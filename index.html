@@ -13,7 +13,7 @@
     body { background-color: #f1f3f5; margin: 0; padding: 0; color: #333; font-weight: 400; }
     .container { max-width: 620px; margin: 0 auto; padding: 12px; padding-bottom: 70px; }
     
-    /* Clean Top Header with Two Navigation Tabs */
+    /* Clean Top Header */
     .app-header {
       background-color: #1b4332;
       color: #ffffff;
@@ -765,12 +765,14 @@
   </div>
 </div>
 
-<!-- Leaflet JS & Turf.js -->
+<!-- Embedded Fast Multi-Threaded CSV Parser & Leaflet Engine -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://unpkg.com/@turf/turf@6.5.0/turf.min.js"></script>
 
 <script>
   const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbwYUYnOa8D5qFiLpWP5RyAmdSg8q7kRTzHWa7HlORxIgcshIyxwLM7HR0jsXGkkjGHfCA/exec";
+  const PERMANENT_DB_NAME = "LukezBunzMasterDB";
 
   let siteRecords = [];
   let masterEditsLog = [];
@@ -991,7 +993,6 @@
     return null;
   }
 
-  /* High-Speed O(1) Stray Bin Analyzer */
   function detectStreetRunDiscrepancy(targetSite, streamKey) {
     if (!targetSite || !targetSite.baseStreetLine) return null;
     const cleanStreet = targetSite.baseStreetLine.trim().toLowerCase();
@@ -1149,7 +1150,6 @@
     openModal('runStyleModal');
   }
 
-  /* Strict Map Renderer with Distance Gatekeeper */
   function renderMapData() {
     if (!leafletMap) return;
 
@@ -1430,10 +1430,11 @@
     else badge.classList.add('searching');
   }
 
-  function openDB() {
+  /* Permanent Single Database Engine */
+  function openDB(dbName = PERMANENT_DB_NAME) {
     return new Promise((resolve) => {
       try {
-        const req = window.indexedDB.open("LukezBunzMasterDB_v130", 1);
+        const req = window.indexedDB.open(dbName, 1);
         req.onupgradeneeded = e => {
           const db = e.target.result;
           if (!db.objectStoreNames.contains("store")) db.createObjectStore("store");
@@ -1458,9 +1459,9 @@
     } catch(e) {}
   }
 
-  async function loadFromDB(key) {
+  async function loadFromDB(key, dbName = PERMANENT_DB_NAME) {
     try {
-      const db = await openDB();
+      const db = await openDB(dbName);
       if (db) {
         return new Promise((resolve) => {
           const tx = db.transaction("store", "readonly");
@@ -1470,6 +1471,27 @@
         });
       }
     } catch(e) {}
+    return null;
+  }
+
+  /* Auto-Recovery scanner for all past IndexedDB versions */
+  async function recoverPreviousDatabases() {
+    const possibleDbs = [
+      PERMANENT_DB_NAME,
+      "LukezBunzMasterDB_v130", "LukezBunzMasterDB_v125", "LukezBunzMasterDB_v120",
+      "LukezBunzMasterDB_v115", "LukezBunzMasterDB_v110", "LukezBunzMasterDB_v105",
+      "LukezBunzMasterDB_v100", "LukezBunzMasterDB_v95", "LukezBunzMasterDB_v90",
+      "LukezBunzMasterDB_v85", "LukezBunzMasterDB_v80", "LukezBunzMasterDB_v75"
+    ];
+
+    for (const name of possibleDbs) {
+      const res = await loadFromDB("masterRecords", name);
+      if (res && res.length > 0) {
+        // Migrate records to permanent database
+        await saveToDB("masterRecords", res);
+        return res;
+      }
+    }
     return null;
   }
 
@@ -1764,7 +1786,8 @@
     startLiveLocationWatcher();
 
     try {
-      let cached = await loadFromDB("masterRecords");
+      setStatus("⏳ Checking cached database...");
+      let cached = await recoverPreviousDatabases();
       const cachedEdits = await loadFromDB("masterEditsLog");
       const lastSync = await loadFromDB("lastSyncTime");
 
@@ -1825,32 +1848,7 @@
     }).filter(Boolean);
   }
 
-  function parseCsvText(text) {
-    const lines = [];
-    let row = [""];
-    let inQuotes = false;
-
-    for (let i = 0; i < text.length; i++) {
-      const c = text[i];
-      const next = text[i + 1];
-
-      if (c === '"') {
-        if (inQuotes && next === '"') { row[row.length - 1] += '"'; i++; }
-        else { inQuotes = !inQuotes; }
-      } else if (c === ',' && !inQuotes) {
-        row.push('');
-      } else if ((c === '\r' || c === '\n') && !inQuotes) {
-        if (c === '\r' && next === '\n') { i++; }
-        lines.push(row);
-        row = [''];
-      } else {
-        row[row.length - 1] += c;
-      }
-    }
-    if (row.length > 1 || row[0] !== '') lines.push(row);
-    return lines;
-  }
-
+  /* Fast Non-Blocking CSV Stream Parser */
   async function startUpdateProcess() {
     const btn = document.getElementById('syncBtn');
     btn.disabled = true;
@@ -1884,11 +1882,11 @@
         chunks.push(value);
         receivedBytes += value.length;
         const mb = (receivedBytes / (1024 * 1024)).toFixed(1);
-        const percent = Math.min(90, Math.round((receivedBytes / estimatedTotal) * 70) + 20);
-        setStatus(`⏳ ${mb} MB...`, percent);
+        const percent = Math.min(85, Math.round((receivedBytes / estimatedTotal) * 65) + 20);
+        setStatus(`⏳ ${mb} MB downloaded...`, percent);
       }
 
-      setStatus("⏳ Decoding CSV...", 92);
+      setStatus("⏳ Decoding CSV text...", 88);
       const allChunks = new Uint8Array(receivedBytes);
       let position = 0;
       for (const chunk of chunks) {
@@ -1898,8 +1896,14 @@
 
       const csvText = new TextDecoder("utf-8").decode(allChunks);
 
-      setStatus("⏳ Parsing records...", 95);
-      const rows = parseCsvText(csvText);
+      setStatus("⏳ Parsing records with PapaParse...", 92);
+      
+      const parsedResults = Papa.parse(csvText, {
+        skipEmptyLines: true,
+        fastMode: true
+      });
+
+      const rows = parsedResults.data;
       const parsed = [];
 
       for (let i = 1; i < rows.length; i++) {
@@ -2001,179 +2005,10 @@
     }
   }
 
-  function formatSerialRow(b, propId, streamKey, binIdx, showEdit, showWarning = false, propLat = '', propLng = '', site = null) {
-    if (!b || !b.serial) return '';
-    let display = b.serial.toUpperCase();
-    if (display.includes('__')) {
-      const parts = display.split('__');
-      display = `${parts[0]}<span class="serial-subline">↳ ${parts.slice(1).join('__')}</span>`;
-    }
-    
-    const unitPill = b.unitLabel ? `<span class="unit-pill">${b.unitLabel}</span>` : '';
-    const sizeBadge = b.size ? `<span class="size-badge">${b.size}</span>` : '';
-    const makeBadge = b.make ? `<span class="make-badge">${b.make}</span>` : '';
-    const editedTag = b.isEdited ? `<span class="edited-badge">EDITED</span>` : '';
-    const notesTag = b.notes ? `<span class="serial-notes-tag">📝 ${b.notes}</span>` : '';
-    const warnHtml = showWarning ? `<span class="warn-icon" title="Not found in Council records">⚠️</span>` : '';
-    const editBtnHtml = showEdit ? `<button class="edit-icon-btn" onclick="promptEditBin('${propId}', '${streamKey}', ${binIdx})" title="Edit Bin">✏️</button>` : '';
-
-    const statusAlert = site ? detectBinStatusFlags(b, site) : null;
-    const statusAlertHtml = statusAlert ? `<span class="${statusAlert.class}">${statusAlert.label}</span>` : '';
-
-    // Direct Single-Stop Navigation Trigger
-    let navBtnHtml = '';
-    const targetLat = b.lat || propLat;
-    const targetLng = b.lng || propLng;
-    if (targetLat && targetLng) {
-      let mapUrl = `https://www.google.com/maps/dir/?api=1&destination=${targetLat},${targetLng}&travelmode=driving`;
-      navBtnHtml = `<a href="${mapUrl}" target="_blank" class="nav-stop-btn" title="Navigate to Bin">📍 Nav</a>`;
-    }
-
-    const drawerId = `drawer_${propId}_${streamKey}_${binIdx}`;
-    let infoBtnHtml = '';
-    let metaDrawerHtml = '';
-
-    if (b.lastFlipped || b.lastUpdated || b.dist) {
-      let metaItems = [];
-      if (b.lastFlipped) metaItems.push(`<span class="meta-tag">Flipped: ${b.lastFlipped}</span>`);
-      if (b.lastUpdated) metaItems.push(`<span class="meta-tag">Updated: ${b.lastUpdated}</span>`);
-      if (b.dist) metaItems.push(`<span class="meta-tag">Dist: ${b.dist}m</span>`);
-
-      infoBtnHtml = `<button type="button" class="info-btn" onclick="toggleBinMeta(this, '${drawerId}')" title="More Info">ℹ️</button>`;
-      metaDrawerHtml = `<div id="${drawerId}" class="bin-meta-drawer">${metaItems.join('')}</div>`;
-    }
-
-    return `
-      <div class="bin-entry">
-        <div class="serial-row">
-          <div class="serial-left">
-            ${unitPill}
-            ${sizeBadge}
-            ${makeBadge}
-            <span class="serial-text">${display}</span>
-            ${statusAlertHtml}
-            ${editedTag}
-          </div>
-          <div class="serial-right">
-            ${navBtnHtml}
-            ${warnHtml}
-            ${infoBtnHtml}
-            ${editBtnHtml}
-          </div>
-        </div>
-        ${notesTag}
-        ${metaDrawerHtml}
-      </div>
-    `;
-  }
-
   function formatSizeSummary(binList) {
     const counts = {};
     binList.forEach(b => { counts[b.size] = (counts[b.size] || 0) + 1; });
     return Object.keys(counts).map(sz => `${counts[sz]} x ${sz}`).join(', ');
-  }
-
-  function renderStreamBox(st, soloBins, councilBins, sch, propId, showSolo, showCouncil, hasCouncilRecord, propLat, propLng, strayWarningHtml = '', site = null) {
-    const titleText = `${st.icon} ${st.label}`;
-    let runBadges = '';
-    const weekSuffix = sch.weekLetter ? ` ${sch.weekLetter}` : '';
-
-    if (showSolo) {
-      if (st.key === 'Garbage' && sch.garRun) runBadges += `<span class="hdr-run-badge ${st.badgeClass}">${sch.garRun}</span>`;
-      if (st.key === 'Recycling') {
-        if (sch.recRun) runBadges += `<span class="hdr-run-badge ${st.badgeClass}">${sch.recRun}${weekSuffix}</span>`;
-        if (sch.recSummerRun) runBadges += `<span class="hdr-run-badge hdr-run-summer">☀️ ${sch.recSummerRun}</span>`;
-      }
-      if (st.key === 'FOGO' && sch.fogRun) runBadges += `<span class="hdr-run-badge ${st.badgeClass}">${sch.fogRun}${weekSuffix}</span>`;
-    }
-
-    const councilSerialsSet = new Set(councilBins.map(cb => cb.serial.split('__')[0].toUpperCase()));
-    const soloSerialsSet = new Set(soloBins.map(b => b.serial.split('__')[0].toUpperCase()));
-
-    let soloBinsHtml = '';
-    if (showSolo && soloBins.length > 0) {
-      soloBinsHtml = soloBins.map((b, binIdx) => {
-        let showWarning = false;
-        if (showCouncil && hasCouncilRecord) {
-          const base = b.serial.split('__')[0].toUpperCase();
-          showWarning = !councilSerialsSet.has(base);
-        }
-        return formatSerialRow(b, b.propId || propId, st.key, binIdx, true, showWarning, propLat, propLng, site);
-      }).join('');
-    } else if (showSolo) {
-      soloBinsHtml = `<div style="font-size:11.5px; color:#888; font-style:italic; padding:2px 0;">No active Solo serials recorded</div>`;
-    }
-
-    let councilSectionHtml = '';
-    if (showCouncil) {
-      const extraCouncilBins = councilBins.filter(cb => {
-        const base = cb.serial.split('__')[0].toUpperCase();
-        return !soloSerialsSet.has(base);
-      });
-
-      if (!showSolo) {
-        const allCouncilHtml = councilBins.map(cb => `
-          <div class="council-bin-entry">
-            <div class="serial-row">
-              <div class="serial-left">
-                ${cb.unitLabel ? `<span class="unit-pill">${cb.unitLabel}</span>` : ''}
-                <span class="size-badge">${cb.size}</span>
-                <span class="serial-text" style="color:#111111;">${cb.serial.toUpperCase()}</span>
-              </div>
-              <div class="serial-right">
-                <button type="button" class="council-add-btn" onclick="promptAddCouncilBin('${propId}', '${st.key}', '${cb.serial}', '${cb.size}', '${cb.unitLabel || ''}')">+ Add to Solo</button>
-              </div>
-            </div>
-          </div>
-        `).join('');
-        councilSectionHtml = `
-          <div class="stream-council-section" style="border-top:none; margin-top:0; padding-top:0;">
-            ${allCouncilHtml || '<div style="font-size:11.5px; color:#888; font-style:italic;">No council records</div>'}
-          </div>
-        `;
-      } else if (extraCouncilBins.length > 0) {
-        const diffBinsHtml = extraCouncilBins.map(cb => `
-          <div class="council-bin-entry">
-            <div class="serial-row">
-              <div class="serial-left">
-                ${cb.unitLabel ? `<span class="unit-pill">${cb.unitLabel}</span>` : ''}
-                <span class="size-badge">${cb.size}</span>
-                <span class="serial-text" style="color:#111111;">${cb.serial.toUpperCase()}</span>
-              </div>
-              <div class="serial-right">
-                <button type="button" class="council-add-btn" onclick="promptAddCouncilBin('${propId}', '${st.key}', '${cb.serial}', '${cb.size}', '${cb.unitLabel || ''}')">+ Add to Solo</button>
-              </div>
-            </div>
-          </div>
-        `).join('');
-
-        councilSectionHtml = `
-          <div class="stream-council-section">
-            <div class="stream-council-title">🏛️ MPSC Data (${extraCouncilBins.length}):</div>
-            ${diffBinsHtml}
-          </div>
-        `;
-      }
-    }
-
-    const addBinBtnHtml = showSolo ? `<button type="button" class="add-bin-btn" onclick="promptAddBin('${propId}', '${st.key}')">+ Add Bin</button>` : '';
-
-    return `
-      <div class="stream-group-card">
-        <div class="stream-group-header ${st.headerClass}">
-          <div class="header-left">
-            <span class="stream-title">${titleText}</span>
-            ${addBinBtnHtml}
-          </div>
-          <div class="header-right">${runBadges}</div>
-        </div>
-        <div class="serials-list">
-          ${strayWarningHtml}
-          ${showSolo ? soloBinsHtml : ''}
-          ${councilSectionHtml}
-        </div>
-      </div>
-    `;
   }
 
   function handleSearch() {
