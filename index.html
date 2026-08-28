@@ -198,7 +198,9 @@
     }
     .hud-top-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
     .hud-street-name { font-size: 18px; font-weight: 700; color: #f8fafc; line-height: 1.2; }
-    .hud-speed-badge { font-size: 13px; font-weight: 700; background: #334155; color: #38bdf8; padding: 3px 8px; border-radius: 6px; }
+    .hud-speed-display { text-align: right; }
+    .hud-speed-num { font-size: 26px; font-weight: 800; color: #38bdf8; line-height: 1; }
+    .hud-speed-dir { font-size: 11px; font-weight: 600; color: #94a3b8; margin-top: 2px; }
 
     .hud-side-toggle {
       display: flex;
@@ -333,7 +335,7 @@
     }
     .hdr-run-gar { background: #fee2e2; color: #991b1b; border: 1px solid #fca5a5; }
     .hdr-run-rec { background: #fef08a; color: #111111; border: 1px solid #facc15; }
-    .hdr-run-fog { background: #dcfce7; color: #166534; border: 1px solid #86efac; }
+    .hdr-run-fog { background: #dcfce7; color: #166534; border: 1px solid #4ade80; }
 
     .header-gar { background-color: #dc2626; color: #ffffff; }
     .header-rec { background-color: #facc15; color: #111111; }
@@ -446,12 +448,15 @@
     <div id="resultsList"></div>
   </div>
 
-  <!-- SCREEN 2: IN-CAB DRIVER HUD (FAST SPATIAL ENGINE) -->
+  <!-- SCREEN 2: IN-CAB DRIVER HUD -->
   <div id="driverHudScreen" class="screen-view">
     <div class="hud-hero">
       <div class="hud-top-row">
         <div id="hudStreetName" class="hud-street-name">Approaching...</div>
-        <div id="hudSpeed" class="hud-speed-badge">0 km/h</div>
+        <div class="hud-speed-display">
+          <div id="hudSpeed" class="hud-speed-num">0</div>
+          <div id="hudHeading" class="hud-speed-dir">0° N</div>
+        </div>
       </div>
       <div style="font-size:12px; color:#94a3b8;" id="hudRunSummary">Ready on run</div>
 
@@ -603,11 +608,11 @@
     { key: 'FOGO', label: 'FOGO', icon: '🌳', pillClass: 'pill-fog', headerClass: 'header-fog', badgeClass: 'hdr-run-fog', cols: [{ idx: 16, sz: '240L' }] }
   ];
 
-  const COUNCIL_STREAMS = [
-    { key: 'Garbage', cols: [{ idx: 25, sz: '80L' }, { idx: 26, sz: '120L' }, { idx: 27, sz: '240L' }] },
-    { key: 'Recycling', cols: [{ idx: 28, sz: '120L' }, { idx: 29, sz: '240L' }] },
-    { key: 'FOGO', cols: [{ idx: 30, sz: '240L' }] }
-  ];
+  function getCardinalDirection(angle) {
+    if (angle === null || isNaN(angle)) return 'N';
+    const directions = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+    return directions[Math.round((angle % 360) / 45) % 8];
+  }
 
   function buildFastStreetIndex() {
     streetHashIndex.clear();
@@ -682,7 +687,9 @@
         updateGpsBadgeUI(true, `🟢 Live ±${accuracy}m`);
 
         const speedEl = document.getElementById('hudSpeed');
-        if (speedEl) speedEl.innerText = `${speedKmh} km/h`;
+        const headingEl = document.getElementById('hudHeading');
+        if (speedEl) speedEl.innerText = speedKmh;
+        if (headingEl) headingEl.innerText = `${Math.round(lastValidHeading || 0)}° ${getCardinalDirection(lastValidHeading)}`;
 
         if (mapTruckMarker && leafletMap) {
           mapTruckMarker.setLatLng([userCurrentLocation.lat, userCurrentLocation.lng]);
@@ -695,9 +702,7 @@
           if (activeTab === 'hud') updateDriverHud();
         }
       },
-      (err) => {
-        updateGpsBadgeUI(false, "⚠️ Tap to Enable GPS");
-      },
+      (err) => updateGpsBadgeUI(false, "⚠️ Tap to Enable GPS"),
       { enableHighAccuracy: true, maximumAge: 3000, timeout: 20000 }
     );
   }
@@ -759,7 +764,7 @@
     return { isUpcoming, side, relAngle };
   }
 
-  /* Lightning-Fast Driver HUD Calculation */
+  /* Driver HUD Screen Engine */
   function updateDriverHud() {
     const listContainer = document.getElementById('hudUpcomingList');
     const streetNameEl = document.getElementById('hudStreetName');
@@ -770,12 +775,9 @@
       return;
     }
 
-    const streamFilter = document.getElementById('streamFilterSelect').value.trim();
     const dayFilter = document.getElementById('dayFilterSelect').value.trim().toLowerCase();
     const curLat = userCurrentLocation.lat;
     const curLng = userCurrentLocation.lng;
-
-    // Fast O(1) coarse box filter (~250 meters max)
     const latDelta = 0.0025;
     const lngDelta = 0.0030;
 
@@ -787,15 +789,12 @@
       const pLat = Number(site.lat);
       const pLng = Number(site.lng);
 
-      // Fast coordinate bound check before any trigonometry
       if (Math.abs(pLat - curLat) > latDelta || Math.abs(pLng - curLng) > lngDelta) continue;
-
       if (dayFilter && !site.soloSchedule.day.toLowerCase().includes(dayFilter)) continue;
 
       const d = getDistanceMeters(curLat, curLng, pLat, pLng);
       if (d <= 140) {
         const travelDir = evaluateTravelDirection(curLat, curLng, lastValidHeading, pLat, pLng);
-
         if (travelMode === 'left' && travelDir.side !== 'left') continue;
         if (travelMode === 'right' && travelDir.side !== 'right') continue;
 
@@ -821,13 +820,14 @@
           </div>
           <div style="display:flex; gap:6px; font-size:12px; margin-bottom:6px;">
             <span class="side-indicator-pill">${sideIcon}</span>
-            <span style="color:#64748b;">📅 ${site.soloSchedule.day} (${site.soloSchedule.garRun || site.soloSchedule.recRun || ''})</span>
+            <span style="color:#64748b;">📅 ${site.soloSchedule.day}</span>
           </div>
           <div style="display:flex; gap:6px; flex-wrap:wrap;">
             ${SOLO_STREAMS.map(st => {
               const bins = site.soloStreams[st.key] || [];
               if (bins.length === 0) return '';
-              return `<span class="stream-count-pill ${st.pillClass}">${st.icon} ${bins.map(b => b.serial).join(', ')}</span>`;
+              let runCode = st.key === 'Garbage' ? site.soloSchedule.garRun : (st.key === 'Recycling' ? site.soloSchedule.recRun : site.soloSchedule.fogRun);
+              return `<span class="stream-count-pill ${st.pillClass}">${st.icon} ${runCode ? `[${runCode}]` : ''} ${bins.map(b => b.serial).join(', ')}</span>`;
             }).join('')}
           </div>
         </div>
@@ -843,18 +843,9 @@
     mapHullsLayer = L.layerGroup().addTo(leafletMap);
   }
 
-  function toggleMapFullscreen() {
-    const container = document.getElementById('mapScreenContainer');
-    const btn = document.getElementById('mapFsBtn');
-    const isFs = container.classList.toggle('fullscreen');
-    btn.innerText = isFs ? '🗗 Exit' : '⛶ Fullscreen';
-    setTimeout(() => { if (leafletMap) leafletMap.invalidateSize(); }, 200);
-  }
-
   function fitMapToVisibleRuns() {
     if (leafletMap && (mapMarkersLayer.getLayers().length > 0 || mapHullsLayer.getLayers().length > 0)) {
-      const allLayers = [...mapMarkersLayer.getLayers(), ...mapHullsLayer.getLayers()];
-      const group = new L.featureGroup(allLayers);
+      const group = new L.featureGroup([...mapMarkersLayer.getLayers(), ...mapHullsLayer.getLayers()]);
       leafletMap.fitBounds(group.getBounds(), { padding: [30, 30] });
     }
   }
@@ -863,6 +854,7 @@
     if (userCurrentLocation && leafletMap) leafletMap.setView([userCurrentLocation.lat, userCurrentLocation.lng], 16);
   }
 
+  /* Safe Canvas-Powered Map Rendering */
   function renderMapData() {
     if (!leafletMap) return;
     mapMarkersLayer.clearLayers();
@@ -915,16 +907,17 @@
             validBounds.push([targetLat, targetLng]);
 
             let dotColor = stKey === 'Garbage' ? '#dc2626' : (stKey === 'Recycling' ? '#eab308' : '#16a34a');
-            const customIcon = L.divIcon({
-              className: 'custom-dot',
-              html: `<div style="background:${dotColor}; width:12px; height:12px; border-radius:50%; border:2px solid white; box-shadow:0 2px 4px rgba(0,0,0,0.3); cursor:pointer;"></div>`,
-              iconSize: [12, 12],
-              iconAnchor: [6, 6]
+            const circleMarker = L.circleMarker([targetLat, targetLng], {
+              radius: 5,
+              fillColor: dotColor,
+              color: '#ffffff',
+              weight: 1,
+              opacity: 1,
+              fillOpacity: 0.85
             });
 
-            const marker = L.marker([targetLat, targetLng], { icon: customIcon });
-            marker.bindPopup(`<b>${site.addressText}</b><br>${stKey}: ${binObj.serial}<br>📅 ${sch.day} (${streamRun})`);
-            mapMarkersLayer.addLayer(marker);
+            circleMarker.bindPopup(`<b>${site.addressText}</b><br>${stKey}: ${binObj.serial}<br>📅 ${sch.day} (${streamRun})`);
+            mapMarkersLayer.addLayer(circleMarker);
           }
         });
       });
@@ -1006,9 +999,15 @@
     const weekSuffix = sch.weekLetter ? ` ${sch.weekLetter}` : '';
 
     if (showSolo) {
-      if (st.key === 'Garbage' && sch.garRun) runBadges += `<span class="hdr-run-badge ${st.badgeClass}">${sch.garRun}</span>`;
-      if (st.key === 'Recycling') runBadges += `<span class="hdr-run-badge ${st.badgeClass}">${sch.recRun}${weekSuffix}</span>`;
-      if (st.key === 'FOGO' && sch.fogRun) runBadges += `<span class="hdr-run-badge ${st.badgeClass}">${sch.fogRun}${weekSuffix}</span>`;
+      if (st.key === 'Garbage' && sch.garRun) {
+        runBadges += `<span class="hdr-run-badge ${st.badgeClass}" onclick="event.stopPropagation(); openRunDirectlyOnMap('${sch.garRun}', 'Garbage', '${sch.day}', '${sch.weekLetter || ''}')">${sch.garRun}</span>`;
+      }
+      if (st.key === 'Recycling' && sch.recRun) {
+        runBadges += `<span class="hdr-run-badge ${st.badgeClass}" onclick="event.stopPropagation(); openRunDirectlyOnMap('${sch.recRun}', 'Recycling', '${sch.day}', '${sch.weekLetter || ''}')">${sch.recRun}${weekSuffix}</span>`;
+      }
+      if (st.key === 'FOGO' && sch.fogRun) {
+        runBadges += `<span class="hdr-run-badge ${st.badgeClass}" onclick="event.stopPropagation(); openRunDirectlyOnMap('${sch.fogRun}', 'FOGO', '${sch.day}', '${sch.weekLetter || ''}')">${sch.fogRun}${weekSuffix}</span>`;
+      }
     }
 
     let soloBinsHtml = '';
@@ -1044,6 +1043,17 @@
         </div>
       </div>
     `;
+  }
+
+  function openRunDirectlyOnMap(runName, streamKey, dayName, weekLetter) {
+    if (!runName) return;
+    selectedRunsSet.clear();
+    selectedRunsSet.add(runName.trim().toLowerCase());
+    if (streamKey) document.getElementById('streamFilterSelect').value = streamKey;
+    if (dayName) document.getElementById('dayFilterSelect').value = dayName;
+    if (weekLetter) document.getElementById('weekFilterSelect').value = weekLetter;
+
+    switchMainTab('map');
   }
 
   function handleFilterChange() {
@@ -1152,7 +1162,7 @@
 
   function openDB() {
     return new Promise((resolve) => {
-      const req = window.indexedDB.open("LukezBunzMasterDB_v150", 1);
+      const req = window.indexedDB.open("LukezBunzMasterDB_v155", 1);
       req.onupgradeneeded = e => e.target.result.createObjectStore("store");
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => resolve(null);
