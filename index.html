@@ -301,6 +301,22 @@
       cursor: pointer;
       font-weight: 500;
     }
+
+    .council-add-btn {
+      background: #2d6a4f;
+      color: white;
+      border: none;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 10.5px;
+      font-weight: 500;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 2px;
+      white-space: nowrap;
+    }
+    .council-add-btn:active { background: #1b4332; }
     
     .hdr-run-badge { font-size: 11px; font-weight: 500; padding: 2px 6px; border-radius: 4px; line-height: 1.2; }
     .hdr-run-gar { background: #fee2e2; color: #991b1b; border: 1px solid #fca5a5; }
@@ -341,7 +357,7 @@
 
     .stream-council-section { margin-top: 6px; padding-top: 6px; border-top: 1px dashed #cbd5e1; }
     .stream-council-title { font-size: 10px; font-weight: 500; color: #111111; text-transform: uppercase; letter-spacing: 0.4px; margin-bottom: 4px; }
-    .council-bin-entry { padding: 3px 0; border-bottom: 1px dotted #e2e8f0; }
+    .council-bin-entry { padding: 4px 0; border-bottom: 1px dotted #e2e8f0; }
     .council-bin-entry:last-child { border-bottom: none; padding-bottom: 0; }
 
     .flag-box { margin-bottom: 8px; padding: 5px 6px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 5px; color: #475569; font-size: 11px; font-weight: 400; }
@@ -418,7 +434,8 @@
     <div class="controls-row">
       <button id="searchToggleBtn" class="search-toggle-btn" type="button" onclick="toggleSearchBar()" title="Toggle Search Input">🔍</button>
       
-      <select id="streamFilterSelect" class="filter-select stream-select" onchange="handleSearch()">
+      <!-- Stream filter triggers dynamic run list refresh -->
+      <select id="streamFilterSelect" class="filter-select stream-select" onchange="handleStreamFilterChange()">
         <option value="">All Streams</option>
         <option value="Garbage">🗑️ Garbage</option>
         <option value="Recycling">♻️ Recycle</option>
@@ -622,12 +639,11 @@
   let masterEditsLog = [];
   let userCurrentLocation = null;
   let lastGpsCoords = { lat: 0, lng: 0 };
-  let lastValidHeading = null; // Memory lock: remembers direction when stopped
+  let lastValidHeading = null;
   let gpsWatchId = null;
   let selectedRunsSet = new Set();
   let expandedCompactCards = new Set();
 
-  // Travel Mode: 'all', 'left', 'right'
   let travelMode = 'all';
 
   const SOLO_STREAMS = [
@@ -694,42 +710,69 @@
     }
   });
 
+  /* Dynamic stream filter handler that recalculates and prunes runs list */
+  function handleStreamFilterChange() {
+    populateRunsChecklist();
+    handleSearch();
+  }
+
   function populateRunsChecklist() {
     const container = document.getElementById('runsChecklistGrid');
     if (!container || siteRecords.length === 0) return;
 
+    const streamFilter = document.getElementById('streamFilterSelect').value.trim();
     const runsSet = new Set();
+
     siteRecords.forEach(site => {
       const sch = site.soloSchedule;
-      if (sch.garRun) runsSet.add(sch.garRun.trim());
-      if (sch.recRun) runsSet.add(sch.recRun.trim());
-      if (sch.recSummerRun) runsSet.add(sch.recSummerRun.trim());
-      if (sch.fogRun) runsSet.add(sch.fogRun.trim());
+      if (!streamFilter || streamFilter === 'Garbage') {
+        if (sch.garRun) runsSet.add(sch.garRun.trim());
+      }
+      if (!streamFilter || streamFilter === 'Recycling') {
+        if (sch.recRun) runsSet.add(sch.recRun.trim());
+        if (sch.recSummerRun) runsSet.add(sch.recSummerRun.trim());
+      }
+      if (!streamFilter || streamFilter === 'FOGO') {
+        if (sch.fogRun) runsSet.add(sch.fogRun.trim());
+      }
     });
 
     const sortedRuns = Array.from(runsSet).filter(Boolean).sort();
+    const lowerValidRuns = new Set(sortedRuns.map(r => r.toLowerCase()));
+
+    // Prune selected runs that don't belong to the newly filtered stream
+    const prunedSelected = new Set();
+    selectedRunsSet.forEach(r => {
+      if (lowerValidRuns.has(r)) prunedSelected.add(r);
+    });
+    selectedRunsSet = prunedSelected;
+
     container.innerHTML = '';
 
-    sortedRuns.forEach(run => {
-      const label = document.createElement('label');
-      label.className = 'run-check-item';
-      
-      const chk = document.createElement('input');
-      chk.type = 'checkbox';
-      chk.value = run;
-      chk.checked = selectedRunsSet.has(run.toLowerCase());
-      chk.onchange = (e) => {
-        const val = e.target.value.toLowerCase();
-        if (e.target.checked) selectedRunsSet.add(val);
-        else selectedRunsSet.delete(val);
-        updateRunsButtonText();
-        handleSearch();
-      };
+    if (sortedRuns.length === 0) {
+      container.innerHTML = '<div style="font-size:11px; color:#888; grid-column:1/-1; padding:6px 0;">No runs recorded for this stream</div>';
+    } else {
+      sortedRuns.forEach(run => {
+        const label = document.createElement('label');
+        label.className = 'run-check-item';
+        
+        const chk = document.createElement('input');
+        chk.type = 'checkbox';
+        chk.value = run;
+        chk.checked = selectedRunsSet.has(run.toLowerCase());
+        chk.onchange = (e) => {
+          const val = e.target.value.toLowerCase();
+          if (e.target.checked) selectedRunsSet.add(val);
+          else selectedRunsSet.delete(val);
+          updateRunsButtonText();
+          handleSearch();
+        };
 
-      label.appendChild(chk);
-      label.appendChild(document.createTextNode(run));
-      container.appendChild(label);
-    });
+        label.appendChild(chk);
+        label.appendChild(document.createTextNode(run));
+        container.appendChild(label);
+      });
+    }
 
     updateRunsButtonText();
   }
@@ -794,8 +837,6 @@
     const propBearing = getBearing(truckLat, truckLng, propLat, propLng);
     const relAngle = (propBearing - heading + 360) % 360;
 
-    // Relative Angles from Driver's Perspective:
-    // 0° = straight ahead, 90° = direct left/kerbside (AU), 270° = direct right, 180° = behind
     let side = 'behind';
     let isUpcoming = false;
 
@@ -813,7 +854,7 @@
     return { isUpcoming, side, relAngle };
   }
 
-  /* Live Continuous GPS Watcher with Anti-Drift Memory */
+  /* Live Continuous GPS Watcher */
   function startLiveLocationWatcher() {
     if (!("geolocation" in navigator)) {
       updateGpsBadge(false, "No GPS");
@@ -833,11 +874,9 @@
           speed: speedKmh
         };
 
-        // If moving faster than 3km/h and device provides heading, update and lock it in memory
         if (pos.coords.heading !== null && !isNaN(pos.coords.heading) && speedKmh >= 3) {
           lastValidHeading = pos.coords.heading;
         } else if (lastGpsCoords.lat !== 0 && speedKmh >= 3) {
-          // Fallback: calculate vector bearing between coordinate samples
           const calcHeading = getBearing(lastGpsCoords.lat, lastGpsCoords.lng, userCurrentLocation.lat, userCurrentLocation.lng);
           if (!isNaN(calcHeading)) lastValidHeading = calcHeading;
         }
@@ -880,7 +919,7 @@
   function openDB() {
     return new Promise((resolve) => {
       try {
-        const req = window.indexedDB.open("LukezBunzMasterDB_v80", 1);
+        const req = window.indexedDB.open("LukezBunzMasterDB_v85", 1);
         req.onupgradeneeded = e => {
           const db = e.target.result;
           if (!db.objectStoreNames.contains("store")) db.createObjectStore("store");
@@ -1007,6 +1046,22 @@
     document.getElementById('modalBinMake').value = "";
     document.getElementById('modalBinSize').value = "240L";
     document.getElementById('modalBinNotes').value = "";
+    openModal('binEditModal');
+  }
+
+  /* Direct Add from MPSC Council Row */
+  function promptAddCouncilBin(propId, streamKey, serial, size, unitLabel) {
+    const site = siteRecords.find(s => String(s.propId || s.siteId) === String(propId));
+    document.getElementById('binModalTitle').innerText = `Add MPSC Bin to Solo`;
+    document.getElementById('modalSitePropId').value = propId;
+    document.getElementById('modalStreamKey').value = streamKey;
+    document.getElementById('modalBinIdx').value = "-1";
+    document.getElementById('modalBinStreamDisplay').value = streamKey;
+    document.getElementById('modalBinUnit').value = unitLabel || (site ? extractUnitNumber(site.addressText).unitLabel : "");
+    document.getElementById('modalBinSerial').value = serial || "";
+    document.getElementById('modalBinMake').value = "";
+    document.getElementById('modalBinSize').value = size || "240L";
+    document.getElementById('modalBinNotes').value = "Added from MPSC records";
     openModal('binEditModal');
   }
 
@@ -1555,6 +1610,9 @@
                 <span class="size-badge">${cb.size}</span>
                 <span class="serial-text" style="color:#111111;">${cb.serial.toUpperCase()}</span>
               </div>
+              <div class="serial-right">
+                <button type="button" class="council-add-btn" onclick="promptAddCouncilBin('${propId}', '${st.key}', '${cb.serial}', '${cb.size}', '${cb.unitLabel || ''}')">+ Add to Solo</button>
+              </div>
             </div>
           </div>
         `).join('');
@@ -1571,6 +1629,9 @@
                 ${cb.unitLabel ? `<span class="unit-pill">${cb.unitLabel}</span>` : ''}
                 <span class="size-badge">${cb.size}</span>
                 <span class="serial-text" style="color:#111111;">${cb.serial.toUpperCase()}</span>
+              </div>
+              <div class="serial-right">
+                <button type="button" class="council-add-btn" onclick="promptAddCouncilBin('${propId}', '${st.key}', '${cb.serial}', '${cb.size}', '${cb.unitLabel || ''}')">+ Add to Solo</button>
               </div>
             </div>
           </div>
@@ -1655,7 +1716,6 @@
               Number(site.lng)
             );
 
-            // Directional & Side calculation using memory-locked heading
             const travelDir = evaluateTravelDirection(
               userCurrentLocation.lat,
               userCurrentLocation.lng,
@@ -1664,7 +1724,6 @@
               Number(site.lng)
             );
 
-            // Filter based on Travel Mode
             if (travelMode === 'left' && travelDir.side !== 'left') return;
             if (travelMode === 'right' && travelDir.side !== 'right') return;
 
@@ -1747,7 +1806,6 @@
       summaryContainer.innerText = `Found ${matches.length} matching locations${matches.length > 20 ? ' (showing first 20)' : ''}:`;
     }
 
-    // Group units at the same base street address
     const groupedAddressMap = new Map();
     matches.forEach(({ site, idx, dist, travelDir }) => {
       const key = `${site.baseStreetLine.toLowerCase()}__${site.suburbLine.toLowerCase()}`;
