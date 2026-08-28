@@ -256,6 +256,7 @@
       gap: 4px;
     }
     .stat-pill { font-weight: 600; color: #166534; }
+    .stat-pill-warn { font-weight: 600; color: #b91c1c; }
 
     .map-controls-toolbar {
       position: absolute;
@@ -411,7 +412,23 @@
     .add-bin-btn { background: rgba(255,255,255,0.25); border: 1px solid rgba(255,255,255,0.4); color: inherit; padding: 1px 5px; border-radius: 3px; font-size: 10px; cursor: pointer; font-weight: 500; }
     .council-add-btn { background: #2d6a4f; color: white; border: none; padding: 2px 6px; border-radius: 4px; font-size: 10.5px; font-weight: 500; cursor: pointer; display: inline-flex; align-items: center; gap: 2px; }
     
-    .hdr-run-badge { font-size: 11.5px; font-weight: 500; padding: 2px 6px; border-radius: 4px; line-height: 1.2; }
+    /* Interactive Clickable Run Badge */
+    .hdr-run-badge {
+      font-size: 11.5px;
+      font-weight: 600;
+      padding: 2px 7px;
+      border-radius: 5px;
+      line-height: 1.2;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+      transition: transform 0.1s ease;
+    }
+    .hdr-run-badge:active { transform: scale(0.95); }
+    .hdr-run-badge::after { content: "🗺️"; font-size: 9px; opacity: 0.8; }
+
     .hdr-run-gar { background: #fee2e2; color: #991b1b; border: 1px solid #fca5a5; }
     .hdr-run-rec { background: #fef08a; color: #111111; border: 1px solid #facc15; }
     .hdr-run-fog { background: #dcfce7; color: #166534; border: 1px solid #86efac; }
@@ -488,7 +505,7 @@
 <body>
 
 <div class="container">
-  <!-- Clean Top Header (Search & Map Tabs Only) -->
+  <!-- Clean Top Header -->
   <div class="app-header">
     <h1>Lukez Bunz</h1>
     <div class="header-nav">
@@ -580,7 +597,8 @@
     <div id="mapScreenContainer">
       <div class="map-stats-banner">
         <div>🏠 <span id="mapTotalHouses" class="stat-pill">0</span> Houses</div>
-        <div>🗑️ <span id="mapTotalBins" class="stat-pill">0</span> Bins</div>
+        <div>🗑️ <span id="mapTotalBins" class="stat-pill">0</span> Active</div>
+        <div>🚫 <span id="mapInactiveBins" class="stat-pill-warn">0</span> Inactive</div>
         <div>📍 Runs: <span id="mapActiveRunList" class="stat-pill">All</span></div>
       </div>
 
@@ -843,6 +861,34 @@
     }
   }
 
+  /* Direct trigger: Click run badge -> switch to map in fullscreen with that run */
+  function openRunDirectlyOnMap(runName, streamKey, dayName, weekLetter) {
+    if (!runName) return;
+    selectedRunsSet.clear();
+    selectedRunsSet.add(runName.trim().toLowerCase());
+
+    if (streamKey) document.getElementById('streamFilterSelect').value = streamKey;
+    if (dayName) document.getElementById('dayFilterSelect').value = dayName;
+    if (weekLetter) document.getElementById('weekFilterSelect').value = weekLetter;
+
+    updateRunsButtonText();
+    switchScreen('map');
+    
+    // Ensure container enters fullscreen
+    const container = document.getElementById('mapScreenContainer');
+    const btn = document.getElementById('mapFsBtn');
+    container.classList.add('fullscreen');
+    btn.innerText = '🗗 Exit';
+
+    setTimeout(() => {
+      if (leafletMap) {
+        leafletMap.invalidateSize();
+        renderMapData();
+        fitMapToVisibleRuns();
+      }
+    }, 250);
+  }
+
   function cycleTravelMode() {
     const btn = document.getElementById('travelModeBtn');
     if (travelMode === 'all') {
@@ -984,11 +1030,11 @@
 
   function detectBinStatusFlags(binObj, site) {
     const textToCheck = `${binObj.serial || ''} ${binObj.notes || ''} ${site.runFlags || ''}`.toUpperCase();
-    if (textToCheck.includes('STOLEN')) return { isAlert: true, label: '🚨 STOLEN', class: 'status-pill-stolen' };
+    if (textToCheck.includes('STOLEN')) return { isAlert: true, label: '🚨 STOLEN', class: 'status-pill-stolen', isInactive: true };
     if (textToCheck.includes('INACTIVE') || textToCheck.includes('CANCELLED') || textToCheck.includes('MISSING') || textToCheck.includes('LOST')) {
-      return { isAlert: true, label: '🚫 INACTIVE', class: 'status-pill-inactive' };
+      return { isAlert: true, label: '🚫 INACTIVE', class: 'status-pill-inactive', isInactive: true };
     }
-    return null;
+    return { isAlert: false, isInactive: false };
   }
 
   /* High-Speed O(1) Stray Bin Analyzer */
@@ -1149,7 +1195,7 @@
     openModal('runStyleModal');
   }
 
-  /* Strict Map Renderer with Distance Gatekeeper */
+  /* Strict Map Renderer with Distance Gatekeeper & Active/Inactive Tallying */
   function renderMapData() {
     if (!leafletMap) return;
 
@@ -1164,7 +1210,8 @@
     const showPins = document.getElementById('chkShowBinDots') ? document.getElementById('chkShowBinDots').checked : true;
 
     const runGroups = {};
-    let totalBinsCount = 0;
+    let activeBinsCount = 0;
+    let inactiveBinsCount = 0;
     const houseSet = new Set();
     const allValidBounds = [];
     const sequencedStops = [];
@@ -1218,7 +1265,13 @@
           }
 
           if (targetLat !== null && targetLng !== null) {
-            totalBinsCount++;
+            const statusInfo = detectBinStatusFlags(binObj, site);
+            if (statusInfo.isInactive) {
+              inactiveBinsCount++;
+            } else {
+              activeBinsCount++;
+            }
+
             houseSet.add(site.propId || site.siteId || site.addressText);
             allValidBounds.push([targetLat, targetLng]);
 
@@ -1236,15 +1289,25 @@
               });
             }
 
-            if (showPins && totalBinsCount <= 1500) {
+            if (showPins && (activeBinsCount + inactiveBinsCount) <= 1500) {
               let dotColor = '#2563eb';
               if (stKey === 'Garbage') dotColor = '#dc2626';
               if (stKey === 'Recycling') dotColor = '#eab308';
               if (stKey === 'FOGO') dotColor = '#16a34a';
 
+              // Visual styling for inactive/stolen dots
+              let customHtml = `<div style="background:${dotColor}; width:13px; height:13px; border-radius:50%; border:2px solid white; box-shadow:0 2px 5px rgba(0,0,0,0.35); cursor:pointer;"></div>`;
+              if (statusInfo.isInactive) {
+                if (statusInfo.label.includes('STOLEN')) {
+                  customHtml = `<div style="background:#f59e0b; width:14px; height:14px; border-radius:50%; border:2px solid #b45309; box-shadow:0 2px 5px rgba(0,0,0,0.4); display:flex; align-items:center; justify-content:center; color:white; font-size:8px; font-weight:bold; cursor:pointer;">!</div>`;
+                } else {
+                  customHtml = `<div style="background:#94a3b8; width:12px; height:12px; border-radius:50%; border:2px solid #475569; opacity:0.75; cursor:pointer;"></div>`;
+                }
+              }
+
               const customIcon = L.divIcon({
                 className: 'custom-dot',
-                html: `<div style="background:${dotColor}; width:13px; height:13px; border-radius:50%; border:2px solid white; box-shadow:0 2px 5px rgba(0,0,0,0.35); cursor:pointer;"></div>`,
+                html: customHtml,
                 iconSize: [13, 13],
                 iconAnchor: [6.5, 6.5]
               });
@@ -1262,7 +1325,8 @@
     });
 
     document.getElementById('mapTotalHouses').innerText = houseSet.size.toLocaleString();
-    document.getElementById('mapTotalBins').innerText = totalBinsCount.toLocaleString();
+    document.getElementById('mapTotalBins').innerText = activeBinsCount.toLocaleString();
+    document.getElementById('mapInactiveBins').innerText = inactiveBinsCount.toLocaleString();
     const activeRunsDisplay = selectedRunsSet.size > 0 ? Array.from(selectedRunsSet).map(r => r.toUpperCase()).join(', ') : 'All';
     document.getElementById('mapActiveRunList').innerText = activeRunsDisplay;
 
@@ -1759,331 +1823,27 @@
     handleSearch();
   }
 
-  /* Async Loader & Initializer */
-  window.addEventListener('DOMContentLoaded', async () => {
-    startLiveLocationWatcher();
-
-    try {
-      let cached = await loadFromDB("masterRecords");
-      const cachedEdits = await loadFromDB("masterEditsLog");
-      const lastSync = await loadFromDB("lastSyncTime");
-
-      if (cachedEdits) masterEditsLog = cachedEdits;
-      updateSyncButtonUI();
-
-      if (cached && cached.length > 0) {
-        siteRecords = cached;
-        buildFastStreetIndex();
-        populateRunsChecklist();
-        setStatus(`⚡ ${siteRecords.length.toLocaleString()} loaded${lastSync ? ` (${lastSync})` : ''}`);
-        handleSearch();
-      } else {
-        setStatus("Ready. Tap 🔄 to load master CSV.");
-      }
-    } catch(err) {
-      setStatus("Ready. Tap 🔄 to load master CSV.");
-    }
-  });
-
-  function parseSoloBinCell(cellStr, size, unitLabel = '') {
-    if (!cellStr) return [];
-    return cellStr.split(';;').map(item => {
-      const it = item.trim();
-      if (!it) return null;
-      const parts = it.split('|');
-      const serial = parts[0].trim().toUpperCase();
-      const meta = {};
-      for (let i = 1; i < parts.length; i++) {
-        const p = parts[i];
-        const colonIdx = p.indexOf(':');
-        if (colonIdx > -1) {
-          meta[p.substring(0, colonIdx).trim()] = p.substring(colonIdx + 1).trim();
-        }
-      }
-      return {
-        serial: serial,
-        originalSerial: serial,
-        size: size,
-        unitLabel: unitLabel,
-        make: meta.m || '',
-        notes: meta.n || '',
-        lastFlipped: meta.f || '',
-        lastUpdated: meta.u || '',
-        dist: meta.d || '',
-        lat: meta.lat || '',
-        lng: meta.lng || ''
-      };
-    }).filter(Boolean);
-  }
-
-  function parseCouncilBinCell(cellStr, size, unitLabel = '') {
-    if (!cellStr) return [];
-    return cellStr.split(';').map(item => {
-      const serial = item.trim().toUpperCase();
-      if (!serial || serial === 'NAN') return null;
-      return { serial, size, unitLabel: unitLabel };
-    }).filter(Boolean);
-  }
-
-  function parseCsvText(text) {
-    const lines = [];
-    let row = [""];
-    let inQuotes = false;
-
-    for (let i = 0; i < text.length; i++) {
-      const c = text[i];
-      const next = text[i + 1];
-
-      if (c === '"') {
-        if (inQuotes && next === '"') { row[row.length - 1] += '"'; i++; }
-        else { inQuotes = !inQuotes; }
-      } else if (c === ',' && !inQuotes) {
-        row.push('');
-      } else if ((c === '\r' || c === '\n') && !inQuotes) {
-        if (c === '\r' && next === '\n') { i++; }
-        lines.push(row);
-        row = [''];
-      } else {
-        row[row.length - 1] += c;
-      }
-    }
-    if (row.length > 1 || row[0] !== '') lines.push(row);
-    return lines;
-  }
-
-  async function startUpdateProcess() {
-    const btn = document.getElementById('syncBtn');
-    btn.disabled = true;
-    startLiveLocationWatcher();
-
-    if (masterEditsLog.length > 0 && SCRIPT_URL) {
-      setStatus(`⏳ Saving ${masterEditsLog.length} edits...`, 10);
-      try {
-        await fetch(SCRIPT_URL, {
-          method: 'POST',
-          mode: 'no-cors',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ edits: masterEditsLog })
-        });
-      } catch(e) {}
-    }
-
-    try {
-      setStatus("⏳ Downloading CSV...", 20);
-      const res = await fetch("master_combined_with_metadata.csv");
-      if (!res.ok) throw new Error(`Could not load CSV file (HTTP ${res.status})`);
-
-      const reader = res.body.getReader();
-      let receivedBytes = 0;
-      const chunks = [];
-      const estimatedTotal = 38 * 1024 * 1024;
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        chunks.push(value);
-        receivedBytes += value.length;
-        const mb = (receivedBytes / (1024 * 1024)).toFixed(1);
-        const percent = Math.min(90, Math.round((receivedBytes / estimatedTotal) * 70) + 20);
-        setStatus(`⏳ ${mb} MB...`, percent);
-      }
-
-      setStatus("⏳ Decoding CSV...", 92);
-      const allChunks = new Uint8Array(receivedBytes);
-      let position = 0;
-      for (const chunk of chunks) {
-        allChunks.set(chunk, position);
-        position += chunk.length;
-      }
-
-      const csvText = new TextDecoder("utf-8").decode(allChunks);
-
-      setStatus("⏳ Parsing records...", 95);
-      const rows = parseCsvText(csvText);
-      const parsed = [];
-
-      for (let i = 1; i < rows.length; i++) {
-        const r = rows[i];
-        if (r.length < 5) continue;
-
-        const propId = r[1] || '';
-        const siteId = r[0] || '';
-        const fullAddr = r[2] || '';
-        const suburb = r[3] || '';
-        const postcode = r[4] || '';
-        const streetPart = fullAddr.split(',')[0].trim();
-        const localityPart = `${suburb} ${postcode}`.trim();
-        const unitInfo = extractUnitNumber(streetPart);
-
-        const soloStreams = { Garbage: [], Recycling: [], FOGO: [] };
-        SOLO_STREAMS.forEach(st => {
-          st.cols.forEach(cfg => {
-            const rawVal = r[cfg.idx] || '';
-            if (rawVal) {
-              soloStreams[st.key].push(...parseSoloBinCell(rawVal, cfg.sz, unitInfo.unitLabel));
-            }
-          });
-        });
-
-        const councilStreams = { Garbage: [], Recycling: [], FOGO: [] };
-        COUNCIL_STREAMS.forEach(st => {
-          st.cols.forEach(cfg => {
-            const rawVal = r[cfg.idx] || '';
-            if (rawVal) {
-              councilStreams[st.key].push(...parseCouncilBinCell(rawVal, cfg.sz, unitInfo.unitLabel));
-            }
-          });
-        });
-
-        const totalSoloBins = Number(r[17]) || (soloStreams.Garbage.length + soloStreams.Recycling.length + soloStreams.FOGO.length);
-        const totalCouncilBins = Number(r[31]) || (councilStreams.Garbage.length + councilStreams.Recycling.length + councilStreams.FOGO.length);
-
-        parsed.push({
-          siteId: siteId,
-          propId: propId,
-          hasCouncilRecord: Boolean(r[22] || r[23] || r[31] !== '0'),
-          addressText: fullAddr,
-          streetLine: streetPart || fullAddr,
-          baseStreetLine: getBaseStreetAddress(streetPart),
-          suburbLine: localityPart,
-          unitNum: unitInfo.unitNum,
-          unitLabel: unitInfo.unitLabel,
-          soloSchedule: {
-            day: r[5] || 'Unknown Day',
-            weekLetter: r[6] || '',
-            weekFormatted: r[6] ? `Week ${r[6]}` : '',
-            garRun: r[7] || '',
-            recRun: r[8] || '',
-            recSummerRun: r[9] || '',
-            fogRun: r[10] || '',
-            hasConflict: false
-          },
-          soloStreams: soloStreams,
-          totalSoloBins: totalSoloBins,
-          runFlags: r[18] || '',
-          parentSiteAddress: r[19] || '',
-          lat: r[20] || '',
-          lng: r[21] || '',
-          councilPropType: r[22] || '',
-          councilSchedule: {
-            day: r[23] || 'Unknown Day',
-            weekLetter: r[24] || '',
-            weekFormatted: r[24] ? `Week ${r[24]}` : ''
-          },
-          councilStreams: councilStreams,
-          totalCouncilBins: totalCouncilBins,
-          matchStatus: r[32] || '',
-          mpscDiscrepancies: (r[33] || '').split(' | ').filter(Boolean),
-          ratingStars: null,
-          ratingComment: ""
-        });
-      }
-
-      siteRecords = parsed;
-      buildFastStreetIndex();
-
-      const dateNow = new Date().toLocaleDateString('en-AU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
-
-      setStatus("⏳ Storing locally...", 98);
-      await saveToDB("masterRecords", siteRecords);
-      await saveToDB("lastSyncTime", dateNow);
-
-      populateRunsChecklist();
-      setStatus(`⚡ ${siteRecords.length.toLocaleString()} loaded (${dateNow})`);
-      updateSyncButtonUI();
-      handleSearch();
-      if (leafletMap && activeScreen === 'map') renderMapData();
-    } catch(err) {
-      alert("Error: " + err.message);
-      setStatus(`❌ ${err.message}`);
-    } finally {
-      btn.disabled = false;
-    }
-  }
-
-  function formatSerialRow(b, propId, streamKey, binIdx, showEdit, showWarning = false, propLat = '', propLng = '', site = null) {
-    if (!b || !b.serial) return '';
-    let display = b.serial.toUpperCase();
-    if (display.includes('__')) {
-      const parts = display.split('__');
-      display = `${parts[0]}<span class="serial-subline">↳ ${parts.slice(1).join('__')}</span>`;
-    }
-    
-    const unitPill = b.unitLabel ? `<span class="unit-pill">${b.unitLabel}</span>` : '';
-    const sizeBadge = b.size ? `<span class="size-badge">${b.size}</span>` : '';
-    const makeBadge = b.make ? `<span class="make-badge">${b.make}</span>` : '';
-    const editedTag = b.isEdited ? `<span class="edited-badge">EDITED</span>` : '';
-    const notesTag = b.notes ? `<span class="serial-notes-tag">📝 ${b.notes}</span>` : '';
-    const warnHtml = showWarning ? `<span class="warn-icon" title="Not found in Council records">⚠️</span>` : '';
-    const editBtnHtml = showEdit ? `<button class="edit-icon-btn" onclick="promptEditBin('${propId}', '${streamKey}', ${binIdx})" title="Edit Bin">✏️</button>` : '';
-
-    const statusAlert = site ? detectBinStatusFlags(b, site) : null;
-    const statusAlertHtml = statusAlert ? `<span class="${statusAlert.class}">${statusAlert.label}</span>` : '';
-
-    let navBtnHtml = '';
-    const targetLat = b.lat || propLat;
-    const targetLng = b.lng || propLng;
-    if (targetLat && targetLng) {
-      let mapUrl = `https://www.google.com/maps/dir/?api=1&destination=${targetLat},${targetLng}&travelmode=driving`;
-      navBtnHtml = `<a href="${mapUrl}" target="_blank" class="nav-stop-btn" title="Navigate to Bin">📍 Nav</a>`;
-    }
-
-    const drawerId = `drawer_${propId}_${streamKey}_${binIdx}`;
-    let infoBtnHtml = '';
-    let metaDrawerHtml = '';
-
-    if (b.lastFlipped || b.lastUpdated || b.dist) {
-      let metaItems = [];
-      if (b.lastFlipped) metaItems.push(`<span class="meta-tag">Flipped: ${b.lastFlipped}</span>`);
-      if (b.lastUpdated) metaItems.push(`<span class="meta-tag">Updated: ${b.lastUpdated}</span>`);
-      if (b.dist) metaItems.push(`<span class="meta-tag">Dist: ${b.dist}m</span>`);
-
-      infoBtnHtml = `<button type="button" class="info-btn" onclick="toggleBinMeta(this, '${drawerId}')" title="More Info">ℹ️</button>`;
-      metaDrawerHtml = `<div id="${drawerId}" class="bin-meta-drawer">${metaItems.join('')}</div>`;
-    }
-
-    return `
-      <div class="bin-entry">
-        <div class="serial-row">
-          <div class="serial-left">
-            ${unitPill}
-            ${sizeBadge}
-            ${makeBadge}
-            <span class="serial-text">${display}</span>
-            ${statusAlertHtml}
-            ${editedTag}
-          </div>
-          <div class="serial-right">
-            ${navBtnHtml}
-            ${warnHtml}
-            ${infoBtnHtml}
-            ${editBtnHtml}
-          </div>
-        </div>
-        ${notesTag}
-        ${metaDrawerHtml}
-      </div>
-    `;
-  }
-
-  function formatSizeSummary(binList) {
-    const counts = {};
-    binList.forEach(b => { counts[b.size] = (counts[b.size] || 0) + 1; });
-    return Object.keys(counts).map(sz => `${counts[sz]} x ${sz}`).join(', ');
-  }
-
+  /* Safe Global Declaration of renderStreamBox */
   function renderStreamBox(st, soloBins, councilBins, sch, propId, showSolo, showCouncil, hasCouncilRecord, propLat, propLng, strayWarningHtml = '', site = null) {
     const titleText = `${st.icon} ${st.label}`;
     let runBadges = '';
     const weekSuffix = sch.weekLetter ? ` ${sch.weekLetter}` : '';
 
     if (showSolo) {
-      if (st.key === 'Garbage' && sch.garRun) runBadges += `<span class="hdr-run-badge ${st.badgeClass}">${sch.garRun}</span>`;
-      if (st.key === 'Recycling') {
-        if (sch.recRun) runBadges += `<span class="hdr-run-badge ${st.badgeClass}">${sch.recRun}${weekSuffix}</span>`;
-        if (sch.recSummerRun) runBadges += `<span class="hdr-run-badge hdr-run-summer">☀️ ${sch.recSummerRun}</span>`;
+      if (st.key === 'Garbage' && sch.garRun) {
+        runBadges += `<span class="hdr-run-badge ${st.badgeClass}" onclick="event.stopPropagation(); openRunDirectlyOnMap('${sch.garRun}', 'Garbage', '${sch.day}', '${sch.weekLetter || ''}')">${sch.garRun}</span>`;
       }
-      if (st.key === 'FOGO' && sch.fogRun) runBadges += `<span class="hdr-run-badge ${st.badgeClass}">${sch.fogRun}${weekSuffix}</span>`;
+      if (st.key === 'Recycling') {
+        if (sch.recRun) {
+          runBadges += `<span class="hdr-run-badge ${st.badgeClass}" onclick="event.stopPropagation(); openRunDirectlyOnMap('${sch.recRun}', 'Recycling', '${sch.day}', '${sch.weekLetter || ''}')">${sch.recRun}${weekSuffix}</span>`;
+        }
+        if (sch.recSummerRun) {
+          runBadges += `<span class="hdr-run-badge hdr-run-summer" onclick="event.stopPropagation(); openRunDirectlyOnMap('${sch.recSummerRun}', 'Recycling', '${sch.day}', '${sch.weekLetter || ''}')">☀️ ${sch.recSummerRun}</span>`;
+        }
+      }
+      if (st.key === 'FOGO' && sch.fogRun) {
+        runBadges += `<span class="hdr-run-badge ${st.badgeClass}" onclick="event.stopPropagation(); openRunDirectlyOnMap('${sch.fogRun}', 'FOGO', '${sch.day}', '${sch.weekLetter || ''}')">${sch.fogRun}${weekSuffix}</span>`;
+      }
     }
 
     const councilSerialsSet = new Set(councilBins.map(cb => cb.serial.split('__')[0].toUpperCase()));
