@@ -211,6 +211,7 @@
       text-align: center;
       box-shadow: 0 2px 6px rgba(0,0,0,0.15);
     }
+    .return-to-map-btn:active { background: #1e40af; }
     .return-to-map-btn.open { display: block; }
 
     /* Map Screen Container & Controls */
@@ -232,11 +233,8 @@
       z-index: 10000;
     }
     #mainLeafletMap { width: 100%; height: 100%; }
-
-    /* Relocate zoom control to bottom right so it never conflicts */
     .leaflet-bottom.leaflet-right { margin-bottom: 10px; margin-right: 10px; }
 
-    /* Run Stats Banner at top of map */
     .map-stats-banner {
       position: absolute;
       top: 8px;
@@ -300,7 +298,6 @@
       cursor: pointer;
     }
 
-    /* Start / Stop Flag Markers */
     .run-seq-flag {
       font-size: 12px;
       font-weight: bold;
@@ -317,7 +314,7 @@
     .start-flag { background: #16a34a; }
     .end-flag { background: #dc2626; }
 
-    /* Stray Bin Alert */
+    /* Stray Bin Optimizer Box */
     .stray-bin-box {
       background: #fffbeb;
       border: 1px solid #fde68a;
@@ -770,7 +767,7 @@
   let lastValidHeading = null;
   let gpsWatchId = null;
   let selectedRunsSet = new Set();
-  let runColorMap = {}; // Stores custom colors per run
+  let runColorMap = {};
 
   let travelMode = 'all';
   let activeScreen = 'search';
@@ -980,18 +977,35 @@
     return null;
   }
 
+  /* 
+    Enhanced Stray Bin / Run Discrepancy Analyzer:
+    Analyzes street alignment + 150m geographic radius around property.
+  */
   function detectStreetRunDiscrepancy(targetSite, streamKey) {
-    if (!targetSite || !targetSite.baseStreetLine) return null;
-    const cleanStreet = targetSite.baseStreetLine.trim().toLowerCase();
-    
-    const streetNeighbors = siteRecords.filter(s => s.baseStreetLine && s.baseStreetLine.trim().toLowerCase() === cleanStreet);
-    if (streetNeighbors.length < 4) return null;
+    if (!targetSite) return null;
+    const cleanStreet = (targetSite.baseStreetLine || '').trim().toLowerCase();
+    const propLat = Number(targetSite.lat);
+    const propLng = Number(targetSite.lng);
+
+    // 1. Gather street neighbors + radius neighbors (within 150m)
+    const neighborhood = siteRecords.filter(s => {
+      if (s === targetSite) return false;
+      const isSameStreet = s.baseStreetLine && s.baseStreetLine.trim().toLowerCase() === cleanStreet;
+      if (isSameStreet) return true;
+      if (propLat && propLng && s.lat && s.lng) {
+        const d = getDistanceMeters(propLat, propLng, Number(s.lat), Number(s.lng));
+        return d <= 150;
+      }
+      return false;
+    });
+
+    if (neighborhood.length < 3) return null;
 
     const runTally = {};
-    streetNeighbors.forEach(s => {
+    neighborhood.forEach(s => {
       let r = '';
       if (streamKey === 'Garbage') r = s.soloSchedule.garRun;
-      else if (streamKey === 'Recycling') r = s.soloSchedule.recRun;
+      else if (streamKey === 'Recycling') r = s.soloSchedule.recRun || s.soloSchedule.recSummerRun;
       else if (streamKey === 'FOGO') r = s.soloSchedule.fogRun;
       else r = s.soloSchedule.garRun || s.soloSchedule.recRun || s.soloSchedule.fogRun;
 
@@ -1010,7 +1024,8 @@
       }
     });
 
-    if (dominantCount >= (streetNeighbors.length * 0.75)) {
+    // If 65%+ of nearby bins are on another run, flag discrepancy
+    if (dominantCount >= (neighborhood.length * 0.65)) {
       const parts = dominantKey.split('|');
       const domRun = parts[0];
       const domDay = parts[1];
@@ -1018,7 +1033,7 @@
 
       let currentRun = '';
       if (streamKey === 'Garbage') currentRun = targetSite.soloSchedule.garRun;
-      else if (streamKey === 'Recycling') currentRun = targetSite.soloSchedule.recRun;
+      else if (streamKey === 'Recycling') currentRun = targetSite.soloSchedule.recRun || targetSite.soloSchedule.recSummerRun;
       else if (streamKey === 'FOGO') currentRun = targetSite.soloSchedule.fogRun;
       else currentRun = targetSite.soloSchedule.garRun || targetSite.soloSchedule.recRun || targetSite.soloSchedule.fogRun;
 
@@ -1028,7 +1043,7 @@
           dominantDay: domDay,
           dominantWeek: domWeek,
           count: dominantCount,
-          totalStreet: streetNeighbors.length,
+          totalNeighborhood: neighborhood.length,
           currentRun: currentRun
         };
       }
@@ -1075,14 +1090,13 @@
     alert(`✅ Harmonized! This address is now reassigned to ${newRun} (${newDay} Week ${newWeek}).`);
   }
 
-  /* Map Setup (Zoom relocated to bottom-right) */
+  /* Map Setup */
   function initLeafletMap() {
     leafletMap = L.map('mainLeafletMap', { 
       preferCanvas: true,
-      zoomControl: false // Disable default top-left zoom
+      zoomControl: false
     }).setView([-38.36, 144.91], 13);
 
-    // Re-add zoom control to bottom right
     L.control.zoom({ position: 'bottomright' }).addTo(leafletMap);
 
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -1117,7 +1131,6 @@
     }
   }
 
-  /* Style Run Modal Builder */
   function openRunStyleModal() {
     const list = document.getElementById('runStyleList');
     list.innerHTML = '';
@@ -1139,9 +1152,7 @@
     openModal('runStyleModal');
   }
 
-  /*
-    Multi-Run Independent Border Shading & Crash-Proof Rendering Engine
-  */
+  /* Strict Map Renderer with Distance Gatekeeper */
   function renderMapData() {
     if (!leafletMap) return;
 
@@ -1155,13 +1166,10 @@
     const strictMatch = document.getElementById('chkStrictDayMatch') ? document.getElementById('chkStrictDayMatch').checked : true;
     const showPins = document.getElementById('chkShowBinDots') ? document.getElementById('chkShowBinDots').checked : true;
 
-    // Data buckets split by individual Run Number
     const runGroups = {};
     let totalBinsCount = 0;
     const houseSet = new Set();
     const allValidBounds = [];
-
-    // Chronological collection sequence tracker
     const sequencedStops = [];
 
     siteRecords.forEach(site => {
@@ -1221,7 +1229,6 @@
             if (!runGroups[runKey]) runGroups[runKey] = [];
             runGroups[runKey].push(turf.point([targetLng, targetLat]));
 
-            // Track flip/collection timestamp for start/end sequence detection
             if (binObj.lastFlipped || binObj.lastUpdated) {
               sequencedStops.push({
                 lat: targetLat,
@@ -1232,40 +1239,38 @@
               });
             }
 
-            // Render pin if pins toggle is enabled (Limit 1500 to guarantee 60fps)
             if (showPins && totalBinsCount <= 1500) {
               let dotColor = '#2563eb';
               if (stKey === 'Garbage') dotColor = '#dc2626';
               if (stKey === 'Recycling') dotColor = '#eab308';
               if (stKey === 'FOGO') dotColor = '#16a34a';
 
-              const circleMarker = L.circleMarker([targetLat, targetLng], {
-                radius: 5.5,
-                fillColor: dotColor,
-                color: '#ffffff',
-                weight: 1.5,
-                opacity: 1,
-                fillOpacity: 0.9
+              const customIcon = L.divIcon({
+                className: 'custom-dot',
+                html: `<div style="background:${dotColor}; width:13px; height:13px; border-radius:50%; border:2px solid white; box-shadow:0 2px 5px rgba(0,0,0,0.35); cursor:pointer;"></div>`,
+                iconSize: [13, 13],
+                iconAnchor: [6.5, 6.5]
               });
 
-              circleMarker.on('click', () => {
+              const marker = L.marker([targetLat, targetLng], { icon: customIcon });
+              marker.on('click', () => {
                 inspectPropertyFromMap(site.propId || site.siteId);
               });
 
-              mapMarkersLayer.addLayer(circleMarker);
+              mapMarkersLayer.addLayer(marker);
             }
           }
         });
       });
     });
 
-    // 1. Update Map Run Stats Dashboard
+    // 1. Update Map Stats Banner
     document.getElementById('mapTotalHouses').innerText = houseSet.size.toLocaleString();
     document.getElementById('mapTotalBins').innerText = totalBinsCount.toLocaleString();
     const activeRunsDisplay = selectedRunsSet.size > 0 ? Array.from(selectedRunsSet).map(r => r.toUpperCase()).join(', ') : 'All Runs';
     document.getElementById('mapActiveRunList').innerText = activeRunsDisplay;
 
-    // 2. Draw Separate Tight Shaded Boundaries Per Run
+    // 2. Render Independent Tight Boundaries Per Run
     Object.keys(runGroups).forEach((rKey, rIdx) => {
       const points = runGroups[rKey];
       const runColor = runColorMap[rKey] || PRESET_COLORS[rIdx % PRESET_COLORS.length];
@@ -1290,7 +1295,7 @@
       }
     });
 
-    // 3. Highlight Start & End Bin Collection Sequence
+    // 3. Highlight Start & End Bin Sequence
     if (sequencedStops.length >= 2) {
       sequencedStops.sort((a, b) => a.time.localeCompare(b.time));
       const startStop = sequencedStops[0];
@@ -1313,7 +1318,7 @@
       mapSeqLayer.addLayer(L.marker([endStop.lat, endStop.lng], { icon: endIcon }).bindPopup(`<b>🛑 Finish Stop (Last Collected)</b><br>${endStop.address}<br>Bin: ${endStop.serial}`));
     }
 
-    // 4. Render Live GPS Truck
+    // 4. Live GPS Truck
     if (userCurrentLocation && userCurrentLocation.lat && userCurrentLocation.lng) {
       if (mapTruckMarker) leafletMap.removeLayer(mapTruckMarker);
       mapTruckMarker = L.circleMarker([userCurrentLocation.lat, userCurrentLocation.lng], {
@@ -1432,7 +1437,7 @@
   function openDB() {
     return new Promise((resolve) => {
       try {
-        const req = window.indexedDB.open("LukezBunzMasterDB_v115", 1);
+        const req = window.indexedDB.open("LukezBunzMasterDB_v120", 1);
         req.onupgradeneeded = e => {
           const db = e.target.result;
           if (!db.objectStoreNames.contains("store")) db.createObjectStore("store");
@@ -2266,7 +2271,11 @@
         if ((selectedRunsSet.size > 0 || dayFilter || weekFilter || streamFilter) && siteRecords.length > 0) {
           const filterMatches = [];
           siteRecords.forEach((site, idx) => {
-            if (matchesRun(site) && matchesDay(site) && matchesWeek(site) && matchesStream(site)) {
+            const isMatch = matchesRun(site) && matchesDay(site) && matchesWeek(site) && matchesStream(site);
+            const strayData = detectStreetRunDiscrepancy(site, streamFilter);
+
+            // Match if valid run/day/week OR if flagged as stray bin on active run
+            if (isMatch || (strayData && selectedRunsSet.has(strayData.dominantRun.toLowerCase()))) {
               let d = null;
               let travelDir = { isUpcoming: true, side: 'unknown' };
               if (userCurrentLocation && site.lat && site.lng) {
@@ -2440,7 +2449,7 @@
             strayAlertHtml = `
               <div class="stray-bin-box">
                 <div class="stray-bin-title">⚠️ Stray Bin Detected</div>
-                <div>${strayData.count} of ${strayData.totalStreet} bins on this street are assigned to <b>${strayData.dominantRun}</b> (${strayData.dominantDay} ${strayData.dominantWeek ? `Week ${strayData.dominantWeek}` : ''}).</div>
+                <div>${strayData.count} of ${strayData.totalNeighborhood} nearby bins are on <b>${strayData.dominantRun}</b> (${strayData.dominantDay} ${strayData.dominantWeek ? `Week ${strayData.dominantWeek}` : ''}). Current: <i>${strayData.currentRun}</i>.</div>
                 <button type="button" class="stray-fix-btn" onclick="applyStrayBinHarmonization('${primary.propId || primary.siteId}', '${st.key}', '${strayData.dominantRun}', '${strayData.dominantDay}', '${strayData.dominantWeek}')">⚡ Move Bin to ${strayData.dominantRun}</button>
               </div>
             `;
