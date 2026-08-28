@@ -13,7 +13,7 @@
     body { background-color: #f1f3f5; margin: 0; padding: 0; color: #333; font-weight: 400; }
     .container { max-width: 600px; margin: 0 auto; padding: 12px; padding-bottom: 70px; }
     
-    /* Clean Top Header with Navigation Bar */
+    /* Top Header Bar */
     .app-header {
       background-color: #1b4332;
       color: #ffffff;
@@ -196,7 +196,7 @@
 
     .count-msg { font-size: 12.5px; font-weight: 500; color: #475569; margin-bottom: 10px; }
     
-    /* Return to Map Button (Inspection Mode) */
+    /* Return to Map Button */
     .return-to-map-btn {
       display: none;
       width: 100%;
@@ -215,17 +215,27 @@
     .return-to-map-btn:active { background: #1e40af; }
     .return-to-map-btn.open { display: block; }
 
-    /* Full Map Screen Container */
+    /* Map Screen Container & Fullscreen Fix */
     #mapScreenContainer {
       position: relative;
       width: 100%;
       height: calc(100vh - 150px);
-      min-height: 420px;
+      min-height: 440px;
       border-radius: 12px;
       overflow: hidden;
       border: 1px solid #cbd5e1;
       box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+      transform: translateZ(0); /* Eliminates repaint glitching */
     }
+    #mapScreenContainer.fullscreen {
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      width: 100vw; height: 100vh;
+      border-radius: 0;
+      border: none;
+      z-index: 99999;
+    }
+
     #mainLeafletMap { width: 100%; height: 100%; }
 
     .map-controls-overlay {
@@ -288,7 +298,7 @@
       cursor: pointer;
     }
 
-    /* Inactive / Stolen Bin Alert Badges */
+    /* Inactive / Stolen Badges */
     .status-pill-inactive {
       font-size: 10px;
       font-weight: 700;
@@ -418,7 +428,7 @@
     .council-bin-entry:last-child { border-bottom: none; }
 
     /* Modals */
-    .modal-overlay { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0, 0, 0, 0.55); z-index: 10000; align-items: center; justify-content: center; padding: 14px; }
+    .modal-overlay { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0, 0, 0, 0.55); z-index: 100000; align-items: center; justify-content: center; padding: 14px; }
     .modal-overlay.open { display: flex; }
     .modal-box { background: #ffffff; border-radius: 12px; width: 100%; max-width: 480px; max-height: 90vh; overflow-y: auto; padding: 16px; box-shadow: 0 10px 25px rgba(0,0,0,0.25); }
     .modal-header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #e2e8f0; padding-bottom: 8px; margin-bottom: 12px; }
@@ -524,17 +534,16 @@
 
   <!-- SCREEN 1 & 2: Search & Live Navigation Cards Screen -->
   <div id="cardsScreen" class="screen-view active">
-    <!-- Quick Return to Map Button (Appears when viewing inspection from Map) -->
     <button id="returnToMapBtn" class="return-to-map-btn" type="button" onclick="switchScreen('map')">🗺️ ⬅ Back to Map</button>
-
     <div id="resultsSummary" class="count-msg" style="display: none;"></div>
     <div id="resultsList"></div>
   </div>
 
-  <!-- SCREEN 3: Dedicated Full Map & Route Inspector Screen -->
+  <!-- SCREEN 3: Dedicated Full Map Screen -->
   <div id="mapScreen" class="screen-view">
     <div id="mapScreenContainer">
       <div class="map-controls-overlay">
+        <button type="button" id="mapFsBtn" class="map-overlay-btn" onclick="toggleMapFullscreen()">⛶ Fullscreen</button>
         <button type="button" class="map-overlay-btn" onclick="fitMapToVisibleRuns()">🎯 Fit Run</button>
         <button type="button" class="map-overlay-btn" onclick="centerMapOnTruck()">🚛 My GPS</button>
         <label class="map-overlay-toggle">
@@ -711,6 +720,7 @@
 
   let travelMode = 'all';
   let activeScreen = 'search';
+  let isMapFullscreen = false;
 
   let leafletMap = null;
   let mapMarkersLayer = null;
@@ -729,7 +739,6 @@
     { key: 'FOGO', cols: [{ idx: 30, sz: '240L' }] }
   ];
 
-  /* Auto-detect and set current day of the week */
   function setDefaultDayToToday() {
     const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
     const todayStr = days[new Date().getDay()];
@@ -739,7 +748,6 @@
     }
   }
 
-  /* Screen Switching */
   function switchScreen(screenName) {
     activeScreen = screenName;
     document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
@@ -763,6 +771,19 @@
       }
       renderMapData();
     }
+  }
+
+  function toggleMapFullscreen() {
+    const container = document.getElementById('mapScreenContainer');
+    const btn = document.getElementById('mapFsBtn');
+    isMapFullscreen = !isMapFullscreen;
+    
+    container.classList.toggle('fullscreen', isMapFullscreen);
+    btn.innerText = isMapFullscreen ? '🗗 Exit Fullscreen' : '⛶ Fullscreen';
+
+    setTimeout(() => {
+      if (leafletMap) leafletMap.invalidateSize();
+    }, 250);
   }
 
   function cycleTravelMode() {
@@ -904,7 +925,6 @@
     }
   }
 
-  /* Inactive & Stolen Serial Detector */
   function detectBinStatusFlags(binObj, site) {
     const textToCheck = `${binObj.serial || ''} ${binObj.notes || ''} ${site.runFlags || ''}`.toUpperCase();
     if (textToCheck.includes('STOLEN')) return { isAlert: true, label: '🚨 STOLEN', class: 'status-pill-stolen' };
@@ -914,7 +934,6 @@
     return null;
   }
 
-  /* Stray Bin / Run Discrepancy Analyzer */
   function detectStreetRunDiscrepancy(targetSite, streamKey) {
     if (!targetSite || !targetSite.baseStreetLine) return null;
     const cleanStreet = targetSite.baseStreetLine.trim().toLowerCase();
@@ -1010,7 +1029,6 @@
     alert(`✅ Harmonized! This address is now reassigned to ${newRun} (${newDay} Week ${newWeek}).`);
   }
 
-  /* Map Setup */
   function initLeafletMap() {
     leafletMap = L.map('mainLeafletMap').setView([-38.36, 144.91], 13);
 
@@ -1036,7 +1054,7 @@
     }
   }
 
-  /* Strict Map Renderer with Distance Gatekeeper */
+  /* Reliable Map Plotting & Outlier Exclusion */
   function renderMapData() {
     if (!leafletMap) return;
 
@@ -1118,7 +1136,7 @@
 
             const marker = L.marker([targetLat, targetLng], { icon: customIcon });
             marker.on('click', () => {
-              inspectPropertyFromMap(site.propId || site.siteId);
+              inspectPropertyFromMap(site.propId || site.siteId, site.addressText);
             });
 
             mapMarkersLayer.addLayer(marker);
@@ -1127,7 +1145,7 @@
       });
     });
 
-    // 1. Shaded Perimeter
+    // Shaded Run Boundary
     if (pointsGeoJson.length >= 3 && window.turf) {
       try {
         const featureColl = turf.featureCollection(pointsGeoJson);
@@ -1141,7 +1159,7 @@
       } catch(e) {}
     }
 
-    // 2. Live GPS Truck
+    // Live GPS Truck Marker
     if (userCurrentLocation && userCurrentLocation.lat && userCurrentLocation.lng) {
       if (mapTruckMarker) leafletMap.removeLayer(mapTruckMarker);
       mapTruckMarker = L.circleMarker([userCurrentLocation.lat, userCurrentLocation.lng], {
@@ -1159,10 +1177,8 @@
     }
   }
 
-  function inspectPropertyFromMap(propId) {
-    const site = siteRecords.find(s => String(s.propId || s.siteId) === String(propId));
-    if (!site) return;
-    document.getElementById('searchInput').value = site.addressText;
+  function inspectPropertyFromMap(propId, addressText) {
+    document.getElementById('searchInput').value = addressText || propId;
     switchScreen('search');
     document.getElementById('returnToMapBtn').classList.add('open');
     handleSearch();
@@ -1203,7 +1219,7 @@
     return { isUpcoming, side, relAngle };
   }
 
-  /* Live Continuous GPS Watcher */
+  /* Live GPS Watcher */
   function startLiveLocationWatcher() {
     if (!("geolocation" in navigator)) {
       updateGpsBadge(false, "No GPS");
@@ -1243,7 +1259,7 @@
         if (movedDist >= 2.5) {
           lastGpsCoords = { ...userCurrentLocation };
           const query = document.getElementById('searchInput').value.trim();
-          if (!query && siteRecords.length > 0) handleSearch();
+          if (!query && siteRecords.length > 0 && activeScreen !== 'map') handleSearch();
         }
       },
       (err) => updateGpsBadge(false, "⚠️ No Signal"),
@@ -1263,7 +1279,7 @@
   function openDB() {
     return new Promise((resolve) => {
       try {
-        const req = window.indexedDB.open("LukezBunzMasterDB_v110", 1);
+        const req = window.indexedDB.open("LukezBunzMasterDB_v115", 1);
         req.onupgradeneeded = e => {
           const db = e.target.result;
           if (!db.objectStoreNames.contains("store")) db.createObjectStore("store");
@@ -1846,7 +1862,6 @@
     const warnHtml = showWarning ? `<span class="warn-icon" title="Not found in Council records">⚠️</span>` : '';
     const editBtnHtml = showEdit ? `<button class="edit-icon-btn" onclick="promptEditBin('${propId}', '${streamKey}', ${binIdx})" title="Edit Bin">✏️</button>` : '';
 
-    // Check Inactive / Stolen Alerts
     const statusAlert = site ? detectBinStatusFlags(b, site) : null;
     const statusAlertHtml = statusAlert ? `<span class="${statusAlert.class}">${statusAlert.label}</span>` : '';
 
