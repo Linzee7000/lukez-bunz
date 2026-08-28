@@ -11,7 +11,7 @@
   <style>
     * { box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
     body { background-color: #f1f5f9; margin: 0; padding: 0; color: #1e293b; font-weight: 500; font-size: 15px; user-select: none; }
-    .container { max-width: 660px; margin: 0 auto; padding: 10px; padding-bottom: 75px; position: relative; }
+    .container { max-width: 660px; margin: 0 auto; padding: 10px; padding-bottom: 80px; position: relative; }
     
     /* Top Bar */
     .app-header {
@@ -325,7 +325,6 @@
       border-top: 4px solid #2d6a4f;
       cursor: pointer;
     }
-    /* Purple Flag Highlight Box */
     .address-card.flagged-purple {
       border-top: 4px solid #7e22ce;
       background: #faf5ff;
@@ -820,7 +819,6 @@
     openModal('filterOptionsModal');
   }
 
-  /* Strict Run filtering by Stream: If Recycling is selected, hide Garbage/FOGO runs */
   function populateModalRunsChecklist() {
     const container = document.getElementById('modalRunsChecklistGrid');
     if (!container || siteRecords.length === 0) return;
@@ -975,6 +973,61 @@
     if (isTruckFollowEnabled && userCurrentLocation && leafletMap) {
       leafletMap.setView([userCurrentLocation.lat, userCurrentLocation.lng], 16);
     }
+  }
+
+  /* Street Consistency Consensus Validation: Detects and flags rogue 30-bin discrepancies */
+  function detectStreetRunDiscrepancy(targetSite, streamKey) {
+    if (!targetSite || !targetSite.baseStreetLine) return null;
+    const cleanStreet = targetSite.baseStreetLine.trim().toLowerCase();
+    
+    const streetNeighbors = streetHashIndex.get(cleanStreet) || [];
+    if (streetNeighbors.length < 4) return null;
+
+    const runTally = {};
+    streetNeighbors.forEach(s => {
+      let r = '';
+      if (streamKey === 'Garbage') r = s.soloSchedule.garRun;
+      else if (streamKey === 'Recycling') r = s.soloSchedule.recRun || s.soloSchedule.recSummerRun;
+      else if (streamKey === 'FOGO') r = s.soloSchedule.fogRun;
+      else r = s.soloSchedule.garRun || s.soloSchedule.recRun || s.soloSchedule.fogRun;
+
+      if (r) {
+        const key = `${r.trim().toUpperCase()}|${s.soloSchedule.day}`;
+        runTally[key] = (runTally[key] || 0) + 1;
+      }
+    });
+
+    let dominantKey = '';
+    let dominantCount = 0;
+    Object.keys(runTally).forEach(k => {
+      if (runTally[k] > dominantCount) {
+        dominantCount = runTally[k];
+        dominantKey = k;
+      }
+    });
+
+    if (dominantCount >= (streetNeighbors.length * 0.70)) {
+      const parts = dominantKey.split('|');
+      const domRun = parts[0];
+      const domDay = parts[1];
+
+      let currentRun = '';
+      if (streamKey === 'Garbage') currentRun = targetSite.soloSchedule.garRun;
+      else if (streamKey === 'Recycling') currentRun = targetSite.soloSchedule.recRun || targetSite.soloSchedule.recSummerRun;
+      else if (streamKey === 'FOGO') currentRun = targetSite.soloSchedule.fogRun;
+      else currentRun = targetSite.soloSchedule.garRun || targetSite.soloSchedule.recRun || targetSite.soloSchedule.fogRun;
+
+      if (currentRun && (currentRun.trim().toUpperCase() !== domRun || targetSite.soloSchedule.day !== domDay)) {
+        return {
+          dominantRun: domRun,
+          dominantDay: domDay,
+          count: dominantCount,
+          totalNeighborhood: streetNeighbors.length,
+          currentRun: currentRun
+        };
+      }
+    }
+    return null;
   }
 
   /* GPS Watcher */
@@ -1206,7 +1259,6 @@
         return `<span style="font-size:13.5px; font-weight:800; background:#f1f5f9; padding:3px 8px; border-radius:4px; border:1px solid #cbd5e1;">${st.icon} ${bins.map(b => b.serial).join(', ')}</span>`;
       }).join('');
 
-      // Check if purple flagged
       const isPurpleFlagged = Boolean(site.runFlags);
       const cardClass = isPurpleFlagged ? 'address-card flagged-purple' : 'address-card';
 
@@ -1236,63 +1288,7 @@
     }).join('') || '<div style="text-align:center; padding:30px; color:#64748b; font-weight:700;">No upcoming bins on selected side.</div>';
   }
 
-  /* Map Setup */
-  function initLeafletMap() {
-    leafletMap = L.map('mainLeafletMap', { zoomControl: false }).setView([-38.36, 144.91], 13);
-    L.control.zoom({ position: 'bottomright' }).addTo(leafletMap);
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' }).addTo(leafletMap);
-    mapMarkersLayer = L.layerGroup().addTo(leafletMap);
-    mapHullsLayer = L.layerGroup().addTo(leafletMap);
-  }
-
-  function toggleMapFullscreen() {
-    const container = document.getElementById('mapScreenContainer');
-    const btn = document.getElementById('mapFsBtn');
-    const isFs = container.classList.toggle('fullscreen');
-    btn.innerText = isFs ? '🗗 Exit' : '⛶ Fullscreen';
-    setTimeout(() => { if (leafletMap) leafletMap.invalidateSize(); }, 200);
-  }
-
-  function fitMapToVisibleRuns() {
-    if (leafletMap && mapMarkersLayer.getLayers().length > 0) {
-      const group = new L.featureGroup(mapMarkersLayer.getLayers());
-      leafletMap.fitBounds(group.getBounds(), { padding: [30, 30] });
-    }
-  }
-
-  function centerMapOnTruck() {
-    if (userCurrentLocation && leafletMap) leafletMap.setView([userCurrentLocation.lat, userCurrentLocation.lng], 16);
-  }
-
-  function openRunStyleModal() {
-    const list = document.getElementById('runStyleList');
-    list.innerHTML = '';
-    
-    const dayRunKeys = new Set();
-    siteRecords.forEach(s => {
-      const sch = s.soloSchedule;
-      if (sch.garRun) dayRunKeys.add(`${sch.garRun.trim().toUpperCase()} - ${sch.day}`);
-      if (sch.recRun) dayRunKeys.add(`${sch.recRun.trim().toUpperCase()} - ${sch.day}`);
-      if (sch.recSummerRun) dayRunKeys.add(`${sch.recSummerRun.trim().toUpperCase()} - ${sch.day}`);
-    });
-
-    const sortedKeys = Array.from(dayRunKeys).sort();
-
-    sortedKeys.forEach((key, idx) => {
-      const curColor = runColorMap[key] || PRESET_COLORS[idx % PRESET_COLORS.length];
-      const row = document.createElement('div');
-      row.style.cssText = 'display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; padding:6px 10px; background:#f8fafc; border-radius:6px; border:1px solid #e2e8f0;';
-      row.innerHTML = `
-        <span style="font-weight:700; font-size:13px;">${key}</span>
-        <input type="color" value="${curColor}" onchange="runColorMap['${key}'] = this.value;" style="width:40px; height:28px; border:none; cursor:pointer;">
-      `;
-      list.appendChild(row);
-    });
-
-    openModal('runStyleModal');
-  }
-
-  /* Strict Stream, Run, and Day-Bound Map Renderer */
+  /* Strict Leaflet Map Renderer: Excludes rogue strays & enforces 0-45m proximity gate */
   function renderMapData() {
     if (!leafletMap) return;
     mapMarkersLayer.clearLayers();
@@ -1320,10 +1316,18 @@
         else if (stKey === 'Recycling') streamRun = (sch.recRun || sch.recSummerRun || '').trim().toLowerCase();
         else if (stKey === 'FOGO') streamRun = (sch.fogRun || '').trim().toLowerCase();
 
-        // Strict Filter Validations
+        if (!streamRun) return;
+
+        // 1. Strict Filter Validations
         if (selectedRunsSet.size > 0 && !selectedRunsSet.has(streamRun)) return;
         if (dayFilter && !sch.day.toLowerCase().includes(dayFilter)) return;
         if (weekFilter && sch.weekLetter.toUpperCase() !== weekFilter) return;
+
+        // 2. Street Consensus Filter: Exclude isolated rogue bins that contradict the entire street
+        const strayCheck = detectStreetRunDiscrepancy(site, stKey);
+        if (strayCheck && strayCheck.dominantRun.toLowerCase() !== streamRun) {
+          return; // Suppress from this run's map to prevent stretching across the Peninsula
+        }
 
         const propLat = site.lat ? Number(site.lat) : null;
         const propLng = site.lng ? Number(site.lng) : null;
@@ -1332,9 +1336,13 @@
           let targetLat = propLat;
           let targetLng = propLng;
 
-          if (pinSourceMode === 'flip' && binObj.lat && binObj.lng && Number(binObj.lat) !== 0) {
-            targetLat = Number(binObj.lat);
-            targetLng = Number(binObj.lng);
+          // 0–45m Flip GPS Gatekeeper
+          if (pinSourceMode === 'flip' && binObj.lat && binObj.lng && propLat && propLng) {
+            const distFromHouse = getDistanceMeters(propLat, propLng, Number(binObj.lat), Number(binObj.lng));
+            if (distFromHouse >= 0 && distFromHouse <= 45) {
+              targetLat = Number(binObj.lat);
+              targetLng = Number(binObj.lng);
+            }
           }
 
           if (targetLat && targetLng && !isNaN(targetLat) && !isNaN(targetLng)) {
