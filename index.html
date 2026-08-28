@@ -360,29 +360,6 @@
       cursor: pointer;
     }
 
-    /* Stray Bin Optimizer Box */
-    .stray-bin-box {
-      background: #fffbeb;
-      border: 1px solid #fde68a;
-      border-left: 4px solid #d97706;
-      border-radius: 6px;
-      padding: 8px 10px;
-      margin-bottom: 10px;
-      font-size: 12px;
-      color: #92400e;
-    }
-    .stray-fix-btn {
-      background: #d97706;
-      color: white;
-      border: none;
-      padding: 4px 8px;
-      border-radius: 4px;
-      font-size: 11px;
-      font-weight: 600;
-      margin-top: 6px;
-      cursor: pointer;
-    }
-
     /* Modals */
     .modal-overlay { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0, 0, 0, 0.55); z-index: 20000; align-items: center; justify-content: center; padding: 14px; }
     .modal-overlay.open { display: flex; }
@@ -403,7 +380,6 @@
 <body>
 
 <div class="container">
-  <!-- Top App Header -->
   <div class="app-header">
     <h1>Lukez Bunz</h1>
     <div class="header-actions">
@@ -416,7 +392,6 @@
     <div id="pBarFill" class="progress-bar-fill"></div>
   </div>
 
-  <!-- Persistent Filter Toolbar -->
   <div class="filter-card">
     <div class="controls-grid">
       <select id="streamFilterSelect" class="filter-select" onchange="handleFilterChange()">
@@ -471,14 +446,14 @@
     <div id="resultsList"></div>
   </div>
 
-  <!-- SCREEN 2: IN-CAB DRIVER HUD (LIVE KERBSIDE ASSIST) -->
+  <!-- SCREEN 2: IN-CAB DRIVER HUD (FAST SPATIAL ENGINE) -->
   <div id="driverHudScreen" class="screen-view">
     <div class="hud-hero">
       <div class="hud-top-row">
         <div id="hudStreetName" class="hud-street-name">Approaching...</div>
         <div id="hudSpeed" class="hud-speed-badge">0 km/h</div>
       </div>
-      <div style="font-size:12px; color:#94a3b8;" id="hudRunSummary">Active Run: All</div>
+      <div style="font-size:12px; color:#94a3b8;" id="hudRunSummary">Ready on run</div>
 
       <div class="hud-side-toggle">
         <button id="hudSideAll" class="hud-side-btn active" onclick="setHudSide('all')">🎯 All Sides</button>
@@ -490,7 +465,7 @@
     <div id="hudUpcomingList"></div>
   </div>
 
-  <!-- SCREEN 3: INTERACTIVE RUN MAP -->
+  <!-- SCREEN 3: MAP -->
   <div id="mapScreen" class="screen-view">
     <div id="mapScreenContainer">
       <div class="map-stats-banner">
@@ -599,7 +574,6 @@
   </div>
 </div>
 
-<!-- Leaflet & Turf Libraries -->
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://unpkg.com/@turf/turf@6.5.0/turf.min.js"></script>
 
@@ -635,7 +609,17 @@
     { key: 'FOGO', cols: [{ idx: 30, sz: '240L' }] }
   ];
 
-  /* Tab Switching */
+  function buildFastStreetIndex() {
+    streetHashIndex.clear();
+    siteRecords.forEach(s => {
+      if (s.baseStreetLine) {
+        const key = s.baseStreetLine.trim().toLowerCase();
+        if (!streetHashIndex.has(key)) streetHashIndex.set(key, []);
+        streetHashIndex.get(key).push(s);
+      }
+    });
+  }
+
   function switchMainTab(tabName) {
     activeTab = tabName;
     document.querySelectorAll('.nav-item').forEach(b => b.classList.remove('active'));
@@ -666,7 +650,6 @@
     updateDriverHud();
   }
 
-  /* Reliable GPS Watcher */
   function startLiveLocationWatcher() {
     if (!("geolocation" in navigator)) {
       updateGpsBadgeUI(false, "No GPS Sensor");
@@ -698,7 +681,6 @@
 
         updateGpsBadgeUI(true, `🟢 Live ±${accuracy}m`);
 
-        // Update driver HUD speed readout
         const speedEl = document.getElementById('hudSpeed');
         if (speedEl) speedEl.innerText = `${speedKmh} km/h`;
 
@@ -715,7 +697,6 @@
       },
       (err) => {
         updateGpsBadgeUI(false, "⚠️ Tap to Enable GPS");
-        console.warn("GPS Warning:", err.message);
       },
       { enableHighAccuracy: true, maximumAge: 3000, timeout: 20000 }
     );
@@ -731,7 +712,7 @@
           if (activeTab === 'search') handleSearch();
           if (activeTab === 'hud') updateDriverHud();
         },
-        (err) => alert("Please allow Location Access in your browser settings."),
+        (err) => alert("Please allow Location Access in browser settings."),
         { enableHighAccuracy: true, timeout: 10000 }
       );
     }
@@ -744,7 +725,6 @@
     badge.className = isActive ? 'gps-badge' : 'gps-badge searching';
   }
 
-  /* Coordinate Geometry */
   function getDistanceMeters(lat1, lon1, lat2, lon2) {
     const R = 6371e3;
     const φ1 = lat1 * Math.PI / 180;
@@ -779,7 +759,7 @@
     return { isUpcoming, side, relAngle };
   }
 
-  /* Driver HUD Screen Engine */
+  /* Lightning-Fast Driver HUD Calculation */
   function updateDriverHud() {
     const listContainer = document.getElementById('hudUpcomingList');
     const streetNameEl = document.getElementById('hudStreetName');
@@ -792,27 +772,43 @@
 
     const streamFilter = document.getElementById('streamFilterSelect').value.trim();
     const dayFilter = document.getElementById('dayFilterSelect').value.trim().toLowerCase();
+    const curLat = userCurrentLocation.lat;
+    const curLng = userCurrentLocation.lng;
+
+    // Fast O(1) coarse box filter (~250 meters max)
+    const latDelta = 0.0025;
+    const lngDelta = 0.0030;
 
     const upcoming = [];
-    siteRecords.forEach(site => {
-      if (dayFilter && !site.soloSchedule.day.toLowerCase().includes(dayFilter)) return;
-      if (site.lat && site.lng && Number(site.lat) !== 0) {
-        const d = getDistanceMeters(userCurrentLocation.lat, userCurrentLocation.lng, Number(site.lat), Number(site.lng));
-        const travelDir = evaluateTravelDirection(userCurrentLocation.lat, userCurrentLocation.lng, lastValidHeading, Number(site.lat), Number(site.lng));
+    for (let i = 0; i < siteRecords.length; i++) {
+      const site = siteRecords[i];
+      if (!site.lat || !site.lng) continue;
 
-        if (travelMode === 'left' && travelDir.side !== 'left') return;
-        if (travelMode === 'right' && travelDir.side !== 'right') return;
+      const pLat = Number(site.lat);
+      const pLng = Number(site.lng);
 
-        if (d <= 120) {
-          upcoming.push({ site, dist: d, travelDir });
-        }
+      // Fast coordinate bound check before any trigonometry
+      if (Math.abs(pLat - curLat) > latDelta || Math.abs(pLng - curLng) > lngDelta) continue;
+
+      if (dayFilter && !site.soloSchedule.day.toLowerCase().includes(dayFilter)) continue;
+
+      const d = getDistanceMeters(curLat, curLng, pLat, pLng);
+      if (d <= 140) {
+        const travelDir = evaluateTravelDirection(curLat, curLng, lastValidHeading, pLat, pLng);
+
+        if (travelMode === 'left' && travelDir.side !== 'left') continue;
+        if (travelMode === 'right' && travelDir.side !== 'right') continue;
+
+        upcoming.push({ site, dist: d, travelDir });
       }
-    });
+    }
 
     upcoming.sort((a, b) => a.dist - b.dist);
 
     if (upcoming.length > 0) {
       streetNameEl.innerText = upcoming[0].site.baseStreetLine || upcoming[0].site.addressText;
+    } else {
+      streetNameEl.innerText = "Cruising...";
     }
 
     listContainer.innerHTML = upcoming.slice(0, 10).map(({ site, dist, travelDir }) => {
@@ -839,7 +835,6 @@
     }).join('') || '<div style="text-align:center; padding:30px; color:#64748b;">No bins immediately ahead on selected side.</div>';
   }
 
-  /* Map Setup */
   function initLeafletMap() {
     leafletMap = L.map('mainLeafletMap', { preferCanvas: true, zoomControl: false }).setView([-38.36, 144.91], 13);
     L.control.zoom({ position: 'bottomright' }).addTo(leafletMap);
@@ -950,54 +945,6 @@
     if (validBounds.length > 0) leafletMap.fitBounds(validBounds, { padding: [30, 30] });
   }
 
-  /* Safe Global Declares */
-  function renderStreamBox(st, soloBins, councilBins, sch, propId, showSolo, showCouncil, hasCouncilRecord, propLat, propLng, strayWarningHtml = '', site = null) {
-    const titleText = `${st.icon} ${st.label}`;
-    let runBadges = '';
-    const weekSuffix = sch.weekLetter ? ` ${sch.weekLetter}` : '';
-
-    if (showSolo) {
-      if (st.key === 'Garbage' && sch.garRun) runBadges += `<span class="hdr-run-badge ${st.badgeClass}">${sch.garRun}</span>`;
-      if (st.key === 'Recycling' && sch.recRun) runBadges += `<span class="hdr-run-badge ${st.badgeClass}">${sch.recRun}${weekSuffix}</span>`;
-      if (st.key === 'FOGO' && sch.fogRun) runBadges += `<span class="hdr-run-badge ${st.badgeClass}">${sch.fogRun}${weekSuffix}</span>`;
-    }
-
-    let soloBinsHtml = '';
-    if (showSolo && soloBins.length > 0) {
-      soloBinsHtml = soloBins.map((b, binIdx) => {
-        let navBtn = (b.lat || propLat) ? `<a href="https://www.google.com/maps/dir/?api=1&destination=${b.lat || propLat},${b.lng || propLng}&travelmode=driving" target="_blank" class="nav-stop-btn">📍 Nav</a>` : '';
-        return `
-          <div class="bin-entry">
-            <div class="serial-row">
-              <div class="serial-left">
-                ${b.unitLabel ? `<span class="unit-pill">${b.unitLabel}</span>` : ''}
-                <span class="size-badge">${b.size || '240L'}</span>
-                <span class="serial-text">${b.serial}</span>
-              </div>
-              <div class="serial-right">
-                ${navBtn}
-                <button type="button" class="size-badge" onclick="promptEditBin('${propId}', '${st.key}', ${binIdx})">✏️</button>
-              </div>
-            </div>
-          </div>
-        `;
-      }).join('');
-    }
-
-    return `
-      <div class="stream-group-card">
-        <div class="stream-group-header ${st.headerClass}">
-          <div class="header-left"><span class="stream-title">${titleText}</span></div>
-          <div class="header-right">${runBadges}</div>
-        </div>
-        <div class="serials-list">
-          ${strayWarningHtml}
-          ${soloBinsHtml || '<div style="font-size:11.5px; color:#888; font-style:italic;">No active bins</div>'}
-        </div>
-      </div>
-    `;
-  }
-
   function handleSearch() {
     const query = document.getElementById('searchInput').value.trim().toLowerCase();
     const streamFilter = document.getElementById('streamFilterSelect').value.trim();
@@ -1051,6 +998,52 @@
         </div>
       `;
     }).join('');
+  }
+
+  function renderStreamBox(st, soloBins, councilBins, sch, propId, showSolo, showCouncil, hasCouncilRecord, propLat, propLng) {
+    const titleText = `${st.icon} ${st.label}`;
+    let runBadges = '';
+    const weekSuffix = sch.weekLetter ? ` ${sch.weekLetter}` : '';
+
+    if (showSolo) {
+      if (st.key === 'Garbage' && sch.garRun) runBadges += `<span class="hdr-run-badge ${st.badgeClass}">${sch.garRun}</span>`;
+      if (st.key === 'Recycling') runBadges += `<span class="hdr-run-badge ${st.badgeClass}">${sch.recRun}${weekSuffix}</span>`;
+      if (st.key === 'FOGO' && sch.fogRun) runBadges += `<span class="hdr-run-badge ${st.badgeClass}">${sch.fogRun}${weekSuffix}</span>`;
+    }
+
+    let soloBinsHtml = '';
+    if (showSolo && soloBins.length > 0) {
+      soloBinsHtml = soloBins.map((b, binIdx) => {
+        let navBtn = (b.lat || propLat) ? `<a href="https://www.google.com/maps/dir/?api=1&destination=${b.lat || propLat},${b.lng || propLng}&travelmode=driving" target="_blank" class="nav-stop-btn">📍 Nav</a>` : '';
+        return `
+          <div class="bin-entry">
+            <div class="serial-row">
+              <div class="serial-left">
+                ${b.unitLabel ? `<span class="unit-pill">${b.unitLabel}</span>` : ''}
+                <span class="size-badge">${b.size || '240L'}</span>
+                <span class="serial-text">${b.serial}</span>
+              </div>
+              <div class="serial-right">
+                ${navBtn}
+                <button type="button" class="size-badge" onclick="promptEditBin('${propId}', '${st.key}', ${binIdx})">✏️</button>
+              </div>
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    return `
+      <div class="stream-group-card">
+        <div class="stream-group-header ${st.headerClass}">
+          <div class="header-left"><span class="stream-title">${titleText}</span></div>
+          <div class="header-right">${runBadges}</div>
+        </div>
+        <div class="serials-list">
+          ${soloBinsHtml || '<div style="font-size:11.5px; color:#888; font-style:italic;">No active bins</div>'}
+        </div>
+      </div>
+    `;
   }
 
   function handleFilterChange() {
@@ -1157,10 +1150,9 @@
 
   function closeModal(id) { document.getElementById(id).classList.remove('open'); }
 
-  /* IndexedDB Cache Layer */
   function openDB() {
     return new Promise((resolve) => {
-      const req = window.indexedDB.open("LukezBunzMasterDB_v140", 1);
+      const req = window.indexedDB.open("LukezBunzMasterDB_v150", 1);
       req.onupgradeneeded = e => e.target.result.createObjectStore("store");
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => resolve(null);
@@ -1185,12 +1177,12 @@
     });
   }
 
-  /* Async Loader */
   window.addEventListener('DOMContentLoaded', async () => {
     startLiveLocationWatcher();
     const cached = await loadFromDB("masterRecords");
     if (cached && cached.length > 0) {
       siteRecords = cached;
+      buildFastStreetIndex();
       populateRunsChecklist();
       handleSearch();
     }
@@ -1224,6 +1216,7 @@
           siteId: r[0] || '',
           propId: r[1] || '',
           addressText: r[2] || '',
+          baseStreetLine: (r[2] || '').split(',')[0].replace(/^\d+\s*\/\s*/, '').trim(),
           suburbLine: `${r[3] || ''} ${r[4] || ''}`.trim(),
           soloSchedule: {
             day: r[5] || 'Monday',
@@ -1240,6 +1233,7 @@
       }
 
       siteRecords = parsed;
+      buildFastStreetIndex();
       await saveToDB("masterRecords", siteRecords);
       populateRunsChecklist();
       handleSearch();
