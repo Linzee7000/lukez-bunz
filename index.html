@@ -859,7 +859,7 @@
 
   let travelMode = 'all';
   let activeTab = 'hud';
-  let pinSourceMode = 'flip';
+  let pinSourceMode = 'flip'; // Defaults to flip location
   let isTruckFollowEnabled = false;
   let isRoadSnapEditing = false;
 
@@ -872,7 +872,9 @@
   let mapEditHandlesLayer = null;
   let mapTruckMarker = null;
 
-  // Active alternating week setup
+  // Week schedule setup:
+  // Week ending Sunday Aug 30, 2026 was Week A Recycle / Week B FOGO.
+  // Week starting Monday Aug 31, 2026 is Week B Recycle / Week A FOGO.
   const BASE_WEEK_DATE = new Date(2026, 7, 31); // Aug 31, 2026
   const BASE_RECYCLE_WEEK = 'B'; 
 
@@ -1144,7 +1146,6 @@
     }
   }
 
-  /* Interactive Road-Snap Boundary Editor with Drag Handles */
   function toggleRoadSnapEditing() {
     isRoadSnapEditing = !isRoadSnapEditing;
     const btn = document.getElementById('btnRoadSnap');
@@ -1216,9 +1217,9 @@
     if (!mapTruckMarker) {
       const truckIcon = L.divIcon({
         className: 'gps-dot-icon',
-        html: `<div style="background:#2563eb; width:16px; height:16px; border-radius:50%; border:3px solid white; box-shadow:0 0 8px rgba(37,99,235,0.8);"></div>`,
-        iconSize: [16, 16],
-        iconAnchor: [8, 8]
+        html: `<div style="background:#2563eb; width:18px; height:18px; border-radius:50%; border:3px solid white; box-shadow:0 0 10px rgba(37,99,235,0.9);"></div>`,
+        iconSize: [18, 18],
+        iconAnchor: [9, 9]
       });
       mapTruckMarker = L.marker(pos, { icon: truckIcon, zIndexOffset: 2000 }).addTo(leafletMap);
     } else {
@@ -1564,7 +1565,7 @@
     openModal('runStyleModal');
   }
 
-  /* Strict Map Renderer: Non-interactive hulls for click-through to dots */
+  /* Strict Map Renderer with Distinct Color for Unflipped (House GPS Fallback) Dots */
   function renderMapData() {
     if (!leafletMap) return;
     mapMarkersLayer.clearLayers();
@@ -1608,12 +1609,15 @@
         bins.forEach(binObj => {
           let targetLat = propLat;
           let targetLng = propLng;
+          let isActualFlipLocation = false;
 
-          if (pinSourceMode === 'flip' && binObj.lat && binObj.lng && propLat && propLng) {
+          // Check if valid kerbside flip GPS is within 0-45m
+          if (binObj.lat && binObj.lng && propLat && propLng) {
             const distFromHouse = getDistanceMeters(propLat, propLng, Number(binObj.lat), Number(binObj.lng));
-            if (distFromHouse >= 0 && distFromHouse <= 45) {
+            if (distFromHouse >= 0 && distFromHouse <= 45 && binObj.lastFlipped) {
               targetLat = Number(binObj.lat);
               targetLng = Number(binObj.lng);
+              isActualFlipLocation = true;
             }
           }
 
@@ -1639,13 +1643,21 @@
               });
             }
 
+            // Standard stream colors for verified flip GPS dots
             let dotColor = stKey === 'Garbage' ? '#dc2626' : (stKey === 'Recycling' ? '#eab308' : '#16a34a');
+            let strokeColor = '#ffffff';
+
+            // Distinct Violet/Cyan dot color when falling back to House GPS (Unflipped / No Flip GPS)
+            if (!isActualFlipLocation) {
+              dotColor = '#8b5cf6'; // Violet indicates fallback house location
+              strokeColor = '#facc15'; // Accent ring
+            }
             
             const circle = L.circleMarker([targetLat, targetLng], {
               radius: 6.5,
               fillColor: dotColor,
-              color: '#ffffff',
-              weight: 1.5,
+              color: strokeColor,
+              weight: isActualFlipLocation ? 1.5 : 2.5,
               fillOpacity: 0.95,
               interactive: true
             });
@@ -1693,7 +1705,7 @@
           <b>🏁 Start Stop (First Bin)</b><br>
           ${startStop.address}<br>
           Serial: ${startStop.serial}<br>
-          <a href="${navStartUrl}" target="_blank" style="display:inline-block; margin-top:5px; background:#16a34a; color:white; padding:4px 8px; border-radius:4px; text-decoration:none;">📍 Navigate from Live GPS</a>
+          <a href="${navStartUrl}" target="_blank" style="display:inline-block; margin-top:5px; background:#16a34a; color:white; padding:4px 8px; border-radius:4px; text-decoration:none; font-weight:bold;">📍 Navigate from Live GPS</a>
         `);
         mapSeqLayer.addLayer(startMarker);
 
@@ -2252,7 +2264,7 @@
   /* IndexedDB Cache Layer */
   function openDB() {
     return new Promise((resolve) => {
-      const req = window.indexedDB.open("LukezBunzMasterDB_v340", 1);
+      const req = window.indexedDB.open("LukezBunzMasterDB_v350", 1);
       req.onupgradeneeded = e => e.target.result.createObjectStore("store");
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => resolve(null);
