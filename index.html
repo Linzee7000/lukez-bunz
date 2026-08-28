@@ -338,6 +338,18 @@
     .start-flag { background: #16a34a; }
     .end-flag { background: #dc2626; }
 
+    /* Editable Polygon Vertex Handles */
+    .poly-edit-handle {
+      background: #ffffff;
+      border: 3px solid #2563eb;
+      border-radius: 50%;
+      width: 16px;
+      height: 16px;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.4);
+      cursor: grab;
+    }
+    .poly-edit-handle:active { cursor: grabbing; background: #2563eb; }
+
     /* Search Screen Cards */
     .address-card {
       background: #ffffff;
@@ -481,7 +493,7 @@
       cursor: pointer;
     }
 
-    /* Fixed 3-Column Tight Run Grid */
+    /* 3-Column Color-Coded Run Grid */
     .runs-3col-grid {
       display: grid;
       grid-template-columns: repeat(3, 1fr);
@@ -746,16 +758,38 @@
         <input type="text" id="modalPropAddress" readonly style="background:#f1f5f9;">
       </div>
       <div class="form-group">
+        <label>Collection Day</label>
+        <select id="modalPropDay" class="main-search-input" style="font-size:14px; height:40px;">
+          <option value="Monday">Monday</option>
+          <option value="Tuesday">Tuesday</option>
+          <option value="Wednesday">Wednesday</option>
+          <option value="Thursday">Thursday</option>
+          <option value="Friday">Friday</option>
+        </select>
+      </div>
+      <div class="form-group">
         <label>Garbage Run</label>
         <select id="modalPropGarRun" class="main-search-input" style="font-size:14px; height:40px;"></select>
       </div>
       <div class="form-group">
-        <label>Recycling Run</label>
-        <select id="modalPropRecRun" class="main-search-input" style="font-size:14px; height:40px;"></select>
+        <label>Recycling Run & Week</label>
+        <div style="display:flex; gap:6px;">
+          <select id="modalPropRecRun" class="main-search-input" style="font-size:14px; height:40px; flex:2;"></select>
+          <select id="modalPropRecWeek" class="main-search-input" style="font-size:14px; height:40px; flex:1;">
+            <option value="A">Week A</option>
+            <option value="B">Week B</option>
+          </select>
+        </div>
       </div>
       <div class="form-group">
-        <label>FOGO Run</label>
-        <select id="modalPropFogRun" class="main-search-input" style="font-size:14px; height:40px;"></select>
+        <label>FOGO Run & Week</label>
+        <div style="display:flex; gap:6px;">
+          <select id="modalPropFogRun" class="main-search-input" style="font-size:14px; height:40px; flex:2;"></select>
+          <select id="modalPropFogWeek" class="main-search-input" style="font-size:14px; height:40px; flex:1;">
+            <option value="A">Week A</option>
+            <option value="B">Week B</option>
+          </select>
+        </div>
       </div>
       <div class="form-group">
         <label>Property GPS Coordinates (House Location)</label>
@@ -784,7 +818,7 @@
       <button type="button" class="modal-close-btn" onclick="closeModal('locationPickerModal')">&times;</button>
     </div>
     <div id="pickerMapContainer" style="width:100%; height:320px; border-radius:8px; margin-bottom:10px; border:1px solid #cbd5e1;"></div>
-    <div style="font-size:13px; color:#475569; margin-bottom:8px;">Selected: <span id="pickerCoordsDisplay" style="font-weight:700; color:#1e293b;">None</span></div>
+    <div style="font-size:13px; color:#475569; margin-bottom:8px;">Selected: <span id="pickerCoordsDisplay" style="color:#1e293b;">None</span></div>
     <div class="modal-actions">
       <button type="button" class="btn-cancel" onclick="closeModal('locationPickerModal')">Cancel</button>
       <button type="button" class="btn-save" onclick="applyChosenPickedLocation()">Apply Coordinate</button>
@@ -891,7 +925,7 @@
   // Standalone map picker state
   let pickerMap = null;
   let pickerMarker = null;
-  let pickerTargetType = 'prop'; // 'prop' or 'bin'
+  let pickerTargetType = 'prop';
   let pickedCoordinates = { lat: null, lng: null };
 
   const BASE_WEEK_DATE = new Date(2026, 7, 31);
@@ -1656,7 +1690,7 @@
     openModal('runStyleModal');
   }
 
-  /* Strict Map Renderer */
+  /* Strict Map Renderer: Unflipped/Fallback locations in Violet, Flip GPS in Stream Colors */
   function renderMapData() {
     if (!leafletMap) return;
     mapMarkersLayer.clearLayers();
@@ -1702,6 +1736,7 @@
           let targetLng = propLng;
           let isActualFlipLocation = false;
 
+          // Default is Flip GPS: Check if valid kerbside flip GPS is within 0-45m
           if (binObj.lat && binObj.lng && propLat && propLng) {
             const distFromHouse = getDistanceMeters(propLat, propLng, Number(binObj.lat), Number(binObj.lng));
             if (distFromHouse >= 0 && distFromHouse <= 45 && binObj.lastFlipped) {
@@ -1733,9 +1768,11 @@
               });
             }
 
+            // Standard stream colors for verified flip GPS dots
             let dotColor = stKey === 'Garbage' ? '#dc2626' : (stKey === 'Recycling' ? '#eab308' : '#16a34a');
             let strokeColor = '#ffffff';
 
+            // Distinct Violet/Yellow dot when falling back to House GPS (Unflipped / No Flip GPS)
             if (!isActualFlipLocation) {
               dotColor = '#8b5cf6';
               strokeColor = '#facc15';
@@ -1763,6 +1800,7 @@
     const activeRunsDisplay = selectedRunsSet.size > 0 ? Array.from(selectedRunsSet).map(r => r.toUpperCase()).join(', ') : 'All Runs';
     document.getElementById('mapActiveRunList').innerText = activeRunsDisplay;
 
+    // First and Last Stop Sequence Rendering on Same Date
     const availableDates = Object.keys(dateGroupedStops).sort();
     if (availableDates.length > 0) {
       const mostRecentDate = availableDates[availableDates.length - 1];
@@ -1802,6 +1840,7 @@
       }
     }
 
+    // Render Hulls
     Object.keys(runDayGroups).forEach((key, idx) => {
       const points = runDayGroups[key];
       const color = runColorMap[key] || PRESET_COLORS[idx % PRESET_COLORS.length];
@@ -2263,17 +2302,20 @@
     }
   }
 
-  /* Populate Stream-Specific Run Dropdowns in Edit Property */
+  /* Populate Stream-Specific Run Dropdowns & Schedules in Edit Property */
   function promptEditProperty(propId) {
     const site = siteRecords.find(s => String(s.propId || s.siteId) === String(propId));
     if (!site) return;
 
     document.getElementById('modalPropTargetId').value = propId;
     document.getElementById('modalPropAddress').value = (site.baseStreetLine || site.addressText.split(',')[0]).trim();
+    document.getElementById('modalPropDay').value = site.soloSchedule.day || 'Monday';
+    document.getElementById('modalPropRecWeek').value = (site.soloSchedule.weekLetter || 'A').toUpperCase();
+    document.getElementById('modalPropFogWeek').value = (site.soloSchedule.weekLetter || 'A').toUpperCase();
     document.getElementById('modalPropLat').value = site.lat || '';
     document.getElementById('modalPropLng').value = site.lng || '';
 
-    // Collect distinct runs for each stream
+    // Collect distinct runs strictly for each stream
     const garRuns = new Set();
     const recRuns = new Set();
     const fogRuns = new Set();
@@ -2295,7 +2337,7 @@
     };
 
     populateSelect('modalPropGarRun', garRuns, site.soloSchedule.garRun);
-    populateSelect('modalPropRecRun', recRuns, site.soloSchedule.recRun);
+    populateSelect('modalPropRecRun', recRuns, site.soloSchedule.recRun || site.soloSchedule.recSummerRun);
     populateSelect('modalPropFogRun', fogRuns, site.soloSchedule.fogRun);
 
     openModal('propEditModal');
@@ -2315,11 +2357,22 @@
     const propId = document.getElementById('modalPropTargetId').value;
     const site = siteRecords.find(s => String(s.propId || s.siteId) === String(propId));
     if (site) {
-      site.soloSchedule.garRun = document.getElementById('modalPropGarRun').value.trim();
-      site.soloSchedule.recRun = document.getElementById('modalPropRecRun').value.trim();
-      site.soloSchedule.fogRun = document.getElementById('modalPropFogRun').value.trim();
-      site.lat = document.getElementById('modalPropLat').value.trim();
-      site.lng = document.getElementById('modalPropLng').value.trim();
+      const chosenDay = document.getElementById('modalPropDay').value.trim();
+      const chosenRecWeek = document.getElementById('modalPropRecWeek').value.trim().toUpperCase();
+      const chosenGarRun = document.getElementById('modalPropGarRun').value.trim();
+      const chosenRecRun = document.getElementById('modalPropRecRun').value.trim();
+      const chosenFogRun = document.getElementById('modalPropFogRun').value.trim();
+      const chosenLat = document.getElementById('modalPropLat').value.trim();
+      const chosenLng = document.getElementById('modalPropLng').value.trim();
+
+      site.soloSchedule.day = chosenDay;
+      site.soloSchedule.weekLetter = chosenRecWeek;
+      site.soloSchedule.weekFormatted = `Week ${chosenRecWeek}`;
+      site.soloSchedule.garRun = chosenGarRun;
+      site.soloSchedule.recRun = chosenRecRun;
+      site.soloSchedule.fogRun = chosenFogRun;
+      site.lat = chosenLat;
+      site.lng = chosenLng;
 
       masterEditsLog.push({
         timestamp: new Date().toISOString(),
@@ -2327,11 +2380,13 @@
         propId: site.propId,
         siteId: site.siteId,
         address: site.addressText,
-        garRun: site.soloSchedule.garRun,
-        recRun: site.soloSchedule.recRun,
-        fogRun: site.soloSchedule.fogRun,
-        lat: site.lat,
-        lng: site.lng
+        day: chosenDay,
+        weekLetter: chosenRecWeek,
+        garRun: chosenGarRun,
+        recRun: chosenRecRun,
+        fogRun: chosenFogRun,
+        lat: chosenLat,
+        lng: chosenLng
       });
 
       await saveToDB("masterRecords", siteRecords);
@@ -2394,7 +2449,7 @@
   /* IndexedDB Cache Layer */
   function openDB() {
     return new Promise((resolve) => {
-      const req = window.indexedDB.open("LukezBunzMasterDB_v370", 1);
+      const req = window.indexedDB.open("LukezBunzMasterDB_v380", 1);
       req.onupgradeneeded = e => e.target.result.createObjectStore("store");
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => resolve(null);
@@ -2419,7 +2474,7 @@
     });
   }
 
-  /* Merge Edits with Loaded CSV Dataset */
+  /* Merge Live Edits Log with CSV Records */
   function mergeEditsIntoRecords(records, edits) {
     if (!edits || edits.length === 0) return records;
 
@@ -2428,6 +2483,11 @@
       if (!site) return;
 
       if (ed.editType === "PROPERTY_UPDATE") {
+        if (ed.day !== undefined) site.soloSchedule.day = ed.day;
+        if (ed.weekLetter !== undefined) {
+          site.soloSchedule.weekLetter = ed.weekLetter;
+          site.soloSchedule.weekFormatted = `Week ${ed.weekLetter}`;
+        }
         if (ed.garRun !== undefined) site.soloSchedule.garRun = ed.garRun;
         if (ed.recRun !== undefined) site.soloSchedule.recRun = ed.recRun;
         if (ed.fogRun !== undefined) site.soloSchedule.fogRun = ed.fogRun;
