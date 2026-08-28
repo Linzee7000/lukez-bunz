@@ -58,7 +58,7 @@
       flex-shrink: 0;
       transition: all 0.15s ease;
     }
-    .travel-mode-btn.active-left { background: #e0f2fe; color: #0369a1; border-color: #7dd3fc; }
+    .travel-mode-btn.active-left { background: #dbeafe; color: #1d4ed8; border-color: #93c5fd; }
     .travel-mode-btn.active-right { background: #fef3c7; color: #b45309; border-color: #fde68a; }
 
     .icon-refresh-btn {
@@ -206,7 +206,7 @@
       border-radius: 6px;
       padding: 4px 6px;
       text-align: right;
-      font-size: 10px; /* Reduced by 1pt */
+      font-size: 10px;
       line-height: 1.35;
       color: #475569;
       flex-shrink: 0;
@@ -433,7 +433,6 @@
     <div class="controls-row">
       <button id="searchToggleBtn" class="search-toggle-btn" type="button" onclick="toggleSearchBar()" title="Toggle Search Input">🔍</button>
       
-      <!-- Stream filter triggers dynamic run list refresh -->
       <select id="streamFilterSelect" class="filter-select stream-select" onchange="handleStreamFilterChange()">
         <option value="">All Streams</option>
         <option value="Garbage">🗑️ Garbage</option>
@@ -801,7 +800,7 @@
     }
   }
 
-  /* Coordinate & Angle Geometry */
+  /* Corrected Coordinate Geometry & Bearing Calculations */
   function getDistanceMeters(lat1, lon1, lat2, lon2) {
     const R = 6371e3;
     const φ1 = lat1 * Math.PI / 180;
@@ -823,11 +822,20 @@
     const Δλ = (lon2 - lon1) * Math.PI / 180;
 
     const y = Math.sin(Δλ) * Math.cos(φ2);
-    const x = Math.cos(φ1) * Math.sin(φ2) - Math.cos(φ1) * Math.cos(φ2) * Math.cos(Δλ);
+    const x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
     const θ = Math.atan2(y, x);
     return (θ * 180 / Math.PI + 360) % 360;
   }
 
+  /*
+    Accurate Direction of Travel & Side Calculation:
+    - In clockwise compass angles:
+      relAngle = (propBearing - truckHeading + 360) % 360
+      * 1° to 179° is to the RIGHT (driver side in Australia)
+      * 181° to 359° is to the LEFT (passenger/kerbside in Australia)
+      * Forward quadrant Left: 260° to 355°
+      * Forward quadrant Right: 5° to 100°
+  */
   function evaluateTravelDirection(truckLat, truckLng, heading, propLat, propLng) {
     if (heading === null || isNaN(heading)) return { isUpcoming: true, side: 'unknown' };
 
@@ -837,13 +845,13 @@
     let side = 'behind';
     let isUpcoming = false;
 
-    if (relAngle >= 5 && relAngle <= 100) {
-      side = 'left';
+    if (relAngle >= 250 && relAngle <= 355) {
+      side = 'left'; // Kerbside in AU
       isUpcoming = true;
-    } else if (relAngle >= 260 && relAngle <= 355) {
-      side = 'right';
+    } else if (relAngle >= 5 && relAngle <= 110) {
+      side = 'right'; // Opposite side in AU
       isUpcoming = true;
-    } else if (relAngle < 5 || relAngle > 355) {
+    } else if (relAngle > 355 || relAngle < 5) {
       side = 'front';
       isUpcoming = true;
     }
@@ -851,7 +859,7 @@
     return { isUpcoming, side, relAngle };
   }
 
-  /* Live Continuous GPS Watcher */
+  /* Live Continuous GPS Watcher with Low-Speed Threshold */
   function startLiveLocationWatcher() {
     if (!("geolocation" in navigator)) {
       updateGpsBadge(false, "No GPS");
@@ -863,7 +871,7 @@
     gpsWatchId = navigator.geolocation.watchPosition(
       (pos) => {
         const accuracy = Math.round(pos.coords.accuracy);
-        const speedKmh = pos.coords.speed ? (pos.coords.speed * 3.6) : 0;
+        const speedKmh = pos.coords.speed !== null ? (pos.coords.speed * 3.6) : 0;
         
         userCurrentLocation = {
           lat: pos.coords.latitude,
@@ -871,11 +879,15 @@
           speed: speedKmh
         };
 
-        if (pos.coords.heading !== null && !isNaN(pos.coords.heading) && speedKmh >= 3) {
+        // Update heading if phone reports it, or calculate from movement delta >= 1.5m
+        if (pos.coords.heading !== null && !isNaN(pos.coords.heading) && pos.coords.heading >= 0) {
           lastValidHeading = pos.coords.heading;
-        } else if (lastGpsCoords.lat !== 0 && speedKmh >= 3) {
-          const calcHeading = getBearing(lastGpsCoords.lat, lastGpsCoords.lng, userCurrentLocation.lat, userCurrentLocation.lng);
-          if (!isNaN(calcHeading)) lastValidHeading = calcHeading;
+        } else if (lastGpsCoords.lat !== 0) {
+          const deltaDist = getDistanceMeters(lastGpsCoords.lat, lastGpsCoords.lng, userCurrentLocation.lat, userCurrentLocation.lng);
+          if (deltaDist >= 1.5) {
+            const calcHeading = getBearing(lastGpsCoords.lat, lastGpsCoords.lng, userCurrentLocation.lat, userCurrentLocation.lng);
+            if (!isNaN(calcHeading)) lastValidHeading = calcHeading;
+          }
         }
 
         const headingLabel = lastValidHeading !== null ? ` ${Math.round(lastValidHeading)}°` : '';
@@ -888,7 +900,7 @@
           userCurrentLocation.lng
         );
 
-        if (movedDist >= 3) {
+        if (movedDist >= 2.5) {
           lastGpsCoords = { ...userCurrentLocation };
           const query = document.getElementById('searchInput').value.trim();
           if (!query && siteRecords.length > 0) {
@@ -916,7 +928,7 @@
   function openDB() {
     return new Promise((resolve) => {
       try {
-        const req = window.indexedDB.open("LukezBunzMasterDB_v85", 1);
+        const req = window.indexedDB.open("LukezBunzMasterDB_v90", 1);
         req.onupgradeneeded = e => {
           const db = e.target.result;
           if (!db.objectStoreNames.contains("store")) db.createObjectStore("store");
@@ -1720,6 +1732,7 @@
               Number(site.lng)
             );
 
+            // Filter strictly based on Travel Mode
             if (travelMode === 'left' && travelDir.side !== 'left') return;
             if (travelMode === 'right' && travelDir.side !== 'right') return;
 
@@ -1907,7 +1920,7 @@
       });
 
       if (!primaryStreamBoxesHtml) {
-        primaryStreamBoxesHtml = `<div style="font-size:13px; color:#888; font-style:italic; padding:6px 0;">No active bin records found</div>`;
+        primaryStreamBoxesHtml = `<div style="font-size:12px; color:#888; font-style:italic; padding:4px 0;">No active bin records found</div>`;
       }
 
       // Compact Mode
