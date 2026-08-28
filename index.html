@@ -398,7 +398,6 @@
 <body>
 
 <div class="container">
-  <!-- Clean Header with Top Screen Switching -->
   <div class="app-header">
     <h1>Lukez Bunz</h1>
     <div class="header-nav">
@@ -408,7 +407,6 @@
     </div>
   </div>
 
-  <!-- Persistent Global Control Card -->
   <div class="card">
     <div class="sync-bar">
       <div id="syncStatus" class="sync-status">Ready</div>
@@ -422,7 +420,6 @@
       <div id="pBarFill" class="progress-bar-fill"></div>
     </div>
 
-    <!-- 3-Way Filter Controls Grid: Stream + Day + Week A/B -->
     <div class="controls-grid">
       <select id="streamFilterSelect" class="filter-select" onchange="handleFilterChange()">
         <option value="">All Streams</option>
@@ -967,7 +964,10 @@
     }
   }
 
-  /* Strict Per-Bin Stream, Run & Same-Day Map Renderer */
+  /* 
+    Strict Map Renderer with 20m–45m Distance Gatekeeper:
+    Rejects flip GPS if located >45m away from property center.
+  */
   function renderMapData() {
     if (!leafletMap) return;
 
@@ -985,43 +985,59 @@
     siteRecords.forEach(site => {
       const sch = site.soloSchedule;
 
-      // Streams to evaluate
       const streamsToProcess = streamFilter ? [streamFilter] : ['Garbage', 'Recycling', 'FOGO'];
 
       streamsToProcess.forEach(stKey => {
-        // 1. Check if this specific stream has bins
         const bins = site.soloStreams[stKey] || [];
         if (bins.length === 0) return;
 
-        // 2. Identify the Run assigned specifically to this stream
         let streamRun = '';
         if (stKey === 'Garbage') streamRun = (sch.garRun || '').trim().toLowerCase();
         else if (stKey === 'Recycling') streamRun = (sch.recRun || sch.recSummerRun || '').trim().toLowerCase();
         else if (stKey === 'FOGO') streamRun = (sch.fogRun || '').trim().toLowerCase();
 
-        // 3. Strict Run filter check
         if (selectedRunsSet.size > 0 && !selectedRunsSet.has(streamRun)) return;
 
-        // 4. Strict Day filter check
         if (strictMatch && dayFilter) {
           const siteDay = (sch.day || '').toLowerCase();
           if (!siteDay.includes(dayFilter)) return;
         }
 
-        // 5. Strict Week (A/B) check
         if (strictMatch && weekFilter) {
           const siteWeek = (sch.weekLetter || '').toUpperCase();
           if (siteWeek && siteWeek !== weekFilter) return;
         }
 
-        // Plot bins that passed strict verification
-        bins.forEach(binObj => {
-          let lat = (binObj.lat && Number(binObj.lat) !== 0) ? Number(binObj.lat) : ((site.lat && Number(site.lat) !== 0) ? Number(site.lat) : null);
-          let lng = (binObj.lng && Number(binObj.lng) !== 0) ? Number(binObj.lng) : ((site.lng && Number(site.lng) !== 0) ? Number(site.lng) : null);
+        const propLat = (site.lat && Number(site.lat) !== 0) ? Number(site.lat) : null;
+        const propLng = (site.lng && Number(site.lng) !== 0) ? Number(site.lng) : null;
 
-          if (lat !== null && lng !== null) {
-            pointsGeoJson.push(turf.point([lng, lat]));
-            validBounds.push([lat, lng]);
+        bins.forEach(binObj => {
+          let targetLat = null;
+          let targetLng = null;
+
+          const hasFlipGps = (binObj.lat && binObj.lng && Number(binObj.lat) !== 0);
+
+          if (hasFlipGps && propLat !== null && propLng !== null) {
+            // Check distance between Flip GPS and House GPS
+            const distFromHouse = getDistanceMeters(propLat, propLng, Number(binObj.lat), Number(binObj.lng));
+            
+            // If flip is within 45m of house (accommodating driveways/acreage blocks), use flip location
+            if (distFromHouse <= 45) {
+              targetLat = Number(binObj.lat);
+              targetLng = Number(binObj.lng);
+            } else {
+              // Outlier flip GPS (reassigned/migrated serial) -> use verified house GPS
+              targetLat = propLat;
+              targetLng = propLng;
+            }
+          } else if (propLat !== null && propLng !== null) {
+            targetLat = propLat;
+            targetLng = propLng;
+          }
+
+          if (targetLat !== null && targetLng !== null) {
+            pointsGeoJson.push(turf.point([targetLng, targetLat]));
+            validBounds.push([targetLat, targetLng]);
 
             let dotColor = '#2563eb';
             if (stKey === 'Garbage') dotColor = '#dc2626';
@@ -1035,7 +1051,7 @@
               iconAnchor: [6.5, 6.5]
             });
 
-            const marker = L.marker([lat, lng], { icon: customIcon });
+            const marker = L.marker([targetLat, targetLng], { icon: customIcon });
             marker.on('click', () => {
               inspectPropertyFromMap(site.propId || site.siteId);
             });
@@ -1046,7 +1062,7 @@
       });
     });
 
-    // 1. Shaded Run Boundary (Tightly fitted around verified stops)
+    // 1. Shaded Perimeter
     if (pointsGeoJson.length >= 3 && window.turf) {
       try {
         const featureColl = turf.featureCollection(pointsGeoJson);
