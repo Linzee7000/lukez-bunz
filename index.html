@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>Lukez Bunz</title>
+  <title>Lukez Bunz Driver Hub</title>
   
   <!-- Leaflet Map CSS -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
@@ -337,6 +337,18 @@
     }
     .start-flag { background: #16a34a; }
     .end-flag { background: #dc2626; }
+
+    /* Editable Polygon Vertex Handles */
+    .poly-edit-handle {
+      background: #ffffff;
+      border: 3px solid #2563eb;
+      border-radius: 50%;
+      width: 16px;
+      height: 16px;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.4);
+      cursor: grab;
+    }
+    .poly-edit-handle:active { cursor: grabbing; background: #2563eb; }
 
     /* Search Screen Cards */
     .address-card {
@@ -857,12 +869,11 @@
   let mapMarkersLayer = null;
   let mapHullsLayer = null;
   let mapSeqLayer = null;
+  let mapEditHandlesLayer = null;
   let mapTruckMarker = null;
 
-  // Base Week Setup:
-  // Week ending Sunday Aug 30, 2026 was Week A Recycle / Week B FOGO.
-  // Week starting Monday Aug 31, 2026 is Week B Recycle / Week A FOGO.
-  const BASE_WEEK_DATE = new Date(2026, 7, 31); // Aug 31, 2026 (Month is 0-indexed: 7 = Aug)
+  // Active alternating week setup
+  const BASE_WEEK_DATE = new Date(2026, 7, 31); // Aug 31, 2026
   const BASE_RECYCLE_WEEK = 'B'; 
 
   const PRESET_COLORS = [
@@ -895,7 +906,6 @@
 
   function getActiveRecycleWeekForDate(dateObj) {
     const d = new Date(dateObj);
-    // Find Monday of the current week
     const day = d.getDay();
     const diff = d.getDate() - day + (day === 0 ? -6 : 1);
     const monday = new Date(d.setDate(diff));
@@ -1134,10 +1144,53 @@
     }
   }
 
+  /* Interactive Road-Snap Boundary Editor with Drag Handles */
   function toggleRoadSnapEditing() {
     isRoadSnapEditing = !isRoadSnapEditing;
     const btn = document.getElementById('btnRoadSnap');
     btn.classList.toggle('active', isRoadSnapEditing);
+
+    if (isRoadSnapEditing) {
+      enableBoundaryVertexHandles();
+    } else {
+      disableBoundaryVertexHandles();
+    }
+  }
+
+  function enableBoundaryVertexHandles() {
+    if (!mapEditHandlesLayer) {
+      mapEditHandlesLayer = L.layerGroup().addTo(leafletMap);
+    }
+    mapEditHandlesLayer.clearLayers();
+
+    mapHullsLayer.eachLayer(layer => {
+      if (layer instanceof L.Polygon) {
+        const latlngs = layer.getLatLngs()[0] || [];
+        latlngs.forEach((latlng, idx) => {
+          const handleMarker = L.marker(latlng, {
+            draggable: true,
+            icon: L.divIcon({
+              className: 'poly-edit-handle',
+              iconSize: [16, 16],
+              iconAnchor: [8, 8]
+            })
+          });
+
+          handleMarker.on('drag', (e) => {
+            latlngs[idx] = e.target.getLatLng();
+            layer.setLatLngs([latlngs]);
+          });
+
+          mapEditHandlesLayer.addLayer(handleMarker);
+        });
+      }
+    });
+  }
+
+  function disableBoundaryVertexHandles() {
+    if (mapEditHandlesLayer) {
+      mapEditHandlesLayer.clearLayers();
+    }
   }
 
   function toggleBinMetaDrawer(btn, drawerId) {
@@ -1156,7 +1209,7 @@
     return Object.keys(counts).map(sz => `${counts[sz]}x ${sz}`).join(', ');
   }
 
-  /* GPS Engine & Persistent Live Map Marker */
+  /* Live Map Truck GPS Marker */
   function updateMapTruckPosition() {
     if (!leafletMap || !userCurrentLocation) return;
     const pos = [userCurrentLocation.lat, userCurrentLocation.lng];
@@ -1173,6 +1226,7 @@
     }
   }
 
+  /* GPS Watcher */
   function startLiveLocationWatcher() {
     if (!("geolocation" in navigator)) {
       updateGpsBadgeUI(false, "No GPS");
@@ -1450,22 +1504,16 @@
     }).join('') || '<div style="text-align:center; padding:30px; color:#64748b; font-weight:700;">No upcoming bins ahead on route.</div>';
   }
 
-  /* Leaflet Map Setup with First/Last Bin Sequence */
+  /* Leaflet Map Setup with Sequence Flags */
   function initLeafletMap() {
     leafletMap = L.map('mainLeafletMap', { zoomControl: false }).setView([-38.36, 144.91], 13);
     L.control.zoom({ position: 'bottomright' }).addTo(leafletMap);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' }).addTo(leafletMap);
-    mapMarkersLayer = L.layerGroup().addTo(leafletMap);
     mapHullsLayer = L.layerGroup().addTo(leafletMap);
+    mapMarkersLayer = L.layerGroup().addTo(leafletMap);
     mapSeqLayer = L.layerGroup().addTo(leafletMap);
 
     updateMapTruckPosition();
-
-    mapHullsLayer.on('click', (e) => {
-      if (isRoadSnapEditing) {
-        alert(`✂️ Snapped boundary node to road coordinate: ${e.latlng.lat.toFixed(5)}, ${e.latlng.lng.toFixed(5)}`);
-      }
-    });
   }
 
   function toggleMapFullscreen() {
@@ -1516,12 +1564,13 @@
     openModal('runStyleModal');
   }
 
-  /* Strict Map Renderer */
+  /* Strict Map Renderer: Non-interactive hulls for click-through to dots */
   function renderMapData() {
     if (!leafletMap) return;
     mapMarkersLayer.clearLayers();
     mapHullsLayer.clearLayers();
     mapSeqLayer.clearLayers();
+    if (mapEditHandlesLayer) mapEditHandlesLayer.clearLayers();
     updateMapTruckPosition();
 
     const streamFilter = activeFilterStream;
@@ -1593,11 +1642,12 @@
             let dotColor = stKey === 'Garbage' ? '#dc2626' : (stKey === 'Recycling' ? '#eab308' : '#16a34a');
             
             const circle = L.circleMarker([targetLat, targetLng], {
-              radius: 6,
+              radius: 6.5,
               fillColor: dotColor,
               color: '#ffffff',
               weight: 1.5,
-              fillOpacity: 0.95
+              fillOpacity: 0.95,
+              interactive: true
             });
 
             circle.on('click', () => openPropertyInspectModal(site.propId || site.siteId));
@@ -1613,7 +1663,7 @@
     const activeRunsDisplay = selectedRunsSet.size > 0 ? Array.from(selectedRunsSet).map(r => r.toUpperCase()).join(', ') : 'All Runs';
     document.getElementById('mapActiveRunList').innerText = activeRunsDisplay;
 
-    // Pick most recent date and render earliest (Start 1) & latest (Finish) on that same date
+    // First and Last Stop Sequence Rendering on Same Date
     const availableDates = Object.keys(dateGroupedStops).sort();
     if (availableDates.length > 0) {
       const mostRecentDate = availableDates[availableDates.length - 1];
@@ -1643,7 +1693,7 @@
           <b>🏁 Start Stop (First Bin)</b><br>
           ${startStop.address}<br>
           Serial: ${startStop.serial}<br>
-          <a href="${navStartUrl}" target="_blank" style="display:inline-block; margin-top:5px; background:#16a34a; color:white; padding:4px 8px; border-radius:4px; text-decoration:none; font-weight:bold;">📍 Navigate from Live GPS</a>
+          <a href="${navStartUrl}" target="_blank" style="display:inline-block; margin-top:5px; background:#16a34a; color:white; padding:4px 8px; border-radius:4px; text-decoration:none;">📍 Navigate from Live GPS</a>
         `);
         mapSeqLayer.addLayer(startMarker);
 
@@ -1653,6 +1703,7 @@
       }
     }
 
+    // Render Hulls (interactive: false ensures shading passes clicks straight to the dots)
     Object.keys(runDayGroups).forEach((key, idx) => {
       const points = runDayGroups[key];
       const color = runColorMap[key] || PRESET_COLORS[idx % PRESET_COLORS.length];
@@ -1660,15 +1711,25 @@
       if (points.length >= 3 && window.turf) {
         try {
           const hull = turf.convex(turf.featureCollection(points));
-          if (hull) {
-            const hullLayer = L.geoJSON(hull, {
-              style: { color: color, weight: 2.5, fillColor: color, fillOpacity: 0.16, dashArray: '4' }
+          if (hull && hull.geometry && hull.geometry.coordinates) {
+            const polyCoords = hull.geometry.coordinates[0].map(c => [c[1], c[0]]);
+            const poly = L.polygon(polyCoords, {
+              color: color,
+              weight: 2.5,
+              fillColor: color,
+              fillOpacity: 0.16,
+              dashArray: '4',
+              interactive: false
             });
-            mapHullsLayer.addLayer(hullLayer);
+            mapHullsLayer.addLayer(poly);
           }
         } catch(e) {}
       }
     });
+
+    if (isRoadSnapEditing) {
+      enableBoundaryVertexHandles();
+    }
 
     if (validBounds.length > 0) leafletMap.fitBounds(validBounds, { padding: [30, 30] });
   }
@@ -2191,7 +2252,7 @@
   /* IndexedDB Cache Layer */
   function openDB() {
     return new Promise((resolve) => {
-      const req = window.indexedDB.open("LukezBunzMasterDB_v330", 1);
+      const req = window.indexedDB.open("LukezBunzMasterDB_v340", 1);
       req.onupgradeneeded = e => e.target.result.createObjectStore("store");
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => resolve(null);
