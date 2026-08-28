@@ -168,18 +168,54 @@
     }
     .map-toggle-btn.active { background: #b91c1c; }
 
-    /* In-App Map Container */
-    #mapDrawer {
+    /* Map Drawer & Fullscreen Support */
+    .map-wrapper {
       display: none;
+      position: relative;
+      margin-bottom: 12px;
+    }
+    .map-wrapper.open { display: block; }
+    
+    #mapDrawer {
       width: 100%;
-      height: 340px;
+      height: 350px;
       border-radius: 10px;
       border: 1px solid #cbd5e1;
-      margin-bottom: 12px;
       box-shadow: 0 2px 8px rgba(0,0,0,0.1);
       z-index: 10;
     }
-    #mapDrawer.open { display: block; }
+
+    /* Fullscreen State */
+    .map-wrapper.fullscreen {
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      width: 100vw; height: 100vh;
+      margin: 0;
+      z-index: 9999;
+      border-radius: 0;
+    }
+    .map-wrapper.fullscreen #mapDrawer {
+      height: 100vh;
+      border-radius: 0;
+      border: none;
+    }
+
+    .map-fs-btn {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      z-index: 1000;
+      background: #ffffff;
+      color: #1e293b;
+      border: 2px solid rgba(0,0,0,0.2);
+      border-radius: 6px;
+      padding: 6px 10px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.2);
+    }
+    .map-fs-btn:active { background: #f1f5f9; }
 
     .runs-dropdown-panel {
       display: none;
@@ -384,7 +420,7 @@
       position: fixed;
       top: 0; left: 0; right: 0; bottom: 0;
       background: rgba(0, 0, 0, 0.55);
-      z-index: 100;
+      z-index: 10000;
       align-items: center;
       justify-content: center;
       padding: 14px;
@@ -429,9 +465,7 @@
       <div id="syncStatus" class="sync-status">Ready</div>
       <div id="gpsStatusBadge" class="gps-badge searching">🛰️ GPS...</div>
       
-      <!-- Travel Mode Toggle Button -->
       <button id="travelModeBtn" class="travel-mode-btn" type="button" onclick="cycleTravelMode()" title="Toggle Travel Mode">🎯 All Sides</button>
-      
       <button id="syncBtn" class="icon-refresh-btn" type="button" onclick="startUpdateProcess()" title="Check Updates">🔄</button>
     </div>
 
@@ -460,7 +494,7 @@
       </select>
     </div>
 
-    <!-- Controls Row 2: Multi-Run Selector + In-App Route & Shading Map Button -->
+    <!-- Controls Row 2: Multi-Run Selector + Map View Button -->
     <div class="controls-row">
       <button id="multiRunBtn" class="multi-run-btn" type="button" onclick="toggleRunsPanel()">Runs (All)</button>
       <button id="mapToggleBtn" class="map-toggle-btn" type="button" onclick="toggleMapDrawer()" title="View Shaded Run & All Bin Pins on Map">🗺️ Map Run</button>
@@ -478,14 +512,17 @@
       </div>
     </div>
 
-    <!-- Interactive In-App Map Drawer -->
-    <div id="mapDrawer"></div>
+    <!-- Interactive In-App Map Wrapper -->
+    <div id="mapWrapper" class="map-wrapper">
+      <button id="mapFsBtn" class="map-fs-btn" type="button" onclick="toggleMapFullscreen()">⛶ Fullscreen</button>
+      <div id="mapDrawer"></div>
+    </div>
 
     <div id="searchInputWrap" class="search-input-wrap">
       <input type="text" id="searchInput" placeholder="Search serial, address, street, ID..." oninput="handleSearch()">
     </div>
     
-    <!-- Filter Checkboxes (Compact removed) -->
+    <!-- Cleaned Filter Checkboxes -->
     <div class="filter-bar-single">
       <label class="checkbox-label">
         <input type="checkbox" id="chkBinOnly" onchange="toggleSearchFilter('bin')"> 🔢 Bin №
@@ -654,7 +691,7 @@
   </div>
 </div>
 
-<!-- Leaflet JS & Shading Algorithm (Turf.js) -->
+<!-- Leaflet JS & Turf.js Shading Algorithm -->
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://unpkg.com/@turf/turf@6.5.0/turf.min.js"></script>
 
@@ -676,6 +713,7 @@
   let mapMarkersLayer = null;
   let mapHullLayer = null;
   let mapTruckMarker = null;
+  let isMapFullscreen = false;
 
   const SOLO_STREAMS = [
     { key: 'Garbage', label: 'Garbage', icon: '🗑️', pillClass: 'pill-gar', headerClass: 'header-gar', badgeClass: 'hdr-run-gar', cols: [{ idx: 11, sz: '80L' }, { idx: 12, sz: '120L' }, { idx: 13, sz: '240L' }] },
@@ -744,7 +782,7 @@
   function handleFilterChange() {
     populateRunsChecklist();
     handleSearch();
-    if (leafletMap && document.getElementById('mapDrawer').classList.contains('open')) {
+    if (leafletMap && document.getElementById('mapWrapper').classList.contains('open')) {
       renderMapData();
     }
   }
@@ -802,7 +840,7 @@
           else selectedRunsSet.delete(val);
           updateRunsButtonText();
           handleSearch();
-          if (leafletMap && document.getElementById('mapDrawer').classList.contains('open')) {
+          if (leafletMap && document.getElementById('mapWrapper').classList.contains('open')) {
             renderMapData();
           }
         };
@@ -828,7 +866,7 @@
 
     updateRunsButtonText();
     handleSearch();
-    if (leafletMap && document.getElementById('mapDrawer').classList.contains('open')) {
+    if (leafletMap && document.getElementById('mapWrapper').classList.contains('open')) {
       renderMapData();
     }
   }
@@ -848,9 +886,9 @@
 
   /* In-App Map Layer Drawer & Shading Engine */
   function toggleMapDrawer() {
-    const drawer = document.getElementById('mapDrawer');
+    const wrapper = document.getElementById('mapWrapper');
     const btn = document.getElementById('mapToggleBtn');
-    const isOpen = drawer.classList.toggle('open');
+    const isOpen = wrapper.classList.toggle('open');
     btn.classList.toggle('active', isOpen);
 
     if (isOpen) {
@@ -863,11 +901,24 @@
       renderMapData();
     } else {
       btn.innerText = '🗺️ Map Run';
+      if (isMapFullscreen) toggleMapFullscreen();
     }
   }
 
+  function toggleMapFullscreen() {
+    const wrapper = document.getElementById('mapWrapper');
+    const btn = document.getElementById('mapFsBtn');
+    isMapFullscreen = !isMapFullscreen;
+    
+    wrapper.classList.toggle('fullscreen', isMapFullscreen);
+    btn.innerText = isMapFullscreen ? '🗗 Exit Fullscreen' : '⛶ Fullscreen';
+
+    setTimeout(() => {
+      if (leafletMap) leafletMap.invalidateSize();
+    }, 250);
+  }
+
   function initLeafletMap() {
-    // Canvas renderer ensures high FPS performance across thousands of markers
     leafletMap = L.map('mapDrawer', { preferCanvas: true }).setView([-38.36, 144.91], 13);
 
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -879,6 +930,35 @@
     mapHullLayer = L.layerGroup().addTo(leafletMap);
   }
 
+  /* Interactive Marker Popup Builder */
+  function buildMarkerPopupHtml(site, streamKey, binObj, lat, lng) {
+    const propId = site.propId || site.siteId;
+    const sizeBadge = binObj.size ? `<span style="background:#e2e8f0; padding:1px 5px; border-radius:4px; font-weight:600;">${binObj.size}</span>` : '';
+    const unitBadge = binObj.unitLabel ? `<span style="background:#dbeafe; color:#1d4ed8; padding:1px 5px; border-radius:4px; font-weight:600;">${binObj.unitLabel}</span>` : '';
+    const makeBadge = binObj.make ? `<span style="background:#ede9fe; color:#5b21b6; padding:1px 5px; border-radius:4px;">${binObj.make}</span>` : '';
+
+    return `
+      <div style="font-size:12.5px; line-height:1.4; color:#1e293b; min-width:200px;">
+        <div style="font-weight:bold; font-size:13.5px; margin-bottom:3px; color:#1b4332;">${site.addressText}</div>
+        <div style="font-size:11.5px; color:#64748b; margin-bottom:6px;">📅 ${site.soloSchedule.day} | Run: ${site.soloSchedule.garRun || site.soloSchedule.recRun || site.soloSchedule.fogRun || 'N/A'}</div>
+        
+        <div style="background:#f8fafc; border:1px solid #e2e8f0; border-radius:6px; padding:6px; margin-bottom:8px;">
+          <div style="font-weight:600; color:#334155; margin-bottom:2px;">${streamKey}: <span style="text-transform:uppercase;">${binObj.serial}</span></div>
+          <div style="display:flex; gap:4px; flex-wrap:wrap; margin-top:3px;">
+            ${unitBadge} ${sizeBadge} ${makeBadge}
+          </div>
+          ${binObj.lastFlipped ? `<div style="font-size:10.5px; color:#64748b; margin-top:4px;">📍 Flip GPS: ${binObj.lastFlipped}</div>` : `<div style="font-size:10.5px; color:#64748b; margin-top:4px;">📍 Using Address GPS</div>`}
+        </div>
+
+        <div style="display:flex; gap:6px; margin-top:6px;">
+          <button type="button" onclick="promptEditProperty('${propId}')" style="background:#f1f5f9; border:1px solid #cbd5e1; border-radius:4px; padding:4px 8px; font-size:11px; cursor:pointer;">⚙️ Edit</button>
+          <a href="https://www.google.com/maps/dir/?api=1&destination=${lat},${lng}" target="_blank" style="background:#2d6a4f; color:white; border-radius:4px; padding:4px 8px; font-size:11px; text-decoration:none; display:inline-flex; align-items:center; gap:3px;">📍 Navigate</a>
+        </div>
+      </div>
+    `;
+  }
+
+  /* Renders Only Filtered Bins (Priority: Flip GPS -> Address GPS) */
   function renderMapData() {
     if (!leafletMap) return;
 
@@ -911,41 +991,52 @@
     const validBounds = [];
 
     siteRecords.forEach(site => {
-      if (matchesRun(site) && matchesDay(site) && site.lat && site.lng && Number(site.lat) !== 0) {
-        const lat = Number(site.lat);
-        const lng = Number(site.lng);
+      if (!matchesRun(site) || !matchesDay(site)) return;
 
-        pointsGeoJson.push(turf.point([lng, lat]));
-        validBounds.push([lat, lng]);
+      const activeStreamsToRender = streamFilter ? [streamFilter] : ['Garbage', 'Recycling', 'FOGO'];
 
-        // Color marker by waste stream
-        let markerColor = '#2563eb'; // Blue
-        if (streamFilter === 'Garbage' || site.soloStreams.Garbage.length > 0) markerColor = '#dc2626';
-        if (streamFilter === 'Recycling' || site.soloStreams.Recycling.length > 0) markerColor = '#eab308';
-        if (streamFilter === 'FOGO' || site.soloStreams.FOGO.length > 0) markerColor = '#16a34a';
+      activeStreamsToRender.forEach(stKey => {
+        const bins = site.soloStreams[stKey] || [];
+        bins.forEach(binObj => {
+          // Priority: 1. Last Flipped Location -> 2. Address Pickup Location
+          let lat = null;
+          let lng = null;
 
-        const circleMarker = L.circleMarker([lat, lng], {
-          radius: 5,
-          fillColor: markerColor,
-          color: '#ffffff',
-          weight: 1.5,
-          opacity: 1,
-          fillOpacity: 0.85
+          if (binObj.lat && binObj.lng && Number(binObj.lat) !== 0) {
+            lat = Number(binObj.lat);
+            lng = Number(binObj.lng);
+          } else if (site.lat && site.lng && Number(site.lat) !== 0) {
+            lat = Number(site.lat);
+            lng = Number(site.lng);
+          }
+
+          if (lat !== null && lng !== null) {
+            pointsGeoJson.push(turf.point([lng, lat]));
+            validBounds.push([lat, lng]);
+
+            // Marker colors matching waste stream
+            let markerColor = '#2563eb';
+            if (stKey === 'Garbage') markerColor = '#dc2626';
+            if (stKey === 'Recycling') markerColor = '#eab308';
+            if (stKey === 'FOGO') markerColor = '#16a34a';
+
+            const circleMarker = L.circleMarker([lat, lng], {
+              radius: 6,
+              fillColor: markerColor,
+              color: '#ffffff',
+              weight: 1.5,
+              opacity: 1,
+              fillOpacity: 0.9
+            });
+
+            circleMarker.bindPopup(buildMarkerPopupHtml(site, stKey, binObj, lat, lng));
+            mapMarkersLayer.addLayer(circleMarker);
+          }
         });
-
-        circleMarker.bindPopup(`
-          <div style="font-size:12px; font-weight:500;">
-            <b>${site.addressText}</b><br>
-            📅 ${site.soloSchedule.day} (${site.soloSchedule.garRun || site.soloSchedule.recRun || site.soloSchedule.fogRun || ''})<br>
-            <a href="https://www.google.com/maps/dir/?api=1&destination=${lat},${lng}" target="_blank" style="color:#1d4ed8; text-decoration:underline;">📍 Navigate in Maps</a>
-          </div>
-        `);
-
-        mapMarkersLayer.addLayer(circleMarker);
-      }
+      });
     });
 
-    // 1. Draw Shaded Perimeter (Convex Hull) over all points in run
+    // 1. Draw Shaded Perimeter (Convex Hull) over filtered bin dots
     if (pointsGeoJson.length >= 3 && window.turf) {
       try {
         const featureColl = turf.featureCollection(pointsGeoJson);
@@ -983,7 +1074,7 @@
 
     // 3. Auto-fit bounds
     if (validBounds.length > 0) {
-      leafletMap.fitBounds(validBounds, { padding: [20, 20] });
+      leafletMap.fitBounds(validBounds, { padding: [25, 25] });
     }
   }
 
@@ -1322,6 +1413,9 @@
     updateSyncButtonUI();
     closeModal('binEditModal');
     handleSearch();
+    if (leafletMap && document.getElementById('mapWrapper').classList.contains('open')) {
+      renderMapData();
+    }
   }
 
   function promptEditProperty(propId) {
@@ -1384,6 +1478,9 @@
     updateSyncButtonUI();
     closeModal('propEditModal');
     handleSearch();
+    if (leafletMap && document.getElementById('mapWrapper').classList.contains('open')) {
+      renderMapData();
+    }
   }
 
   function promptRateProperty(propId) {
@@ -1667,7 +1764,7 @@
       setStatus(`⚡ ${siteRecords.length.toLocaleString()} loaded (${dateNow})`);
       updateSyncButtonUI();
       handleSearch();
-      if (leafletMap && document.getElementById('mapDrawer').classList.contains('open')) {
+      if (leafletMap && document.getElementById('mapWrapper').classList.contains('open')) {
         renderMapData();
       }
     } catch(err) {
@@ -1893,7 +1990,6 @@
 
     if (!query) {
       if (userCurrentLocation && siteRecords.length > 0 && selectedRunsSet.size === 0 && !dayFilter) {
-        // Proximity Radius Mode (No Specific Run/Day Selected)
         const nearby = [];
         siteRecords.forEach((site, idx) => {
           if (!matchesStream(site)) return;
@@ -1933,7 +2029,6 @@
         const filterStr = filterLabel.length > 0 ? ` (${filterLabel.join(' | ')})` : '';
         summaryContainer.innerText = `📍 Closest Ahead${filterStr} (${closest.length} found):`;
       } else {
-        // Run/Day Manifest Mode: Lists all matching properties for selected run/day
         if ((selectedRunsSet.size > 0 || dayFilter || streamFilter) && siteRecords.length > 0) {
           const filterMatches = [];
           siteRecords.forEach((site, idx) => {
