@@ -708,7 +708,7 @@
   </div>
 </div>
 
-<!-- Sub-Modal 2: Edit Bin -->
+<!-- Sub-Modal 2: Edit Bin & Bin GPS Coordinates -->
 <div id="binEditModal" class="modal-overlay sub-modal-layer">
   <div class="modal-box">
     <div class="modal-header">
@@ -727,6 +727,14 @@
         <label>Bin Serial Number *</label>
         <input type="text" id="modalBinSerial" required style="text-transform:uppercase;">
       </div>
+      <div class="form-group">
+        <label>Pickup GPS Coordinates</label>
+        <div style="display:flex; gap:6px;">
+          <input type="text" id="modalBinLat" placeholder="Latitude">
+          <input type="text" id="modalBinLng" placeholder="Longitude">
+        </div>
+        <button type="button" class="stray-fix-btn" style="width:100%; margin-top:6px;" onclick="useCurrentGpsForBin()">📍 Use Live GPS</button>
+      </div>
       <div class="modal-actions">
         <button type="button" class="btn-cancel" onclick="closeModal('binEditModal')">Cancel</button>
         <button type="submit" class="btn-save">Save Bin</button>
@@ -735,7 +743,7 @@
   </div>
 </div>
 
-<!-- Sub-Modal 3: Edit Property Runs & Coordinates -->
+<!-- Sub-Modal 3: Edit Property Runs -->
 <div id="propEditModal" class="modal-overlay sub-modal-layer">
   <div class="modal-box">
     <div class="modal-header">
@@ -759,14 +767,6 @@
       <div class="form-group">
         <label>FOGO Run</label>
         <input type="text" id="modalPropFogRun" placeholder="e.g. W-FOG-01">
-      </div>
-      <div class="form-group">
-        <label>Pickup GPS Coordinates</label>
-        <div style="display:flex; gap:6px;">
-          <input type="text" id="modalPropLat" placeholder="Latitude">
-          <input type="text" id="modalPropLng" placeholder="Longitude">
-        </div>
-        <button type="button" class="stray-fix-btn" style="width:100%; margin-top:6px;" onclick="useCurrentGpsForPickup()">📍 Use Live GPS</button>
       </div>
       <div class="modal-actions">
         <button type="button" class="btn-cancel" onclick="closeModal('propEditModal')">Cancel</button>
@@ -859,7 +859,7 @@
 
   let travelMode = 'all';
   let activeTab = 'hud';
-  let pinSourceMode = 'flip'; // Defaults to flip location
+  let pinSourceMode = 'flip';
   let isTruckFollowEnabled = false;
   let isRoadSnapEditing = false;
 
@@ -872,9 +872,7 @@
   let mapEditHandlesLayer = null;
   let mapTruckMarker = null;
 
-  // Week schedule setup:
-  // Week ending Sunday Aug 30, 2026 was Week A Recycle / Week B FOGO.
-  // Week starting Monday Aug 31, 2026 is Week B Recycle / Week A FOGO.
+  // Alternating fortnightly schedule
   const BASE_WEEK_DATE = new Date(2026, 7, 31); // Aug 31, 2026
   const BASE_RECYCLE_WEEK = 'B'; 
 
@@ -1565,7 +1563,7 @@
     openModal('runStyleModal');
   }
 
-  /* Strict Map Renderer with Distinct Color for Unflipped (House GPS Fallback) Dots */
+  /* Strict Map Renderer: Unflipped/Fallback locations in Violet, Flip GPS in Stream Colors */
   function renderMapData() {
     if (!leafletMap) return;
     mapMarkersLayer.clearLayers();
@@ -1611,7 +1609,7 @@
           let targetLng = propLng;
           let isActualFlipLocation = false;
 
-          // Check if valid kerbside flip GPS is within 0-45m
+          // Default is Flip GPS: Check if valid kerbside flip GPS is within 0-45m
           if (binObj.lat && binObj.lng && propLat && propLng) {
             const distFromHouse = getDistanceMeters(propLat, propLng, Number(binObj.lat), Number(binObj.lng));
             if (distFromHouse >= 0 && distFromHouse <= 45 && binObj.lastFlipped) {
@@ -1647,10 +1645,10 @@
             let dotColor = stKey === 'Garbage' ? '#dc2626' : (stKey === 'Recycling' ? '#eab308' : '#16a34a');
             let strokeColor = '#ffffff';
 
-            // Distinct Violet/Cyan dot color when falling back to House GPS (Unflipped / No Flip GPS)
+            // Distinct Violet/Yellow dot when falling back to House GPS (Unflipped / No Flip GPS)
             if (!isActualFlipLocation) {
               dotColor = '#8b5cf6'; // Violet indicates fallback house location
-              strokeColor = '#facc15'; // Accent ring
+              strokeColor = '#facc15';
             }
             
             const circle = L.circleMarker([targetLat, targetLng], {
@@ -1715,7 +1713,7 @@
       }
     }
 
-    // Render Hulls (interactive: false ensures shading passes clicks straight to the dots)
+    // Render Hulls (interactive: false ensures click-through to dots)
     Object.keys(runDayGroups).forEach((key, idx) => {
       const points = runDayGroups[key];
       const color = runColorMap[key] || PRESET_COLORS[idx % PRESET_COLORS.length];
@@ -2111,7 +2109,18 @@
     document.getElementById('modalBinIdx').value = binIdx;
     document.getElementById('modalBinStreamDisplay').value = streamKey;
     document.getElementById('modalBinSerial').value = binObj.serial;
+    document.getElementById('modalBinLat').value = binObj.lat || '';
+    document.getElementById('modalBinLng').value = binObj.lng || '';
     openModal('binEditModal');
+  }
+
+  function useCurrentGpsForBin() {
+    if (userCurrentLocation && userCurrentLocation.lat && userCurrentLocation.lng) {
+      document.getElementById('modalBinLat').value = userCurrentLocation.lat.toFixed(6);
+      document.getElementById('modalBinLng').value = userCurrentLocation.lng.toFixed(6);
+    } else {
+      alert("GPS not ready.");
+    }
   }
 
   function promptAddCouncilBin(propId, streamKey, serial, size) {
@@ -2122,6 +2131,8 @@
     document.getElementById('modalBinIdx').value = "-1";
     document.getElementById('modalBinStreamDisplay').value = streamKey;
     document.getElementById('modalBinSerial').value = serial || "";
+    document.getElementById('modalBinLat').value = site.lat || '';
+    document.getElementById('modalBinLng').value = site.lng || '';
     openModal('binEditModal');
   }
 
@@ -2131,13 +2142,17 @@
     const streamKey = document.getElementById('modalStreamKey').value;
     const binIdx = Number(document.getElementById('modalBinIdx').value);
     const newSerial = document.getElementById('modalBinSerial').value.trim().toUpperCase();
+    const newLat = document.getElementById('modalBinLat').value.trim();
+    const newLng = document.getElementById('modalBinLng').value.trim();
     const site = siteRecords.find(s => String(s.propId || s.siteId) === String(propId));
     
     if (site) {
       if (binIdx >= 0) {
         site.soloStreams[streamKey][binIdx].serial = newSerial;
+        site.soloStreams[streamKey][binIdx].lat = newLat;
+        site.soloStreams[streamKey][binIdx].lng = newLng;
       } else {
-        site.soloStreams[streamKey].push({ serial: newSerial, size: "240L" });
+        site.soloStreams[streamKey].push({ serial: newSerial, size: "240L", lat: newLat, lng: newLng });
       }
 
       masterEditsLog.push({
@@ -2147,7 +2162,9 @@
         siteId: site.siteId,
         address: site.addressText,
         stream: streamKey,
-        serial: newSerial
+        serial: newSerial,
+        lat: newLat,
+        lng: newLng
       });
 
       await saveToDB("masterRecords", siteRecords);
@@ -2166,18 +2183,7 @@
     document.getElementById('modalPropGarRun').value = site.soloSchedule.garRun || '';
     document.getElementById('modalPropRecRun').value = site.soloSchedule.recRun || '';
     document.getElementById('modalPropFogRun').value = site.soloSchedule.fogRun || '';
-    document.getElementById('modalPropLat').value = site.lat || '';
-    document.getElementById('modalPropLng').value = site.lng || '';
     openModal('propEditModal');
-  }
-
-  function useCurrentGpsForPickup() {
-    if (userCurrentLocation && userCurrentLocation.lat && userCurrentLocation.lng) {
-      document.getElementById('modalPropLat').value = userCurrentLocation.lat.toFixed(6);
-      document.getElementById('modalPropLng').value = userCurrentLocation.lng.toFixed(6);
-    } else {
-      alert("GPS not ready.");
-    }
   }
 
   async function savePropertyForm(e) {
@@ -2188,8 +2194,6 @@
       site.soloSchedule.garRun = document.getElementById('modalPropGarRun').value.trim();
       site.soloSchedule.recRun = document.getElementById('modalPropRecRun').value.trim();
       site.soloSchedule.fogRun = document.getElementById('modalPropFogRun').value.trim();
-      site.lat = document.getElementById('modalPropLat').value.trim();
-      site.lng = document.getElementById('modalPropLng').value.trim();
 
       masterEditsLog.push({
         timestamp: new Date().toISOString(),
@@ -2199,9 +2203,7 @@
         address: site.addressText,
         garRun: site.soloSchedule.garRun,
         recRun: site.soloSchedule.recRun,
-        fogRun: site.soloSchedule.fogRun,
-        lat: site.lat,
-        lng: site.lng
+        fogRun: site.soloSchedule.fogRun
       });
 
       await saveToDB("masterRecords", siteRecords);
@@ -2264,7 +2266,7 @@
   /* IndexedDB Cache Layer */
   function openDB() {
     return new Promise((resolve) => {
-      const req = window.indexedDB.open("LukezBunzMasterDB_v350", 1);
+      const req = window.indexedDB.open("LukezBunzMasterDB_v360", 1);
       req.onupgradeneeded = e => e.target.result.createObjectStore("store");
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => resolve(null);
@@ -2301,6 +2303,9 @@
       buildFastStreetIndex();
       renderActiveFilterChips();
       updateDriverHud();
+    } else {
+      // Automatically refresh on first load if no database exists
+      startUpdateProcess();
     }
   });
 
