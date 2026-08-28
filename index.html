@@ -412,7 +412,7 @@
     .pill-fog { background-color: #dcfce7; color: #166534; border: 1px solid #4ade80; }
 
     .schedule-bar { display: flex; justify-content: space-between; align-items: center; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 7px 10px; margin-bottom: 8px; font-size: 14px; }
-    .schedule-cycle { font-size: 13px; color: #1e293b; background: #e2e8f0; padding: 2px 6px; border-radius: 5px; }
+    .next-collection-tag { font-size: 13px; color: #166534; background: #dcfce7; border: 1px solid #86efac; padding: 2px 7px; border-radius: 5px; }
 
     /* Stream Group Box */
     .stream-group-card { border: 1px solid #e2e8f0; border-radius: 8px; background: #ffffff; margin-bottom: 8px; overflow: hidden; }
@@ -495,18 +495,19 @@
       background: #f8fafc;
     }
     .run-select-chip {
-      font-size: 12.5px;
+      font-size: 13px;
       display: flex;
       align-items: center;
-      gap: 4px;
-      padding: 4px 6px;
-      border-radius: 5px;
+      gap: 6px;
+      padding: 6px 8px;
+      border-radius: 6px;
       border: 1px solid #cbd5e1;
       cursor: pointer;
       overflow: hidden;
       white-space: nowrap;
       text-overflow: ellipsis;
     }
+    .run-chip-text { font-size: 13px; color: inherit; }
     .run-chip-gar { background: #fee2e2; border-color: #fca5a5; color: #991b1b; }
     .run-chip-rec { background: #fef08a; border-color: #facc15; color: #854d0e; }
     .run-chip-summer { background: #ffedd5; border-color: #fed7aa; color: #c2410c; }
@@ -673,7 +674,7 @@
     </div>
 
     <div class="form-group">
-      <label>Runs (3 Columns Color-Coded)</label>
+      <label>Runs</label>
       <div id="modalRunsChecklistGrid" class="runs-3col-grid"></div>
     </div>
 
@@ -847,6 +848,10 @@
   let mapSeqLayer = null;
   let mapTruckMarker = null;
 
+  // Active alternating week schedule
+  const RECYCLE_ACTIVE_WEEK = 'A';
+  const FOGO_ACTIVE_WEEK = 'B';
+
   const PRESET_COLORS = [
     '#2563eb', '#7c3aed', '#db2777', '#ea580c', '#0d9488', 
     '#ca8a04', '#4f46e5', '#059669', '#dc2626', '#9333ea'
@@ -875,7 +880,31 @@
     });
   }
 
-  /* One-Click Run Badge Trigger: Opens Map Fullscreen with only that run */
+  function getNextCollectionDate(dayName, weekLetter) {
+    if (!dayName) return '';
+    const daysMap = { 'sunday': 0, 'monday': 1, 'tuesday': 2, 'wednesday': 3, 'thursday': 4, 'friday': 5, 'saturday': 6 };
+    const targetDay = daysMap[dayName.toLowerCase()];
+    if (targetDay === undefined) return '';
+
+    const today = new Date();
+    const currentDay = today.getDay();
+    let daysAhead = (targetDay - currentDay + 7) % 7;
+    if (daysAhead === 0) daysAhead = 7; // Next scheduled cycle
+
+    const nextDate = new Date(today);
+    nextDate.setDate(today.getDate() + daysAhead);
+
+    const isRecycleThisWeek = (weekLetter && weekLetter.toUpperCase() === RECYCLE_ACTIVE_WEEK);
+    const isFogoThisWeek = (weekLetter && weekLetter.toUpperCase() === FOGO_ACTIVE_WEEK);
+
+    const streams = ['🗑️'];
+    if (isRecycleThisWeek) streams.push('♻️');
+    if (isFogoThisWeek) streams.push('🌳');
+
+    const options = { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' };
+    return `Next: ${nextDate.toLocaleDateString('en-AU', options)} ${streams.join(' ')}`;
+  }
+
   function openRunDirectlyOnMap(runName, streamKey, dayName, weekLetter) {
     if (!runName) return;
     selectedRunsSet.clear();
@@ -944,7 +973,7 @@
       return `
         <label class="run-select-chip ${chipClass}">
           <input type="checkbox" value="${run}" ${selectedRunsSet.has(run.toLowerCase()) ? 'checked' : ''} onchange="toggleModalRunSelection('${run.toLowerCase()}', this.checked)">
-          <span>${type === 'summer' ? '☀️ ' : ''}${run}</span>
+          <span class="run-chip-text">${type === 'summer' ? '☀️ ' : ''}${run}</span>
         </label>
       `;
     }).join('');
@@ -1306,18 +1335,10 @@
       const sch = site.soloSchedule;
       
       let runBadgeHtml = '';
-      if ((!streamFilter || streamFilter === 'Garbage') && sch.garRun) {
-        runBadgeHtml += `<span class="hdr-run-badge hdr-run-gar" onclick="event.stopPropagation(); openRunDirectlyOnMap('${sch.garRun}', 'Garbage', '${sch.day}', '${sch.weekLetter || ''}')">${sch.garRun}</span> `;
-      }
-      if ((!streamFilter || streamFilter === 'Recycling') && sch.recRun) {
-        runBadgeHtml += `<span class="hdr-run-badge hdr-run-rec" onclick="event.stopPropagation(); openRunDirectlyOnMap('${sch.recRun}', 'Recycling', '${sch.day}', '${sch.weekLetter || ''}')">${sch.recRun}</span> `;
-      }
-      if ((!streamFilter || streamFilter === 'Recycling') && sch.recSummerRun) {
-        runBadgeHtml += `<span class="hdr-run-badge hdr-run-summer" onclick="event.stopPropagation(); openRunDirectlyOnMap('${sch.recSummerRun}', 'Recycling', '${sch.day}', '${sch.weekLetter || ''}')">☀️ ${sch.recSummerRun}</span> `;
-      }
-      if ((!streamFilter || streamFilter === 'FOGO') && sch.fogRun) {
-        runBadgeHtml += `<span class="hdr-run-badge hdr-run-fog" onclick="event.stopPropagation(); openRunDirectlyOnMap('${sch.fogRun}', 'FOGO', '${sch.day}', '${sch.weekLetter || ''}')">${sch.fogRun}</span>`;
-      }
+      if ((!streamFilter || streamFilter === 'Garbage') && sch.garRun) runBadgeHtml += `<span class="hdr-run-badge hdr-run-gar">${sch.garRun}</span> `;
+      if ((!streamFilter || streamFilter === 'Recycling') && sch.recRun) runBadgeHtml += `<span class="hdr-run-badge hdr-run-rec">${sch.recRun}</span> `;
+      if ((!streamFilter || streamFilter === 'Recycling') && sch.recSummerRun) runBadgeHtml += `<span class="hdr-run-badge hdr-run-summer">☀️ ${sch.recSummerRun}</span> `;
+      if ((!streamFilter || streamFilter === 'FOGO') && sch.fogRun) runBadgeHtml += `<span class="hdr-run-badge hdr-run-fog">${sch.fogRun}</span>`;
 
       const navUrl = `https://www.google.com/maps/dir/?api=1&destination=${site.lat},${site.lng}&travelmode=driving`;
       const cleanStreetOnly = (site.baseStreetLine || site.addressText.split(',')[0]).trim();
@@ -1381,7 +1402,7 @@
     }).join('') || '<div style="text-align:center; padding:30px; color:#64748b; font-weight:700;">No upcoming bins ahead on route.</div>';
   }
 
-  /* Leaflet Map Setup with First/Last Bin Navigation */
+  /* Leaflet Map Setup with Same-Date Earliest & Latest Sequencing */
   function initLeafletMap() {
     leafletMap = L.map('mainLeafletMap', { zoomControl: false }).setView([-38.36, 144.91], 13);
     L.control.zoom({ position: 'bottomright' }).addTo(leafletMap);
@@ -1392,7 +1413,7 @@
 
     mapHullsLayer.on('click', (e) => {
       if (isRoadSnapEditing) {
-        alert(`✂️ Snapped boundary node to road network coordinate: ${e.latlng.lat.toFixed(5)}, ${e.latlng.lng.toFixed(5)}`);
+        alert(`✂️ Snapped boundary node to road coordinate: ${e.latlng.lat.toFixed(5)}, ${e.latlng.lng.toFixed(5)}`);
       }
     });
   }
@@ -1445,7 +1466,7 @@
     openModal('runStyleModal');
   }
 
-  /* Strict Map Renderer with Sequence Flags */
+  /* Strict Map Renderer with Same-Date Earliest & Latest Start/Finish Sequencing */
   function renderMapData() {
     if (!leafletMap) return;
     mapMarkersLayer.clearLayers();
@@ -1458,7 +1479,7 @@
 
     const runDayGroups = {};
     const validBounds = [];
-    const sequencedStops = [];
+    const dateGroupedStops = {};
     let activeBinsCount = 0;
     const houseSet = new Set();
 
@@ -1505,11 +1526,15 @@
             if (!runDayGroups[groupKey]) runDayGroups[groupKey] = [];
             runDayGroups[groupKey].push(turf.point([targetLng, targetLat]));
 
-            if (binObj.lastFlipped || binObj.lastUpdated) {
-              sequencedStops.push({
+            // Group stops by ISO date string (YYYY-MM-DD)
+            const rawTime = binObj.lastFlipped || binObj.lastUpdated;
+            if (rawTime) {
+              const datePart = rawTime.split('T')[0] || rawTime.split(' ')[0] || 'GENERAL';
+              if (!dateGroupedStops[datePart]) dateGroupedStops[datePart] = [];
+              dateGroupedStops[datePart].push({
                 lat: targetLat,
                 lng: targetLng,
-                time: binObj.lastFlipped || binObj.lastUpdated,
+                time: rawTime,
                 address: site.addressText,
                 serial: binObj.serial
               });
@@ -1538,38 +1563,45 @@
     const activeRunsDisplay = selectedRunsSet.size > 0 ? Array.from(selectedRunsSet).map(r => r.toUpperCase()).join(', ') : 'All Runs';
     document.getElementById('mapActiveRunList').innerText = activeRunsDisplay;
 
-    // First and Last Bin Start/Finish Icons
-    if (sequencedStops.length >= 2) {
-      sequencedStops.sort((a, b) => a.time.localeCompare(b.time));
-      const startStop = sequencedStops[0];
-      const endStop = sequencedStops[sequencedStops.length - 1];
+    // Pick most recent collection date and plot earliest (start) and latest (finish) on THAT SAME DATE
+    const availableDates = Object.keys(dateGroupedStops).sort();
+    if (availableDates.length > 0) {
+      const mostRecentDate = availableDates[availableDates.length - 1];
+      const sameDateStops = dateGroupedStops[mostRecentDate];
 
-      const startIcon = L.divIcon({
-        className: 'custom-flag',
-        html: `<div class="run-seq-flag start-flag" title="First Bin">1</div>`,
-        iconSize: [26, 26],
-        iconAnchor: [13, 13]
-      });
-      const endIcon = L.divIcon({
-        className: 'custom-flag',
-        html: `<div class="run-seq-flag end-flag" title="Last Bin">🏁</div>`,
-        iconSize: [26, 26],
-        iconAnchor: [13, 13]
-      });
+      if (sameDateStops && sameDateStops.length >= 2) {
+        sameDateStops.sort((a, b) => a.time.localeCompare(b.time));
+        const startStop = sameDateStops[0];
+        const endStop = sameDateStops[sameDateStops.length - 1];
 
-      const navStartUrl = `https://www.google.com/maps/dir/?api=1&destination=${startStop.lat},${startStop.lng}&travelmode=driving`;
-      const startMarker = L.marker([startStop.lat, startStop.lng], { icon: startIcon });
-      startMarker.bindPopup(`
-        <b>🏁 Start Stop (First Bin)</b><br>
-        ${startStop.address}<br>
-        Serial: ${startStop.serial}<br>
-        <a href="${navStartUrl}" target="_blank" style="display:inline-block; margin-top:5px; background:#16a34a; color:white; padding:4px 8px; border-radius:4px; text-decoration:none; font-weight:bold;">📍 Navigate from Live GPS</a>
-      `);
-      mapSeqLayer.addLayer(startMarker);
+        const startIcon = L.divIcon({
+          className: 'custom-flag',
+          html: `<div class="run-seq-flag start-flag" title="First Bin">1</div>`,
+          iconSize: [26, 26],
+          iconAnchor: [13, 13]
+        });
+        const endIcon = L.divIcon({
+          className: 'custom-flag',
+          html: `<div class="run-seq-flag end-flag" title="Last Bin">🏁</div>`,
+          iconSize: [26, 26],
+          iconAnchor: [13, 13]
+        });
 
-      const endMarker = L.marker([endStop.lat, endStop.lng], { icon: endIcon });
-      endMarker.bindPopup(`<b>🛑 Finish Stop (Last Bin)</b><br>${endStop.address}<br>Serial: ${endStop.serial}`);
-      mapSeqLayer.addLayer(endMarker);
+        const navStartUrl = `https://www.google.com/maps/dir/?api=1&destination=${startStop.lat},${startStop.lng}&travelmode=driving`;
+        const startMarker = L.marker([startStop.lat, startStop.lng], { icon: startIcon });
+        startMarker.bindPopup(`
+          <b>🏁 Start Stop (First Bin)</b><br>
+          ${startStop.address}<br>
+          Serial: ${startStop.serial}<br>
+          Time: ${startStop.time}<br>
+          <a href="${navStartUrl}" target="_blank" style="display:inline-block; margin-top:5px; background:#16a34a; color:white; padding:4px 8px; border-radius:4px; text-decoration:none;">📍 Navigate from Live GPS</a>
+        `);
+        mapSeqLayer.addLayer(startMarker);
+
+        const endMarker = L.marker([endStop.lat, endStop.lng], { icon: endIcon });
+        endMarker.bindPopup(`<b>🛑 Finish Stop (Last Bin)</b><br>${endStop.address}<br>Serial: ${endStop.serial}<br>Time: ${endStop.time}`);
+        mapSeqLayer.addLayer(endMarker);
+      }
     }
 
     Object.keys(runDayGroups).forEach((key, idx) => {
@@ -1599,7 +1631,7 @@
     if (activeTab === 'map') renderMapData();
   }
 
-  /* Search Screen with Working ℹ️, ✏️, Suburb & ⚠️ on Right */
+  /* Search Screen */
   function handleSearch() {
     const query = document.getElementById('searchInput').value.trim().toLowerCase();
     const streamFilter = activeFilterStream;
@@ -1659,6 +1691,8 @@
         }
       });
       const countsRowHtml = streamCountPillsHtml ? `<div class="stream-counts-row">${streamCountPillsHtml}</div>` : '';
+
+      const nextScheduledCollectionText = getNextCollectionDate(site.soloSchedule.day, site.soloSchedule.weekLetter);
 
       const streamBoxesHtml = SOLO_STREAMS.map(st => {
         if (streamFilter && streamFilter !== st.key) return '';
@@ -1771,8 +1805,8 @@
           ${ratingBannerHtml}
           ${countsRowHtml}
           <div class="schedule-bar">
-            <span>📅 ${site.soloSchedule.day}</span>
-            <span class="schedule-cycle">${site.soloSchedule.weekFormatted}</span>
+            <span>📅 ${site.soloSchedule.day} ${site.soloSchedule.weekFormatted}</span>
+            <span class="next-collection-tag">${nextScheduledCollectionText}</span>
           </div>
           <div class="prop-header-actions" style="margin-bottom:6px;">
             ${dist ? `<span class="distance-pill">${Math.round(dist)}m</span>` : ''}
@@ -2108,7 +2142,7 @@
   /* IndexedDB Cache Layer */
   function openDB() {
     return new Promise((resolve) => {
-      const req = window.indexedDB.open("LukezBunzMasterDB_v310", 1);
+      const req = window.indexedDB.open("LukezBunzMasterDB_v320", 1);
       req.onupgradeneeded = e => e.target.result.createObjectStore("store");
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => resolve(null);
