@@ -215,6 +215,7 @@
       z-index: 1000;
       display: flex;
       gap: 6px;
+      flex-wrap: wrap;
     }
     .map-overlay-btn {
       background: #ffffff;
@@ -226,6 +227,20 @@
       color: #1e293b;
       cursor: pointer;
       box-shadow: 0 2px 6px rgba(0,0,0,0.15);
+    }
+    .map-overlay-toggle {
+      background: #ffffff;
+      border: 1px solid #cbd5e1;
+      padding: 4px 8px;
+      border-radius: 6px;
+      font-size: 11.5px;
+      font-weight: 500;
+      color: #1e293b;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.15);
+      cursor: pointer;
     }
 
     /* Stray Bin Optimizer Box */
@@ -476,6 +491,9 @@
       <div class="map-controls-overlay">
         <button type="button" class="map-overlay-btn" onclick="fitMapToVisibleRuns()">🎯 Fit Run</button>
         <button type="button" class="map-overlay-btn" onclick="centerMapOnTruck()">🚛 My GPS</button>
+        <label class="map-overlay-toggle">
+          <input type="checkbox" id="chkStrictDayMatch" checked onchange="renderMapData()"> 🔒 Strict Day/Week Match
+        </label>
       </div>
       <div id="mainLeafletMap"></div>
     </div>
@@ -832,7 +850,6 @@
     if (!targetSite || !targetSite.baseStreetLine) return null;
     const cleanStreet = targetSite.baseStreetLine.trim().toLowerCase();
     
-    // Find all properties on the same street
     const streetNeighbors = siteRecords.filter(s => s.baseStreetLine && s.baseStreetLine.trim().toLowerCase() === cleanStreet);
     if (streetNeighbors.length < 4) return null;
 
@@ -950,6 +967,7 @@
     }
   }
 
+  /* Strict Per-Bin Stream, Run & Same-Day Map Renderer */
   function renderMapData() {
     if (!leafletMap) return;
 
@@ -959,41 +977,44 @@
     const streamFilter = document.getElementById('streamFilterSelect').value.trim();
     const dayFilter = document.getElementById('dayFilterSelect').value.trim().toLowerCase();
     const weekFilter = document.getElementById('weekFilterSelect').value.trim().toUpperCase();
-
-    const matchesRun = (site) => {
-      if (selectedRunsSet.size === 0) return true;
-      const sch = site.soloSchedule;
-      const gar = (sch.garRun || '').trim().toLowerCase();
-      const rec = (sch.recRun || '').trim().toLowerCase();
-      const recSum = (sch.recSummerRun || '').trim().toLowerCase();
-      const fog = (sch.fogRun || '').trim().toLowerCase();
-
-      return (gar && selectedRunsSet.has(gar)) ||
-             (rec && selectedRunsSet.has(rec)) ||
-             (recSum && selectedRunsSet.has(recSum)) ||
-             (fog && selectedRunsSet.has(fog));
-    };
-
-    const matchesDay = (site) => {
-      if (!dayFilter) return true;
-      return site.soloSchedule.day && site.soloSchedule.day.toLowerCase().includes(dayFilter);
-    };
-
-    const matchesWeek = (site) => {
-      if (!weekFilter) return true;
-      return site.soloSchedule.weekLetter && site.soloSchedule.weekLetter.toUpperCase() === weekFilter;
-    };
+    const strictMatch = document.getElementById('chkStrictDayMatch') ? document.getElementById('chkStrictDayMatch').checked : true;
 
     const pointsGeoJson = [];
     const validBounds = [];
 
     siteRecords.forEach(site => {
-      if (!matchesRun(site) || !matchesDay(site) || !matchesWeek(site)) return;
+      const sch = site.soloSchedule;
 
-      const activeStreams = streamFilter ? [streamFilter] : ['Garbage', 'Recycling', 'FOGO'];
+      // Streams to evaluate
+      const streamsToProcess = streamFilter ? [streamFilter] : ['Garbage', 'Recycling', 'FOGO'];
 
-      activeStreams.forEach(stKey => {
+      streamsToProcess.forEach(stKey => {
+        // 1. Check if this specific stream has bins
         const bins = site.soloStreams[stKey] || [];
+        if (bins.length === 0) return;
+
+        // 2. Identify the Run assigned specifically to this stream
+        let streamRun = '';
+        if (stKey === 'Garbage') streamRun = (sch.garRun || '').trim().toLowerCase();
+        else if (stKey === 'Recycling') streamRun = (sch.recRun || sch.recSummerRun || '').trim().toLowerCase();
+        else if (stKey === 'FOGO') streamRun = (sch.fogRun || '').trim().toLowerCase();
+
+        // 3. Strict Run filter check
+        if (selectedRunsSet.size > 0 && !selectedRunsSet.has(streamRun)) return;
+
+        // 4. Strict Day filter check
+        if (strictMatch && dayFilter) {
+          const siteDay = (sch.day || '').toLowerCase();
+          if (!siteDay.includes(dayFilter)) return;
+        }
+
+        // 5. Strict Week (A/B) check
+        if (strictMatch && weekFilter) {
+          const siteWeek = (sch.weekLetter || '').toUpperCase();
+          if (siteWeek && siteWeek !== weekFilter) return;
+        }
+
+        // Plot bins that passed strict verification
         bins.forEach(binObj => {
           let lat = (binObj.lat && Number(binObj.lat) !== 0) ? Number(binObj.lat) : ((site.lat && Number(site.lat) !== 0) ? Number(site.lat) : null);
           let lng = (binObj.lng && Number(binObj.lng) !== 0) ? Number(binObj.lng) : ((site.lng && Number(site.lng) !== 0) ? Number(site.lng) : null);
@@ -1007,17 +1028,15 @@
             if (stKey === 'Recycling') dotColor = '#eab308';
             if (stKey === 'FOGO') dotColor = '#16a34a';
 
-            // High-Performance Interactive DOM Dot
             const customIcon = L.divIcon({
               className: 'custom-dot',
-              html: `<div style="background:${dotColor}; width:12px; height:12px; border-radius:50%; border:2px solid white; box-shadow:0 2px 5px rgba(0,0,0,0.3); cursor:pointer;"></div>`,
-              iconSize: [12, 12],
-              iconAnchor: [6, 6]
+              html: `<div style="background:${dotColor}; width:13px; height:13px; border-radius:50%; border:2px solid white; box-shadow:0 2px 5px rgba(0,0,0,0.35); cursor:pointer;"></div>`,
+              iconSize: [13, 13],
+              iconAnchor: [6.5, 6.5]
             });
 
             const marker = L.marker([lat, lng], { icon: customIcon });
             marker.on('click', () => {
-              // Direct click inspects property
               inspectPropertyFromMap(site.propId || site.siteId);
             });
 
@@ -1027,14 +1046,14 @@
       });
     });
 
-    // 1. Shaded Run Perimeter (Convex Hull)
+    // 1. Shaded Run Boundary (Tightly fitted around verified stops)
     if (pointsGeoJson.length >= 3 && window.turf) {
       try {
         const featureColl = turf.featureCollection(pointsGeoJson);
         const hull = turf.convex(featureColl);
         if (hull) {
           const hullLayer = L.geoJSON(hull, {
-            style: { color: '#2d6a4f', weight: 2, fillColor: '#86efac', fillOpacity: 0.2, dashArray: '4' }
+            style: { color: '#2d6a4f', weight: 2, fillColor: '#86efac', fillOpacity: 0.18, dashArray: '4' }
           });
           mapHullLayer.addLayer(hullLayer);
         }
@@ -1083,7 +1102,7 @@
     const φ2 = lat2 * Math.PI / 180;
     const Δλ = (lon2 - lon1) * Math.PI / 180;
     const y = Math.sin(Δλ) * Math.cos(φ2);
-    const x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
+    const x = Math.cos(φ1) * Math.sin(φ2) - Math.cos(φ1) * Math.cos(φ2) * Math.cos(Δλ);
     return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
   }
 
@@ -1162,7 +1181,7 @@
   function openDB() {
     return new Promise((resolve) => {
       try {
-        const req = window.indexedDB.open("LukezBunzMasterDB_v100", 1);
+        const req = window.indexedDB.open("LukezBunzMasterDB_v105", 1);
         req.onupgradeneeded = e => {
           const db = e.target.result;
           if (!db.objectStoreNames.contains("store")) db.createObjectStore("store");
@@ -2160,7 +2179,6 @@
         const councilList = combinedCouncilStreams[st.key];
 
         if (soloList.length > 0 || councilList.length > 0) {
-          // Check for stray bin discrepancy on this street
           const strayData = detectStreetRunDiscrepancy(primary, st.key);
           let strayAlertHtml = '';
           if (strayData) {
