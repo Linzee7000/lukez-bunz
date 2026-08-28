@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>Lukez Bunz Driver Hub</title>
+  <title>Lukez Bunz</title>
   
   <!-- Leaflet Map CSS -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
@@ -321,7 +321,7 @@
     }
     .map-tool-btn.active { background: #1b4332; color: #ffffff; border-color: #1b4332; }
 
-    /* Map First / Last Flag Icons */
+    /* Map Flag Icons */
     .run-seq-flag {
       font-size: 13px;
       color: white;
@@ -487,7 +487,7 @@
       display: grid;
       grid-template-columns: repeat(3, 1fr);
       gap: 6px;
-      max-height: 180px;
+      max-height: 220px;
       overflow-y: auto;
       padding: 6px;
       border: 1px solid #cbd5e1;
@@ -507,7 +507,18 @@
       white-space: nowrap;
       text-overflow: ellipsis;
     }
-    .run-chip-text { font-size: 13px; color: inherit; }
+    .run-select-chip input[type="checkbox"] {
+      flex-shrink: 0;
+      margin: 0;
+      cursor: pointer;
+    }
+    .run-chip-text {
+      font-size: 13px;
+      color: inherit;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
     .run-chip-gar { background: #fee2e2; border-color: #fca5a5; color: #991b1b; }
     .run-chip-rec { background: #fef08a; border-color: #facc15; color: #854d0e; }
     .run-chip-summer { background: #ffedd5; border-color: #fed7aa; color: #c2410c; }
@@ -848,9 +859,11 @@
   let mapSeqLayer = null;
   let mapTruckMarker = null;
 
-  // Active alternating week schedule
-  const RECYCLE_ACTIVE_WEEK = 'A';
-  const FOGO_ACTIVE_WEEK = 'B';
+  // Base Week Setup:
+  // Week ending Sunday Aug 30, 2026 was Week A Recycle / Week B FOGO.
+  // Week starting Monday Aug 31, 2026 is Week B Recycle / Week A FOGO.
+  const BASE_WEEK_DATE = new Date(2026, 7, 31); // Aug 31, 2026 (Month is 0-indexed: 7 = Aug)
+  const BASE_RECYCLE_WEEK = 'B'; 
 
   const PRESET_COLORS = [
     '#2563eb', '#7c3aed', '#db2777', '#ea580c', '#0d9488', 
@@ -880,7 +893,20 @@
     });
   }
 
-  function getNextCollectionDate(dayName, weekLetter) {
+  function getActiveRecycleWeekForDate(dateObj) {
+    const d = new Date(dateObj);
+    // Find Monday of the current week
+    const day = d.getDay();
+    const diff = d.getDate() - day + (day === 0 ? -6 : 1);
+    const monday = new Date(d.setDate(diff));
+    monday.setHours(0, 0, 0, 0);
+
+    const diffWeeks = Math.floor((monday - BASE_WEEK_DATE) / (7 * 24 * 60 * 60 * 1000));
+    const isEven = (Math.abs(diffWeeks) % 2 === 0);
+    return isEven ? BASE_RECYCLE_WEEK : (BASE_RECYCLE_WEEK === 'A' ? 'B' : 'A');
+  }
+
+  function getNextCollectionDate(dayName, siteWeekLetter) {
     if (!dayName) return '';
     const daysMap = { 'sunday': 0, 'monday': 1, 'tuesday': 2, 'wednesday': 3, 'thursday': 4, 'friday': 5, 'saturday': 6 };
     const targetDay = daysMap[dayName.toLowerCase()];
@@ -889,17 +915,21 @@
     const today = new Date();
     const currentDay = today.getDay();
     let daysAhead = (targetDay - currentDay + 7) % 7;
-    if (daysAhead === 0) daysAhead = 7; // Next scheduled cycle
+    if (daysAhead === 0) daysAhead = 7;
 
     const nextDate = new Date(today);
     nextDate.setDate(today.getDate() + daysAhead);
 
-    const isRecycleThisWeek = (weekLetter && weekLetter.toUpperCase() === RECYCLE_ACTIVE_WEEK);
-    const isFogoThisWeek = (weekLetter && weekLetter.toUpperCase() === FOGO_ACTIVE_WEEK);
+    const activeRecycleWeek = getActiveRecycleWeekForDate(nextDate);
+    const activeFogoWeek = activeRecycleWeek === 'A' ? 'B' : 'A';
+
+    const cleanSiteWeek = (siteWeekLetter || 'A').toUpperCase();
+    const isRecycleOn = (cleanSiteWeek === activeRecycleWeek);
+    const isFogoOn = (cleanSiteWeek === activeFogoWeek);
 
     const streams = ['🗑️'];
-    if (isRecycleThisWeek) streams.push('♻️');
-    if (isFogoThisWeek) streams.push('🌳');
+    if (isRecycleOn) streams.push('♻️');
+    if (isFogoOn) streams.push('🌳');
 
     const options = { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' };
     return `Next: ${nextDate.toLocaleDateString('en-AU', options)} ${streams.join(' ')}`;
@@ -970,9 +1000,11 @@
       if (type === 'summer') chipClass = 'run-chip-summer';
       if (type === 'fog') chipClass = 'run-chip-fog';
 
+      const isChecked = selectedRunsSet.has(run.toLowerCase()) ? 'checked' : '';
+
       return `
         <label class="run-select-chip ${chipClass}">
-          <input type="checkbox" value="${run}" ${selectedRunsSet.has(run.toLowerCase()) ? 'checked' : ''} onchange="toggleModalRunSelection('${run.toLowerCase()}', this.checked)">
+          <input type="checkbox" value="${run}" ${isChecked} onchange="toggleModalRunSelection('${run.toLowerCase()}', this.checked)">
           <span class="run-chip-text">${type === 'summer' ? '☀️ ' : ''}${run}</span>
         </label>
       `;
@@ -1124,7 +1156,23 @@
     return Object.keys(counts).map(sz => `${counts[sz]}x ${sz}`).join(', ');
   }
 
-  /* GPS Watcher */
+  /* GPS Engine & Persistent Live Map Marker */
+  function updateMapTruckPosition() {
+    if (!leafletMap || !userCurrentLocation) return;
+    const pos = [userCurrentLocation.lat, userCurrentLocation.lng];
+    if (!mapTruckMarker) {
+      const truckIcon = L.divIcon({
+        className: 'gps-dot-icon',
+        html: `<div style="background:#2563eb; width:16px; height:16px; border-radius:50%; border:3px solid white; box-shadow:0 0 8px rgba(37,99,235,0.8);"></div>`,
+        iconSize: [16, 16],
+        iconAnchor: [8, 8]
+      });
+      mapTruckMarker = L.marker(pos, { icon: truckIcon, zIndexOffset: 2000 }).addTo(leafletMap);
+    } else {
+      mapTruckMarker.setLatLng(pos);
+    }
+  }
+
   function startLiveLocationWatcher() {
     if (!("geolocation" in navigator)) {
       updateGpsBadgeUI(false, "No GPS");
@@ -1164,11 +1212,10 @@
           headingEl.innerText = `🧭 ${cardinal} ${lastValidHeading}°`;
         }
 
-        if (mapTruckMarker && leafletMap) {
-          mapTruckMarker.setLatLng([userCurrentLocation.lat, userCurrentLocation.lng]);
-          if (isTruckFollowEnabled) {
-            leafletMap.panTo([userCurrentLocation.lat, userCurrentLocation.lng]);
-          }
+        updateMapTruckPosition();
+
+        if (isTruckFollowEnabled && leafletMap) {
+          leafletMap.panTo([userCurrentLocation.lat, userCurrentLocation.lng]);
         }
 
         const movedDist = getDistanceMeters(lastGpsCoords.lat, lastGpsCoords.lng, userCurrentLocation.lat, userCurrentLocation.lng);
@@ -1190,6 +1237,7 @@
         (pos) => {
           userCurrentLocation = { lat: pos.coords.latitude, lng: pos.coords.longitude, speed: 0 };
           updateGpsBadgeUI(true, "🟢 Locked");
+          updateMapTruckPosition();
           if (activeTab === 'search') handleSearch();
           if (activeTab === 'hud') updateDriverHud();
         },
@@ -1402,7 +1450,7 @@
     }).join('') || '<div style="text-align:center; padding:30px; color:#64748b; font-weight:700;">No upcoming bins ahead on route.</div>';
   }
 
-  /* Leaflet Map Setup with Same-Date Earliest & Latest Sequencing */
+  /* Leaflet Map Setup with First/Last Bin Sequence */
   function initLeafletMap() {
     leafletMap = L.map('mainLeafletMap', { zoomControl: false }).setView([-38.36, 144.91], 13);
     L.control.zoom({ position: 'bottomright' }).addTo(leafletMap);
@@ -1410,6 +1458,8 @@
     mapMarkersLayer = L.layerGroup().addTo(leafletMap);
     mapHullsLayer = L.layerGroup().addTo(leafletMap);
     mapSeqLayer = L.layerGroup().addTo(leafletMap);
+
+    updateMapTruckPosition();
 
     mapHullsLayer.on('click', (e) => {
       if (isRoadSnapEditing) {
@@ -1466,12 +1516,13 @@
     openModal('runStyleModal');
   }
 
-  /* Strict Map Renderer with Same-Date Earliest & Latest Start/Finish Sequencing */
+  /* Strict Map Renderer */
   function renderMapData() {
     if (!leafletMap) return;
     mapMarkersLayer.clearLayers();
     mapHullsLayer.clearLayers();
     mapSeqLayer.clearLayers();
+    updateMapTruckPosition();
 
     const streamFilter = activeFilterStream;
     const dayFilter = activeFilterDay.toLowerCase();
@@ -1526,7 +1577,6 @@
             if (!runDayGroups[groupKey]) runDayGroups[groupKey] = [];
             runDayGroups[groupKey].push(turf.point([targetLng, targetLat]));
 
-            // Group stops by ISO date string (YYYY-MM-DD)
             const rawTime = binObj.lastFlipped || binObj.lastUpdated;
             if (rawTime) {
               const datePart = rawTime.split('T')[0] || rawTime.split(' ')[0] || 'GENERAL';
@@ -1563,7 +1613,7 @@
     const activeRunsDisplay = selectedRunsSet.size > 0 ? Array.from(selectedRunsSet).map(r => r.toUpperCase()).join(', ') : 'All Runs';
     document.getElementById('mapActiveRunList').innerText = activeRunsDisplay;
 
-    // Pick most recent collection date and plot earliest (start) and latest (finish) on THAT SAME DATE
+    // Pick most recent date and render earliest (Start 1) & latest (Finish) on that same date
     const availableDates = Object.keys(dateGroupedStops).sort();
     if (availableDates.length > 0) {
       const mostRecentDate = availableDates[availableDates.length - 1];
@@ -1588,18 +1638,17 @@
         });
 
         const navStartUrl = `https://www.google.com/maps/dir/?api=1&destination=${startStop.lat},${startStop.lng}&travelmode=driving`;
-        const startMarker = L.marker([startStop.lat, startStop.lng], { icon: startIcon });
+        const startMarker = L.marker([startStop.lat, startStop.lng], { icon: startIcon, zIndexOffset: 1500 });
         startMarker.bindPopup(`
           <b>🏁 Start Stop (First Bin)</b><br>
           ${startStop.address}<br>
           Serial: ${startStop.serial}<br>
-          Time: ${startStop.time}<br>
-          <a href="${navStartUrl}" target="_blank" style="display:inline-block; margin-top:5px; background:#16a34a; color:white; padding:4px 8px; border-radius:4px; text-decoration:none;">📍 Navigate from Live GPS</a>
+          <a href="${navStartUrl}" target="_blank" style="display:inline-block; margin-top:5px; background:#16a34a; color:white; padding:4px 8px; border-radius:4px; text-decoration:none; font-weight:bold;">📍 Navigate from Live GPS</a>
         `);
         mapSeqLayer.addLayer(startMarker);
 
-        const endMarker = L.marker([endStop.lat, endStop.lng], { icon: endIcon });
-        endMarker.bindPopup(`<b>🛑 Finish Stop (Last Bin)</b><br>${endStop.address}<br>Serial: ${endStop.serial}<br>Time: ${endStop.time}`);
+        const endMarker = L.marker([endStop.lat, endStop.lng], { icon: endIcon, zIndexOffset: 1500 });
+        endMarker.bindPopup(`<b>🛑 Finish Stop (Last Bin)</b><br>${endStop.address}<br>Serial: ${endStop.serial}`);
         mapSeqLayer.addLayer(endMarker);
       }
     }
@@ -2142,7 +2191,7 @@
   /* IndexedDB Cache Layer */
   function openDB() {
     return new Promise((resolve) => {
-      const req = window.indexedDB.open("LukezBunzMasterDB_v320", 1);
+      const req = window.indexedDB.open("LukezBunzMasterDB_v330", 1);
       req.onupgradeneeded = e => e.target.result.createObjectStore("store");
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => resolve(null);
