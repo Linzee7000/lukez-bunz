@@ -107,10 +107,10 @@
     .progress-bar-wrap { width: 100%; height: 6px; background: #e2e8f0; border-radius: 4px; overflow: hidden; margin-bottom: 8px; display: none; }
     .progress-bar-fill { height: 100%; width: 0%; background: #2d6a4f; transition: width 0.15s ease; }
 
-    /* Single-Line Controls Grid */
+    /* Single-Line Controls Grid with Clear/Reset Button */
     .controls-row-single {
       display: grid;
-      grid-template-columns: repeat(4, 1fr);
+      grid-template-columns: 1fr 1fr 1fr 1fr 34px;
       gap: 5px;
       margin-bottom: 8px;
     }
@@ -155,6 +155,23 @@
     }
     .multi-run-btn.active { border-color: #2d6a4f; background: #eef7f2; }
     .multi-run-btn::after { content: "▾"; font-size: 9px; margin-left: 2px; color: #64748b; }
+
+    /* Quick Clear Filters Button */
+    .clear-filters-btn {
+      height: 32px;
+      width: 34px;
+      background: #fee2e2;
+      border: 1px solid #fca5a5;
+      color: #b91c1c;
+      border-radius: 6px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 13px;
+      transition: background-color 0.15s ease;
+    }
+    .clear-filters-btn:active { background: #fecaca; }
 
     .runs-dropdown-panel {
       display: none;
@@ -215,7 +232,7 @@
     .return-to-map-btn:active { background: #1e40af; }
     .return-to-map-btn.open { display: block; }
 
-    /* Map Screen Container & Fullscreen Fix */
+    /* Map Screen Container */
     #mapScreenContainer {
       position: relative;
       width: 100%;
@@ -225,7 +242,7 @@
       overflow: hidden;
       border: 1px solid #cbd5e1;
       box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-      transform: translateZ(0); /* Eliminates repaint glitching */
+      transform: translateZ(0);
     }
     #mapScreenContainer.fullscreen {
       position: fixed;
@@ -475,13 +492,15 @@
       <div id="pBarFill" class="progress-bar-fill"></div>
     </div>
 
-    <!-- 1-Line Filter Controls Row -->
+    <!-- 1-Line Filter Controls Row with Reset Button -->
     <div class="controls-row-single">
+      <!-- Full name options inside, emoji when closed -->
       <select id="streamFilterSelect" class="filter-select" onchange="handleFilterChange()">
         <option value="">Stream</option>
-        <option value="Garbage">🗑️ Gar</option>
-        <option value="Recycling">♻️ Rec</option>
+        <option value="Garbage">🗑️ Garbage</option>
+        <option value="Recycling">♻️ Recycling</option>
         <option value="FOGO">🌳 FOGO</option>
+        <option value="Summer">☀️ Summer Only</option>
       </select>
 
       <select id="dayFilterSelect" class="filter-select" onchange="handleFilterChange()">
@@ -500,6 +519,9 @@
       </select>
 
       <button id="multiRunBtn" class="multi-run-btn" type="button" onclick="toggleRunsPanel()">Runs</button>
+
+      <!-- Quick Reset Filters Button -->
+      <button class="clear-filters-btn" type="button" onclick="clearAllFilters()" title="Reset All Filters">🧹</button>
     </div>
 
     <div id="runsDropdownPanel" class="runs-dropdown-panel">
@@ -748,6 +770,21 @@
     }
   }
 
+  /* Quick Reset All Filters */
+  function clearAllFilters() {
+    document.getElementById('streamFilterSelect').value = '';
+    document.getElementById('dayFilterSelect').value = '';
+    document.getElementById('weekFilterSelect').value = '';
+    document.getElementById('searchInput').value = '';
+    document.getElementById('chkBinOnly').checked = false;
+    document.getElementById('chkAddrOnly').checked = false;
+    selectedRunsSet.clear();
+    updateRunsButtonText();
+    populateRunsChecklist();
+    handleSearch();
+    if (leafletMap && activeScreen === 'map') renderMapData();
+  }
+
   function switchScreen(screenName) {
     activeScreen = screenName;
     document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
@@ -854,6 +891,9 @@
       }
       if (!streamFilter || streamFilter === 'FOGO') {
         if (sch.fogRun) runsSet.add(sch.fogRun.trim());
+      }
+      if (streamFilter === 'Summer') {
+        if (sch.recSummerRun) runsSet.add(sch.recSummerRun.trim());
       }
     });
 
@@ -1054,7 +1094,11 @@
     }
   }
 
-  /* Reliable Map Plotting & Outlier Exclusion */
+  /* 
+    Strict Map Plotting Engine:
+    - Checks strict stream, run, day, and mandatory Week assignment for Recycling/FOGO.
+    - Preserves summer runs when selected.
+  */
   function renderMapData() {
     if (!leafletMap) return;
 
@@ -1072,7 +1116,9 @@
     siteRecords.forEach(site => {
       const sch = site.soloSchedule;
 
-      const streamsToProcess = streamFilter ? [streamFilter] : ['Garbage', 'Recycling', 'FOGO'];
+      let streamsToProcess = ['Garbage', 'Recycling', 'FOGO'];
+      if (streamFilter === 'Summer') streamsToProcess = ['Recycling'];
+      else if (streamFilter) streamsToProcess = [streamFilter];
 
       streamsToProcess.forEach(stKey => {
         const bins = site.soloStreams[stKey] || [];
@@ -1080,19 +1126,29 @@
 
         let streamRun = '';
         if (stKey === 'Garbage') streamRun = (sch.garRun || '').trim().toLowerCase();
-        else if (stKey === 'Recycling') streamRun = (sch.recRun || sch.recSummerRun || '').trim().toLowerCase();
+        else if (stKey === 'Recycling') {
+          streamRun = (streamFilter === 'Summer' ? sch.recSummerRun : (sch.recRun || sch.recSummerRun || '')).trim().toLowerCase();
+        }
         else if (stKey === 'FOGO') streamRun = (sch.fogRun || '').trim().toLowerCase();
 
         if (selectedRunsSet.size > 0 && !selectedRunsSet.has(streamRun)) return;
 
+        // Strict Day Filter Check
         if (strictMatch && dayFilter) {
           const siteDay = (sch.day || '').toLowerCase();
           if (!siteDay.includes(dayFilter)) return;
         }
 
-        if (strictMatch && weekFilter) {
-          const siteWeek = (sch.weekLetter || '').toUpperCase();
-          if (siteWeek && siteWeek !== weekFilter) return;
+        // Strict Week Enforcement for Recycling & FOGO (Excluding Summer)
+        if (strictMatch && streamFilter !== 'Summer') {
+          if (stKey === 'Recycling' || stKey === 'FOGO') {
+            const siteWeek = (sch.weekLetter || '').toUpperCase();
+            // Must have a valid week assigned
+            if (!siteWeek || (weekFilter && siteWeek !== weekFilter)) return;
+          } else if (weekFilter) {
+            const siteWeek = (sch.weekLetter || '').toUpperCase();
+            if (siteWeek && siteWeek !== weekFilter) return;
+          }
         }
 
         const propLat = (site.lat && Number(site.lat) !== 0) ? Number(site.lat) : null;
@@ -1124,7 +1180,7 @@
 
             let dotColor = '#2563eb';
             if (stKey === 'Garbage') dotColor = '#dc2626';
-            if (stKey === 'Recycling') dotColor = '#eab308';
+            if (stKey === 'Recycling') dotColor = streamFilter === 'Summer' ? '#f97316' : '#eab308';
             if (stKey === 'FOGO') dotColor = '#16a34a';
 
             const customIcon = L.divIcon({
@@ -1159,7 +1215,7 @@
       } catch(e) {}
     }
 
-    // Live GPS Truck Marker
+    // Live GPS Truck
     if (userCurrentLocation && userCurrentLocation.lat && userCurrentLocation.lng) {
       if (mapTruckMarker) leafletMap.removeLayer(mapTruckMarker);
       mapTruckMarker = L.circleMarker([userCurrentLocation.lat, userCurrentLocation.lng], {
@@ -1275,11 +1331,11 @@
     else badge.classList.add('searching');
   }
 
-  /* Database Storage Setup */
+  /* Database Storage */
   function openDB() {
     return new Promise((resolve) => {
       try {
-        const req = window.indexedDB.open("LukezBunzMasterDB_v115", 1);
+        const req = window.indexedDB.open("LukezBunzMasterDB_v120", 1);
         req.onupgradeneeded = e => {
           const db = e.target.result;
           if (!db.objectStoreNames.contains("store")) db.createObjectStore("store");
@@ -1606,7 +1662,7 @@
     handleSearch();
   }
 
-  /* Sync & Fetch */
+  /* Sync & Data Fetch */
   window.addEventListener('DOMContentLoaded', async () => {
     startLiveLocationWatcher();
     setDefaultDayToToday();
@@ -2061,6 +2117,7 @@
     };
 
     const matchesStream = (site) => {
+      if (streamFilter === 'Summer') return (site.soloSchedule.recSummerRun || '').length > 0;
       if (!streamFilter) return true;
       const soloCount = (site.soloStreams[streamFilter] || []).length;
       const councilCount = (site.councilStreams[streamFilter] || []).length;
@@ -2149,7 +2206,7 @@
                           String(site.propId).toLowerCase().includes(query) ||
                           String(site.siteId).toLowerCase().includes(query);
 
-        const streamsToCheck = streamFilter ? [streamFilter] : ['Garbage', 'Recycling', 'FOGO'];
+        const streamsToCheck = streamFilter === 'Summer' ? ['Recycling'] : (streamFilter ? [streamFilter] : ['Garbage', 'Recycling', 'FOGO']);
         let allSerials = [];
         streamsToCheck.forEach(st => {
           allSerials.push(...site.soloStreams[st].map(b => b.serial.toLowerCase()));
@@ -2267,7 +2324,7 @@
 
       let streamCountPillsHtml = '';
       SOLO_STREAMS.forEach(st => {
-        if (streamFilter && st.key !== streamFilter) return;
+        if (streamFilter && streamFilter !== 'Summer' && st.key !== streamFilter) return;
         const streamBins = activeStreams[st.key];
         if (streamBins.length > 0) {
           streamCountPillsHtml += `<span class="stream-count-pill ${st.pillClass}">${st.icon} ${formatSizeSummary(streamBins)}</span>`;
@@ -2277,7 +2334,7 @@
 
       let primaryStreamBoxesHtml = '';
       SOLO_STREAMS.forEach(st => {
-        if (streamFilter && st.key !== streamFilter) return;
+        if (streamFilter && streamFilter !== 'Summer' && st.key !== streamFilter) return;
         const soloList = combinedSoloStreams[st.key];
         const councilList = combinedCouncilStreams[st.key];
 
