@@ -744,7 +744,7 @@
   </div>
 </div>
 
-<!-- Sub-Modal 3: Edit Property Runs & House GPS -->
+<!-- Sub-Modal 3: Edit Property Runs, Schedules & House GPS -->
 <div id="propEditModal" class="modal-overlay sub-modal-layer">
   <div class="modal-box">
     <div class="modal-header">
@@ -780,6 +780,10 @@
             <option value="B">Week B</option>
           </select>
         </div>
+      </div>
+      <div class="form-group">
+        <label>☀️ Summer Recycling Run</label>
+        <select id="modalPropRecSummerRun" class="main-search-input" style="font-size:14px; height:40px;"></select>
       </div>
       <div class="form-group">
         <label>FOGO Run & Week</label>
@@ -1690,7 +1694,7 @@
     openModal('runStyleModal');
   }
 
-  /* Strict Map Renderer: Unflipped/Fallback locations in Violet, Flip GPS in Stream Colors */
+  /* Strict Map Renderer */
   function renderMapData() {
     if (!leafletMap) return;
     mapMarkersLayer.clearLayers();
@@ -1736,7 +1740,6 @@
           let targetLng = propLng;
           let isActualFlipLocation = false;
 
-          // Default is Flip GPS: Check if valid kerbside flip GPS is within 0-45m
           if (binObj.lat && binObj.lng && propLat && propLng) {
             const distFromHouse = getDistanceMeters(propLat, propLng, Number(binObj.lat), Number(binObj.lng));
             if (distFromHouse >= 0 && distFromHouse <= 45 && binObj.lastFlipped) {
@@ -1768,11 +1771,9 @@
               });
             }
 
-            // Standard stream colors for verified flip GPS dots
             let dotColor = stKey === 'Garbage' ? '#dc2626' : (stKey === 'Recycling' ? '#eab308' : '#16a34a');
             let strokeColor = '#ffffff';
 
-            // Distinct Violet/Yellow dot when falling back to House GPS (Unflipped / No Flip GPS)
             if (!isActualFlipLocation) {
               dotColor = '#8b5cf6';
               strokeColor = '#facc15';
@@ -1800,7 +1801,6 @@
     const activeRunsDisplay = selectedRunsSet.size > 0 ? Array.from(selectedRunsSet).map(r => r.toUpperCase()).join(', ') : 'All Runs';
     document.getElementById('mapActiveRunList').innerText = activeRunsDisplay;
 
-    // First and Last Stop Sequence Rendering on Same Date
     const availableDates = Object.keys(dateGroupedStops).sort();
     if (availableDates.length > 0) {
       const mostRecentDate = availableDates[availableDates.length - 1];
@@ -1840,7 +1840,6 @@
       }
     }
 
-    // Render Hulls
     Object.keys(runDayGroups).forEach((key, idx) => {
       const points = runDayGroups[key];
       const color = runColorMap[key] || PRESET_COLORS[idx % PRESET_COLORS.length];
@@ -2318,13 +2317,14 @@
     // Collect distinct runs strictly for each stream
     const garRuns = new Set();
     const recRuns = new Set();
+    const recSummerRuns = new Set();
     const fogRuns = new Set();
 
     siteRecords.forEach(s => {
       const sch = s.soloSchedule;
       if (sch.garRun) garRuns.add(sch.garRun.trim());
       if (sch.recRun) recRuns.add(sch.recRun.trim());
-      if (sch.recSummerRun) recRuns.add(sch.recSummerRun.trim());
+      if (sch.recSummerRun) recSummerRuns.add(sch.recSummerRun.trim());
       if (sch.fogRun) fogRuns.add(sch.fogRun.trim());
     });
 
@@ -2337,7 +2337,8 @@
     };
 
     populateSelect('modalPropGarRun', garRuns, site.soloSchedule.garRun);
-    populateSelect('modalPropRecRun', recRuns, site.soloSchedule.recRun || site.soloSchedule.recSummerRun);
+    populateSelect('modalPropRecRun', recRuns, site.soloSchedule.recRun);
+    populateSelect('modalPropRecSummerRun', recSummerRuns, site.soloSchedule.recSummerRun);
     populateSelect('modalPropFogRun', fogRuns, site.soloSchedule.fogRun);
 
     openModal('propEditModal');
@@ -2361,6 +2362,7 @@
       const chosenRecWeek = document.getElementById('modalPropRecWeek').value.trim().toUpperCase();
       const chosenGarRun = document.getElementById('modalPropGarRun').value.trim();
       const chosenRecRun = document.getElementById('modalPropRecRun').value.trim();
+      const chosenRecSummerRun = document.getElementById('modalPropRecSummerRun').value.trim();
       const chosenFogRun = document.getElementById('modalPropFogRun').value.trim();
       const chosenLat = document.getElementById('modalPropLat').value.trim();
       const chosenLng = document.getElementById('modalPropLng').value.trim();
@@ -2370,6 +2372,7 @@
       site.soloSchedule.weekFormatted = `Week ${chosenRecWeek}`;
       site.soloSchedule.garRun = chosenGarRun;
       site.soloSchedule.recRun = chosenRecRun;
+      site.soloSchedule.recSummerRun = chosenRecSummerRun;
       site.soloSchedule.fogRun = chosenFogRun;
       site.lat = chosenLat;
       site.lng = chosenLng;
@@ -2384,6 +2387,7 @@
         weekLetter: chosenRecWeek,
         garRun: chosenGarRun,
         recRun: chosenRecRun,
+        recSummerRun: chosenRecSummerRun,
         fogRun: chosenFogRun,
         lat: chosenLat,
         lng: chosenLng
@@ -2449,7 +2453,7 @@
   /* IndexedDB Cache Layer */
   function openDB() {
     return new Promise((resolve) => {
-      const req = window.indexedDB.open("LukezBunzMasterDB_v380", 1);
+      const req = window.indexedDB.open("LukezBunzMasterDB_v390", 1);
       req.onupgradeneeded = e => e.target.result.createObjectStore("store");
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => resolve(null);
@@ -2490,6 +2494,7 @@
         }
         if (ed.garRun !== undefined) site.soloSchedule.garRun = ed.garRun;
         if (ed.recRun !== undefined) site.soloSchedule.recRun = ed.recRun;
+        if (ed.recSummerRun !== undefined) site.soloSchedule.recSummerRun = ed.recSummerRun;
         if (ed.fogRun !== undefined) site.soloSchedule.fogRun = ed.fogRun;
         if (ed.lat !== undefined) site.lat = ed.lat;
         if (ed.lng !== undefined) site.lng = ed.lng;
