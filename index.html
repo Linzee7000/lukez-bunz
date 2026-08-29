@@ -1899,8 +1899,9 @@
         } else {
           leafletMap.invalidateSize();
         }
+        // Preserve the user's current centre/zoom when returning to Map.
+        // The initial view is set only once in initLeafletMap().
         renderMapData();
-        fitMapToVisibleRuns();
       });
     }
   }
@@ -2172,6 +2173,15 @@
   }
   function siteMatchesMapFilters(site){
     const sch=site?.soloSchedule||{};
+    const selected=selectedMapRuns();
+
+    // Map All Runs is strictly the normal services only. Summer assignments
+    // stay in the dataset for Search and Drive, but are not rendered here
+    // unless a specific Summer run has explicitly been selected.
+    if(!selected.size && !activeFilterStream){
+      const hasNormalRun=!!(String(sch.garRun||'').trim() || String(sch.recRun||'').trim() || String(sch.fogRun||'').trim());
+      if(!hasNormalRun) return false;
+    }
     if(activeFilterDay&&String(sch.day||'').trim().toLowerCase()!==String(activeFilterDay).trim().toLowerCase()) return false;
     if(activeFilterWeek&&String(sch.weekLetter||'').trim().toUpperCase()!==String(activeFilterWeek).trim().toUpperCase()) return false;
 
@@ -2180,7 +2190,6 @@
     if(activeFilterStream==='SummerRecycling'&&!String(sch.recSummerRun||'').trim()) return false;
     if(activeFilterStream==='FOGO'&&!String(sch.fogRun||'').trim()) return false;
 
-    const selected=selectedMapRuns();
     if(selected.size&&activeFilterStream){
       const runs=visibleStreams().map(st=>streamRunForSite(site,st)).filter(Boolean);
       if(!runs.some(run=>selected.has(mapKey(run)))) return false;
@@ -2320,7 +2329,11 @@
   function drawBoundary(key,sites,i){
     let pts;
 
-    if(customRunBorders[key]?.length>=3){
+    // Never reuse a manually cached border for Summer runs. Older cached
+    // Summer borders can contain points in the wrong order and create long
+    // diagonal lines across the map. Build the Summer boundary fresh from
+    // the currently selected run's own collection points only.
+    if(activeFilterStream!=='SummerRecycling' && customRunBorders[key]?.length>=3){
       pts=customRunBorders[key].map(p=>Array.isArray(p)
         ? {lat:Number(p[0]),lng:Number(p[1])}
         : {lat:Number(p.lat),lng:Number(p.lng)}
@@ -2354,6 +2367,10 @@
       // Only the outermost unique collection points are used.
       pts=buildRunConvexHull(boundaryPoints);
     }
+
+    // A Summer boundary must only ever be drawn for one explicitly selected
+    // Summer run. This prevents any Summer geometry appearing in All Runs.
+    if(activeFilterStream==='SummerRecycling' && !runIsSelected(key)) return;
 
     if(pts.length<3) return;
 
@@ -2642,7 +2659,43 @@
   }
 
   function renderMapData(){
-    updateMapLiveRun(); if(!leafletMap)initLeafletMap();if(!leafletMap)return;mapMarkersLayer.clearLayers();mapHullsLayer.clearLayers();mapSeqLayer.clearLayers();activeMapCircleMarkers.clear();const sites=siteRecords.filter(siteMatchesMapFilters),groups=new Map();sites.forEach(s=>{const r=primaryRun(s);if(r){if(!groups.has(r.key))groups.set(r.key,[]);groups.get(r.key).push(s);}});currentlyShowingRunKeys=Array.from(groups.keys());Array.from(groups.entries()).forEach(([k,ss],i)=>{drawBoundary(k,ss,i);ss.forEach(s=>drawSite(s,k,i));});renderKmzEvidence();updateMapHeaderInfo(sites,groups);if(userCurrentLocation)updateMapTruckPosition();requestAnimationFrame(()=>leafletMap&&leafletMap.invalidateSize()); }
+    updateMapLiveRun();
+    if(!leafletMap) initLeafletMap();
+    if(!leafletMap) return;
+
+    mapMarkersLayer.clearLayers();
+    mapHullsLayer.clearLayers();
+    mapSeqLayer.clearLayers();
+    activeMapCircleMarkers.clear();
+
+    const sites=siteRecords.filter(siteMatchesMapFilters);
+    const groups=new Map();
+    const selected=selectedMapRuns();
+
+    sites.forEach(site=>{
+      const run=primaryRun(site);
+      if(!run) return;
+
+      // Summer data is opt-in on the map: only the explicitly selected
+      // Summer run can create a group, route boundary or bin markers.
+      if(run.type==='summer' &&
+         (activeFilterStream!=='SummerRecycling' || !selected.has(mapKey(run.key)))) return;
+
+      if(!groups.has(run.key)) groups.set(run.key,[]);
+      groups.get(run.key).push(site);
+    });
+
+    currentlyShowingRunKeys=Array.from(groups.keys());
+    Array.from(groups.entries()).forEach(([key,runSites],i)=>{
+      drawBoundary(key,runSites,i);
+      runSites.forEach(site=>drawSite(site,key,i));
+    });
+
+    renderKmzEvidence();
+    updateMapHeaderInfo(sites,groups);
+    if(userCurrentLocation) updateMapTruckPosition();
+    requestAnimationFrame(()=>leafletMap&&leafletMap.invalidateSize());
+  }
   function openRunStyleModal(){
     const list=document.getElementById('runStyleList');
     const subtitle=document.getElementById('runStyleSubtitle');
