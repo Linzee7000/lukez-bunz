@@ -7,6 +7,7 @@
   
   <!-- Leaflet Map CSS -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
   
   <style>
     * {
@@ -1054,7 +1055,78 @@
       cursor: pointer;
       font-size: 14px;
     }
-  </style>
+  
+    /* Clean map driving HUD: small run/direction above large street and speed */
+    .map-driving-hud-clean {
+      position:absolute;
+      left:12px;
+      right:12px;
+      bottom:18px;
+      z-index:800;
+      background:rgba(15,23,42,.94);
+      border:1px solid rgba(148,163,184,.28);
+      border-radius:14px;
+      padding:10px 14px 12px;
+      color:#fff;
+      box-shadow:0 8px 28px rgba(0,0,0,.28);
+      pointer-events:none;
+    }
+    .map-driving-hud-clean .hud-topline{
+      display:flex;
+      justify-content:space-between;
+      align-items:center;
+      gap:12px;
+      font-size:14px;
+      font-weight:700;
+      color:#cbd5e1;
+      margin-bottom:4px;
+    }
+    .map-driving-hud-clean .hud-run{
+      color:#f8fafc;
+      white-space:nowrap;
+      overflow:hidden;
+      text-overflow:ellipsis;
+    }
+    .map-driving-hud-clean .hud-direction{
+      white-space:nowrap;
+      color:#e2e8f0;
+    }
+    .map-driving-hud-clean .hud-mainline{
+      display:grid;
+      grid-template-columns:minmax(0,1fr) auto;
+      align-items:end;
+      gap:16px;
+    }
+    .map-driving-hud-clean .hud-street-large{
+      font-size:28px;
+      font-weight:800;
+      line-height:1.05;
+      white-space:nowrap;
+      overflow:hidden;
+      text-overflow:ellipsis;
+      letter-spacing:.2px;
+    }
+    .map-driving-hud-clean .hud-speed-large{
+      font-size:36px;
+      font-weight:900;
+      line-height:.95;
+      min-width:54px;
+      text-align:right;
+      font-variant-numeric:tabular-nums;
+    }
+    .map-driving-hud-clean .hud-labels{
+      display:grid;
+      grid-template-columns:minmax(0,1fr) auto;
+      gap:16px;
+      margin-top:3px;
+      color:#94a3b8;
+      font-size:11px;
+      font-weight:700;
+      text-transform:uppercase;
+      letter-spacing:.08em;
+    }
+
+</style>
 </head>
 <body>
 
@@ -1150,6 +1222,8 @@
         <div class="map-toolbar-row">
           <button type="button" id="btnBinGpsToggle" class="map-tool-btn active" onclick="toggleBinGpsDots()">🗑️ Bins</button>
           <button type="button" id="btnHouseGpsToggle" class="map-tool-btn" onclick="toggleHouseGpsDots()">🏠 Houses</button>
+          <button type="button" id="btnKmzToggle" class="map-tool-btn" onclick="toggleKmzLayers()">🚛 KMZ</button>
+          <button type="button" class="map-tool-btn" onclick="loadKmzForCurrentRun()">📥 KMZ File</button>
           <button type="button" class="map-tool-btn" onclick="openRunStyleModal()">🎨 Style</button>
           <button type="button" id="btnRoadSnap" class="map-tool-btn" onclick="toggleRoadSnapEditing()">✂️ Edit Boundary</button>
         </div>
@@ -1483,6 +1557,19 @@
   let runColorMap = {};
   let runDotColorMap = {};
   let houseDotsColor = '#8b5cf6';
+
+  /*
+    KMZ evidence is deliberately kept separate from property/bin master data.
+    The selected CSV run remains the authority for which houses belong to a run.
+  */
+  let kmzDataByRun = new Map();
+  let kmzLayersVisible = true;
+  let mapKmzRouteLayer = null;
+  let mapKmzLiftLayer = null;
+  let recyclingLiftColor = '#facc15';
+  let garbageLiftColor = '#dc2626';
+  let fogoLiftColor = '#16a34a';
+
   let currentlyShowingRunKeys = [];
 
   let servicedBinSerials = new Set();
@@ -1585,7 +1672,7 @@
     activeFilterWeek = isSummer ? '' : (weekLetter || '');
     renderActiveFilterChips();
     
-    switchMainTab('map');
+    switchMainTab('search');
   }
 
   function openFilterDrawerModal() {
@@ -2004,20 +2091,14 @@
   function mapColor(k,i=0){ return runColorMap[mapKey(k)]||runColorMap[k]||PRESET_COLORS[i%PRESET_COLORS.length]; }
   function dotColor(k,f){ return runDotColorMap[mapKey(k)]||runDotColorMap[k]||f; }
   function hasBins(site,source,stream){ const obj=source==='solo'?site.soloStreams:site.councilStreams; return (obj?.[stream]||[]).length>0; }
+  function visibleStreams(){ if(activeFilterStream==='SummerRecycling')return ['Recycling']; return activeFilterStream?[activeFilterStream]:['Garbage','Recycling','FOGO']; }
   /*
-    STRICT RUN SEPARATION
+    IMPORTANT: Normal Recycling and Summer Recycling are separate run
+    assignments even though both use the Recycling bin collection.
 
-    Normal Recycling and Summer Recycling are different run systems.
-    A selected normal recycling run must NEVER match recSummerRun.
-    A selected summer recycling run must NEVER match recRun.
-
-    This is deliberately stream-aware rather than searching every run field.
+    Selecting 220A in normal Recycling must compare ONLY recRun.
+    Summer Recycling is compared ONLY against recSummerRun.
   */
-  function visibleStreams(){
-    if(activeFilterStream==='SummerRecycling') return ['Recycling'];
-    return activeFilterStream ? [activeFilterStream] : ['Garbage','Recycling','FOGO'];
-  }
-
   function streamRunForSite(site,stream){
     const s=site?.soloSchedule||{};
 
@@ -2036,89 +2117,414 @@
   function streamMatchesSelectedRun(site,stream){
     const set=selectedMapRuns();
     if(!set.size) return true;
+
     const run=streamRunForSite(site,stream);
+
     return !!run && set.has(mapKey(run));
   }
-
-  function siteMatchesMapFilters(site){
-    const sch=site?.soloSchedule||{};
-
-    if(activeFilterDay &&
-      String(sch.day||'').trim().toLowerCase()!==String(activeFilterDay).trim().toLowerCase()) return false;
-
-    if(activeFilterWeek &&
-      String(sch.weekLetter||'').trim().toUpperCase()!==String(activeFilterWeek).trim().toUpperCase()) return false;
-
-    if(activeFilterStream==='Garbage' && !String(sch.garRun||'').trim()) return false;
-    if(activeFilterStream==='Recycling' && !String(sch.recRun||'').trim()) return false;
-    if(activeFilterStream==='SummerRecycling' && !String(sch.recSummerRun||'').trim()) return false;
-    if(activeFilterStream==='FOGO' && !String(sch.fogRun||'').trim()) return false;
-
+  function siteMatchesMapFilters(site){ const sch=site?.soloSchedule||{};
+    if(activeFilterDay&&String(sch.day||'').trim().toLowerCase()!==String(activeFilterDay).trim().toLowerCase())return false;
+    if(activeFilterWeek&&String(sch.weekLetter||'').trim().toUpperCase()!==String(activeFilterWeek).trim().toUpperCase())return false;
     const selected=selectedMapRuns();
-
-    /*
-      With a stream selected, only the run field belonging to that stream
-      may satisfy the selected run. This prevents Summer 220 from appearing
-      when normal 220A is selected, even if the same property has both fields.
-    */
-    if(selected.size && activeFilterStream){
-      const activeRuns=visibleStreams().map(st=>streamRunForSite(site,st)).filter(Boolean);
-      if(!activeRuns.some(run=>selected.has(mapKey(run)))) return false;
-    } else if(selected.size){
-      if(!getSiteRunEntries(site).some(x=>selected.has(mapKey(x.key)))) return false;
-    }
-
-    const streams=visibleStreams().filter(st=>{
-      if(selected.size) return streamMatchesSelectedRun(site,st);
-      return true;
-    });
-
-    if(activeFilterDataSource==='solo' &&
-      !streams.some(st=>hasBins(site,'solo',st))) return false;
-
-    if(activeFilterDataSource==='council' &&
-      !streams.some(st=>hasBins(site,'council',st))) return false;
-
+    if(selected.size&&!getSiteRunEntries(site).some(x=>selected.has(mapKey(x.key))))return false;
+    if(activeFilterStream==='Garbage'&&!sch.garRun)return false;
+    if(activeFilterStream==='Recycling'&&!sch.recRun)return false;
+    if(activeFilterStream==='SummerRecycling'&&!sch.recSummerRun)return false;
+    if(activeFilterStream==='FOGO'&&!sch.fogRun)return false;
+    const streams=visibleStreams().filter(st=>streamMatchesSelectedRun(site,st));
+    if(selected.size&&!streams.length)return false;
+    if(activeFilterDataSource==='solo'&&!streams.some(st=>hasBins(site,'solo',st)))return false;
+    if(activeFilterDataSource==='council'&&!streams.some(st=>hasBins(site,'council',st)))return false;
     return true;
   }
-  function primaryRun(site){
-    const a=getSiteRunEntries(site);
-    const set=selectedMapRuns();
-
-    if(activeFilterStream==='Garbage'){
-      const run=String(site?.soloSchedule?.garRun||'').trim();
-      return run && (!set.size || set.has(mapKey(run))) ? {key:run,type:'gar'} : null;
-    }
-
-    if(activeFilterStream==='Recycling'){
-      const run=String(site?.soloSchedule?.recRun||'').trim();
-      return run && (!set.size || set.has(mapKey(run))) ? {key:run,type:'rec'} : null;
-    }
-
-    if(activeFilterStream==='SummerRecycling'){
-      const run=String(site?.soloSchedule?.recSummerRun||'').trim();
-      return run && (!set.size || set.has(mapKey(run))) ? {key:run,type:'summer'} : null;
-    }
-
-    if(activeFilterStream==='FOGO'){
-      const run=String(site?.soloSchedule?.fogRun||'').trim();
-      return run && (!set.size || set.has(mapKey(run))) ? {key:run,type:'fog'} : null;
-    }
-
-    if(!a.length) return null;
-    if(set.size) return a.find(x=>set.has(mapKey(x.key)))||null;
-    return a[0];
-  }
+  function primaryRun(site){ const a=getSiteRunEntries(site),set=selectedMapRuns(); if(!a.length)return null; if(set.size)return a.find(x=>set.has(mapKey(x.key)))||null; if(activeFilterStream==='Garbage')return a.find(x=>x.type==='gar')||null; if(activeFilterStream==='Recycling')return a.find(x=>x.type==='rec')||null; if(activeFilterStream==='SummerRecycling')return a.find(x=>x.type==='summer')||null; if(activeFilterStream==='FOGO')return a.find(x=>x.type==='fog')||null; return a[0]; }
   function sourceCoords(site,bin){ const prop=gps(site.lat,site.lng),flip=bin&&gps(bin.lat,bin.lng); if(pinSourceMode==='property')return prop; if(pinSourceMode==='bin')return flip&&metersBetween(prop,flip)<=10?flip:null; /* flip mode: only trust a flip within 10m of its own house */ return flip&&metersBetween(prop,flip)<=10?flip:prop; }
   function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
-  function initLeafletMap(){ if(leafletMap)return; const el=document.getElementById('mainLeafletMap'); if(!el||typeof L==='undefined'){console.error('Leaflet/map container unavailable');return;} leafletMap=L.map(el,{preferCanvas:true,zoomControl:true}).setView([-38.36,144.91],12); osmLayer=L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:20,attribution:'&copy; OpenStreetMap contributors'}).addTo(leafletMap); satLayer=L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{maxZoom:20,attribution:'Tiles &copy; Esri'}); mapHullsLayer=L.layerGroup().addTo(leafletMap); mapSeqLayer=L.layerGroup().addTo(leafletMap); mapMarkersLayer=L.layerGroup().addTo(leafletMap); setTimeout(()=>leafletMap&&leafletMap.invalidateSize(),100); }
+  function initLeafletMap(){ if(leafletMap)return; const el=document.getElementById('mainLeafletMap'); if(!el||typeof L==='undefined'){console.error('Leaflet/map container unavailable');return;} leafletMap=L.map(el,{preferCanvas:true,zoomControl:true}).setView([-38.36,144.91],12); osmLayer=L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:20,attribution:'&copy; OpenStreetMap contributors'}).addTo(leafletMap); satLayer=L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{maxZoom:20,attribution:'Tiles &copy; Esri'}); mapHullsLayer=L.layerGroup().addTo(leafletMap); mapSeqLayer=L.layerGroup().addTo(leafletMap); mapMarkersLayer=L.layerGroup().addTo(leafletMap); mapKmzRouteLayer=L.layerGroup().addTo(leafletMap); mapKmzLiftLayer=L.layerGroup().addTo(leafletMap); setTimeout(()=>leafletMap&&leafletMap.invalidateSize(),100); }
   function updateMapHeaderInfo(sites,groups){ const box=document.getElementById('mapRunColoredBox'),title=document.getElementById('mapRunTitleText'),day=document.getElementById('mapDayText'); if(box){box.classList.remove('hdr-run-gar','hdr-run-rec','hdr-run-summer','hdr-run-fog');box.classList.add(activeFilterStream==='Recycling'?'hdr-run-rec':activeFilterStream==='SummerRecycling'?'hdr-run-summer':activeFilterStream==='FOGO'?'hdr-run-fog':'hdr-run-gar');} if(title)title.textContent=selectedRunsSet.size===1?Array.from(selectedRunsSet)[0]:groups.size===1?Array.from(groups.keys())[0]:'All Runs'; if(day)day.textContent=activeFilterDay?activeFilterDay.toUpperCase():'ALL'; const h=document.getElementById('mapTotalHouses'),b=document.getElementById('mapTotalBins');if(h)h.textContent=sites.length;let n=0;sites.forEach(site=>visibleStreams().filter(st=>streamMatchesSelectedRun(site,st)).forEach(st=>{if(activeFilterDataSource!=='council')n+=(site.soloStreams?.[st]||[]).length;if(activeFilterDataSource!=='solo')n+=(site.councilStreams?.[st]||[]).length;}));if(b)b.textContent=n; }
   function propertyPopup(site){const id=String(site.propId||site.siteId||'');return `<div><b>${esc(cleanStreetAddress(site.addressText)||site.baseStreetLine||'Property')}</b><br><small>${esc(site.suburbLine||'')}</small><br><button type="button" onclick="openPropertyInspectModal('${esc(id)}')">Inspect</button> <button type="button" onclick="promptEditProperty('${esc(id)}')">Edit</button></div>`;}
-  function drawBoundary(key,sites,i){let pts=sites.map(s=>gps(s.lat,s.lng)).filter(Boolean).map(p=>[p.lat,p.lng]);if(customRunBorders[key]?.length>=3)pts=customRunBorders[key].map(p=>Array.isArray(p)?p:[p.lat,p.lng]);if(pts.length<3)return;const poly=L.polygon(pts,{color:mapColor(key,i),weight:2,fillColor:mapColor(key,i),fillOpacity:.1});poly._runGroupKey=key;poly.addTo(mapHullsLayer);}
+  /*
+    Build a real outer boundary instead of joining properties in CSV order.
+    The previous version passed every house GPS point directly into L.polygon(),
+    which created the unwanted criss-cross "dot to dot" lines.
+
+    For automatic borders we use the outer convex hull of the selected run.
+    Custom borders still take priority when they have been manually saved.
+  */
+  function cross(o,a,b){
+    return (a.lat-o.lat)*(b.lng-o.lng) - (a.lng-o.lng)*(b.lat-o.lat);
+  }
+
+  function buildRunConvexHull(points){
+    const unique=[];
+    const seen=new Set();
+
+    points.forEach(p=>{
+      const key=`${Number(p.lat).toFixed(7)},${Number(p.lng).toFixed(7)}`;
+      if(!seen.has(key)){
+        seen.add(key);
+        unique.push({lat:Number(p.lat),lng:Number(p.lng)});
+      }
+    });
+
+    if(unique.length<3) return unique;
+
+    unique.sort((a,b)=>a.lng-b.lng || a.lat-b.lat);
+
+    const lower=[];
+    unique.forEach(p=>{
+      while(lower.length>=2 &&
+        cross(lower[lower.length-2],lower[lower.length-1],p)<=0){
+        lower.pop();
+      }
+      lower.push(p);
+    });
+
+    const upper=[];
+    for(let j=unique.length-1;j>=0;j--){
+      const p=unique[j];
+      while(upper.length>=2 &&
+        cross(upper[upper.length-2],upper[upper.length-1],p)<=0){
+        upper.pop();
+      }
+      upper.push(p);
+    }
+
+    lower.pop();
+    upper.pop();
+    return lower.concat(upper);
+  }
+
+  function drawBoundary(key,sites,i){
+    let pts;
+
+    if(customRunBorders[key]?.length>=3){
+      pts=customRunBorders[key].map(p=>Array.isArray(p)
+        ? {lat:Number(p[0]),lng:Number(p[1])}
+        : {lat:Number(p.lat),lng:Number(p.lng)}
+      ).filter(p=>Number.isFinite(p.lat)&&Number.isFinite(p.lng));
+    } else {
+      const sitePoints=sites
+        .map(s=>gps(s.lat,s.lng))
+        .filter(Boolean);
+
+      // Only use the outer perimeter, never the CSV/property sequence.
+      pts=buildRunConvexHull(sitePoints);
+    }
+
+    if(pts.length<3) return;
+
+    const polygonPoints=pts.map(p=>[p.lat,p.lng]);
+    const poly=L.polygon(polygonPoints,{
+      color:mapColor(key,i),
+      weight:2,
+      fillColor:mapColor(key,i),
+      fillOpacity:.1,
+      lineJoin:'round'
+    });
+
+    poly._runGroupKey=key;
+    poly.addTo(mapHullsLayer);
+  }
+
   function drawSite(site,key,i){const id=String(site.propId||site.siteId||''),c=mapColor(key,i);if(showHouseGpsDots){const p=gps(site.lat,site.lng);if(p)L.circleMarker([p.lat,p.lng],{radius:5,color:'#fff',weight:1.5,fillColor:houseDotsColor||c,fillOpacity:1}).bindPopup(propertyPopup(site)).addTo(mapMarkersLayer);} if(!showBinGpsDots)return;const sources=activeFilterDataSource==='solo'?['solo']:activeFilterDataSource==='council'?['council']:['solo','council'];sources.forEach(src=>visibleStreams().filter(st=>streamMatchesSelectedRun(site,st)).forEach(st=>{const bins=(src==='solo'?site.soloStreams:site.councilStreams)?.[st]||[];bins.forEach((bin,idx)=>{const p=sourceCoords(site,bin);if(!p)return;const serial=String(bin.serial||'').trim().toUpperCase();const markerKey=`${id}|${src}|${st}|${idx}|${serial}`; if(serial&&servicedBinSerials.has(serial))return;const fc=serial&&missedBinSerials.has(serial)?'#ef4444':dotColor(key,c);const m=L.circleMarker([p.lat,p.lng],{radius:7,color:'#fff',weight:2,fillColor:fc,fillOpacity:1}).bindPopup(`<div><b>${esc(serial||'Bin')}</b><br>${esc(st)} · ${esc(bin.size||'240L')}<br><button type="button" onclick="openPropertyInspectModal('${esc(id)}')">Property</button>${src==='solo'?` <button type="button" onclick="promptEditBin('${esc(id)}','${esc(st)}',${idx})">Edit Bin</button>`:''}</div>`).addTo(mapMarkersLayer);activeMapCircleMarkers.set(markerKey,{layer:m,lat:p.lat,lng:p.lng,stream:st,siteId:id,serial});});})); }
-  function renderMapData(){ if(!leafletMap)initLeafletMap();if(!leafletMap)return;mapMarkersLayer.clearLayers();mapHullsLayer.clearLayers();mapSeqLayer.clearLayers();activeMapCircleMarkers.clear();const sites=siteRecords.filter(siteMatchesMapFilters),groups=new Map();sites.forEach(s=>{const r=primaryRun(s);if(r){if(!groups.has(r.key))groups.set(r.key,[]);groups.get(r.key).push(s);}});currentlyShowingRunKeys=Array.from(groups.keys());Array.from(groups.entries()).forEach(([k,ss],i)=>{drawBoundary(k,ss,i);ss.forEach(s=>drawSite(s,k,i));});updateMapHeaderInfo(sites,groups);if(userCurrentLocation)updateMapTruckPosition();requestAnimationFrame(()=>leafletMap&&leafletMap.invalidateSize()); }
-  function openRunStyleModal(){const list=document.getElementById('runStyleList');if(!list)return;const runs=Array.from(new Set(siteRecords.flatMap(getSiteRunEntries).map(x=>x.key))).sort();list.innerHTML=`<div class="run-style-row"><b>House GPS Dots</b><input id="styleHouseDotsColor" type="color" value="${houseDotsColor||'#8b5cf6'}"></div>`+runs.map((k,i)=>`<div class="run-style-row"><b>${esc(k)}</b><label>Boundary <input class="run-border-style-input" data-run="${esc(k)}" type="color" value="${mapColor(k,i)}"></label><label>Pins <input class="run-dot-style-input" data-run="${esc(k)}" type="color" value="${dotColor(k,mapColor(k,i))}"></label></div>`).join('');openModal('runStyleModal');}
-  async function saveAndApplyRunStyles(){const h=document.getElementById('styleHouseDotsColor');if(h)houseDotsColor=h.value;document.querySelectorAll('.run-border-style-input').forEach(x=>runColorMap[mapKey(x.dataset.run)]=x.value);document.querySelectorAll('.run-dot-style-input').forEach(x=>runDotColorMap[mapKey(x.dataset.run)]=x.value);await saveToDB('runColorMap',runColorMap);await saveToDB('runDotColorMap',runDotColorMap);await saveToDB('houseDotsColor',houseDotsColor);closeModal('runStyleModal');renderMapData();}
+  /*
+    KMZ IMPORT
+    ----------
+    WasteTrak KMZ files are read locally in the browser. Nothing is uploaded.
+    We extract telemetry.kml, then separately parse:
+      - Route geometries (truck movement evidence)
+      - numbered/individual placemarks inside the Bins folder (lift evidence)
+    KMZ evidence never adds properties to a run.
+  */
+  function selectedSingleMapRun(){
+    const runs=Array.from(selectedMapRuns());
+    return runs.length===1 ? runs[0] : '';
+  }
+
+  function loadKmzForCurrentRun(){
+    const run=selectedSingleMapRun();
+    if(!run){
+      alert('Select exactly one run before loading a KMZ file. The KMZ will then be kept under that run only.');
+      return;
+    }
+    const input=document.getElementById('kmzFileInput');
+    if(!input) return;
+    input.dataset.run=run;
+    input.value='';
+    input.click();
+  }
+
+  function normaliseKmzText(text){
+    return String(text||'')
+      .replace(/<br\s*\/?>/gi,'\n')
+      .replace(/&nbsp;/gi,' ')
+      .replace(/<[^>]+>/g,' ')
+      .replace(/&amp;/g,'&')
+      .replace(/&lt;/g,'<')
+      .replace(/&gt;/g,'>')
+      .replace(/\s+/g,' ')
+      .trim();
+  }
+
+  function parseKmzTime(text){
+    const raw=String(text||'').trim();
+    if(!raw) return null;
+    // Handles WasteTrak forms such as:
+    // 2026/08/26 19:59:00 +00:00
+    // 2026/08/28 05:55:00 AEST
+    const isoish=raw.replace(/^(\d{4})\/(\d{2})\/(\d{2})/, '$1-$2-$3');
+    const d=new Date(isoish);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+
+  function parseCoordinateText(text){
+    const out=[];
+    String(text||'').trim().split(/\s+/).forEach(token=>{
+      const p=token.split(',');
+      if(p.length>=2){
+        const lng=Number(p[0]), lat=Number(p[1]);
+        if(Number.isFinite(lat)&&Number.isFinite(lng)) out.push({lat,lng});
+      }
+    });
+    return out;
+  }
+
+  function placemarkFolderName(pm){
+    let node=pm.parentElement;
+    while(node){
+      if(node.localName==='Folder'){
+        const n=Array.from(node.children).find(c=>c.localName==='name');
+        if(n) return (n.textContent||'').trim();
+      }
+      node=node.parentElement;
+    }
+    return '';
+  }
+
+  function extractKmzKml(kmlText, fileName){
+    const xml=new DOMParser().parseFromString(kmlText,'application/xml');
+    if(xml.querySelector('parsererror')) throw new Error('Could not parse KML');
+
+    const placemarks=Array.from(xml.getElementsByTagNameNS('*','Placemark'));
+    const routes=[];
+    const lifts=[];
+
+    placemarks.forEach((pm,index)=>{
+      const nameNode=Array.from(pm.children).find(c=>c.localName==='name');
+      const name=(nameNode?.textContent||'').trim();
+      const folder=placemarkFolderName(pm);
+      const descNode=Array.from(pm.children).find(c=>c.localName==='description');
+      const descRaw=descNode?.textContent||'';
+      const desc=normaliseKmzText(descRaw);
+
+      const lineCoords=[];
+      Array.from(pm.getElementsByTagNameNS('*','LineString')).forEach(ls=>{
+        const c=Array.from(ls.getElementsByTagNameNS('*','coordinates'))[0];
+        if(c) lineCoords.push(...parseCoordinateText(c.textContent));
+      });
+      if(lineCoords.length>=2){
+        routes.push({name:name||folder||`Route ${routes.length+1}`, coordinates:lineCoords});
+      }
+
+      const pointNode=Array.from(pm.getElementsByTagNameNS('*','Point'))[0];
+      const coordNode=pointNode ? Array.from(pointNode.getElementsByTagNameNS('*','coordinates'))[0] : null;
+      if(coordNode){
+        const coords=parseCoordinateText(coordNode.textContent);
+        if(coords.length){
+          const isBinFolder=/\bbins?\b/i.test(folder) || /\bBin Lift time\b/i.test(descRaw);
+          if(isBinFolder){
+            const timeMatch=String(descRaw).match(/Bin\s*Lift\s*time\s*:?\s*(?:<[^>]*>|\s)*([0-9]{4}[\/-][0-9]{2}[\/-][0-9]{2}[^\r\n<]*)/i);
+            const timestampRaw=(timeMatch?.[1]||'').trim();
+            lifts.push({
+              sequence:Number(name)||index+1,
+              name:name||String(index+1),
+              lat:coords[0].lat,
+              lng:coords[0].lng,
+              timestampRaw,
+              timestamp:parseKmzTime(timestampRaw),
+              description:desc
+            });
+          }
+        }
+      }
+    });
+
+    lifts.sort((a,b)=>{
+      const ta=a.timestamp?.getTime()||Infinity;
+      const tb=b.timestamp?.getTime()||Infinity;
+      if(ta!==tb) return ta-tb;
+      return (a.sequence||0)-(b.sequence||0);
+    });
+
+    lifts.forEach((lift,i)=>{
+      lift.previous=i>0?lifts[i-1]:null;
+      lift.next=i<lifts.length-1?lifts[i+1]:null;
+      if(lift.previous){
+        lift.distanceFromPrevious=Math.round(
+          metersBetween({lat:lift.previous.lat,lng:lift.previous.lng},{lat:lift.lat,lng:lift.lng})
+        );
+        lift.bearingFromPrevious=getBearing(
+          lift.previous.lat,lift.previous.lng,lift.lat,lift.lng
+        );
+      } else {
+        lift.distanceFromPrevious=null;
+        lift.bearingFromPrevious=null;
+      }
+    });
+
+    return {fileName, routes, lifts, importedAt:new Date().toISOString()};
+  }
+
+  async function handleKmzFiles(files, runKey){
+    if(!files?.length || !runKey) return;
+    if(typeof JSZip==='undefined'){
+      alert('KMZ support could not start because JSZip failed to load. Check your internet connection and reload the page.');
+      return;
+    }
+
+    const imported=[];
+    for(const file of Array.from(files)){
+      const zip=await JSZip.loadAsync(file);
+      const kmlEntry=Object.values(zip.files).find(f=>/telemetry\.kml$/i.test(f.name))
+        || Object.values(zip.files).find(f=>/\.kml$/i.test(f.name));
+      if(!kmlEntry) throw new Error(`${file.name}: no KML file found`);
+      const kml=await kmlEntry.async('text');
+      imported.push(extractKmzKml(kml,file.name));
+    }
+
+    const key=mapKey(runKey);
+    const existing=kmzDataByRun.get(key)||{run:runKey,files:[]};
+    existing.files.push(...imported);
+    kmzDataByRun.set(key,existing);
+    renderMapData();
+
+    const totalLifts=existing.files.reduce((n,f)=>n+f.lifts.length,0);
+    alert(`KMZ loaded for ${existing.run}: ${imported.length} file(s), ${totalLifts} bin lift point(s).`);
+  }
+
+  function kmzColorForActiveStream(){
+    if(activeFilterStream==='Garbage') return garbageLiftColor;
+    if(activeFilterStream==='FOGO') return fogoLiftColor;
+    return recyclingLiftColor;
+  }
+
+  function renderKmzEvidence(){
+    if(!mapKmzRouteLayer||!mapKmzLiftLayer) return;
+    mapKmzRouteLayer.clearLayers();
+    mapKmzLiftLayer.clearLayers();
+
+    if(!kmzLayersVisible) return;
+
+    const runs=Array.from(selectedMapRuns());
+    if(runs.length!==1) return;
+
+    const data=kmzDataByRun.get(mapKey(runs[0]));
+    if(!data) return;
+
+    const liftColor=kmzColorForActiveStream();
+
+    data.files.forEach(file=>{
+      file.routes.forEach(route=>{
+        L.polyline(route.coordinates.map(p=>[p.lat,p.lng]),{
+          color:'#2563eb', weight:3, opacity:.55, dashArray:'6 6'
+        }).bindPopup(`<b>Truck route</b><br>${esc(file.fileName)}<br>${esc(route.name)}`)
+          .addTo(mapKmzRouteLayer);
+      });
+
+      file.lifts.forEach(lift=>{
+        const marker=L.circleMarker([lift.lat,lift.lng],{
+          radius:5.5,
+          color:'#ffffff',
+          weight:1.5,
+          fillColor:liftColor,
+          fillOpacity:.95
+        });
+
+        const previousText=lift.previous
+          ? `${lift.distanceFromPrevious ?? '?'} m from previous`
+          : 'First recorded lift';
+
+        const headingText=Number.isFinite(lift.bearingFromPrevious)
+          ? `${Math.round(lift.bearingFromPrevious)}° ${getCardinalDirection(lift.bearingFromPrevious)}`
+          : '—';
+
+        marker.bindPopup(`
+          <div style="min-width:190px">
+            <b>${esc(activeFilterStream||'Bin')} lift #${esc(lift.name)}</b><br>
+            <b>Time:</b> ${esc(lift.timestampRaw||'Not supplied')}<br>
+            <b>Direction:</b> ${esc(headingText)}<br>
+            <b>Sequence:</b> ${esc(previousText)}<br>
+            <button type="button" onclick="inspectKmzLift(${lift.lat},${lift.lng},'${esc(mapKey(runs[0]))}',${Number(lift.sequence)||0})">Find nearby houses</button>
+          </div>
+        `).addTo(mapKmzLiftLayer);
+      });
+    });
+  }
+
+  function inspectKmzLift(lat,lng,runKey,sequence){
+    const run=kmzDataByRun.get(runKey);
+    if(!run) return;
+    let target=null;
+    for(const file of run.files){
+      target=file.lifts.find(x=>Number(x.sequence)===Number(sequence) && Math.abs(x.lat-lat)<1e-9 && Math.abs(x.lng-lng)<1e-9);
+      if(target) break;
+    }
+    if(!target) return;
+
+    const candidates=siteRecords
+      .filter(siteMatchesMapFilters)
+      .map(site=>{
+        const p=gps(site.lat,site.lng);
+        if(!p) return null;
+        return {site,distance:metersBetween({lat,lng},p)};
+      })
+      .filter(Boolean)
+      .sort((a,b)=>a.distance-b.distance)
+      .slice(0,8);
+
+    const html=candidates.length
+      ? candidates.map((x,i)=>`${i+1}. <b>${esc(x.site.addressText)}</b> — ${Math.round(x.distance)} m${x.site.runFlags?`<br><small>${esc(x.site.runFlags)}</small>`:''}`).join('<hr style="border:0;border-top:1px solid #ddd">')
+      : 'No currently filtered houses have GPS coordinates.';
+
+    alert(`Nearest currently filtered houses to KMZ lift #${sequence}:\n\n` +
+      candidates.map((x,i)=>`${i+1}. ${x.site.addressText} — ${Math.round(x.distance)} m${x.site.runFlags?` (${x.site.runFlags})`:''}`).join('\n'));
+  }
+
+  function toggleKmzLayers(){
+    kmzLayersVisible=!kmzLayersVisible;
+    const b=document.getElementById('btnKmzToggle');
+    if(b) b.classList.toggle('active',kmzLayersVisible);
+    renderMapData();
+  }
+
+  function renderMapData(){ if(!leafletMap)initLeafletMap();if(!leafletMap)return;mapMarkersLayer.clearLayers();mapHullsLayer.clearLayers();mapSeqLayer.clearLayers();activeMapCircleMarkers.clear();const sites=siteRecords.filter(siteMatchesMapFilters),groups=new Map();sites.forEach(s=>{const r=primaryRun(s);if(r){if(!groups.has(r.key))groups.set(r.key,[]);groups.get(r.key).push(s);}});currentlyShowingRunKeys=Array.from(groups.keys());Array.from(groups.entries()).forEach(([k,ss],i)=>{drawBoundary(k,ss,i);ss.forEach(s=>drawSite(s,k,i));});renderKmzEvidence();updateMapHeaderInfo(sites,groups);if(userCurrentLocation)updateMapTruckPosition();requestAnimationFrame(()=>leafletMap&&leafletMap.invalidateSize()); }
+  function openRunStyleModal(){
+    const list=document.getElementById('runStyleList');
+    if(!list)return;
+    const selected=Array.from(selectedMapRuns());
+    const runs=selected.length ? selected : currentlyShowingRunKeys;
+    const streamRows=`<div class="run-style-row"><b>House GPS</b><input id="styleHouseDotsColor" type="color" value="${houseDotsColor||'#8b5cf6'}"></div>
+      <div class="run-style-row"><b>Recycling lift</b><input id="styleRecyclingLiftColor" type="color" value="${recyclingLiftColor}"></div>
+      <div class="run-style-row"><b>Garbage lift</b><input id="styleGarbageLiftColor" type="color" value="${garbageLiftColor}"></div>
+      <div class="run-style-row"><b>FOGO lift</b><input id="styleFogoLiftColor" type="color" value="${fogoLiftColor}"></div>`;
+    list.innerHTML=streamRows+(runs.length
+      ? runs.map((k,i)=>`<div class="run-style-row"><b>${esc(k)}</b><label>Boundary <input class="run-border-style-input" data-run="${esc(k)}" type="color" value="${mapColor(k,i)}"></label><label>Bin pins <input class="run-dot-style-input" data-run="${esc(k)}" type="color" value="${dotColor(k,mapColor(k,i))}"></label></div>`).join('')
+      : '<div style="font-size:13px;color:#64748b">Select a run to customise that run.</div>');
+    openModal('runStyleModal');
+  }
+  async function saveAndApplyRunStyles(){
+    const h=document.getElementById('styleHouseDotsColor');if(h)houseDotsColor=h.value;
+    const r=document.getElementById('styleRecyclingLiftColor');if(r)recyclingLiftColor=r.value;
+    const g=document.getElementById('styleGarbageLiftColor');if(g)garbageLiftColor=g.value;
+    const f=document.getElementById('styleFogoLiftColor');if(f)fogoLiftColor=f.value;
+    document.querySelectorAll('.run-border-style-input').forEach(x=>runColorMap[mapKey(x.dataset.run)]=x.value);
+    document.querySelectorAll('.run-dot-style-input').forEach(x=>runDotColorMap[mapKey(x.dataset.run)]=x.value);
+    await saveToDB('runColorMap',runColorMap);await saveToDB('runDotColorMap',runDotColorMap);
+    await saveToDB('houseDotsColor',houseDotsColor);
+    await saveToDB('kmzLiftColors',{recyclingLiftColor,garbageLiftColor,fogoLiftColor});
+    closeModal('runStyleModal');renderMapData();
+  }
 
   function fitMapToVisibleRuns() {
     if (!leafletMap) return;
@@ -2131,6 +2537,17 @@
     } else if (userCurrentLocation) {
       leafletMap.setView([userCurrentLocation.lat, userCurrentLocation.lng], 16);
     }
+  }
+
+
+  function updateMapDrivingHud(){
+    const runEl=document.getElementById('mapActiveRun');
+    if(!runEl) return;
+    const runs=Array.from(selectedMapRuns ? selectedMapRuns() : []);
+    const run=runs.length===1 ? runs[0] : (runs.length>1 ? `${runs.length} runs selected` : 'No run selected');
+    const stream=activeFilterStream||'';
+    const icon=stream==='Recycling'||stream==='SummerRecycling'?'♻️':stream==='Garbage'?'🗑️':stream==='FOGO'?'🌿':'📍';
+    runEl.textContent = run==='No run selected' ? run : `${icon} ${run}`;
   }
 
   /* Reliable Robust GPS Watcher */
@@ -2171,6 +2588,7 @@
       const cardinal = getCardinalDirection(lastValidHeading);
       mapHeadingEl.innerText = `🧭 ${cardinal} ${lastValidHeading}°`;
     }
+    updateMapDrivingHud();
 
     updateMapTruckPosition();
 
@@ -3141,6 +3559,17 @@
   }
 
   window.addEventListener('DOMContentLoaded', async () => {
+    const kmzInput=document.getElementById('kmzFileInput');
+    if(kmzInput){
+      kmzInput.addEventListener('change',async e=>{
+        try{
+          await handleKmzFiles(e.target.files,e.target.dataset.run||selectedSingleMapRun());
+        }catch(err){
+          console.error(err);
+          alert('KMZ import failed: '+(err.message||err));
+        }
+      });
+    }
     startLiveLocationWatcher();
 
     const cached = await loadFromDB("masterRecords");
@@ -3149,12 +3578,14 @@
     const cachedRunColors = await loadFromDB("runColorMap");
     const cachedDotColors = await loadFromDB("runDotColorMap");
     const cachedHouseDotsColor = await loadFromDB("houseDotsColor");
+    const cachedKmzLiftColors = await loadFromDB("kmzLiftColors");
 
     if (cachedEdits) masterEditsLog = cachedEdits;
     if (cachedBorders) customRunBorders = cachedBorders;
     if (cachedRunColors) runColorMap = cachedRunColors;
     if (cachedDotColors) runDotColorMap = cachedDotColors;
     if (cachedHouseDotsColor) houseDotsColor = cachedHouseDotsColor;
+    if (cachedKmzLiftColors) { recyclingLiftColor=cachedKmzLiftColors.recyclingLiftColor||recyclingLiftColor; garbageLiftColor=cachedKmzLiftColors.garbageLiftColor||garbageLiftColor; fogoLiftColor=cachedKmzLiftColors.fogoLiftColor||fogoLiftColor; }
 
     if (cached && cached.length > 0) {
       siteRecords = mergeEditsIntoRecords(cached, masterEditsLog);
@@ -3339,5 +3770,6 @@
   }
 </script>
 
+  <input id="kmzFileInput" type="file" accept=".kmz,application/vnd.google-earth.kmz,application/zip" multiple style="display:none">
 </body>
 </html>
