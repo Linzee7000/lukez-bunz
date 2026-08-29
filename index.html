@@ -2072,7 +2072,90 @@
   function initLeafletMap(){ if(leafletMap)return; const el=document.getElementById('mainLeafletMap'); if(!el||typeof L==='undefined'){console.error('Leaflet/map container unavailable');return;} leafletMap=L.map(el,{preferCanvas:true,zoomControl:true}).setView([-38.36,144.91],12); osmLayer=L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:20,attribution:'&copy; OpenStreetMap contributors'}).addTo(leafletMap); satLayer=L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{maxZoom:20,attribution:'Tiles &copy; Esri'}); mapHullsLayer=L.layerGroup().addTo(leafletMap); mapSeqLayer=L.layerGroup().addTo(leafletMap); mapMarkersLayer=L.layerGroup().addTo(leafletMap); mapKmzRouteLayer=L.layerGroup().addTo(leafletMap); mapKmzLiftLayer=L.layerGroup().addTo(leafletMap); setTimeout(()=>leafletMap&&leafletMap.invalidateSize(),100); }
   function updateMapHeaderInfo(sites,groups){ const box=document.getElementById('mapRunColoredBox'),title=document.getElementById('mapRunTitleText'),day=document.getElementById('mapDayText'); if(box){box.classList.remove('hdr-run-gar','hdr-run-rec','hdr-run-summer','hdr-run-fog');box.classList.add(activeFilterStream==='Recycling'?'hdr-run-rec':activeFilterStream==='SummerRecycling'?'hdr-run-summer':activeFilterStream==='FOGO'?'hdr-run-fog':'hdr-run-gar');} if(title)title.textContent=selectedRunsSet.size===1?Array.from(selectedRunsSet)[0]:groups.size===1?Array.from(groups.keys())[0]:'All Runs'; if(day)day.textContent=activeFilterDay?activeFilterDay.toUpperCase():'ALL'; const h=document.getElementById('mapTotalHouses'),b=document.getElementById('mapTotalBins');if(h)h.textContent=sites.length;let n=0;sites.forEach(site=>visibleStreams().filter(st=>streamMatchesSelectedRun(site,st)).forEach(st=>{if(activeFilterDataSource!=='council')n+=(site.soloStreams?.[st]||[]).length;if(activeFilterDataSource!=='solo')n+=(site.councilStreams?.[st]||[]).length;}));if(b)b.textContent=n; }
   function propertyPopup(site){const id=String(site.propId||site.siteId||'');return `<div><b>${esc(cleanStreetAddress(site.addressText)||site.baseStreetLine||'Property')}</b><br><small>${esc(site.suburbLine||'')}</small><br><button type="button" onclick="openPropertyInspectModal('${esc(id)}')">Inspect</button> <button type="button" onclick="promptEditProperty('${esc(id)}')">Edit</button></div>`;}
-  function drawBoundary(key,sites,i){let pts=sites.map(s=>gps(s.lat,s.lng)).filter(Boolean).map(p=>[p.lat,p.lng]);if(customRunBorders[key]?.length>=3)pts=customRunBorders[key].map(p=>Array.isArray(p)?p:[p.lat,p.lng]);if(pts.length<3)return;const poly=L.polygon(pts,{color:mapColor(key,i),weight:2,fillColor:mapColor(key,i),fillOpacity:.1});poly._runGroupKey=key;poly.addTo(mapHullsLayer);}
+  /*
+    Build a real outer boundary instead of joining properties in CSV order.
+    The previous version passed every house GPS point directly into L.polygon(),
+    which created the unwanted criss-cross "dot to dot" lines.
+
+    For automatic borders we use the outer convex hull of the selected run.
+    Custom borders still take priority when they have been manually saved.
+  */
+  function cross(o,a,b){
+    return (a.lat-o.lat)*(b.lng-o.lng) - (a.lng-o.lng)*(b.lat-o.lat);
+  }
+
+  function buildRunConvexHull(points){
+    const unique=[];
+    const seen=new Set();
+
+    points.forEach(p=>{
+      const key=`${Number(p.lat).toFixed(7)},${Number(p.lng).toFixed(7)}`;
+      if(!seen.has(key)){
+        seen.add(key);
+        unique.push({lat:Number(p.lat),lng:Number(p.lng)});
+      }
+    });
+
+    if(unique.length<3) return unique;
+
+    unique.sort((a,b)=>a.lng-b.lng || a.lat-b.lat);
+
+    const lower=[];
+    unique.forEach(p=>{
+      while(lower.length>=2 &&
+        cross(lower[lower.length-2],lower[lower.length-1],p)<=0){
+        lower.pop();
+      }
+      lower.push(p);
+    });
+
+    const upper=[];
+    for(let j=unique.length-1;j>=0;j--){
+      const p=unique[j];
+      while(upper.length>=2 &&
+        cross(upper[upper.length-2],upper[upper.length-1],p)<=0){
+        upper.pop();
+      }
+      upper.push(p);
+    }
+
+    lower.pop();
+    upper.pop();
+    return lower.concat(upper);
+  }
+
+  function drawBoundary(key,sites,i){
+    let pts;
+
+    if(customRunBorders[key]?.length>=3){
+      pts=customRunBorders[key].map(p=>Array.isArray(p)
+        ? {lat:Number(p[0]),lng:Number(p[1])}
+        : {lat:Number(p.lat),lng:Number(p.lng)}
+      ).filter(p=>Number.isFinite(p.lat)&&Number.isFinite(p.lng));
+    } else {
+      const sitePoints=sites
+        .map(s=>gps(s.lat,s.lng))
+        .filter(Boolean);
+
+      // Only use the outer perimeter, never the CSV/property sequence.
+      pts=buildRunConvexHull(sitePoints);
+    }
+
+    if(pts.length<3) return;
+
+    const polygonPoints=pts.map(p=>[p.lat,p.lng]);
+    const poly=L.polygon(polygonPoints,{
+      color:mapColor(key,i),
+      weight:2,
+      fillColor:mapColor(key,i),
+      fillOpacity:.1,
+      lineJoin:'round'
+    });
+
+    poly._runGroupKey=key;
+    poly.addTo(mapHullsLayer);
+  }
+
   function drawSite(site,key,i){const id=String(site.propId||site.siteId||''),c=mapColor(key,i);if(showHouseGpsDots){const p=gps(site.lat,site.lng);if(p)L.circleMarker([p.lat,p.lng],{radius:5,color:'#fff',weight:1.5,fillColor:houseDotsColor||c,fillOpacity:1}).bindPopup(propertyPopup(site)).addTo(mapMarkersLayer);} if(!showBinGpsDots)return;const sources=activeFilterDataSource==='solo'?['solo']:activeFilterDataSource==='council'?['council']:['solo','council'];sources.forEach(src=>visibleStreams().filter(st=>streamMatchesSelectedRun(site,st)).forEach(st=>{const bins=(src==='solo'?site.soloStreams:site.councilStreams)?.[st]||[];bins.forEach((bin,idx)=>{const p=sourceCoords(site,bin);if(!p)return;const serial=String(bin.serial||'').trim().toUpperCase();const markerKey=`${id}|${src}|${st}|${idx}|${serial}`; if(serial&&servicedBinSerials.has(serial))return;const fc=serial&&missedBinSerials.has(serial)?'#ef4444':dotColor(key,c);const m=L.circleMarker([p.lat,p.lng],{radius:7,color:'#fff',weight:2,fillColor:fc,fillOpacity:1}).bindPopup(`<div><b>${esc(serial||'Bin')}</b><br>${esc(st)} · ${esc(bin.size||'240L')}<br><button type="button" onclick="openPropertyInspectModal('${esc(id)}')">Property</button>${src==='solo'?` <button type="button" onclick="promptEditBin('${esc(id)}','${esc(st)}',${idx})">Edit Bin</button>`:''}</div>`).addTo(mapMarkersLayer);activeMapCircleMarkers.set(markerKey,{layer:m,lat:p.lat,lng:p.lng,stream:st,siteId:id,serial});});})); }
   /*
     KMZ IMPORT
