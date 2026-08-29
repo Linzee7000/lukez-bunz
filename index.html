@@ -1568,7 +1568,7 @@
     openModal('filterOptionsModal');
   }
 
-  /* Strict Isolation: Summer runs ONLY appear when SummerRecycling is active */
+  /* Strict Run Identification: Summer Runs Excluded from General & Recycle */
   function populateModalRunsChecklist() {
     const container = document.getElementById('modalRunsChecklistGrid');
     if (!container || siteRecords.length === 0) return;
@@ -1582,16 +1582,29 @@
       if (dayVal && !sch.day.toLowerCase().includes(dayVal)) return;
 
       if (!streamVal || streamVal === 'Garbage') {
-        if (sch.garRun && !sch.garRun.toUpperCase().includes('SUMMER')) runsMap.set(sch.garRun.trim(), 'gar');
+        if (sch.garRun && !sch.garRun.toLowerCase().includes('summer')) {
+          runsMap.set(sch.garRun.trim(), 'gar');
+        }
       }
-      if (!streamVal || streamVal === 'Recycling') {
-        if (sch.recRun && !sch.recRun.toUpperCase().includes('SUMMER')) runsMap.set(sch.recRun.trim(), 'rec');
+      if (streamVal === 'Recycling') {
+        if (sch.recRun && !sch.recRun.toLowerCase().includes('summer')) {
+          runsMap.set(sch.recRun.trim(), 'rec');
+        }
       }
       if (streamVal === 'SummerRecycling') {
-        if (sch.recSummerRun) runsMap.set(sch.recSummerRun.trim(), 'summer');
+        if (sch.recSummerRun) {
+          runsMap.set(sch.recSummerRun.trim(), 'summer');
+        }
       }
       if (!streamVal || streamVal === 'FOGO') {
-        if (sch.fogRun && !sch.fogRun.toUpperCase().includes('SUMMER')) runsMap.set(sch.fogRun.trim(), 'fog');
+        if (sch.fogRun && !sch.fogRun.toLowerCase().includes('summer')) {
+          runsMap.set(sch.fogRun.trim(), 'fog');
+        }
+      }
+      if (!streamVal) {
+        if (sch.recRun && !sch.recRun.toLowerCase().includes('summer')) {
+          runsMap.set(sch.recRun.trim(), 'rec');
+        }
       }
     });
 
@@ -1723,8 +1736,7 @@
           leafletMap.invalidateSize();
         }
         renderMapData();
-        fitMapToVisibleRuns();
-      }, 150);
+      }, 100);
     }
   }
 
@@ -2064,7 +2076,7 @@
   }
 
   function getCardinalDirection(deg) {
-    const sectors = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+    const sectors = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'NW', 'NW'];
     return sectors[Math.round(deg / 45) % 8];
   }
 
@@ -2197,6 +2209,7 @@
     const mapLiveNextBin = document.getElementById('mapLiveNextBin');
     if (mapLiveStreet) mapLiveStreet.innerText = liveStreetName;
     
+    // Format Next Bin strictly matching the filtered stream and run
     if (mapLiveNextBin && upcoming.length > 0) {
       const firstUpcomingSite = upcoming[0].site;
       let relevantStreams = ['Garbage', 'Recycling', 'FOGO'];
@@ -2520,6 +2533,7 @@
     openModal('binEditModal');
   }
 
+  /* Core Mutators: Synchronous In-Memory Commit + IndexedDB + Apps Script Push */
   async function saveBinForm(e) {
     e.preventDefault();
     const propId = document.getElementById('modalSitePropId').value;
@@ -2579,10 +2593,10 @@
 
     siteRecords.forEach(s => {
       const sch = s.soloSchedule;
-      if (sch.garRun) garRuns.add(sch.garRun.trim());
-      if (sch.recRun) recRuns.add(sch.recRun.trim());
+      if (sch.garRun && !sch.garRun.toLowerCase().includes('summer')) garRuns.add(sch.garRun.trim());
+      if (sch.recRun && !sch.recRun.toLowerCase().includes('summer')) recRuns.add(sch.recRun.trim());
       if (sch.recSummerRun) recSummerRuns.add(sch.recSummerRun.trim());
-      if (sch.fogRun) fogRuns.add(sch.fogRun.trim());
+      if (sch.fogRun && !sch.fogRun.toLowerCase().includes('summer')) fogRuns.add(sch.fogRun.trim());
     });
 
     const populateSelect = (elId, runsSet, currentVal) => {
@@ -2710,169 +2724,7 @@
   function openModal(id) { document.getElementById(id).classList.add('open'); }
   function closeModal(id) { document.getElementById(id).classList.remove('open'); }
 
-  /* Open Inspection Modal */
-  function openPropertyInspectModal(propId) {
-    const site = siteRecords.find(s => String(s.propId || s.siteId) === String(propId));
-    if (!site) return;
-
-    document.getElementById('inspectPropAddress').innerText = (site.baseStreetLine || site.addressText.split(',')[0]).trim();
-    const sch = site.soloSchedule;
-
-    let strayAlertHtml = '';
-    const streetNeighbors = site.baseStreetLine ? (streetHashIndex.get(site.baseStreetLine.trim().toLowerCase()) || []) : [];
-    if (streetNeighbors.length >= 4) {
-      const tally = {};
-      streetNeighbors.forEach(n => {
-        const r = n.soloSchedule.recRun || n.soloSchedule.garRun || '';
-        if (r) tally[r] = (tally[r] || 0) + 1;
-      });
-      let domRun = '';
-      let maxC = 0;
-      Object.keys(tally).forEach(k => { if (tally[k] > maxC) { maxC = tally[k]; domRun = k; } });
-      const currentRun = sch.recRun || sch.garRun || '';
-      if (domRun && currentRun && domRun !== currentRun && maxC >= streetNeighbors.length * 0.7) {
-        strayAlertHtml = `
-          <div class="stray-bin-box">
-            <div>⚠️ Stray Bin: ${maxC} of ${streetNeighbors.length} bins on this street belong to <b>${domRun}</b>.</div>
-            <button type="button" class="stray-fix-btn" onclick="applyHarmonization('${site.propId || site.siteId}', '${domRun}')">⚡ Harmonize Street Run to ${domRun}</button>
-          </div>
-        `;
-      }
-    }
-
-    const councilBinsList = [
-      ...(site.councilStreams.Garbage || []),
-      ...(site.councilStreams.Recycling || []),
-      ...(site.councilStreams.FOGO || [])
-    ];
-    const councilSerialsSet = new Set(councilBinsList.map(cb => cb.serial.toUpperCase()));
-
-    let hasAnyBins = false;
-    const streamBoxesHtml = SOLO_STREAMS.map(st => {
-      const soloBins = site.soloStreams[st.key] || [];
-      const councilBins = site.councilStreams ? (site.councilStreams[st.key] || []) : [];
-      if (soloBins.length === 0 && councilBins.length === 0) return '';
-      hasAnyBins = true;
-
-      let soloRunBadge = '';
-      if (st.key === 'Garbage' && sch.garRun) {
-        soloRunBadge = `<span class="hdr-run-badge hdr-run-gar" onclick="event.stopPropagation(); closeModal('propInspectModal'); openRunDirectlyOnMap('${sch.garRun}', 'Garbage', '${sch.day}', '${sch.weekLetter || ''}', false)">🗑️ ${sch.garRun}</span>`;
-      }
-      if (st.key === 'Recycling' && sch.recRun) {
-        soloRunBadge = `<span class="hdr-run-badge hdr-run-rec" onclick="event.stopPropagation(); closeModal('propInspectModal'); openRunDirectlyOnMap('${sch.recRun}', 'Recycling', '${sch.day}', '${sch.weekLetter || ''}', false)">♻️ ${sch.recRun}</span>`;
-      }
-      if (st.key === 'Recycling' && sch.recSummerRun) {
-        soloRunBadge += ` <span class="hdr-run-badge hdr-run-summer" onclick="event.stopPropagation(); closeModal('propInspectModal'); openRunDirectlyOnMap('${sch.recSummerRun}', 'SummerRecycling', '${sch.day}', '', true)">☀️ ${sch.recSummerRun}</span>`;
-      }
-      if (st.key === 'FOGO' && sch.fogRun) {
-        soloRunBadge = `<span class="hdr-run-badge hdr-run-fog" onclick="event.stopPropagation(); closeModal('propInspectModal'); openRunDirectlyOnMap('${sch.fogRun}', 'FOGO', '${sch.day}', '${sch.weekLetter || ''}', false)">🌳 ${sch.fogRun}</span>`;
-      }
-
-      const missingCouncilBins = councilBins.filter(cb => !soloBins.some(sb => sb.serial.toUpperCase() === cb.serial.toUpperCase()));
-
-      return `
-        <div class="stream-group-card" style="margin-top:8px;">
-          <div class="stream-group-header ${st.headerClass}">
-            <span>${st.icon} ${st.label}</span>
-            <div>${soloRunBadge}</div>
-          </div>
-          <div class="serials-list">
-            ${soloBins.map((b, bIdx) => {
-              const drawerId = `modal_drawer_${site.propId || site.siteId}_${st.key}_${bIdx}`;
-              const isSoloNotInMpsc = councilBinsList.length > 0 && !councilSerialsSet.has(b.serial.toUpperCase());
-
-              return `
-                <div class="bin-entry">
-                  <div class="serial-row">
-                    <div class="serial-left">
-                      ${b.unitLabel ? `<span class="unit-pill">${b.unitLabel}</span>` : ''}
-                      <span class="size-badge">${b.size || '240L'}</span>
-                      <span class="serial-text">${b.serial}</span>
-                    </div>
-                    <div class="serial-right-actions">
-                      ${isSoloNotInMpsc ? '<span title="Serial not in MPSC dataset" style="font-size:16px; cursor:help;">⚠️</span>' : ''}
-                      <button type="button" class="info-btn" onclick="toggleBinMetaDrawer(this, '${drawerId}')">ℹ️</button>
-                      <button type="button" class="pencil-btn" onclick="promptEditBin('${site.propId || site.siteId}', '${st.key}', ${bIdx})">✏️</button>
-                    </div>
-                  </div>
-                  <div id="${drawerId}" class="bin-meta-drawer">
-                    ${b.lastFlipped ? `Flipped: ${b.lastFlipped}<br>` : ''}
-                    ${b.lastUpdated ? `Updated: ${b.lastUpdated}<br>` : ''}
-                    ${b.make ? `Make: ${b.make}<br>` : ''}
-                    ${b.notes ? `Notes: ${b.notes}` : ''}
-                  </div>
-                </div>
-              `;
-            }).join('')}
-
-            ${missingCouncilBins.length > 0 ? `
-              <div class="stream-council-section">
-                <div class="stream-council-title">🏛️ MPSC Data</div>
-                ${missingCouncilBins.map(cb => `
-                  <div style="display:flex; justify-content:space-between; align-items:center; padding:3px 0;">
-                    <span>${cb.size} - <b style="text-transform:uppercase;">${cb.serial}</b></span>
-                    <button type="button" class="council-add-btn" onclick="promptAddCouncilBin('${site.propId || site.siteId}', '${st.key}', '${cb.serial}', '${cb.size}')">+ Add to Solo</button>
-                  </div>
-                `).join('')}
-              </div>
-            ` : ''}
-          </div>
-        </div>
-      `;
-    }).join('');
-
-    let ratingBannerHtml = '';
-    if (site.ratingStars) {
-      ratingBannerHtml = `
-        <div class="rating-banner">
-          <span class="rating-stars-val">${'★'.repeat(site.ratingStars)}${'☆'.repeat(5 - site.ratingStars)}</span>
-          ${site.ratingComment ? `<div class="rating-comment-text">"${site.ratingComment}"</div>` : ''}
-        </div>
-      `;
-    }
-
-    document.getElementById('inspectPropContent').innerHTML = `
-      <div style="font-size:13.5px; line-height:1.45; color:#334155; margin-bottom:8px;">
-        <div>PID: ${site.propId || 'N/A'} | SID: ${site.siteId || 'N/A'}</div>
-        <div>Property Type: ${site.councilPropType || 'Residential'}</div>
-        <div>Collection: 📅 ${sch.day} ${sch.weekFormatted}</div>
-      </div>
-      <div style="display:flex; gap:6px; margin-bottom:8px;">
-        <button type="button" class="single-nav-btn" style="background:#f1f5f9; color:#1e293b; border:1px solid #cbd5e1;" onclick="promptEditProperty('${site.propId || site.siteId}')">⚙️ Edit Property</button>
-        <button type="button" class="single-nav-btn" style="background:#fef9c3; color:#854d0e; border:1px solid #fde047;" onclick="promptRateProperty('${site.propId || site.siteId}')">⭐ Rate Property</button>
-      </div>
-      ${ratingBannerHtml}
-      ${strayAlertHtml}
-      ${hasAnyBins ? streamBoxesHtml : '<div style="color:#94a3b8; font-style:italic; font-size:13px; padding:6px 0;">no bins registered</div>'}
-    `;
-
-    openModal('propInspectModal');
-  }
-
-  async function applyHarmonization(propId, newRun) {
-    const site = siteRecords.find(s => String(s.propId || s.siteId) === String(propId));
-    if (!site) return;
-
-    site.soloSchedule.garRun = newRun;
-    site.soloSchedule.recRun = newRun;
-
-    masterEditsLog.push({
-      timestamp: new Date().toISOString(),
-      editType: "STRAY_RESOLVED",
-      propId: site.propId,
-      siteId: site.siteId,
-      address: site.addressText,
-      garRun: newRun,
-      recRun: newRun
-    });
-
-    await saveToDB("masterRecords", siteRecords);
-    await saveToDB("masterEditsLog", masterEditsLog);
-    openPropertyInspectModal(propId);
-    triggerUniversalDataRefresh();
-  }
-
-  /* IndexedDB Storage Engine (v900 guarantees clean filter cache reset) */
+  /* IndexedDB Storage Engine (Bumped to v900 for complete fresh start) */
   function openDB() {
     return new Promise((resolve) => {
       const req = window.indexedDB.open("LukezBunzMasterDB_v900", 1);
