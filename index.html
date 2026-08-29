@@ -384,12 +384,17 @@
       background: #e2e8f0;
     }
     #mainLeafletMap {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      left: 0;
+      right: 0;
       width: 100%;
       height: 100%;
       z-index: 1;
     }
     .leaflet-bottom.leaflet-right {
-      margin-bottom: 135px !important;
+      margin-bottom: 140px !important;
       margin-right: 12px !important;
     }
 
@@ -531,6 +536,37 @@
       font-size: 12px;
       color: #94a3b8;
       margin-top: 1px;
+    }
+
+    /* GPS Live Heading Marker */
+    .gps-truck-marker {
+      width: 34px;
+      height: 34px;
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: transform 0.25s linear;
+    }
+    .gps-truck-arrow {
+      width: 0;
+      height: 0;
+      border-left: 7px solid transparent;
+      border-right: 7px solid transparent;
+      border-bottom: 14px solid #2563eb;
+      position: absolute;
+      top: -3px;
+      filter: drop-shadow(0 0 3px rgba(37,99,235,0.8));
+    }
+    .gps-truck-dot {
+      width: 18px;
+      height: 18px;
+      background: #2563eb;
+      border: 3px solid #ffffff;
+      border-radius: 50%;
+      box-shadow: 0 0 10px rgba(37,99,235,0.9);
+      position: absolute;
+      top: 9px;
     }
 
     /* Map Flag Icons */
@@ -1539,6 +1575,7 @@
     return `Next: ${nextDate.toLocaleDateString('en-AU', options)} ${streams.join(' ')}`;
   }
 
+  /* Direct Map Navigation */
   function openRunDirectlyOnMap(runName, streamKey, dayName, weekLetter, isSummer = false) {
     if (!runName) return;
     selectedRunsSet.clear();
@@ -1549,14 +1586,6 @@
     renderActiveFilterChips();
     
     switchMainTab('map');
-
-    setTimeout(() => {
-      if (leafletMap) {
-        leafletMap.invalidateSize();
-        renderMapData();
-        fitMapToVisibleRuns();
-      }
-    }, 250);
   }
 
   function openFilterDrawerModal() {
@@ -1736,7 +1765,8 @@
           leafletMap.invalidateSize();
         }
         renderMapData();
-      }, 100);
+        fitMapToVisibleRuns();
+      }, 150);
     }
   }
 
@@ -1863,19 +1893,29 @@
     return Object.keys(counts).map(sz => `${counts[sz]}x ${sz}`).join(', ');
   }
 
+  /* Live Map Truck GPS Marker with Directional Heading Arrow */
   function updateMapTruckPosition() {
     if (!leafletMap || !userCurrentLocation) return;
     const pos = [userCurrentLocation.lat, userCurrentLocation.lng];
+    const headingDeg = lastValidHeading || 0;
+
+    const truckIcon = L.divIcon({
+      className: 'custom-gps-icon',
+      html: `
+        <div class="gps-truck-marker" style="transform: rotate(${headingDeg}deg);">
+          <div class="gps-truck-arrow"></div>
+          <div class="gps-truck-dot"></div>
+        </div>
+      `,
+      iconSize: [34, 34],
+      iconAnchor: [17, 17]
+    });
+
     if (!mapTruckMarker) {
-      const truckIcon = L.divIcon({
-        className: 'gps-dot-icon',
-        html: `<div style="background:#2563eb; width:18px; height:18px; border-radius:50%; border:3px solid white; box-shadow:0 0 10px rgba(37,99,235,0.9);"></div>`,
-        iconSize: [18, 18],
-        iconAnchor: [9, 9]
-      });
       mapTruckMarker = L.marker(pos, { icon: truckIcon, zIndexOffset: 2000 }).addTo(leafletMap);
     } else {
       mapTruckMarker.setLatLng(pos);
+      mapTruckMarker.setIcon(truckIcon);
     }
   }
 
@@ -1952,6 +1992,19 @@
   function cleanStreetAddress(addr) {
     if (!addr) return '';
     return addr.split(',')[0].replace(/\bVIC\b|\b\d{4}\b/gi, '').trim();
+  }
+
+  function fitMapToVisibleRuns() {
+    if (!leafletMap) return;
+    const layers = [];
+    if (mapMarkersLayer) layers.push(...mapMarkersLayer.getLayers());
+    if (mapHullsLayer) layers.push(...mapHullsLayer.getLayers());
+    if (layers.length > 0) {
+      const group = new L.featureGroup(layers);
+      leafletMap.fitBounds(group.getBounds(), { padding: [35, 35] });
+    } else if (userCurrentLocation) {
+      leafletMap.setView([userCurrentLocation.lat, userCurrentLocation.lng], 16);
+    }
   }
 
   /* Reliable Robust GPS Watcher */
@@ -2076,7 +2129,7 @@
   }
 
   function getCardinalDirection(deg) {
-    const sectors = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'NW', 'NW'];
+    const sectors = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
     return sectors[Math.round(deg / 45) % 8];
   }
 
@@ -2138,172 +2191,325 @@
     return { isUpcoming: true, side: 'ahead' };
   }
 
-  /* Driver HUD Screen Engine with Strict Single-Stream Next-Bin Filtering */
-  function updateDriverHud() {
-    const listContainer = document.getElementById('hudUpcomingList');
-    const streetNameEl = document.getElementById('hudStreetName');
-    const runSummaryEl = document.getElementById('hudRunSummary');
-    const houseCountEl = document.getElementById('hudHouseCount');
-    const binCountEl = document.getElementById('hudBinCount');
-    if (!listContainer) return;
+  /* Style Modal for Color Customization */
+  function openRunStyleModal() {
+    const list = document.getElementById('runStyleList');
+    list.innerHTML = '';
+    
+    document.getElementById('houseDotsColorWheel').value = houseDotsColor || '#8b5cf6';
 
-    if (!userCurrentLocation) {
-      listContainer.innerHTML = '<div style="text-align:center; padding:30px; color:#64748b;">Acquiring live GPS...</div>';
-      return;
+    if (currentlyShowingRunKeys.length === 0) {
+      list.innerHTML = '<div style="text-align:center; color:#64748b; padding:15px;">No active runs currently showing on map.</div>';
+    } else {
+      currentlyShowingRunKeys.forEach((key, idx) => {
+        const curBorderColor = runColorMap[key] || PRESET_COLORS[idx % PRESET_COLORS.length];
+        const curDotColor = runDotColorMap[key] || (key.includes('GAR') ? '#dc2626' : (key.includes('REC') ? '#eab308' : '#16a34a'));
+
+        const row = document.createElement('div');
+        row.style.cssText = 'display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; padding:8px 10px; background:#f8fafc; border-radius:8px; border:1px solid #e2e8f0;';
+        row.innerHTML = `
+          <span style="font-size:13.5px; font-weight:500;">${key}</span>
+          <div style="display:flex; align-items:center; gap:10px;">
+            <label style="font-size:11px; color:#64748b; display:flex; flex-direction:column; align-items:center;">
+              Border
+              <input type="color" id="border_col_${idx}" value="${curBorderColor}" style="width:36px; height:28px; border:none; cursor:pointer; padding:0; background:transparent;">
+            </label>
+            <label style="font-size:11px; color:#64748b; display:flex; flex-direction:column; align-items:center;">
+              Dots
+              <input type="color" id="dot_col_${idx}" value="${curDotColor}" style="width:36px; height:28px; border:none; cursor:pointer; padding:0; background:transparent;">
+            </label>
+          </div>
+        `;
+        list.appendChild(row);
+      });
     }
+
+    openModal('runStyleModal');
+  }
+
+  async function saveAndApplyRunStyles() {
+    houseDotsColor = document.getElementById('houseDotsColorWheel').value;
+    currentlyShowingRunKeys.forEach((key, idx) => {
+      const bEl = document.getElementById(`border_col_${idx}`);
+      const dEl = document.getElementById(`dot_col_${idx}`);
+      if (bEl) runColorMap[key] = bEl.value;
+      if (dEl) runDotColorMap[key] = dEl.value;
+    });
+
+    await saveToDB("runColorMap", runColorMap);
+    await saveToDB("runDotColorMap", runDotColorMap);
+    await saveToDB("houseDotsColor", houseDotsColor);
+
+    closeModal('runStyleModal');
+    renderMapData();
+  }
+
+  /* Leaflet Map Setup */
+  function initLeafletMap() {
+    if (leafletMap) return;
+    leafletMap = L.map('mainLeafletMap', { zoomControl: false }).setView([-38.36, 144.91], 13);
+    L.control.zoom({ position: 'bottomright' }).addTo(leafletMap);
+    
+    osmLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' });
+    satLayer = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { maxZoom: 19, attribution: 'Esri Satellite' });
+
+    osmLayer.addTo(leafletMap);
+
+    mapHullsLayer = L.layerGroup().addTo(leafletMap);
+    mapMarkersLayer = L.layerGroup().addTo(leafletMap);
+    mapSeqLayer = L.layerGroup().addTo(leafletMap);
+
+    updateMapTruckPosition();
+  }
+
+  /* Strict Map Renderer */
+  function renderMapData() {
+    if (!leafletMap) return;
+    mapMarkersLayer.clearLayers();
+    mapHullsLayer.clearLayers();
+    mapSeqLayer.clearLayers();
+    activeMapCircleMarkers.clear();
+    if (mapEditHandlesLayer) mapEditHandlesLayer.clearLayers();
+    updateMapTruckPosition();
 
     const streamFilter = activeFilterStream;
     const sourceFilter = activeFilterDataSource;
     const dayFilter = activeFilterDay.toLowerCase();
     const weekFilter = activeFilterWeek.toUpperCase();
 
-    const upcoming = [];
-    let activeRunHouses = 0;
-    let activeRunBins = 0;
+    const runDayGroups = {};
+    const validBounds = [];
+    const dateGroupedStops = {};
+    let activeBinsCount = 0;
+    const houseSet = new Set();
+    const activeRunKeySet = new Set();
 
     siteRecords.forEach(site => {
       const sch = site.soloSchedule;
-      if (dayFilter && !sch.day.toLowerCase().includes(dayFilter)) return;
-      if (weekFilter && sch.weekLetter.toUpperCase() !== weekFilter) return;
+      const streamsToProcess = streamFilter ? (streamFilter === 'SummerRecycling' ? ['Recycling'] : [streamFilter]) : ['Garbage', 'Recycling', 'FOGO'];
 
-      let streamRun = '';
-      if (streamFilter === 'Garbage') streamRun = (sch.garRun || '').trim().toLowerCase();
-      else if (streamFilter === 'Recycling') streamRun = (sch.recRun || '').trim().toLowerCase();
-      else if (streamFilter === 'SummerRecycling') streamRun = (sch.recSummerRun || '').trim().toLowerCase();
-      else if (streamFilter === 'FOGO') streamRun = (sch.fogRun || '').trim().toLowerCase();
-      else streamRun = (sch.garRun || sch.recRun || sch.fogRun || '').trim().toLowerCase();
+      streamsToProcess.forEach(stKey => {
+        const bins = site.soloStreams[stKey] || [];
+        const councilBins = site.councilStreams ? (site.councilStreams[stKey] || []) : [];
+        
+        if (sourceFilter === 'solo' && bins.length === 0) return;
+        if (sourceFilter === 'council' && councilBins.length === 0) return;
+        if (bins.length === 0 && councilBins.length === 0) return;
 
-      if (selectedRunsSet.size > 0 && isRunLocked && !selectedRunsSet.has(streamRun)) return;
+        let streamRun = '';
+        let isSummer = false;
 
-      if (selectedRunsSet.size === 0 || selectedRunsSet.has(streamRun)) {
-        activeRunHouses++;
-        SOLO_STREAMS.forEach(st => {
-          if (!streamFilter || streamFilter === st.key || (streamFilter === 'SummerRecycling' && st.key === 'Recycling')) {
-            activeRunBins += (site.soloStreams[st.key] || []).length;
+        if (stKey === 'Garbage') {
+          streamRun = (sch.garRun || '').trim().toLowerCase();
+        } else if (stKey === 'Recycling') {
+          if (streamFilter === 'SummerRecycling') {
+            streamRun = (sch.recSummerRun || '').trim().toLowerCase();
+            isSummer = true;
+          } else if (streamFilter === 'Recycling') {
+            streamRun = (sch.recRun || '').trim().toLowerCase();
+          } else {
+            // Default "All Streams" excludes summer recycle on Map
+            streamRun = (sch.recRun || '').trim().toLowerCase();
+          }
+        } else if (stKey === 'FOGO') {
+          streamRun = (sch.fogRun || '').trim().toLowerCase();
+        }
+
+        if (!streamRun) return;
+
+        if (selectedRunsSet.size > 0 && !selectedRunsSet.has(streamRun)) return;
+        if (dayFilter && !sch.day.toLowerCase().includes(dayFilter)) return;
+        if (weekFilter && !isSummer && sch.weekLetter.toUpperCase() !== weekFilter) return;
+
+        const propLat = site.lat ? Number(site.lat) : null;
+        const propLng = site.lng ? Number(site.lng) : null;
+
+        const groupKey = `${(streamRun || 'General').toUpperCase()} - ${sch.day}`;
+        activeRunKeySet.add(groupKey);
+
+        if (showHouseGpsDots && propLat && propLng && !isNaN(propLat) && !isNaN(propLng)) {
+          const houseCircle = L.circleMarker([propLat, propLng], {
+            radius: 5.5,
+            fillColor: houseDotsColor || '#8b5cf6',
+            color: '#facc15',
+            weight: 2,
+            fillOpacity: 0.95,
+            interactive: true
+          });
+          houseCircle.on('click', () => openPropertyInspectModal(site.propId || site.siteId));
+          mapMarkersLayer.addLayer(houseCircle);
+        }
+
+        bins.forEach(binObj => {
+          let binLat = propLat;
+          let binLng = propLng;
+          let hasActualFlipLocation = false;
+
+          if (binObj.lat && binObj.lng && propLat && propLng) {
+            const distFromHouse = getDistanceMeters(propLat, propLng, Number(binObj.lat), Number(binObj.lng));
+            if (distFromHouse >= 0 && distFromHouse <= 45 && binObj.lastFlipped) {
+              binLat = Number(binObj.lat);
+              binLng = Number(binObj.lng);
+              hasActualFlipLocation = true;
+            }
+          }
+
+          if (binLat && binLng && !isNaN(binLat) && !isNaN(binLng)) {
+            activeBinsCount++;
+            houseSet.add(site.propId || site.siteId || site.addressText);
+            validBounds.push([binLat, binLng]);
+
+            if (!runDayGroups[groupKey]) runDayGroups[groupKey] = [];
+            runDayGroups[groupKey].push(turf.point([binLng, binLat]));
+
+            const rawTime = binObj.lastFlipped || binObj.lastUpdated;
+            if (rawTime) {
+              const datePart = rawTime.split('T')[0] || rawTime.split(' ')[0] || 'GENERAL';
+              if (!dateGroupedStops[datePart]) dateGroupedStops[datePart] = [];
+              dateGroupedStops[datePart].push({
+                lat: binLat,
+                lng: binLng,
+                time: rawTime,
+                address: site.addressText,
+                serial: binObj.serial
+              });
+            }
+
+            if (showBinGpsDots && !servicedBinSerials.has(binObj.serial)) {
+              let dotColor = runDotColorMap[groupKey] || (stKey === 'Garbage' ? '#dc2626' : (stKey === 'Recycling' ? (isSummer ? '#c2410c' : '#eab308') : '#16a34a'));
+              let strokeColor = '#ffffff';
+
+              if (missedBinSerials.has(binObj.serial)) {
+                dotColor = '#ef4444';
+              } else if (!hasActualFlipLocation) {
+                dotColor = '#8b5cf6';
+                strokeColor = '#facc15';
+              }
+              
+              const binCircle = L.circleMarker([binLat, binLng], {
+                radius: 7.5,
+                fillColor: dotColor,
+                color: strokeColor,
+                weight: 1.5,
+                fillOpacity: 0.95,
+                interactive: true
+              });
+
+              binCircle.on('click', () => openPropertyInspectModal(site.propId || site.siteId));
+              mapMarkersLayer.addLayer(binCircle);
+              activeMapCircleMarkers.set(binObj.serial, { lat: binLat, lng: binLng, layer: binCircle });
+            }
           }
         });
+      });
+    });
+
+    currentlyShowingRunKeys = Array.from(activeRunKeySet).sort();
+
+    document.getElementById('mapTotalHouses').innerText = houseSet.size.toLocaleString();
+    document.getElementById('mapTotalBins').innerText = activeBinsCount.toLocaleString();
+
+    // Map Top Line Box 1 & Box 2 Updates
+    const runColoredBox = document.getElementById('mapRunColoredBox');
+    const runTitleText = document.getElementById('mapRunTitleText');
+    const mapDayText = document.getElementById('mapDayText');
+
+    if (currentlyShowingRunKeys.length > 0) {
+      const primaryKey = currentlyShowingRunKeys[0];
+      let boxCls = 'hdr-run-gar';
+      let icon = '🗑️';
+      if (primaryKey.includes('REC') || primaryKey.includes('RECYCLE')) { boxCls = 'hdr-run-rec'; icon = '♻️'; }
+      if (primaryKey.includes('SUMMER') || primaryKey.includes('☀️') || activeFilterStream === 'SummerRecycling') { boxCls = 'hdr-run-summer'; icon = '☀️'; }
+      if (primaryKey.includes('FOG') || primaryKey.includes('FOGO')) { boxCls = 'hdr-run-fog'; icon = '🌳'; }
+
+      runColoredBox.className = `map-run-colored-box ${boxCls}`;
+      const weekLetterDisp = (activeFilterWeek && !primaryKey.includes('SUMMER') && activeFilterStream !== 'SummerRecycling') ? ` ${activeFilterWeek}` : '';
+      runTitleText.innerText = `${icon} ${selectedRunsSet.size > 0 ? Array.from(selectedRunsSet).map(r => r.toUpperCase()).join(', ') : 'Run'}${weekLetterDisp}`;
+      
+      const day3 = (activeFilterDay || primaryKey.split('-')[1] || 'ALL').trim().substring(0, 3).toUpperCase();
+      mapDayText.innerText = day3;
+    } else {
+      runColoredBox.className = 'map-run-colored-box hdr-run-gar';
+      runTitleText.innerText = 'All Runs';
+      mapDayText.innerText = 'ALL';
+    }
+
+    const availableDates = Object.keys(dateGroupedStops).sort();
+    if (availableDates.length > 0) {
+      const mostRecentDate = availableDates[availableDates.length - 1];
+      const sameDateStops = dateGroupedStops[mostRecentDate];
+
+      if (sameDateStops && sameDateStops.length >= 2) {
+        sameDateStops.sort((a, b) => a.time.localeCompare(b.time));
+        const startStop = sameDateStops[0];
+        const endStop = sameDateStops[sameDateStops.length - 1];
+
+        const startIcon = L.divIcon({
+          className: 'custom-flag',
+          html: `<div class="run-seq-flag start-flag" title="First Bin">1</div>`,
+          iconSize: [26, 26],
+          iconAnchor: [13, 13]
+        });
+        const endIcon = L.divIcon({
+          className: 'custom-flag',
+          html: `<div class="run-seq-flag end-flag" title="Last Bin">🏁</div>`,
+          iconSize: [26, 26],
+          iconAnchor: [13, 13]
+        });
+
+        const navStartUrl = `https://www.google.com/maps/dir/?api=1&destination=${startStop.lat},${startStop.lng}&travelmode=driving`;
+        const startMarker = L.marker([startStop.lat, startStop.lng], { icon: startIcon, zIndexOffset: 1500 });
+        startMarker.bindPopup(`
+          <b>🏁 Start Stop (First Bin)</b><br>
+          ${startStop.address}<br>
+          Serial: ${startStop.serial}<br>
+          <a href="${navStartUrl}" target="_blank" style="display:inline-block; margin-top:5px; background:#16a34a; color:white; padding:4px 8px; border-radius:4px; text-decoration:none; font-weight:bold;">📍 Navigate from Live GPS</a>
+        `);
+        mapSeqLayer.addLayer(startMarker);
+
+        const endMarker = L.marker([endStop.lat, endStop.lng], { icon: endIcon, zIndexOffset: 1500 });
+        endMarker.bindPopup(`<b>🛑 Finish Stop (Last Bin)</b><br>${endStop.address}<br>Serial: ${endStop.serial}`);
+        mapSeqLayer.addLayer(endMarker);
+      }
+    }
+
+    Object.keys(runDayGroups).forEach((groupKey, idx) => {
+      const color = runColorMap[groupKey] || PRESET_COLORS[idx % PRESET_COLORS.length];
+      let polyCoords = null;
+
+      if (customRunBorders[groupKey] && customRunBorders[groupKey].length >= 3) {
+        polyCoords = customRunBorders[groupKey];
+      } else {
+        const points = runDayGroups[groupKey];
+        if (points.length >= 3 && window.turf) {
+          try {
+            const hull = turf.convex(turf.featureCollection(points));
+            if (hull && hull.geometry && hull.geometry.coordinates) {
+              polyCoords = hull.geometry.coordinates[0].map(c => [c[1], c[0]]);
+            }
+          } catch(e) {}
+        }
       }
 
-      if (site.lat && site.lng && Number(site.lat) !== 0) {
-        const d = getDistanceMeters(userCurrentLocation.lat, userCurrentLocation.lng, Number(site.lat), Number(site.lng));
-        const travelEval = evaluateTravelDirection(userCurrentLocation.lat, userCurrentLocation.lng, lastValidHeading, Number(site.lat), Number(site.lng), site.baseStreetLine);
-
-        if (travelMode === 'left' && travelEval.side !== 'left') return;
-        if (travelMode === 'right' && travelEval.side !== 'right') return;
-
-        if (d <= 150 && travelEval.isUpcoming) {
-          upcoming.push({ site, dist: d, travelEval });
-        }
+      if (polyCoords) {
+        const poly = L.polygon(polyCoords, {
+          color: color,
+          weight: 2.5,
+          fillColor: color,
+          fillOpacity: 0.16,
+          dashArray: '4',
+          interactive: false
+        });
+        poly._runGroupKey = groupKey;
+        mapHullsLayer.addLayer(poly);
       }
     });
 
-    houseCountEl.innerText = activeRunHouses.toLocaleString();
-    binCountEl.innerText = activeRunBins.toLocaleString();
-    runSummaryEl.innerText = selectedRunsSet.size > 0 ? `Run: ${Array.from(selectedRunsSet).map(r => r.toUpperCase()).join(', ')}` : 'Run: All';
-
-    upcoming.sort((a, b) => a.dist - b.dist);
-    const liveStreetName = (upcoming.length > 0) ? (upcoming[0].site.baseStreetLine || upcoming[0].site.addressText.split(',')[0]).trim() : 'Scanning Street...';
-    if (streetNameEl) streetNameEl.innerText = liveStreetName;
-
-    const mapLiveStreet = document.getElementById('mapLiveStreet');
-    const mapLiveNextBin = document.getElementById('mapLiveNextBin');
-    if (mapLiveStreet) mapLiveStreet.innerText = liveStreetName;
-    
-    // Format Next Bin strictly matching the filtered stream and run
-    if (mapLiveNextBin && upcoming.length > 0) {
-      const firstUpcomingSite = upcoming[0].site;
-      let relevantStreams = ['Garbage', 'Recycling', 'FOGO'];
-      if (streamFilter === 'Garbage') relevantStreams = ['Garbage'];
-      if (streamFilter === 'Recycling' || streamFilter === 'SummerRecycling') relevantStreams = ['Recycling'];
-      if (streamFilter === 'FOGO') relevantStreams = ['FOGO'];
-
-      const nextBinList = [];
-      relevantStreams.forEach(k => {
-        (firstUpcomingSite.soloStreams[k] || []).forEach(b => {
-          nextBinList.push(`${b.size || '240L'} - ${b.serial}`);
-        });
-      });
-
-      mapLiveNextBin.innerText = nextBinList.length > 0 ? `Next: ${nextBinList.join(', ')}` : 'Next: No Bins';
+    if (isRoadSnapEditing) {
+      enableBoundaryVertexHandles();
     }
 
-    listContainer.innerHTML = upcoming.slice(0, 10).map(({ site, dist }) => {
-      const sch = site.soloSchedule;
-      
-      let runBadgeHtml = '';
-      if ((!streamFilter || streamFilter === 'Garbage') && sch.garRun) {
-        runBadgeHtml += `<span class="hdr-run-badge hdr-run-gar" onclick="event.stopPropagation(); openRunDirectlyOnMap('${sch.garRun}', 'Garbage', '${sch.day}', '${sch.weekLetter || ''}', false)">🗑️ ${sch.garRun}</span> `;
-      }
-      if ((!streamFilter || streamFilter === 'Recycling') && sch.recRun) {
-        runBadgeHtml += `<span class="hdr-run-badge hdr-run-rec" onclick="event.stopPropagation(); openRunDirectlyOnMap('${sch.recRun}', 'Recycling', '${sch.day}', '${sch.weekLetter || ''}', false)">♻️ ${sch.recRun}</span> `;
-      }
-      if (streamFilter === 'SummerRecycling' && sch.recSummerRun) {
-        runBadgeHtml += `<span class="hdr-run-badge hdr-run-summer" onclick="event.stopPropagation(); openRunDirectlyOnMap('${sch.recSummerRun}', 'SummerRecycling', '${sch.day}', '', true)">☀️ ${sch.recSummerRun}</span> `;
-      }
-      if ((!streamFilter || streamFilter === 'FOGO') && sch.fogRun) {
-        runBadgeHtml += `<span class="hdr-run-badge hdr-run-fog" onclick="event.stopPropagation(); openRunDirectlyOnMap('${sch.fogRun}', 'FOGO', '${sch.day}', '${sch.weekLetter || ''}', false)">🌳 ${sch.fogRun}</span>`;
-      }
-
-      const navUrl = `https://www.google.com/maps/dir/?api=1&destination=${site.lat},${site.lng}&travelmode=driving`;
-      const cleanStreetOnly = cleanStreetAddress(site.addressText);
-
-      let ratingBannerHtml = '';
-      if (site.ratingStars) {
-        ratingBannerHtml = `
-          <div class="rating-banner">
-            <span class="rating-stars-val">${'★'.repeat(site.ratingStars)}${'☆'.repeat(5 - site.ratingStars)}</span>
-            ${site.ratingComment ? `<div class="rating-comment-text">"${site.ratingComment}"</div>` : ''}
-          </div>
-        `;
-      }
-
-      let hasAnyBins = false;
-      const binPills = SOLO_STREAMS.map(st => {
-        if (streamFilter && streamFilter !== 'SummerRecycling' && st.key !== streamFilter) return '';
-        const bins = site.soloStreams[st.key] || [];
-        if (bins.length === 0) return '';
-        hasAnyBins = true;
-
-        let themeClass = st.key === 'Garbage' ? 'hud-bin-gar' : (st.key === 'Recycling' ? 'hud-bin-rec' : 'hud-bin-fog');
-
-        return bins.map(b => `
-          <div class="hud-bin-item ${themeClass}">
-            <div style="display:flex; align-items:center; gap:6px;">
-              <span class="size-badge">${b.size || '240L'}</span>
-              <span style="font-size:18px;">${st.icon}</span>
-              ${b.unitLabel ? `<span class="unit-pill">${b.unitLabel}</span>` : ''}
-            </div>
-            <span class="hud-serial-large">${b.serial}</span>
-          </div>
-        `).join('');
-      }).join('');
-
-      const isPurpleFlagged = Boolean(site.runFlags);
-      const cardClass = isPurpleFlagged ? 'address-card flagged-purple' : 'address-card';
-
-      return `
-        <div class="${cardClass}" onclick="openPropertyInspectModal('${site.propId || site.siteId}')">
-          ${isPurpleFlagged ? `<div class="flag-banner-purple">🚩 ${site.runFlags}</div>` : ''}
-          <div class="address-header-row">
-            <div>
-              <div class="address-line1">${cleanStreetOnly}</div>
-            </div>
-            <div class="prop-header-actions">
-              <span class="distance-pill">${Math.round(dist)}m</span>
-              <a href="${navUrl}" target="_blank" class="single-nav-btn" onclick="event.stopPropagation()">📍 Nav</a>
-            </div>
-          </div>
-          ${ratingBannerHtml}
-          <div style="display:flex; gap:6px; font-size:13px; margin-bottom:6px; align-items:center; flex-wrap:wrap;">
-            <span style="color:#64748b;">📅 ${sch.day}</span>
-            ${runBadgeHtml}
-          </div>
-          <div class="hud-bin-container">
-            ${hasAnyBins ? binPills : '<span style="color:#94a3b8; font-style:italic; font-size:13px;">no bins</span>'}
-          </div>
-        </div>
-      `;
-    }).join('') || '<div style="text-align:center; padding:30px; color:#64748b; font-weight:700;">No upcoming bins ahead on route.</div>';
+    if (validBounds.length > 0) leafletMap.fitBounds(validBounds, { padding: [30, 30] });
   }
 
   function handleSearch() {
@@ -2330,7 +2536,7 @@
         ...site.soloStreams.Garbage, ...site.soloStreams.Recycling, ...site.soloStreams.FOGO
       ].some(b => b.serial.toLowerCase().includes(query)) : false;
 
-      const runMatch = query ? [sch.garRun, sch.recRun, (streamFilter === 'SummerRecycling' ? sch.recSummerRun : ''), sch.fogRun].some(r => (r || '').toLowerCase().includes(query)) : false;
+      const runMatch = query ? [sch.garRun, sch.recRun, sch.recSummerRun, sch.fogRun].some(r => (r || '').toLowerCase().includes(query)) : false;
 
       if (!query || addrMatch || binMatch || runMatch) {
         let d = null;
@@ -2386,7 +2592,7 @@
         if (st.key === 'Recycling' && site.soloSchedule.recRun && streamFilter !== 'SummerRecycling') {
           soloRunBadge = `<span class="hdr-run-badge hdr-run-rec" onclick="event.stopPropagation(); openRunDirectlyOnMap('${site.soloSchedule.recRun}', 'Recycling', '${site.soloSchedule.day}', '${site.soloSchedule.weekLetter || ''}', false)">♻️ ${site.soloSchedule.recRun}</span>`;
         }
-        if (st.key === 'Recycling' && site.soloSchedule.recSummerRun && streamFilter === 'SummerRecycling') {
+        if (st.key === 'Recycling' && site.soloSchedule.recSummerRun) {
           soloRunBadge += ` <span class="hdr-run-badge hdr-run-summer" onclick="event.stopPropagation(); openRunDirectlyOnMap('${site.soloSchedule.recSummerRun}', 'SummerRecycling', '${site.soloSchedule.day}', '', true)">☀️ ${site.soloSchedule.recSummerRun}</span>`;
         }
         if (st.key === 'FOGO' && site.soloSchedule.fogRun) {
@@ -2724,10 +2930,172 @@
   function openModal(id) { document.getElementById(id).classList.add('open'); }
   function closeModal(id) { document.getElementById(id).classList.remove('open'); }
 
-  /* IndexedDB Storage Engine (Bumped to v900 for complete fresh start) */
+  /* Open Inspection Modal */
+  function openPropertyInspectModal(propId) {
+    const site = siteRecords.find(s => String(s.propId || s.siteId) === String(propId));
+    if (!site) return;
+
+    document.getElementById('inspectPropAddress').innerText = (site.baseStreetLine || site.addressText.split(',')[0]).trim();
+    const sch = site.soloSchedule;
+
+    let strayAlertHtml = '';
+    const streetNeighbors = site.baseStreetLine ? (streetHashIndex.get(site.baseStreetLine.trim().toLowerCase()) || []) : [];
+    if (streetNeighbors.length >= 4) {
+      const tally = {};
+      streetNeighbors.forEach(n => {
+        const r = n.soloSchedule.recRun || n.soloSchedule.garRun || '';
+        if (r) tally[r] = (tally[r] || 0) + 1;
+      });
+      let domRun = '';
+      let maxC = 0;
+      Object.keys(tally).forEach(k => { if (tally[k] > maxC) { maxC = tally[k]; domRun = k; } });
+      const currentRun = sch.recRun || sch.garRun || '';
+      if (domRun && currentRun && domRun !== currentRun && maxC >= streetNeighbors.length * 0.7) {
+        strayAlertHtml = `
+          <div class="stray-bin-box">
+            <div>⚠️ Stray Bin: ${maxC} of ${streetNeighbors.length} bins on this street belong to <b>${domRun}</b>.</div>
+            <button type="button" class="stray-fix-btn" onclick="applyHarmonization('${site.propId || site.siteId}', '${domRun}')">⚡ Harmonize Street Run to ${domRun}</button>
+          </div>
+        `;
+      }
+    }
+
+    const councilBinsList = [
+      ...(site.councilStreams.Garbage || []),
+      ...(site.councilStreams.Recycling || []),
+      ...(site.councilStreams.FOGO || [])
+    ];
+    const councilSerialsSet = new Set(councilBinsList.map(cb => cb.serial.toUpperCase()));
+
+    let hasAnyBins = false;
+    const streamBoxesHtml = SOLO_STREAMS.map(st => {
+      const soloBins = site.soloStreams[st.key] || [];
+      const councilBins = site.councilStreams ? (site.councilStreams[st.key] || []) : [];
+      if (soloBins.length === 0 && councilBins.length === 0) return '';
+      hasAnyBins = true;
+
+      let soloRunBadge = '';
+      if (st.key === 'Garbage' && sch.garRun) {
+        soloRunBadge = `<span class="hdr-run-badge hdr-run-gar" onclick="event.stopPropagation(); closeModal('propInspectModal'); openRunDirectlyOnMap('${sch.garRun}', 'Garbage', '${sch.day}', '${sch.weekLetter || ''}', false)">🗑️ ${sch.garRun}</span>`;
+      }
+      if (st.key === 'Recycling' && sch.recRun) {
+        soloRunBadge = `<span class="hdr-run-badge hdr-run-rec" onclick="event.stopPropagation(); closeModal('propInspectModal'); openRunDirectlyOnMap('${sch.recRun}', 'Recycling', '${sch.day}', '${sch.weekLetter || ''}', false)">♻️ ${sch.recRun}</span>`;
+      }
+      if (st.key === 'Recycling' && sch.recSummerRun) {
+        soloRunBadge += ` <span class="hdr-run-badge hdr-run-summer" onclick="event.stopPropagation(); closeModal('propInspectModal'); openRunDirectlyOnMap('${sch.recSummerRun}', 'SummerRecycling', '${sch.day}', '', true)">☀️ ${sch.recSummerRun}</span>`;
+      }
+      if (st.key === 'FOGO' && sch.fogRun) {
+        soloRunBadge = `<span class="hdr-run-badge hdr-run-fog" onclick="event.stopPropagation(); closeModal('propInspectModal'); openRunDirectlyOnMap('${sch.fogRun}', 'FOGO', '${sch.day}', '${sch.weekLetter || ''}', false)">🌳 ${sch.fogRun}</span>`;
+      }
+
+      const missingCouncilBins = councilBins.filter(cb => !soloBins.some(sb => sb.serial.toUpperCase() === cb.serial.toUpperCase()));
+
+      return `
+        <div class="stream-group-card" style="margin-top:8px;">
+          <div class="stream-group-header ${st.headerClass}">
+            <span>${st.icon} ${st.label}</span>
+            <div>${soloRunBadge}</div>
+          </div>
+          <div class="serials-list">
+            ${soloBins.map((b, bIdx) => {
+              const drawerId = `modal_drawer_${site.propId || site.siteId}_${st.key}_${bIdx}`;
+              const isSoloNotInMpsc = councilBinsList.length > 0 && !councilSerialsSet.has(b.serial.toUpperCase());
+
+              return `
+                <div class="bin-entry">
+                  <div class="serial-row">
+                    <div class="serial-left">
+                      ${b.unitLabel ? `<span class="unit-pill">${b.unitLabel}</span>` : ''}
+                      <span class="size-badge">${b.size || '240L'}</span>
+                      <span class="serial-text">${b.serial}</span>
+                    </div>
+                    <div class="serial-right-actions">
+                      ${isSoloNotInMpsc ? '<span title="Serial not in MPSC dataset" style="font-size:16px; cursor:help;">⚠️</span>' : ''}
+                      <button type="button" class="info-btn" onclick="toggleBinMetaDrawer(this, '${drawerId}')">ℹ️</button>
+                      <button type="button" class="pencil-btn" onclick="promptEditBin('${site.propId || site.siteId}', '${st.key}', ${bIdx})">✏️</button>
+                    </div>
+                  </div>
+                  <div id="${drawerId}" class="bin-meta-drawer">
+                    ${b.lastFlipped ? `Flipped: ${b.lastFlipped}<br>` : ''}
+                    ${b.lastUpdated ? `Updated: ${b.lastUpdated}<br>` : ''}
+                    ${b.make ? `Make: ${b.make}<br>` : ''}
+                    ${b.notes ? `Notes: ${b.notes}` : ''}
+                  </div>
+                </div>
+              `;
+            }).join('')}
+
+            ${missingCouncilBins.length > 0 ? `
+              <div class="stream-council-section">
+                <div class="stream-council-title">🏛️ MPSC Data</div>
+                ${missingCouncilBins.map(cb => `
+                  <div style="display:flex; justify-content:space-between; align-items:center; padding:3px 0;">
+                    <span>${cb.size} - <b style="text-transform:uppercase;">${cb.serial}</b></span>
+                    <button type="button" class="council-add-btn" onclick="promptAddCouncilBin('${site.propId || site.siteId}', '${st.key}', '${cb.serial}', '${cb.size}')">+ Add to Solo</button>
+                  </div>
+                `).join('')}
+              </div>
+            ` : ''}
+          </div>
+        </div>
+      `;
+    }).join('');
+
+    let ratingBannerHtml = '';
+    if (site.ratingStars) {
+      ratingBannerHtml = `
+        <div class="rating-banner">
+          <span class="rating-stars-val">${'★'.repeat(site.ratingStars)}${'☆'.repeat(5 - site.ratingStars)}</span>
+          ${site.ratingComment ? `<div class="rating-comment-text">"${site.ratingComment}"</div>` : ''}
+        </div>
+      `;
+    }
+
+    document.getElementById('inspectPropContent').innerHTML = `
+      <div style="font-size:13.5px; line-height:1.45; color:#334155; margin-bottom:8px;">
+        <div>PID: ${site.propId || 'N/A'} | SID: ${site.siteId || 'N/A'}</div>
+        <div>Property Type: ${site.councilPropType || 'Residential'}</div>
+        <div>Collection: 📅 ${sch.day} ${sch.weekFormatted}</div>
+      </div>
+      <div style="display:flex; gap:6px; margin-bottom:8px;">
+        <button type="button" class="single-nav-btn" style="background:#f1f5f9; color:#1e293b; border:1px solid #cbd5e1;" onclick="promptEditProperty('${site.propId || site.siteId}')">⚙️ Edit Property</button>
+        <button type="button" class="single-nav-btn" style="background:#fef9c3; color:#854d0e; border:1px solid #fde047;" onclick="promptRateProperty('${site.propId || site.siteId}')">⭐ Rate Property</button>
+      </div>
+      ${ratingBannerHtml}
+      ${strayAlertHtml}
+      ${hasAnyBins ? streamBoxesHtml : '<div style="color:#94a3b8; font-style:italic; font-size:13px; padding:6px 0;">no bins registered</div>'}
+    `;
+
+    openModal('propInspectModal');
+  }
+
+  async function applyHarmonization(propId, newRun) {
+    const site = siteRecords.find(s => String(s.propId || s.siteId) === String(propId));
+    if (!site) return;
+
+    site.soloSchedule.garRun = newRun;
+    site.soloSchedule.recRun = newRun;
+
+    masterEditsLog.push({
+      timestamp: new Date().toISOString(),
+      editType: "STRAY_RESOLVED",
+      propId: site.propId,
+      siteId: site.siteId,
+      address: site.addressText,
+      garRun: newRun,
+      recRun: newRun
+    });
+
+    await saveToDB("masterRecords", siteRecords);
+    await saveToDB("masterEditsLog", masterEditsLog);
+    openPropertyInspectModal(propId);
+    triggerUniversalDataRefresh();
+  }
+
+  /* IndexedDB Storage Engine (Bumped to v1000 for fresh schema) */
   function openDB() {
     return new Promise((resolve) => {
-      const req = window.indexedDB.open("LukezBunzMasterDB_v900", 1);
+      const req = window.indexedDB.open("LukezBunzMasterDB_v1000", 1);
       req.onupgradeneeded = e => {
         const db = e.target.result;
         if (!db.objectStoreNames.contains("store")) {
