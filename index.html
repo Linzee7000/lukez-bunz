@@ -285,25 +285,28 @@
     #mainLeafletMap { width: 100%; height: 100%; }
     .leaflet-bottom.leaflet-right { margin-bottom: 10px; margin-right: 10px; }
 
+    /* Redesigned Map Stats Banner */
     .map-stats-banner {
       position: absolute;
-      top: 8px; left: 8px; right: 52px;
+      top: 8px; left: 8px; right: 54px;
       background: rgba(255, 255, 255, 0.96);
       backdrop-filter: blur(4px);
       border: 1px solid #cbd5e1;
       border-radius: 8px;
-      padding: 8px 12px;
+      padding: 7px 10px;
       z-index: 1000;
-      font-size: 13.5px;
+      font-size: 14px;
       color: #1e293b;
       display: flex;
       justify-content: space-between;
       align-items: center;
+      gap: 6px;
       box-shadow: 0 2px 6px rgba(0,0,0,0.1);
     }
+    .map-stats-group { display: flex; align-items: center; gap: 8px; }
     .stat-pill { color: #166534; }
 
-    /* Top Right Standalone Fullscreen/Exit Button */
+    /* Top Right Standalone Fullscreen/Exit SVG Button */
     .map-exit-topright-btn {
       position: absolute;
       top: 8px; right: 8px;
@@ -314,13 +317,13 @@
       width: 38px;
       height: 38px;
       border-radius: 8px;
-      font-size: 16px;
       display: flex;
       align-items: center;
       justify-content: center;
       cursor: pointer;
       box-shadow: 0 2px 8px rgba(0,0,0,0.25);
     }
+    .map-exit-topright-btn svg { width: 18px; height: 18px; fill: currentColor; }
 
     .map-controls-toolbar {
       position: absolute;
@@ -641,14 +644,19 @@
   <!-- SCREEN 3: RUN MAP -->
   <div id="mapScreen" class="screen-view">
     <div id="mapScreenContainer">
+      <!-- Clean Redesigned Map Stats Banner -->
       <div class="map-stats-banner">
-        <div>🏠 <span id="mapTotalHouses" class="stat-pill">0</span> Houses</div>
-        <div>🗑️ <span id="mapTotalBins" class="stat-pill">0</span> Bins</div>
-        <div>📍 <span id="mapActiveRunList" class="stat-pill">All Runs</span></div>
+        <div id="mapActiveRunList" style="display:flex; gap:4px; align-items:center; overflow-x:auto;">All Runs</div>
+        <div class="map-stats-group">
+          <span>🏠 <b id="mapTotalHouses" class="stat-pill">0</b></span>
+          <span>🗑️ <b id="mapTotalBins" class="stat-pill">0</b></span>
+        </div>
       </div>
 
-      <!-- Top Right Exit / Fullscreen Button -->
-      <button id="mapFsBtn" type="button" class="map-exit-topright-btn" onclick="toggleMapFullscreen()" title="Toggle Fullscreen">⛶</button>
+      <!-- Top Right Exit / Fullscreen SVG Button -->
+      <button id="mapFsBtn" type="button" class="map-exit-topright-btn" onclick="toggleMapFullscreen()" title="Toggle Fullscreen">
+        <svg viewBox="0 0 24 24" id="mapFsIcon"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg>
+      </button>
 
       <div class="map-controls-toolbar">
         <button type="button" class="map-tool-btn" onclick="fitMapToVisibleRuns()">🎯 Fit</button>
@@ -888,16 +896,16 @@
   </div>
 </div>
 
-<!-- Sub-Modal 6: Customize Run Colors -->
+<!-- Sub-Modal 6: Customize Active Run Colors & Dots -->
 <div id="runStyleModal" class="modal-overlay sub-modal-layer">
   <div class="modal-box">
     <div class="modal-header">
-      <h3>🎨 Customize Run Borders</h3>
+      <h3>🎨 Customize Active Run Colors</h3>
       <button type="button" class="modal-close-btn" onclick="closeModal('runStyleModal')">&times;</button>
     </div>
     <div id="runStyleList"></div>
     <div class="modal-actions">
-      <button type="button" class="btn-save" onclick="closeModal('runStyleModal'); renderMapData();">Apply Styles</button>
+      <button type="button" class="btn-save" onclick="saveAndApplyRunStyles()">Apply Colors</button>
     </div>
   </div>
 </div>
@@ -925,7 +933,7 @@
 
   let siteRecords = [];
   let masterEditsLog = [];
-  let customRunBorders = {}; // Persistent custom edited boundary coordinates
+  let customRunBorders = {};
   let streetHashIndex = new Map();
   let userCurrentLocation = null;
   let lastValidHeading = 0;
@@ -941,7 +949,6 @@
   let travelMode = 'all';
   let activeTab = 'hud';
   
-  // Independent Bin GPS & House GPS layer toggles (Default: Bin GPS On, House GPS Off)
   let showBinGpsDots = true;
   let showHouseGpsDots = false;
   let isSatelliteView = false;
@@ -950,6 +957,8 @@
   let isRoadSnapEditing = false;
 
   let runColorMap = {};
+  let runDotColorMap = {};
+  let currentlyShowingRunKeys = [];
 
   let leafletMap = null;
   let osmLayer = null;
@@ -960,7 +969,6 @@
   let mapEditHandlesLayer = null;
   let mapTruckMarker = null;
 
-  // Standalone map picker state
   let pickerMap = null;
   let pickerMarker = null;
   let pickerTargetType = 'prop';
@@ -1038,7 +1046,8 @@
     return `Next: ${nextDate.toLocaleDateString('en-AU', options)} ${streams.join(' ')}`;
   }
 
-  function openRunDirectlyOnMap(runName, streamKey, dayName, weekLetter) {
+  /* Direct Map Navigation: Both Drive & Search Badges open Map directly */
+  function openRunDirectlyOnMap(runName, streamKey, dayName, weekLetter, isSummer = false) {
     if (!runName) return;
     selectedRunsSet.clear();
     selectedRunsSet.add(runName.trim().toLowerCase());
@@ -1050,9 +1059,8 @@
     switchMainTab('map');
     
     const container = document.getElementById('mapScreenContainer');
-    const btn = document.getElementById('mapFsBtn');
     container.classList.add('fullscreen');
-    btn.innerText = '🗗';
+    updateFsIcon(true);
 
     setTimeout(() => {
       if (leafletMap) {
@@ -1221,7 +1229,6 @@
     updateDriverHud();
   }
 
-  /* Independent GPS Dot Toggles */
   function toggleBinGpsDots() {
     showBinGpsDots = !showBinGpsDots;
     document.getElementById('btnBinGpsToggle').classList.toggle('active', showBinGpsDots);
@@ -1234,7 +1241,6 @@
     renderMapData();
   }
 
-  /* Satellite View Toggle */
   function toggleSatelliteView() {
     if (!leafletMap || !osmLayer || !satLayer) return;
     isSatelliteView = !isSatelliteView;
@@ -1258,7 +1264,6 @@
     }
   }
 
-  /* Interactive Boundary Snap & Drag Handles */
   async function toggleRoadSnapEditing() {
     isRoadSnapEditing = !isRoadSnapEditing;
     const btn = document.getElementById('btnRoadSnap');
@@ -1327,7 +1332,6 @@
     return Object.keys(counts).map(sz => `${counts[sz]}x ${sz}`).join(', ');
   }
 
-  /* Live Map Truck GPS Marker */
   function updateMapTruckPosition() {
     if (!leafletMap || !userCurrentLocation) return;
     const pos = [userCurrentLocation.lat, userCurrentLocation.lng];
@@ -1344,7 +1348,6 @@
     }
   }
 
-  /* Standalone Map Location Picker */
   function openLocationPickerModal(targetType) {
     pickerTargetType = targetType;
     let initialLat = null;
@@ -1415,7 +1418,6 @@
     closeModal('locationPickerModal');
   }
 
-  /* GPS Watcher */
   function startLiveLocationWatcher() {
     if (!("geolocation" in navigator)) {
       updateGpsBadgeUI(false, "No GPS");
@@ -1626,10 +1628,18 @@
       const sch = site.soloSchedule;
       
       let runBadgeHtml = '';
-      if ((!streamFilter || streamFilter === 'Garbage') && sch.garRun) runBadgeHtml += `<span class="hdr-run-badge hdr-run-gar">${sch.garRun}</span> `;
-      if ((!streamFilter || streamFilter === 'Recycling') && sch.recRun) runBadgeHtml += `<span class="hdr-run-badge hdr-run-rec">${sch.recRun}</span> `;
-      if ((!streamFilter || streamFilter === 'Recycling') && sch.recSummerRun) runBadgeHtml += `<span class="hdr-run-badge hdr-run-summer">☀️ ${sch.recSummerRun}</span> `;
-      if ((!streamFilter || streamFilter === 'FOGO') && sch.fogRun) runBadgeHtml += `<span class="hdr-run-badge hdr-run-fog">${sch.fogRun}</span>`;
+      if ((!streamFilter || streamFilter === 'Garbage') && sch.garRun) {
+        runBadgeHtml += `<span class="hdr-run-badge hdr-run-gar" onclick="event.stopPropagation(); openRunDirectlyOnMap('${sch.garRun}', 'Garbage', '${sch.day}', '${sch.weekLetter || ''}', false)">${sch.garRun}</span> `;
+      }
+      if ((!streamFilter || streamFilter === 'Recycling') && sch.recRun) {
+        runBadgeHtml += `<span class="hdr-run-badge hdr-run-rec" onclick="event.stopPropagation(); openRunDirectlyOnMap('${sch.recRun}', 'Recycling', '${sch.day}', '${sch.weekLetter || ''}', false)">${sch.recRun}</span> `;
+      }
+      if ((!streamFilter || streamFilter === 'Recycling') && sch.recSummerRun) {
+        runBadgeHtml += `<span class="hdr-run-badge hdr-run-summer" onclick="event.stopPropagation(); openRunDirectlyOnMap('${sch.recSummerRun}', 'Recycling', '${sch.day}', '${sch.weekLetter || ''}', true)">☀️ ${sch.recSummerRun}</span> `;
+      }
+      if ((!streamFilter || streamFilter === 'FOGO') && sch.fogRun) {
+        runBadgeHtml += `<span class="hdr-run-badge hdr-run-fog" onclick="event.stopPropagation(); openRunDirectlyOnMap('${sch.fogRun}', 'FOGO', '${sch.day}', '${sch.weekLetter || ''}', false)">${sch.fogRun}</span>`;
+      }
 
       const navUrl = `https://www.google.com/maps/dir/?api=1&destination=${site.lat},${site.lng}&travelmode=driving`;
       const cleanStreetOnly = (site.baseStreetLine || site.addressText.split(',')[0]).trim();
@@ -1693,7 +1703,7 @@
     }).join('') || '<div style="text-align:center; padding:30px; color:#64748b; font-weight:700;">No upcoming bins ahead on route.</div>';
   }
 
-  /* Leaflet Map Setup with Multi-Tile Layer Support */
+  /* Leaflet Map Setup */
   function initLeafletMap() {
     leafletMap = L.map('mainLeafletMap', { zoomControl: false }).setView([-38.36, 144.91], 13);
     L.control.zoom({ position: 'bottomright' }).addTo(leafletMap);
@@ -1710,11 +1720,22 @@
     updateMapTruckPosition();
   }
 
+  function updateFsIcon(isFullscreen) {
+    const icon = document.getElementById('mapFsIcon');
+    if (!icon) return;
+    if (isFullscreen) {
+      // Exit icon
+      icon.innerHTML = '<path d="M5 16h3v3h2v-5H5v2zm3-8H5v2h5V5H8v3zm6 11h2v-3h3v-2h-5v5zm2-14v3h3v2h-5V5h2z"/>';
+    } else {
+      // Enter Fullscreen icon
+      icon.innerHTML = '<path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/>';
+    }
+  }
+
   function toggleMapFullscreen() {
     const container = document.getElementById('mapScreenContainer');
-    const btn = document.getElementById('mapFsBtn');
     const isFs = container.classList.toggle('fullscreen');
-    btn.innerText = isFs ? '🗗' : '⛶';
+    updateFsIcon(isFs);
     setTimeout(() => { if (leafletMap) leafletMap.invalidateSize(); }, 200);
   }
 
@@ -1730,35 +1751,56 @@
     if (userCurrentLocation && leafletMap) leafletMap.setView([userCurrentLocation.lat, userCurrentLocation.lng], 16);
   }
 
+  /* Style Modal for Currently Showing Runs Only with Dot Color Customizer */
   function openRunStyleModal() {
     const list = document.getElementById('runStyleList');
     list.innerHTML = '';
     
-    const dayRunKeys = new Set();
-    siteRecords.forEach(s => {
-      const sch = s.soloSchedule;
-      if (sch.garRun) dayRunKeys.add(`${sch.garRun.trim().toUpperCase()} - ${sch.day}`);
-      if (sch.recRun) dayRunKeys.add(`${sch.recRun.trim().toUpperCase()} - ${sch.day}`);
-      if (sch.recSummerRun) dayRunKeys.add(`${sch.recSummerRun.trim().toUpperCase()} - ${sch.day}`);
-    });
+    if (currentlyShowingRunKeys.length === 0) {
+      list.innerHTML = '<div style="text-align:center; color:#64748b; padding:15px;">No active runs currently showing on map.</div>';
+    } else {
+      currentlyShowingRunKeys.forEach((key, idx) => {
+        const curBorderColor = runColorMap[key] || PRESET_COLORS[idx % PRESET_COLORS.length];
+        const curDotColor = runDotColorMap[key] || (key.includes('GAR') ? '#dc2626' : (key.includes('REC') ? '#eab308' : '#16a34a'));
 
-    const sortedKeys = Array.from(dayRunKeys).sort();
-
-    sortedKeys.forEach((key, idx) => {
-      const curColor = runColorMap[key] || PRESET_COLORS[idx % PRESET_COLORS.length];
-      const row = document.createElement('div');
-      row.style.cssText = 'display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; padding:6px 10px; background:#f8fafc; border-radius:6px; border:1px solid #e2e8f0;';
-      row.innerHTML = `
-        <span style="font-size:13px;">${key}</span>
-        <input type="color" value="${curColor}" onchange="runColorMap['${key}'] = this.value;" style="width:40px; height:28px; border:none; cursor:pointer;">
-      `;
-      list.appendChild(row);
-    });
+        const row = document.createElement('div');
+        row.style.cssText = 'display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; padding:8px 10px; background:#f8fafc; border-radius:8px; border:1px solid #e2e8f0;';
+        row.innerHTML = `
+          <span style="font-size:13.5px; font-weight:500;">${key}</span>
+          <div style="display:flex; align-items:center; gap:10px;">
+            <label style="font-size:11px; color:#64748b; display:flex; flex-direction:column; align-items:center;">
+              Border
+              <input type="color" id="border_col_${idx}" value="${curBorderColor}" style="width:34px; height:26px; border:none; cursor:pointer; padding:0; background:transparent;">
+            </label>
+            <label style="font-size:11px; color:#64748b; display:flex; flex-direction:column; align-items:center;">
+              Dots
+              <input type="color" id="dot_col_${idx}" value="${curDotColor}" style="width:34px; height:26px; border:none; cursor:pointer; padding:0; background:transparent;">
+            </label>
+          </div>
+        `;
+        list.appendChild(row);
+      });
+    }
 
     openModal('runStyleModal');
   }
 
-  /* Strict Map Renderer with Stored Border Resumption & Independent Layers */
+  async function saveAndApplyRunStyles() {
+    currentlyShowingRunKeys.forEach((key, idx) => {
+      const bEl = document.getElementById(`border_col_${idx}`);
+      const dEl = document.getElementById(`dot_col_${idx}`);
+      if (bEl) runColorMap[key] = bEl.value;
+      if (dEl) runDotColorMap[key] = dEl.value;
+    });
+
+    await saveToDB("runColorMap", runColorMap);
+    await saveToDB("runDotColorMap", runDotColorMap);
+
+    closeModal('runStyleModal');
+    renderMapData();
+  }
+
+  /* Strict Map Renderer */
   function renderMapData() {
     if (!leafletMap) return;
     mapMarkersLayer.clearLayers();
@@ -1776,6 +1818,8 @@
     const dateGroupedStops = {};
     let activeBinsCount = 0;
     const houseSet = new Set();
+    const activeRunKeySet = new Set();
+    const activeRunBadgesList = [];
 
     siteRecords.forEach(site => {
       const sch = site.soloSchedule;
@@ -1786,8 +1830,17 @@
         if (bins.length === 0) return;
 
         let streamRun = '';
+        let isSummer = false;
         if (stKey === 'Garbage') streamRun = (sch.garRun || '').trim().toLowerCase();
-        else if (stKey === 'Recycling') streamRun = (sch.recRun || sch.recSummerRun || '').trim().toLowerCase();
+        else if (stKey === 'Recycling') {
+          if (sch.recSummerRun && selectedRunsSet.has(sch.recSummerRun.trim().toLowerCase())) {
+            streamRun = sch.recSummerRun.trim().toLowerCase();
+            isSummer = true;
+          } else {
+            streamRun = (sch.recRun || sch.recSummerRun || '').trim().toLowerCase();
+            if (streamRun === (sch.recSummerRun || '').trim().toLowerCase()) isSummer = true;
+          }
+        }
         else if (stKey === 'FOGO') streamRun = (sch.fogRun || '').trim().toLowerCase();
 
         if (!streamRun) return;
@@ -1798,6 +1851,9 @@
 
         const propLat = site.lat ? Number(site.lat) : null;
         const propLng = site.lng ? Number(site.lng) : null;
+
+        const groupKey = `${(streamRun || 'General').toUpperCase()} - ${sch.day}`;
+        activeRunKeySet.add(groupKey);
 
         // Render House Location Dot if House GPS toggle is enabled
         if (showHouseGpsDots && propLat && propLng && !isNaN(propLat) && !isNaN(propLng)) {
@@ -1813,7 +1869,6 @@
           mapMarkersLayer.addLayer(houseCircle);
         }
 
-        // Render Kerbside Bin GPS Dots if Bin GPS toggle is enabled
         bins.forEach(binObj => {
           let binLat = propLat;
           let binLng = propLng;
@@ -1833,7 +1888,6 @@
             houseSet.add(site.propId || site.siteId || site.addressText);
             validBounds.push([binLat, binLng]);
 
-            const groupKey = `${(streamRun || 'General').toUpperCase()} - ${sch.day}`;
             if (!runDayGroups[groupKey]) runDayGroups[groupKey] = [];
             runDayGroups[groupKey].push(turf.point([binLng, binLat]));
 
@@ -1851,10 +1905,9 @@
             }
 
             if (showBinGpsDots) {
-              let dotColor = stKey === 'Garbage' ? '#dc2626' : (stKey === 'Recycling' ? '#eab308' : '#16a34a');
+              let dotColor = runDotColorMap[groupKey] || (stKey === 'Garbage' ? '#dc2626' : (stKey === 'Recycling' ? (isSummer ? '#c2410c' : '#eab308') : '#16a34a'));
               let strokeColor = '#ffffff';
 
-              // If bin has no kerbside flip coordinate, color violet
               if (!hasActualFlipLocation) {
                 dotColor = '#8b5cf6';
                 strokeColor = '#ffffff';
@@ -1877,11 +1930,25 @@
       });
     });
 
+    currentlyShowingRunKeys = Array.from(activeRunKeySet).sort();
+
     document.getElementById('mapTotalHouses').innerText = houseSet.size.toLocaleString();
     document.getElementById('mapTotalBins').innerText = activeBinsCount.toLocaleString();
 
-    const activeRunsDisplay = selectedRunsSet.size > 0 ? Array.from(selectedRunsSet).map(r => r.toUpperCase()).join(', ') : 'All Runs';
-    document.getElementById('mapActiveRunList').innerText = activeRunsDisplay;
+    // Redesigned Header: Render Colored Badges instead of plain text
+    const bannerRunList = document.getElementById('mapActiveRunList');
+    if (currentlyShowingRunKeys.length > 0) {
+      bannerRunList.innerHTML = currentlyShowingRunKeys.map(k => {
+        let cls = 'hdr-run-gar';
+        let text = k;
+        if (k.includes('REC') || k.includes('RECYCLE')) cls = 'hdr-run-rec';
+        if (k.includes('SUMMER') || k.includes('☀️')) { cls = 'hdr-run-summer'; text = `☀️ ${k}`; }
+        if (k.includes('FOG') || k.includes('FOGO')) cls = 'hdr-run-fog';
+        return `<span class="hdr-run-badge ${cls}" style="font-size:12px; padding:2px 7px;">${text}</span>`;
+      }).join(' ');
+    } else {
+      bannerRunList.innerHTML = '<span style="font-size:13px; color:#64748b;">All Runs</span>';
+    }
 
     // Sequence Start and Finish on Same Date
     const availableDates = Object.keys(dateGroupedStops).sort();
@@ -1913,7 +1980,7 @@
           <b>🏁 Start Stop (First Bin)</b><br>
           ${startStop.address}<br>
           Serial: ${startStop.serial}<br>
-          <a href="${navStartUrl}" target="_blank" style="display:inline-block; margin-top:5px; background:#16a34a; color:white; padding:4px 8px; border-radius:4px; text-decoration:none; font-weight:bold;">📍 Navigate from Live GPS</a>
+          <a href="${navStartUrl}" target="_blank" style="display:inline-block; margin-top:5px; background:#16a34a; color:white; padding:4px 8px; border-radius:4px; text-decoration:none;">📍 Navigate from Live GPS</a>
         `);
         mapSeqLayer.addLayer(startMarker);
 
@@ -1923,7 +1990,7 @@
       }
     }
 
-    // Render Boundary Polygons: Check custom saved borders first, or generate dynamic convex hull
+    // Render Boundary Polygons
     Object.keys(runDayGroups).forEach((groupKey, idx) => {
       const color = runColorMap[groupKey] || PRESET_COLORS[idx % PRESET_COLORS.length];
       let polyCoords = null;
@@ -2042,16 +2109,16 @@
         
         let soloRunBadge = '';
         if (st.key === 'Garbage' && site.soloSchedule.garRun) {
-          soloRunBadge = `<span class="hdr-run-badge hdr-run-gar" onclick="event.stopPropagation(); openRunDirectlyOnMap('${site.soloSchedule.garRun}', 'Garbage', '${site.soloSchedule.day}', '${site.soloSchedule.weekLetter || ''}')">${site.soloSchedule.garRun}</span>`;
+          soloRunBadge = `<span class="hdr-run-badge hdr-run-gar" onclick="event.stopPropagation(); openRunDirectlyOnMap('${site.soloSchedule.garRun}', 'Garbage', '${site.soloSchedule.day}', '${site.soloSchedule.weekLetter || ''}', false)">${site.soloSchedule.garRun}</span>`;
         }
         if (st.key === 'Recycling' && site.soloSchedule.recRun) {
-          soloRunBadge = `<span class="hdr-run-badge hdr-run-rec" onclick="event.stopPropagation(); openRunDirectlyOnMap('${site.soloSchedule.recRun}', 'Recycling', '${site.soloSchedule.day}', '${site.soloSchedule.weekLetter || ''}')">${site.soloSchedule.recRun}</span>`;
+          soloRunBadge = `<span class="hdr-run-badge hdr-run-rec" onclick="event.stopPropagation(); openRunDirectlyOnMap('${site.soloSchedule.recRun}', 'Recycling', '${site.soloSchedule.day}', '${site.soloSchedule.weekLetter || ''}', false)">${site.soloSchedule.recRun}</span>`;
         }
         if (st.key === 'Recycling' && site.soloSchedule.recSummerRun) {
-          soloRunBadge += ` <span class="hdr-run-badge hdr-run-summer" onclick="event.stopPropagation(); openRunDirectlyOnMap('${site.soloSchedule.recSummerRun}', 'Recycling', '${site.soloSchedule.day}', '${site.soloSchedule.weekLetter || ''}')">☀️ ${site.soloSchedule.recSummerRun}</span>`;
+          soloRunBadge += ` <span class="hdr-run-badge hdr-run-summer" onclick="event.stopPropagation(); openRunDirectlyOnMap('${site.soloSchedule.recSummerRun}', 'Recycling', '${site.soloSchedule.day}', '${site.soloSchedule.weekLetter || ''}', true)">☀️ ${site.soloSchedule.recSummerRun}</span>`;
         }
         if (st.key === 'FOGO' && site.soloSchedule.fogRun) {
-          soloRunBadge = `<span class="hdr-run-badge hdr-run-fog" onclick="event.stopPropagation(); openRunDirectlyOnMap('${site.soloSchedule.fogRun}', 'FOGO', '${site.soloSchedule.day}', '${site.soloSchedule.weekLetter || ''}')">${site.soloSchedule.fogRun}</span>`;
+          soloRunBadge = `<span class="hdr-run-badge hdr-run-fog" onclick="event.stopPropagation(); openRunDirectlyOnMap('${site.soloSchedule.fogRun}', 'FOGO', '${site.soloSchedule.day}', '${site.soloSchedule.weekLetter || ''}', false)">${site.soloSchedule.fogRun}</span>`;
         }
 
         const missingCouncilBins = councilBins.filter(cb => !soloBins.some(sb => sb.serial.toUpperCase() === cb.serial.toUpperCase()));
@@ -2203,16 +2270,16 @@
 
       let soloRunBadge = '';
       if (st.key === 'Garbage' && sch.garRun) {
-        soloRunBadge = `<span class="hdr-run-badge hdr-run-gar" onclick="event.stopPropagation(); closeModal('propInspectModal'); openRunDirectlyOnMap('${sch.garRun}', 'Garbage', '${sch.day}', '${sch.weekLetter || ''}')">${sch.garRun}</span>`;
+        soloRunBadge = `<span class="hdr-run-badge hdr-run-gar" onclick="event.stopPropagation(); closeModal('propInspectModal'); openRunDirectlyOnMap('${sch.garRun}', 'Garbage', '${sch.day}', '${sch.weekLetter || ''}', false)">${sch.garRun}</span>`;
       }
       if (st.key === 'Recycling' && sch.recRun) {
-        soloRunBadge = `<span class="hdr-run-badge hdr-run-rec" onclick="event.stopPropagation(); closeModal('propInspectModal'); openRunDirectlyOnMap('${sch.recRun}', 'Recycling', '${sch.day}', '${sch.weekLetter || ''}')">${sch.recRun}</span>`;
+        soloRunBadge = `<span class="hdr-run-badge hdr-run-rec" onclick="event.stopPropagation(); closeModal('propInspectModal'); openRunDirectlyOnMap('${sch.recRun}', 'Recycling', '${sch.day}', '${sch.weekLetter || ''}', false)">${sch.recRun}</span>`;
       }
       if (st.key === 'Recycling' && sch.recSummerRun) {
-        soloRunBadge += ` <span class="hdr-run-badge hdr-run-summer" onclick="event.stopPropagation(); closeModal('propInspectModal'); openRunDirectlyOnMap('${sch.recSummerRun}', 'Recycling', '${sch.day}', '${sch.weekLetter || ''}')">☀️ ${sch.recSummerRun}</span>`;
+        soloRunBadge += ` <span class="hdr-run-badge hdr-run-summer" onclick="event.stopPropagation(); closeModal('propInspectModal'); openRunDirectlyOnMap('${sch.recSummerRun}', 'Recycling', '${sch.day}', '${sch.weekLetter || ''}', true)">☀️ ${sch.recSummerRun}</span>`;
       }
       if (st.key === 'FOGO' && sch.fogRun) {
-        soloRunBadge = `<span class="hdr-run-badge hdr-run-fog" onclick="event.stopPropagation(); closeModal('propInspectModal'); openRunDirectlyOnMap('${sch.fogRun}', 'FOGO', '${sch.day}', '${sch.weekLetter || ''}')">${sch.fogRun}</span>`;
+        soloRunBadge = `<span class="hdr-run-badge hdr-run-fog" onclick="event.stopPropagation(); closeModal('propInspectModal'); openRunDirectlyOnMap('${sch.fogRun}', 'FOGO', '${sch.day}', '${sch.weekLetter || ''}', false)">${sch.fogRun}</span>`;
       }
 
       const missingCouncilBins = councilBins.filter(cb => !soloBins.some(sb => sb.serial.toUpperCase() === cb.serial.toUpperCase()));
@@ -2394,6 +2461,7 @@
     }
   }
 
+  /* Populate Stream-Specific Run Dropdowns & Schedules in Edit Property */
   function promptEditProperty(propId) {
     const site = siteRecords.find(s => String(s.propId || s.siteId) === String(propId));
     if (!site) return;
@@ -2544,7 +2612,7 @@
   /* IndexedDB Cache Layer */
   function openDB() {
     return new Promise((resolve) => {
-      const req = window.indexedDB.open("LukezBunzMasterDB_v400", 1);
+      const req = window.indexedDB.open("LukezBunzMasterDB_v410", 1);
       req.onupgradeneeded = e => {
         const db = e.target.result;
         if (!db.objectStoreNames.contains("store")) {
@@ -2623,9 +2691,13 @@
     const cached = await loadFromDB("masterRecords");
     const cachedEdits = await loadFromDB("masterEditsLog");
     const cachedBorders = await loadFromDB("customRunBorders");
+    const cachedRunColors = await loadFromDB("runColorMap");
+    const cachedDotColors = await loadFromDB("runDotColorMap");
 
     if (cachedEdits) masterEditsLog = cachedEdits;
     if (cachedBorders) customRunBorders = cachedBorders;
+    if (cachedRunColors) runColorMap = cachedRunColors;
+    if (cachedDotColors) runDotColorMap = cachedDotColors;
 
     if (cached && cached.length > 0) {
       siteRecords = mergeEditsIntoRecords(cached, masterEditsLog);
@@ -2637,7 +2709,6 @@
     }
   });
 
-  /* Sync & Save with Visible Progress Steps */
   async function startUpdateProcess() {
     const btn = document.getElementById('syncBtn');
     btn.disabled = true;
