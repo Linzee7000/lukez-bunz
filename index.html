@@ -1523,6 +1523,229 @@
     { key: 'FOGO', cols: [{ idx: 30, sz: '240L' }] }
   ];
 
+  /*
+    Unique street index built directly from the parsed CSV records.
+
+    Key:
+      normalised run name, e.g. "220a"
+
+    Value:
+      {
+        run: original run label,
+        streets: Map(
+          normalised street name -> {
+            name,
+            houseCount,
+            siteIds
+          }
+        )
+      }
+
+    Summer Recycling is deliberately indexed separately from normal
+    Recycling so selecting 220A never pulls in Summer 220 streets.
+  */
+  let runStreetIndex = new Map();
+
+  function normaliseRunStreetKey(value) {
+    return String(value || '')
+      .trim()
+      .replace(/\s+/g, ' ')
+      .toLowerCase();
+  }
+
+  function normaliseStreetKey(value) {
+    return String(value || '')
+      .trim()
+      .replace(/\s+/g, ' ')
+      .toLowerCase();
+  }
+
+  function getRunStreetPairs(site) {
+    const sch = site?.soloSchedule || {};
+    const pairs = [];
+
+    const add = (run, stream, season) => {
+      const cleanRun = String(run || '').trim();
+      if (!cleanRun) return;
+      pairs.push({
+        run: cleanRun,
+        stream,
+        season
+      });
+    };
+
+    // Each schedule field is treated as its own assignment.
+    // Normal Recycling and Summer Recycling must never be merged.
+    add(sch.garRun, 'Garbage', 'normal');
+    add(sch.recRun, 'Recycling', 'normal');
+    add(sch.recSummerRun, 'Recycling', 'summer');
+    add(sch.fogRun, 'FOGO', 'normal');
+
+    return pairs;
+  }
+
+  function buildRunStreetIndex() {
+    runStreetIndex.clear();
+
+    siteRecords.forEach(site => {
+      const street = String(
+        site.baseStreetLine ||
+        cleanStreetAddress?.(site.addressText || '') ||
+        ''
+      ).trim();
+
+      if (!street) return;
+
+      const siteId = String(site.propId || site.siteId || '');
+      const streetKey = normaliseStreetKey(street);
+
+      getRunStreetPairs(site).forEach(pair => {
+        const runKey = normaliseRunStreetKey(pair.run);
+
+        if (!runStreetIndex.has(runKey)) {
+          runStreetIndex.set(runKey, {
+            run: pair.run,
+            streets: new Map()
+          });
+        }
+
+        const runEntry = runStreetIndex.get(runKey);
+
+        if (!runEntry.streets.has(streetKey)) {
+          runEntry.streets.set(streetKey, {
+            name: street,
+            houseCount: 0,
+            siteIds: new Set(),
+            assignments: []
+          });
+        }
+
+        const streetEntry = runEntry.streets.get(streetKey);
+
+        // Count each house only once per run/street, even if the
+        // source data contains duplicated records.
+        if (!siteId || !streetEntry.siteIds.has(siteId)) {
+          if (siteId) streetEntry.siteIds.add(siteId);
+          streetEntry.houseCount += 1;
+        }
+
+        const assignmentKey =
+          pair.stream + ':' + pair.season;
+
+        if (!streetEntry.assignments.includes(assignmentKey)) {
+          streetEntry.assignments.push(assignmentKey);
+        }
+      });
+    });
+
+    // Expose a plain-data snapshot for inspection/debugging.
+    window.runStreetLists = getAllRunStreetLists();
+  }
+
+  function getRunStreetList(runKey) {
+    const entry = runStreetIndex.get(
+      normaliseRunStreetKey(runKey)
+    );
+
+    if (!entry) return [];
+
+    return Array.from(entry.streets.values())
+      .map(street => ({
+        street: street.name,
+        houseCount: street.houseCount,
+        assignments: [...street.assignments]
+      }))
+      .sort((a, b) =>
+        a.street.localeCompare(b.street, undefined, {
+          numeric: true,
+          sensitivity: 'base'
+        })
+      );
+  }
+
+  function getAllRunStreetLists() {
+    const result = {};
+
+    Array.from(runStreetIndex.entries())
+      .sort((a, b) => a[1].run.localeCompare(b[1].run))
+      .forEach(([key, entry]) => {
+        result[entry.run] = getRunStreetList(key);
+      });
+
+    return result;
+  }
+
+  function getUniqueStreetsForSelectedRuns() {
+    const selected =
+      Array.from(selectedRunsSet || []);
+
+    const merged = new Map();
+
+    selected.forEach(runKey => {
+      getRunStreetList(runKey).forEach(item => {
+        const key = normaliseStreetKey(item.street);
+
+        if (!merged.has(key)) {
+          merged.set(key, {
+            street: item.street,
+            houseCount: 0,
+            runs: new Set()
+          });
+        }
+
+        const target = merged.get(key);
+        target.houseCount += item.houseCount;
+        target.runs.add(runKey);
+      });
+    });
+
+    return Array.from(merged.values())
+      .map(item => ({
+        street: item.street,
+        houseCount: item.houseCount,
+        runs: Array.from(item.runs).sort()
+      }))
+      .sort((a, b) =>
+        a.street.localeCompare(b.street, undefined, {
+          numeric: true,
+          sensitivity: 'base'
+        })
+      );
+  }
+
+  function downloadRunStreetList(runKey) {
+    const rows = getRunStreetList(runKey);
+
+    const csv = [
+      'Run,Street,House Count,Assignments',
+      ...rows.map(row =>
+        [
+          JSON.stringify(String(runKey)),
+          JSON.stringify(row.street),
+          row.houseCount,
+          JSON.stringify(row.assignments.join(' | '))
+        ].join(',')
+      )
+    ].join('\n');
+
+    const blob = new Blob([csv], {
+      type: 'text/csv;charset=utf-8'
+    });
+
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+
+    link.href = url;
+    link.download =
+      `run_${String(runKey).replace(/[^a-z0-9]+/gi, '_')}_streets.csv`;
+
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+  }
+
   function buildFastStreetIndex() {
     streetHashIndex.clear();
     siteRecords.forEach(s => {
@@ -1532,6 +1755,9 @@
         streetHashIndex.get(key).push(s);
       }
     });
+
+    // Keep the per-run street lists in sync with the CSV data.
+    buildRunStreetIndex();
   }
 
   function getActiveRecycleWeekForDate(dateObj) {
@@ -2030,6 +2256,15 @@
   function propertyPopup(site){const id=String(site.propId||site.siteId||'');return `<div><b>${esc(cleanStreetAddress(site.addressText)||site.baseStreetLine||'Property')}</b><br><small>${esc(site.suburbLine||'')}</small><br><button type="button" onclick="openPropertyInspectModal('${esc(id)}')">Inspect</button> <button type="button" onclick="promptEditProperty('${esc(id)}')">Edit</button></div>`;}
   function drawBoundary(key,sites,i){let pts=sites.map(s=>gps(s.lat,s.lng)).filter(Boolean).map(p=>[p.lat,p.lng]);if(customRunBorders[key]?.length>=3)pts=customRunBorders[key].map(p=>Array.isArray(p)?p:[p.lat,p.lng]);if(pts.length<3)return;const poly=L.polygon(pts,{color:mapColor(key,i),weight:2,fillColor:mapColor(key,i),fillOpacity:.1});poly._runGroupKey=key;poly.addTo(mapHullsLayer);}
   function drawSite(site,key,i){const id=String(site.propId||site.siteId||''),c=mapColor(key,i);if(showHouseGpsDots){const p=gps(site.lat,site.lng);if(p)L.circleMarker([p.lat,p.lng],{radius:5,color:'#fff',weight:1.5,fillColor:houseDotsColor||c,fillOpacity:1}).bindPopup(propertyPopup(site)).addTo(mapMarkersLayer);} if(!showBinGpsDots)return;const sources=activeFilterDataSource==='solo'?['solo']:activeFilterDataSource==='council'?['council']:['solo','council'];sources.forEach(src=>visibleStreams().filter(st=>streamMatchesSelectedRun(site,st)).forEach(st=>{const bins=(src==='solo'?site.soloStreams:site.councilStreams)?.[st]||[];bins.forEach((bin,idx)=>{const p=sourceCoords(site,bin);if(!p)return;const serial=String(bin.serial||'').trim().toUpperCase();const markerKey=`${id}|${src}|${st}|${idx}|${serial}`; if(serial&&servicedBinSerials.has(serial))return;const fc=serial&&missedBinSerials.has(serial)?'#ef4444':dotColor(key,c);const m=L.circleMarker([p.lat,p.lng],{radius:7,color:'#fff',weight:2,fillColor:fc,fillOpacity:1}).bindPopup(`<div><b>${esc(serial||'Bin')}</b><br>${esc(st)} · ${esc(bin.size||'240L')}<br><button type="button" onclick="openPropertyInspectModal('${esc(id)}')">Property</button>${src==='solo'?` <button type="button" onclick="promptEditBin('${esc(id)}','${esc(st)}',${idx})">Edit Bin</button>`:''}</div>`).addTo(mapMarkersLayer);activeMapCircleMarkers.set(markerKey,{layer:m,lat:p.lat,lng:p.lng,stream:st,siteId:id,serial});});})); }
+  /*
+    Map helper: returns the unique streets for the currently selected runs.
+    This does not alter filtering; it only provides the road list derived
+    directly from the same filtered run assignments.
+  */
+  function getMapSelectedRunStreets() {
+    return getUniqueStreetsForSelectedRuns();
+  }
+
   function renderMapData(){ if(!leafletMap)initLeafletMap();if(!leafletMap)return;mapMarkersLayer.clearLayers();mapHullsLayer.clearLayers();mapSeqLayer.clearLayers();activeMapCircleMarkers.clear();const sites=siteRecords.filter(siteMatchesMapFilters),groups=new Map();sites.forEach(s=>{const r=primaryRun(s);if(r){if(!groups.has(r.key))groups.set(r.key,[]);groups.get(r.key).push(s);}});currentlyShowingRunKeys=Array.from(groups.keys());Array.from(groups.entries()).forEach(([k,ss],i)=>{drawBoundary(k,ss,i);ss.forEach(s=>drawSite(s,k,i));});updateMapHeaderInfo(sites,groups);if(userCurrentLocation)updateMapTruckPosition();requestAnimationFrame(()=>leafletMap&&leafletMap.invalidateSize()); }
   function openRunStyleModal(){const list=document.getElementById('runStyleList');if(!list)return;const runs=Array.from(new Set(siteRecords.flatMap(getSiteRunEntries).map(x=>x.key))).sort();list.innerHTML=`<div class="run-style-row"><b>House GPS Dots</b><input id="styleHouseDotsColor" type="color" value="${houseDotsColor||'#8b5cf6'}"></div>`+runs.map((k,i)=>`<div class="run-style-row"><b>${esc(k)}</b><label>Boundary <input class="run-border-style-input" data-run="${esc(k)}" type="color" value="${mapColor(k,i)}"></label><label>Pins <input class="run-dot-style-input" data-run="${esc(k)}" type="color" value="${dotColor(k,mapColor(k,i))}"></label></div>`).join('');openModal('runStyleModal');}
   async function saveAndApplyRunStyles(){const h=document.getElementById('styleHouseDotsColor');if(h)houseDotsColor=h.value;document.querySelectorAll('.run-border-style-input').forEach(x=>runColorMap[mapKey(x.dataset.run)]=x.value);document.querySelectorAll('.run-dot-style-input').forEach(x=>runDotColorMap[mapKey(x.dataset.run)]=x.value);await saveToDB('runColorMap',runColorMap);await saveToDB('runDotColorMap',runDotColorMap);await saveToDB('houseDotsColor',houseDotsColor);closeModal('runStyleModal');renderMapData();}
