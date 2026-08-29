@@ -386,7 +386,7 @@
       margin-right: 12px;
     }
 
-    /* Map Header & Stacked Toolbars without Overlap */
+    /* Map Stacked Control Panels */
     .map-header-panel {
       position: absolute;
       top: 8px;
@@ -879,19 +879,8 @@
       cursor: pointer;
       font-size: 12px;
     }
-    .run-select-chip input[type="checkbox"] {
-      margin: 0;
-      padding: 0;
-      width: 14px;
-      height: 14px;
-      flex-shrink: 0;
-    }
-    .run-chip-text {
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      font-size: 12px;
-    }
+    .run-select-chip input[type="checkbox"] { margin: 0; padding: 0; width: 14px; height: 14px; flex-shrink: 0; }
+    .run-chip-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 12px; }
     .run-chip-gar { background: #fee2e2; border-color: #fca5a5; color: #991b1b; }
     .run-chip-rec { background: #fef08a; border-color: #facc15; color: #854d0e; }
     .run-chip-summer { background: #ffedd5; border-color: #fed7aa; color: #c2410c; }
@@ -1508,7 +1497,6 @@
     return `Next: ${nextDate.toLocaleDateString('en-AU', options)} ${streams.join(' ')}`;
   }
 
-  /* Direct Map Navigation: Opens Map directly with strict Run & Week isolation */
   function openRunDirectlyOnMap(runName, streamKey, dayName, weekLetter, isSummer = false) {
     if (!runName) return;
     selectedRunsSet.clear();
@@ -1898,6 +1886,342 @@
     }
   }
 
+  /* Reliable Robust GPS Watcher */
+  function onGpsPositionSuccess(pos) {
+    const accuracy = Math.round(pos.coords.accuracy);
+    const speedKmh = pos.coords.speed !== null && !isNaN(pos.coords.speed) ? Math.round(pos.coords.speed * 3.6) : 0;
+    
+    userCurrentLocation = {
+      lat: pos.coords.latitude,
+      lng: pos.coords.longitude,
+      speed: speedKmh
+    };
+
+    if (pos.coords.heading !== null && !isNaN(pos.coords.heading) && pos.coords.heading >= 0) {
+      lastValidHeading = Math.round(pos.coords.heading);
+    } else if (lastGpsCoords.lat !== 0) {
+      const deltaDist = getDistanceMeters(lastGpsCoords.lat, lastGpsCoords.lng, userCurrentLocation.lat, userCurrentLocation.lng);
+      if (deltaDist >= 2.0) {
+        const calcHeading = getBearing(lastGpsCoords.lat, lastGpsCoords.lng, userCurrentLocation.lat, userCurrentLocation.lng);
+        if (!isNaN(calcHeading)) lastValidHeading = Math.round(calcHeading);
+      }
+    }
+
+    updateGpsBadgeUI(true, `🟢 ±${accuracy}m`);
+
+    const speedEl = document.getElementById('hudSpeed');
+    const headingEl = document.getElementById('hudHeading');
+    if (speedEl) speedEl.innerText = `${speedKmh}`;
+    if (headingEl) {
+      const cardinal = getCardinalDirection(lastValidHeading);
+      headingEl.innerText = `🧭 ${cardinal} ${lastValidHeading}°`;
+    }
+
+    const mapSpeedEl = document.getElementById('mapLiveSpeed');
+    const mapHeadingEl = document.getElementById('mapLiveHeading');
+    if (mapSpeedEl) mapSpeedEl.innerText = `${speedKmh}`;
+    if (mapHeadingEl) {
+      const cardinal = getCardinalDirection(lastValidHeading);
+      mapHeadingEl.innerText = `🧭 ${cardinal} ${lastValidHeading}°`;
+    }
+
+    updateMapTruckPosition();
+
+    if (isTruckFollowEnabled && leafletMap) {
+      leafletMap.panTo([userCurrentLocation.lat, userCurrentLocation.lng]);
+    }
+
+    activeMapCircleMarkers.forEach((markerObj, serial) => {
+      if (!servicedBinSerials.has(serial)) {
+        const d = getDistanceMeters(userCurrentLocation.lat, userCurrentLocation.lng, markerObj.lat, markerObj.lng);
+        if (d <= 25) {
+          if (speedKmh <= 5) {
+            servicedBinSerials.add(serial);
+            if (mapMarkersLayer && markerObj.layer) {
+              mapMarkersLayer.removeLayer(markerObj.layer);
+            }
+          } else if (d <= 15 && speedKmh > 15 && !missedBinSerials.has(serial)) {
+            missedBinSerials.add(serial);
+            if (markerObj.layer) {
+              markerObj.layer.setStyle({ fillColor: '#ef4444', color: '#ffffff', weight: 2 });
+            }
+          }
+        }
+      }
+    });
+
+    const movedDist = getDistanceMeters(lastGpsCoords.lat, lastGpsCoords.lng, userCurrentLocation.lat, userCurrentLocation.lng);
+    if (movedDist >= 3.0) {
+      lastGpsCoords = { ...userCurrentLocation };
+      if (activeTab === 'search') handleSearch();
+      if (activeTab === 'hud') updateDriverHud();
+    }
+  }
+
+  function onGpsPositionError(err) {
+    console.warn("GPS Error:", err);
+    updateGpsBadgeUI(false, "⚠️ Tap GPS");
+  }
+
+  function startLiveLocationWatcher() {
+    if (!("geolocation" in navigator)) {
+      updateGpsBadgeUI(false, "No GPS");
+      return;
+    }
+
+    if (gpsWatchId !== null) {
+      navigator.geolocation.clearWatch(gpsWatchId);
+    }
+
+    // Instant location resolution
+    navigator.geolocation.getCurrentPosition(onGpsPositionSuccess, onGpsPositionError, {
+      enableHighAccuracy: true,
+      maximumAge: 30000,
+      timeout: 27000
+    });
+
+    gpsWatchId = navigator.geolocation.watchPosition(onGpsPositionSuccess, onGpsPositionError, {
+      enableHighAccuracy: true,
+      maximumAge: 30000,
+      timeout: 27000
+    });
+  }
+
+  function forceRecheckGps() {
+    startLiveLocationWatcher();
+    if ("geolocation" in navigator) {
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          onGpsPositionSuccess(pos);
+          updateGpsBadgeUI(true, "🟢 Locked");
+        },
+        () => alert("Location permission needed. Please ensure device Location is ON."),
+        { enableHighAccuracy: true, maximumAge: 0, timeout: 15000 }
+      );
+    }
+  }
+
+  function updateGpsBadgeUI(isActive, text) {
+    const badge = document.getElementById('gpsStatusBadge');
+    if (!badge) return;
+    badge.innerText = text;
+    badge.className = isActive ? 'gps-badge' : 'gps-badge searching';
+  }
+
+  function getCardinalDirection(deg) {
+    const sectors = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+    return sectors[Math.round(deg / 45) % 8];
+  }
+
+  function getDistanceMeters(lat1, lon1, lat2, lon2) {
+    const R = 6371e3;
+    const φ1 = lat1 * Math.PI / 180;
+    const φ2 = lat2 * Math.PI / 180;
+    const Δφ = (lat2 - lat1) * Math.PI / 180;
+    const Δλ = (lon2 - lon1) * Math.PI / 180;
+    const a = Math.sin(Δφ/2) * Math.sin(Δφ/2) + Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ/2) * Math.sin(Δλ/2);
+    return R * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a)));
+  }
+
+  function getBearing(lat1, lon1, lat2, lon2) {
+    const φ1 = lat1 * Math.PI / 180;
+    const φ2 = lat2 * Math.PI / 180;
+    const Δλ = (lon2 - lon1) * Math.PI / 180;
+    const y = Math.sin(Δλ) * Math.cos(φ2);
+    const x = Math.cos(φ1) * Math.sin(φ2) - Math.cos(φ1) * Math.cos(φ2) * Math.cos(Δλ);
+    return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+  }
+
+  function evaluateTravelDirection(truckLat, truckLng, heading, propLat, propLng, streetName = '') {
+    let effectiveHeading = heading;
+
+    if (streetName && streetHashIndex.has(streetName.trim().toLowerCase())) {
+      const neighbors = streetHashIndex.get(streetName.trim().toLowerCase());
+      const flippedNodes = [];
+      neighbors.forEach(n => {
+        SOLO_STREAMS.forEach(st => {
+          (n.soloStreams[st.key] || []).forEach(b => {
+            if (b.lastFlipped && n.lat && n.lng) {
+              flippedNodes.push({ time: b.lastFlipped, lat: Number(n.lat), lng: Number(n.lng) });
+            }
+          });
+        });
+      });
+
+      if (flippedNodes.length >= 2) {
+        flippedNodes.sort((a, b) => a.time.localeCompare(b.time));
+        const first = flippedNodes[0];
+        const last = flippedNodes[flippedNodes.length - 1];
+        const streetVector = getBearing(first.lat, first.lng, last.lat, last.lng);
+        if (!isNaN(streetVector)) effectiveHeading = streetVector;
+      }
+    }
+
+    const propBearing = getBearing(truckLat, truckLng, propLat, propLng);
+    const relAngle = (propBearing - effectiveHeading + 360) % 360;
+
+    if (relAngle >= 315 || relAngle <= 45) return { isUpcoming: true, side: 'ahead' };
+    if (travelMode === 'left' && relAngle >= 225 && relAngle <= 315) return { isUpcoming: true, side: 'left' };
+    if (travelMode === 'right' && relAngle >= 45 && relAngle <= 135) return { isUpcoming: true, side: 'right' };
+    
+    if (travelMode === 'all' && (relAngle > 45 && relAngle < 315)) {
+      return { isUpcoming: false, side: 'behind' };
+    }
+
+    return { isUpcoming: true, side: 'ahead' };
+  }
+
+  /* Driver HUD Screen Engine */
+  function updateDriverHud() {
+    const listContainer = document.getElementById('hudUpcomingList');
+    const streetNameEl = document.getElementById('hudStreetName');
+    const runSummaryEl = document.getElementById('hudRunSummary');
+    const houseCountEl = document.getElementById('hudHouseCount');
+    const binCountEl = document.getElementById('hudBinCount');
+    if (!listContainer) return;
+
+    if (!userCurrentLocation) {
+      listContainer.innerHTML = '<div style="text-align:center; padding:30px; color:#64748b;">Acquiring live GPS...</div>';
+      return;
+    }
+
+    const streamFilter = activeFilterStream;
+    const dayFilter = activeFilterDay.toLowerCase();
+    const weekFilter = activeFilterWeek.toUpperCase();
+
+    const upcoming = [];
+    let activeRunHouses = 0;
+    let activeRunBins = 0;
+
+    siteRecords.forEach(site => {
+      const sch = site.soloSchedule;
+      if (dayFilter && !sch.day.toLowerCase().includes(dayFilter)) return;
+      if (weekFilter && sch.weekLetter.toUpperCase() !== weekFilter) return;
+
+      let streamRun = '';
+      if (streamFilter === 'Garbage') streamRun = (sch.garRun || '').trim().toLowerCase();
+      else if (streamFilter === 'Recycling') streamRun = (sch.recRun || sch.recSummerRun || '').trim().toLowerCase();
+      else if (streamFilter === 'FOGO') streamRun = (sch.fogRun || '').trim().toLowerCase();
+      else streamRun = (sch.garRun || sch.recRun || sch.fogRun || '').trim().toLowerCase();
+
+      if (selectedRunsSet.size > 0 && isRunLocked && !selectedRunsSet.has(streamRun)) return;
+
+      if (selectedRunsSet.size === 0 || selectedRunsSet.has(streamRun)) {
+        activeRunHouses++;
+        SOLO_STREAMS.forEach(st => {
+          if (!streamFilter || streamFilter === st.key) activeRunBins += (site.soloStreams[st.key] || []).length;
+        });
+      }
+
+      if (site.lat && site.lng && Number(site.lat) !== 0) {
+        const d = getDistanceMeters(userCurrentLocation.lat, userCurrentLocation.lng, Number(site.lat), Number(site.lng));
+        const travelEval = evaluateTravelDirection(userCurrentLocation.lat, userCurrentLocation.lng, lastValidHeading, Number(site.lat), Number(site.lng), site.baseStreetLine);
+
+        if (travelMode === 'left' && travelEval.side !== 'left') return;
+        if (travelMode === 'right' && travelEval.side !== 'right') return;
+
+        if (d <= 150 && travelEval.isUpcoming) {
+          upcoming.push({ site, dist: d, travelEval });
+        }
+      }
+    });
+
+    houseCountEl.innerText = activeRunHouses.toLocaleString();
+    binCountEl.innerText = activeRunBins.toLocaleString();
+    runSummaryEl.innerText = selectedRunsSet.size > 0 ? `Run: ${Array.from(selectedRunsSet).map(r => r.toUpperCase()).join(', ')}` : 'Run: All';
+
+    upcoming.sort((a, b) => a.dist - b.dist);
+    const liveStreetName = (upcoming.length > 0) ? (upcoming[0].site.baseStreetLine || upcoming[0].site.addressText.split(',')[0]).trim() : 'Scanning Street...';
+    if (streetNameEl) streetNameEl.innerText = liveStreetName;
+
+    const mapLiveStreet = document.getElementById('mapLiveStreet');
+    const mapLiveNextBin = document.getElementById('mapLiveNextBin');
+    if (mapLiveStreet) mapLiveStreet.innerText = liveStreetName;
+    if (mapLiveNextBin && upcoming.length > 0) {
+      const firstUpcomingSite = upcoming[0].site;
+      const binsSummary = Object.keys(firstUpcomingSite.soloStreams).map(k => (firstUpcomingSite.soloStreams[k] || []).map(b => b.serial).join(', ')).filter(Boolean).join(' | ');
+      mapLiveNextBin.innerText = `Next: ${cleanStreetAddress(firstUpcomingSite.addressText)} (${binsSummary || 'no bins'})`;
+    }
+
+    listContainer.innerHTML = upcoming.slice(0, 10).map(({ site, dist }) => {
+      const sch = site.soloSchedule;
+      
+      let runBadgeHtml = '';
+      if ((!streamFilter || streamFilter === 'Garbage') && sch.garRun) {
+        runBadgeHtml += `<span class="hdr-run-badge hdr-run-gar" onclick="event.stopPropagation(); openRunDirectlyOnMap('${sch.garRun}', 'Garbage', '${sch.day}', '${sch.weekLetter || ''}', false)">${sch.garRun}</span> `;
+      }
+      if ((!streamFilter || streamFilter === 'Recycling') && sch.recRun) {
+        runBadgeHtml += `<span class="hdr-run-badge hdr-run-rec" onclick="event.stopPropagation(); openRunDirectlyOnMap('${sch.recRun}', 'Recycling', '${sch.day}', '${sch.weekLetter || ''}', false)">${sch.recRun}</span> `;
+      }
+      if ((!streamFilter || streamFilter === 'Recycling') && sch.recSummerRun) {
+        runBadgeHtml += `<span class="hdr-run-badge hdr-run-summer" onclick="event.stopPropagation(); openRunDirectlyOnMap('${sch.recSummerRun}', 'Recycling', '${sch.day}', '${sch.weekLetter || ''}', true)">☀️ ${sch.recSummerRun}</span> `;
+      }
+      if ((!streamFilter || streamFilter === 'FOGO') && sch.fogRun) {
+        runBadgeHtml += `<span class="hdr-run-badge hdr-run-fog" onclick="event.stopPropagation(); openRunDirectlyOnMap('${sch.fogRun}', 'FOGO', '${sch.day}', '${sch.weekLetter || ''}', false)">${sch.fogRun}</span>`;
+      }
+
+      const navUrl = `https://www.google.com/maps/dir/?api=1&destination=${site.lat},${site.lng}&travelmode=driving`;
+      const cleanStreetOnly = cleanStreetAddress(site.addressText);
+
+      let ratingBannerHtml = '';
+      if (site.ratingStars) {
+        ratingBannerHtml = `
+          <div class="rating-banner">
+            <span class="rating-stars-val">${'★'.repeat(site.ratingStars)}${'☆'.repeat(5 - site.ratingStars)}</span>
+            ${site.ratingComment ? `<div class="rating-comment-text">"${site.ratingComment}"</div>` : ''}
+          </div>
+        `;
+      }
+
+      let hasAnyBins = false;
+      const binPills = SOLO_STREAMS.map(st => {
+        if (streamFilter && st.key !== streamFilter) return '';
+        const bins = site.soloStreams[st.key] || [];
+        if (bins.length === 0) return '';
+        hasAnyBins = true;
+
+        let themeClass = st.key === 'Garbage' ? 'hud-bin-gar' : (st.key === 'Recycling' ? 'hud-bin-rec' : 'hud-bin-fog');
+
+        return bins.map(b => `
+          <div class="hud-bin-item ${themeClass}">
+            <div style="display:flex; align-items:center; gap:6px;">
+              <span class="size-badge">${b.size || '240L'}</span>
+              <span style="font-size:18px;">${st.icon}</span>
+              ${b.unitLabel ? `<span class="unit-pill">${b.unitLabel}</span>` : ''}
+            </div>
+            <span class="hud-serial-large">${b.serial}</span>
+          </div>
+        `).join('');
+      }).join('');
+
+      const isPurpleFlagged = Boolean(site.runFlags);
+      const cardClass = isPurpleFlagged ? 'address-card flagged-purple' : 'address-card';
+
+      return `
+        <div class="${cardClass}" onclick="openPropertyInspectModal('${site.propId || site.siteId}')">
+          ${isPurpleFlagged ? `<div class="flag-banner-purple">🚩 ${site.runFlags}</div>` : ''}
+          <div class="address-header-row">
+            <div>
+              <div class="address-line1">${cleanStreetOnly}</div>
+            </div>
+            <div class="prop-header-actions">
+              <span class="distance-pill">${Math.round(dist)}m</span>
+              <a href="${navUrl}" target="_blank" class="single-nav-btn" onclick="event.stopPropagation()">📍 Nav</a>
+            </div>
+          </div>
+          ${ratingBannerHtml}
+          <div style="display:flex; gap:6px; font-size:13px; margin-bottom:6px; align-items:center; flex-wrap:wrap;">
+            <span style="color:#64748b;">📅 ${sch.day}</span>
+            ${runBadgeHtml}
+          </div>
+          <div class="hud-bin-container">
+            ${hasAnyBins ? binPills : '<span style="color:#94a3b8; font-style:italic; font-size:13px;">no bins</span>'}
+          </div>
+        </div>
+      `;
+    }).join('') || '<div style="text-align:center; padding:30px; color:#64748b; font-weight:700;">No upcoming bins ahead on route.</div>';
+  }
+
   /* Style Modal for Color Customization */
   function openRunStyleModal() {
     const list = document.getElementById('runStyleList');
@@ -1949,6 +2273,456 @@
 
     closeModal('runStyleModal');
     renderMapData();
+  }
+
+  /* Leaflet Map Setup */
+  function initLeafletMap() {
+    leafletMap = L.map('mainLeafletMap', { zoomControl: false }).setView([-38.36, 144.91], 13);
+    L.control.zoom({ position: 'bottomright' }).addTo(leafletMap);
+    
+    osmLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' });
+    satLayer = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { maxZoom: 19, attribution: 'Esri Satellite' });
+
+    osmLayer.addTo(leafletMap);
+
+    mapHullsLayer = L.layerGroup().addTo(leafletMap);
+    mapMarkersLayer = L.layerGroup().addTo(leafletMap);
+    mapSeqLayer = L.layerGroup().addTo(leafletMap);
+
+    updateMapTruckPosition();
+  }
+
+  /* Strict Map Renderer */
+  function renderMapData() {
+    if (!leafletMap) return;
+    mapMarkersLayer.clearLayers();
+    mapHullsLayer.clearLayers();
+    mapSeqLayer.clearLayers();
+    activeMapCircleMarkers.clear();
+    if (mapEditHandlesLayer) mapEditHandlesLayer.clearLayers();
+    updateMapTruckPosition();
+
+    const streamFilter = activeFilterStream;
+    const dayFilter = activeFilterDay.toLowerCase();
+    const weekFilter = activeFilterWeek.toUpperCase();
+
+    const runDayGroups = {};
+    const validBounds = [];
+    const dateGroupedStops = {};
+    let activeBinsCount = 0;
+    const houseSet = new Set();
+    const activeRunKeySet = new Set();
+
+    siteRecords.forEach(site => {
+      const sch = site.soloSchedule;
+      const streamsToProcess = streamFilter ? [streamFilter] : ['Garbage', 'Recycling', 'FOGO'];
+
+      streamsToProcess.forEach(stKey => {
+        const bins = site.soloStreams[stKey] || [];
+        if (bins.length === 0) return;
+
+        let streamRun = '';
+        let isSummer = false;
+        if (stKey === 'Garbage') streamRun = (sch.garRun || '').trim().toLowerCase();
+        else if (stKey === 'Recycling') {
+          if (sch.recSummerRun && selectedRunsSet.has(sch.recSummerRun.trim().toLowerCase())) {
+            streamRun = sch.recSummerRun.trim().toLowerCase();
+            isSummer = true;
+          } else {
+            streamRun = (sch.recRun || sch.recSummerRun || '').trim().toLowerCase();
+            if (streamRun === (sch.recSummerRun || '').trim().toLowerCase()) isSummer = true;
+          }
+        }
+        else if (stKey === 'FOGO') streamRun = (sch.fogRun || '').trim().toLowerCase();
+
+        if (!streamRun) return;
+
+        if (selectedRunsSet.size > 0 && !selectedRunsSet.has(streamRun)) return;
+        if (dayFilter && !sch.day.toLowerCase().includes(dayFilter)) return;
+        if (weekFilter && !isSummer && sch.weekLetter.toUpperCase() !== weekFilter) return;
+
+        const propLat = site.lat ? Number(site.lat) : null;
+        const propLng = site.lng ? Number(site.lng) : null;
+
+        const groupKey = `${(streamRun || 'General').toUpperCase()} - ${sch.day}`;
+        activeRunKeySet.add(groupKey);
+
+        if (showHouseGpsDots && propLat && propLng && !isNaN(propLat) && !isNaN(propLng)) {
+          const houseCircle = L.circleMarker([propLat, propLng], {
+            radius: 5.5,
+            fillColor: houseDotsColor || '#8b5cf6',
+            color: '#facc15',
+            weight: 2,
+            fillOpacity: 0.95,
+            interactive: true
+          });
+          houseCircle.on('click', () => openPropertyInspectModal(site.propId || site.siteId));
+          mapMarkersLayer.addLayer(houseCircle);
+        }
+
+        bins.forEach(binObj => {
+          let binLat = propLat;
+          let binLng = propLng;
+          let hasActualFlipLocation = false;
+
+          if (binObj.lat && binObj.lng && propLat && propLng) {
+            const distFromHouse = getDistanceMeters(propLat, propLng, Number(binObj.lat), Number(binObj.lng));
+            if (distFromHouse >= 0 && distFromHouse <= 45 && binObj.lastFlipped) {
+              binLat = Number(binObj.lat);
+              binLng = Number(binObj.lng);
+              hasActualFlipLocation = true;
+            }
+          }
+
+          if (binLat && binLng && !isNaN(binLat) && !isNaN(binLng)) {
+            activeBinsCount++;
+            houseSet.add(site.propId || site.siteId || site.addressText);
+            validBounds.push([binLat, binLng]);
+
+            if (!runDayGroups[groupKey]) runDayGroups[groupKey] = [];
+            runDayGroups[groupKey].push(turf.point([binLng, binLat]));
+
+            const rawTime = binObj.lastFlipped || binObj.lastUpdated;
+            if (rawTime) {
+              const datePart = rawTime.split('T')[0] || rawTime.split(' ')[0] || 'GENERAL';
+              if (!dateGroupedStops[datePart]) dateGroupedStops[datePart] = [];
+              dateGroupedStops[datePart].push({
+                lat: binLat,
+                lng: binLng,
+                time: rawTime,
+                address: site.addressText,
+                serial: binObj.serial
+              });
+            }
+
+            if (showBinGpsDots && !servicedBinSerials.has(binObj.serial)) {
+              let dotColor = runDotColorMap[groupKey] || (stKey === 'Garbage' ? '#dc2626' : (stKey === 'Recycling' ? (isSummer ? '#c2410c' : '#eab308') : '#16a34a'));
+              let strokeColor = '#ffffff';
+
+              if (missedBinSerials.has(binObj.serial)) {
+                dotColor = '#ef4444';
+              } else if (!hasActualFlipLocation) {
+                dotColor = '#8b5cf6';
+                strokeColor = '#facc15';
+              }
+              
+              const binCircle = L.circleMarker([binLat, binLng], {
+                radius: 6.5,
+                fillColor: dotColor,
+                color: strokeColor,
+                weight: 1.5,
+                fillOpacity: 0.95,
+                interactive: true
+              });
+
+              binCircle.on('click', () => openPropertyInspectModal(site.propId || site.siteId));
+              mapMarkersLayer.addLayer(binCircle);
+              activeMapCircleMarkers.set(binObj.serial, { lat: binLat, lng: binLng, layer: binCircle });
+            }
+          }
+        });
+      });
+    });
+
+    currentlyShowingRunKeys = Array.from(activeRunKeySet).sort();
+
+    document.getElementById('mapTotalHouses').innerText = houseSet.size.toLocaleString();
+    document.getElementById('mapTotalBins').innerText = activeBinsCount.toLocaleString();
+
+    const runColoredBox = document.getElementById('mapRunColoredBox');
+    const runTitleText = document.getElementById('mapRunTitleText');
+    const mapDayText = document.getElementById('mapDayText');
+
+    if (currentlyShowingRunKeys.length > 0) {
+      const primaryKey = currentlyShowingRunKeys[0];
+      let boxCls = 'hdr-run-gar';
+      let icon = '🗑️';
+      if (primaryKey.includes('REC') || primaryKey.includes('RECYCLE')) { boxCls = 'hdr-run-rec'; icon = '♻️'; }
+      if (primaryKey.includes('SUMMER') || primaryKey.includes('☀️')) { boxCls = 'hdr-run-summer'; icon = '☀️'; }
+      if (primaryKey.includes('FOG') || primaryKey.includes('FOGO')) { boxCls = 'hdr-run-fog'; icon = '🌳'; }
+
+      runColoredBox.className = `map-run-colored-box ${boxCls}`;
+      const weekLetterDisp = (activeFilterWeek && !primaryKey.includes('SUMMER')) ? ` ${activeFilterWeek}` : '';
+      runTitleText.innerText = `${icon} ${selectedRunsSet.size > 0 ? Array.from(selectedRunsSet).map(r => r.toUpperCase()).join(', ') : 'Run'}${weekLetterDisp}`;
+      
+      const day3 = (activeFilterDay || primaryKey.split('-')[1] || 'ALL').trim().substring(0, 3).toUpperCase();
+      mapDayText.innerText = day3;
+    } else {
+      runColoredBox.className = 'map-run-colored-box hdr-run-gar';
+      runTitleText.innerText = 'All Runs';
+      mapDayText.innerText = 'ALL';
+    }
+
+    const availableDates = Object.keys(dateGroupedStops).sort();
+    if (availableDates.length > 0) {
+      const mostRecentDate = availableDates[availableDates.length - 1];
+      const sameDateStops = dateGroupedStops[mostRecentDate];
+
+      if (sameDateStops && sameDateStops.length >= 2) {
+        sameDateStops.sort((a, b) => a.time.localeCompare(b.time));
+        const startStop = sameDateStops[0];
+        const endStop = sameDateStops[sameDateStops.length - 1];
+
+        const startIcon = L.divIcon({
+          className: 'custom-flag',
+          html: `<div class="run-seq-flag start-flag" title="First Bin">1</div>`,
+          iconSize: [26, 26],
+          iconAnchor: [13, 13]
+        });
+        const endIcon = L.divIcon({
+          className: 'custom-flag',
+          html: `<div class="run-seq-flag end-flag" title="Last Bin">🏁</div>`,
+          iconSize: [26, 26],
+          iconAnchor: [13, 13]
+        });
+
+        const navStartUrl = `https://www.google.com/maps/dir/?api=1&destination=${startStop.lat},${startStop.lng}&travelmode=driving`;
+        const startMarker = L.marker([startStop.lat, startStop.lng], { icon: startIcon, zIndexOffset: 1500 });
+        startMarker.bindPopup(`
+          <b>🏁 Start Stop (First Bin)</b><br>
+          ${startStop.address}<br>
+          Serial: ${startStop.serial}<br>
+          <a href="${navStartUrl}" target="_blank" style="display:inline-block; margin-top:5px; background:#16a34a; color:white; padding:4px 8px; border-radius:4px; text-decoration:none; font-weight:bold;">📍 Navigate from Live GPS</a>
+        `);
+        mapSeqLayer.addLayer(startMarker);
+
+        const endMarker = L.marker([endStop.lat, endStop.lng], { icon: endIcon, zIndexOffset: 1500 });
+        endMarker.bindPopup(`<b>🛑 Finish Stop (Last Bin)</b><br>${endStop.address}<br>Serial: ${endStop.serial}`);
+        mapSeqLayer.addLayer(endMarker);
+      }
+    }
+
+    Object.keys(runDayGroups).forEach((groupKey, idx) => {
+      const color = runColorMap[groupKey] || PRESET_COLORS[idx % PRESET_COLORS.length];
+      let polyCoords = null;
+
+      if (customRunBorders[groupKey] && customRunBorders[groupKey].length >= 3) {
+        polyCoords = customRunBorders[groupKey];
+      } else {
+        const points = runDayGroups[groupKey];
+        if (points.length >= 3 && window.turf) {
+          try {
+            const hull = turf.convex(turf.featureCollection(points));
+            if (hull && hull.geometry && hull.geometry.coordinates) {
+              polyCoords = hull.geometry.coordinates[0].map(c => [c[1], c[0]]);
+            }
+          } catch(e) {}
+        }
+      }
+
+      if (polyCoords) {
+        const poly = L.polygon(polyCoords, {
+          color: color,
+          weight: 2.5,
+          fillColor: color,
+          fillOpacity: 0.16,
+          dashArray: '4',
+          interactive: false
+        });
+        poly._runGroupKey = groupKey;
+        mapHullsLayer.addLayer(poly);
+      }
+    });
+
+    if (isRoadSnapEditing) {
+      enableBoundaryVertexHandles();
+    }
+
+    if (validBounds.length > 0) leafletMap.fitBounds(validBounds, { padding: [30, 30] });
+  }
+
+  function handleFilterChange() {
+    populateModalRunsChecklist();
+    if (activeTab === 'search') handleSearch();
+    if (activeTab === 'hud') updateDriverHud();
+    if (activeTab === 'map') renderMapData();
+  }
+
+  /* Search Screen */
+  function handleSearch() {
+    const query = document.getElementById('searchInput').value.trim().toLowerCase();
+    const streamFilter = activeFilterStream;
+    const dayFilter = activeFilterDay.toLowerCase();
+    const weekFilter = activeFilterWeek.toUpperCase();
+    const resultsContainer = document.getElementById('resultsList');
+    const summaryContainer = document.getElementById('resultsSummary');
+
+    let matches = [];
+
+    siteRecords.forEach((site, idx) => {
+      const sch = site.soloSchedule;
+      if (dayFilter && !sch.day.toLowerCase().includes(dayFilter)) return;
+      if (weekFilter && sch.weekLetter.toUpperCase() !== weekFilter) return;
+
+      const addrMatch = site.addressText.toLowerCase().includes(query) ||
+                        String(site.propId).toLowerCase().includes(query) ||
+                        String(site.siteId).toLowerCase().includes(query);
+
+      const binMatch = query ? [
+        ...site.soloStreams.Garbage, ...site.soloStreams.Recycling, ...site.soloStreams.FOGO
+      ].some(b => b.serial.toLowerCase().includes(query)) : false;
+
+      const runMatch = query ? [sch.garRun, sch.recRun, sch.recSummerRun, sch.fogRun].some(r => (r || '').toLowerCase().includes(query)) : false;
+
+      if (!query || addrMatch || binMatch || runMatch) {
+        let d = null;
+        if (userCurrentLocation && site.lat && site.lng) {
+          d = getDistanceMeters(userCurrentLocation.lat, userCurrentLocation.lng, Number(site.lat), Number(site.lng));
+        }
+        matches.push({ site, idx, dist: d });
+      }
+    });
+
+    if (userCurrentLocation) matches.sort((a, b) => (a.dist || 999999) - (b.dist || 999999));
+
+    summaryContainer.style.display = 'block';
+    summaryContainer.innerText = `Found ${matches.length} properties:`;
+
+    resultsContainer.innerHTML = matches.slice(0, 25).map(({ site, dist }) => {
+      const navUrl = `https://www.google.com/maps/dir/?api=1&destination=${site.lat},${site.lng}&travelmode=driving`;
+      let hasAnyBins = false;
+
+      const councilBinsList = [
+        ...(site.councilStreams.Garbage || []),
+        ...(site.councilStreams.Recycling || []),
+        ...(site.councilStreams.FOGO || [])
+      ];
+      const councilSerialsSet = new Set(councilBinsList.map(cb => cb.serial.toUpperCase()));
+
+      let streamCountPillsHtml = '';
+      SOLO_STREAMS.forEach(st => {
+        if (streamFilter && st.key !== streamFilter) return;
+        const streamBins = site.soloStreams[st.key] || [];
+        if (streamBins.length > 0) {
+          streamCountPillsHtml += `<span class="stream-count-pill ${st.pillClass}">${st.icon} ${formatSizeSummary(streamBins)}</span>`;
+        }
+      });
+      const countsRowHtml = streamCountPillsHtml ? `<div class="stream-counts-row">${streamCountPillsHtml}</div>` : '';
+
+      const nextScheduledCollectionText = getNextCollectionDate(site.soloSchedule.day, site.soloSchedule.weekLetter);
+
+      const streamBoxesHtml = SOLO_STREAMS.map(st => {
+        if (streamFilter && streamFilter !== st.key) return '';
+        const soloBins = site.soloStreams[st.key] || [];
+        const councilBins = site.councilStreams ? (site.councilStreams[st.key] || []) : [];
+        if (soloBins.length === 0 && councilBins.length === 0) return '';
+        hasAnyBins = true;
+        
+        let soloRunBadge = '';
+        if (st.key === 'Garbage' && site.soloSchedule.garRun) {
+          soloRunBadge = `<span class="hdr-run-badge hdr-run-gar" onclick="event.stopPropagation(); openRunDirectlyOnMap('${site.soloSchedule.garRun}', 'Garbage', '${site.soloSchedule.day}', '${site.soloSchedule.weekLetter || ''}', false)">${site.soloSchedule.garRun}</span>`;
+        }
+        if (st.key === 'Recycling' && site.soloSchedule.recRun) {
+          soloRunBadge = `<span class="hdr-run-badge hdr-run-rec" onclick="event.stopPropagation(); openRunDirectlyOnMap('${site.soloSchedule.recRun}', 'Recycling', '${site.soloSchedule.day}', '${site.soloSchedule.weekLetter || ''}', false)">${site.soloSchedule.recRun}</span>`;
+        }
+        if (st.key === 'Recycling' && site.soloSchedule.recSummerRun) {
+          soloRunBadge += ` <span class="hdr-run-badge hdr-run-summer" onclick="event.stopPropagation(); openRunDirectlyOnMap('${site.soloSchedule.recSummerRun}', 'Recycling', '${site.soloSchedule.day}', '${site.soloSchedule.weekLetter || ''}', true)">☀️ ${site.soloSchedule.recSummerRun}</span>`;
+        }
+        if (st.key === 'FOGO' && site.soloSchedule.fogRun) {
+          soloRunBadge = `<span class="hdr-run-badge hdr-run-fog" onclick="event.stopPropagation(); openRunDirectlyOnMap('${site.soloSchedule.fogRun}', 'FOGO', '${site.soloSchedule.day}', '${site.soloSchedule.weekLetter || ''}', false)">${site.soloSchedule.fogRun}</span>`;
+        }
+
+        const missingCouncilBins = councilBins.filter(cb => !soloBins.some(sb => sb.serial.toUpperCase() === cb.serial.toUpperCase()));
+
+        return `
+          <div class="stream-group-card">
+            <div class="stream-group-header ${st.headerClass}">
+              <span>${st.icon} ${st.label}</span>
+              <div>${soloRunBadge}</div>
+            </div>
+            <div class="serials-list">
+              ${soloBins.map((b, bIdx) => {
+                const drawerId = `search_drawer_${site.propId || site.siteId}_${st.key}_${bIdx}`;
+                const isSoloNotInMpsc = councilBinsList.length > 0 && !councilSerialsSet.has(b.serial.toUpperCase());
+
+                return `
+                  <div class="bin-entry">
+                    <div class="serial-row">
+                      <div class="serial-left">
+                        ${b.unitLabel ? `<span class="unit-pill">${b.unitLabel}</span>` : ''}
+                        <span class="size-badge">${b.size || '240L'}</span>
+                        <span class="serial-text">${b.serial}</span>
+                      </div>
+                      <div class="serial-right-actions">
+                        ${isSoloNotInMpsc ? '<span title="Serial not in MPSC dataset" style="font-size:16px; cursor:help;">⚠️</span>' : ''}
+                        <button type="button" class="info-btn" onclick="event.stopPropagation(); toggleBinMetaDrawer(this, '${drawerId}')">ℹ️</button>
+                        <button type="button" class="pencil-btn" onclick="event.stopPropagation(); promptEditBin('${site.propId || site.siteId}', '${st.key}', ${bIdx})">✏️</button>
+                      </div>
+                    </div>
+                    <div id="${drawerId}" class="bin-meta-drawer">
+                      ${b.lastFlipped ? `Flipped: ${b.lastFlipped}<br>` : ''}
+                      ${b.lastUpdated ? `Updated: ${b.lastUpdated}<br>` : ''}
+                      ${b.make ? `Make: ${b.make}<br>` : ''}
+                      ${b.notes ? `Notes: ${b.notes}` : ''}
+                    </div>
+                  </div>
+                `;
+              }).join('')}
+
+              ${missingCouncilBins.length > 0 ? `
+                <div class="stream-council-section">
+                  <div class="stream-council-title">🏛️ MPSC Data</div>
+                  ${missingCouncilBins.map(cb => `
+                    <div style="display:flex; justify-content:space-between; align-items:center; padding:3px 0;">
+                      <span>${cb.size} - <b style="text-transform:uppercase;">${cb.serial}</b></span>
+                      <button type="button" class="council-add-btn" onclick="event.stopPropagation(); promptAddCouncilBin('${site.propId || site.siteId}', '${st.key}', '${cb.serial}', '${cb.size}')">+ Add to Solo</button>
+                    </div>
+                  `).join('')}
+                </div>
+              ` : ''}
+            </div>
+          </div>
+        `;
+      }).join('');
+
+      const propIdLine = site.propId ? `<span class="rhs-line">PID: ${site.propId}</span>` : '';
+      const siteIdLine = site.siteId ? `<span class="rhs-line">SID: ${site.siteId}</span>` : '';
+      const propTypeLine = site.councilPropType ? `<span class="rhs-line rhs-type-line">${site.councilPropType}</span>` : '';
+
+      const cleanStreetOnly = (site.baseStreetLine || site.addressText.split(',')[0]).trim();
+      const suburbHtml = site.suburbLine ? `<div class="address-line2">${site.suburbLine}</div>` : '';
+
+      let ratingBannerHtml = '';
+      if (site.ratingStars) {
+        ratingBannerHtml = `
+          <div class="rating-banner">
+            <span class="rating-stars-val">${'★'.repeat(site.ratingStars)}${'☆'.repeat(5 - site.ratingStars)}</span>
+            ${site.ratingComment ? `<div class="rating-comment-text">"${site.ratingComment}"</div>` : ''}
+          </div>
+        `;
+      }
+
+      const isPurpleFlagged = Boolean(site.runFlags);
+      const cardClass = isPurpleFlagged ? 'address-card flagged-purple' : 'address-card';
+
+      return `
+        <div class="${cardClass}" onclick="openPropertyInspectModal('${site.propId || site.siteId}')">
+          ${isPurpleFlagged ? `<div class="flag-banner-purple">🚩 ${site.runFlags}</div>` : ''}
+          <div class="address-header-row">
+            <div>
+              <div class="address-line1">${cleanStreetOnly}</div>
+              ${suburbHtml}
+            </div>
+            <div class="property-rhs-badge">
+              ${propIdLine}
+              ${siteIdLine}
+              ${propTypeLine}
+            </div>
+          </div>
+          ${ratingBannerHtml}
+          ${countsRowHtml}
+          <div class="schedule-bar">
+            <span>📅 ${site.soloSchedule.day} ${site.soloSchedule.weekFormatted}</span>
+            <span class="next-collection-tag">${nextScheduledCollectionText}</span>
+          </div>
+          <div class="prop-header-actions" style="margin-bottom:6px;">
+            ${dist ? `<span class="distance-pill">${Math.round(dist)}m</span>` : ''}
+            <a href="${navUrl}" target="_blank" class="single-nav-btn" onclick="event.stopPropagation()">📍 Nav</a>
+          </div>
+          ${hasAnyBins ? streamBoxesHtml : '<div style="font-size:13px; color:#94a3b8; font-style:italic; padding:4px 0;">no bins</div>'}
+        </div>
+      `;
+    }).join('');
   }
 
   /* Property Inspection Modal */
@@ -2335,10 +3109,10 @@
   function openModal(id) { document.getElementById(id).classList.add('open'); }
   function closeModal(id) { document.getElementById(id).classList.remove('open'); }
 
-  /* IndexedDB Storage Core */
+  /* IndexedDB Storage Engine */
   function openDB() {
     return new Promise((resolve) => {
-      const req = window.indexedDB.open("LukezBunzMasterDB_v440", 1);
+      const req = window.indexedDB.open("LukezBunzMasterDB_v450", 1);
       req.onupgradeneeded = e => {
         const db = e.target.result;
         if (!db.objectStoreNames.contains("store")) {
