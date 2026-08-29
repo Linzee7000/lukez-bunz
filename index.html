@@ -1130,6 +1130,26 @@
     .run-style-actions{position:sticky;bottom:0;margin:0;padding:12px 18px 16px;background:#fff;border-top:1px solid #e2e8f0;justify-content:flex-end;gap:8px}
     @media(max-width:520px){.run-style-grid{grid-template-columns:1fr}.run-style-modal-header h3{font-size:20px}}
 
+
+    /* ---------- Compact run header ---------- */
+    .map-run-colored-box{
+      white-space:nowrap!important;
+      overflow:hidden;
+      text-overflow:ellipsis;
+      font-size:20px!important;
+      min-height:52px!important;
+    }
+    #mapRunTitleText{
+      white-space:nowrap!important;
+      display:block;
+      line-height:1.1!important;
+    }
+
+    /* Follow mode stays tightly focused on the current street. */
+    .leaflet-container{
+      touch-action:pan-x pan-y;
+    }
+
 </style>
 </head>
 <body>
@@ -1936,7 +1956,7 @@
     const btn = document.getElementById('btnTruckFollow');
     btn.classList.toggle('active', isTruckFollowEnabled);
     if (isTruckFollowEnabled && userCurrentLocation && leafletMap) {
-      leafletMap.setView([userCurrentLocation.lat, userCurrentLocation.lng], 16);
+      leafletMap.setView([userCurrentLocation.lat, userCurrentLocation.lng], 18);
     }
   }
 
@@ -2175,7 +2195,19 @@
     if(activeFilterDataSource==='council'&&!streams.some(st=>hasBins(site,'council',st))) return false;
     return true;
   }
-  function primaryRun(site){ const a=getSiteRunEntries(site),set=selectedMapRuns(); if(!a.length)return null; if(set.size)return a.find(x=>set.has(mapKey(x.key)))||null; if(activeFilterStream==='Garbage')return a.find(x=>x.type==='gar')||null; if(activeFilterStream==='Recycling')return a.find(x=>x.type==='rec')||null; if(activeFilterStream==='SummerRecycling')return a.find(x=>x.type==='summer')||null; if(activeFilterStream==='FOGO')return a.find(x=>x.type==='fog')||null; return a[0]; }
+  function primaryRun(site){
+    const a=getSiteRunEntries(site),set=selectedMapRuns();
+    if(!a.length)return null;
+
+    if(set.size)return a.find(x=>set.has(mapKey(x.key)))||null;
+    if(activeFilterStream==='Garbage')return a.find(x=>x.type==='gar')||null;
+    if(activeFilterStream==='Recycling')return a.find(x=>x.type==='rec')||null;
+    if(activeFilterStream==='SummerRecycling')return a.find(x=>x.type==='summer')||null;
+    if(activeFilterStream==='FOGO')return a.find(x=>x.type==='fog')||null;
+
+    // All Runs means the standard services. Summer is opt-in only.
+    return a.find(x=>x.type==='gar') || a.find(x=>x.type==='rec') || a.find(x=>x.type==='fog') || null;
+  }
   function sourceCoords(site,bin){ const prop=gps(site.lat,site.lng),flip=bin&&gps(bin.lat,bin.lng); if(pinSourceMode==='property')return prop; if(pinSourceMode==='bin')return flip&&metersBetween(prop,flip)<=10?flip:null; /* flip mode: only trust a flip within 10m of its own house */ return flip&&metersBetween(prop,flip)<=10?flip:prop; }
   function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
   function initLeafletMap(){
@@ -2183,7 +2215,7 @@
     const el=document.getElementById('mainLeafletMap');
     if(!el||typeof L==='undefined'){console.error('Leaflet/map container unavailable');return;}
 
-    leafletMap=L.map(el,{preferCanvas:true,zoomControl:true,zoomSnap:1}).setView([-38.36,144.91],17);
+    leafletMap=L.map(el,{preferCanvas:true,zoomControl:true,zoomSnap:1}).setView([-38.36,144.91],18);
     osmLayer=L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:20,attribution:'&copy; OpenStreetMap contributors'}).addTo(leafletMap);
     satLayer=L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{maxZoom:20,attribution:'Tiles &copy; Esri'});
     mapHullsLayer=L.layerGroup().addTo(leafletMap);
@@ -2204,7 +2236,8 @@
     const week=String(activeFilterWeek||'').trim().toUpperCase();
     if(displayRun&&week&&!/[A-Z]$/.test(displayRun)&&stream!=='SummerRecycling') displayRun+=week;
     const day=String(activeFilterDay||'').trim();
-    return displayRun?`${icon} ${displayRun}${day?` · ${day}`:''}`:'All Runs';
+    const dayShort=day ? day.slice(0,3).toUpperCase() : '';
+    return displayRun?`${icon} ${displayRun}${dayShort?` · ${dayShort}`:''}`:'All Runs';
   }
 
   function updateMapHeaderInfo(sites,groups){
@@ -2293,12 +2326,33 @@
         : {lat:Number(p.lat),lng:Number(p.lng)}
       ).filter(p=>Number.isFinite(p.lat)&&Number.isFinite(p.lng));
     } else {
-      const sitePoints=sites
-        .map(s=>gps(s.lat,s.lng))
-        .filter(Boolean);
+      let boundaryPoints=[];
 
-      // Only use the outer perimeter, never the CSV/property sequence.
-      pts=buildRunConvexHull(sitePoints);
+      // Summer recycling boundaries must be based on the actual selected
+      // collection locations, not the wider property assignments.
+      if(activeFilterStream==='SummerRecycling'){
+        sites.forEach(site=>{
+          const bins=(site.soloStreams?.Recycling||[]);
+          bins.forEach(bin=>{
+            const binPoint=gps(bin.lat,bin.lng);
+            const housePoint=gps(site.lat,site.lng);
+            // Prefer a valid flip location; otherwise use that property's
+            // house location so a property with no recorded flip is retained.
+            if(binPoint) boundaryPoints.push(binPoint);
+            else if(housePoint) boundaryPoints.push(housePoint);
+          });
+          // A summer property may legitimately have no bin record.
+          if(!bins.length){
+            const housePoint=gps(site.lat,site.lng);
+            if(housePoint) boundaryPoints.push(housePoint);
+          }
+        });
+      } else {
+        boundaryPoints=sites.map(s=>gps(s.lat,s.lng)).filter(Boolean);
+      }
+
+      // Only the outermost unique collection points are used.
+      pts=buildRunConvexHull(boundaryPoints);
     }
 
     if(pts.length<3) return;
@@ -2660,7 +2714,7 @@
       const group = new L.featureGroup(layers);
       leafletMap.fitBounds(group.getBounds(), { padding: [35, 35] });
     } else if (userCurrentLocation) {
-      leafletMap.setView([userCurrentLocation.lat, userCurrentLocation.lng], 16);
+      leafletMap.setView([userCurrentLocation.lat, userCurrentLocation.lng], 18);
     }
   }
 
@@ -2707,7 +2761,7 @@
 
     if (isTruckFollowEnabled && leafletMap) {
       if (!hasAutoCenteredTruck) {
-        leafletMap.setView([userCurrentLocation.lat, userCurrentLocation.lng], 17);
+        leafletMap.setView([userCurrentLocation.lat, userCurrentLocation.lng], 18);
         hasAutoCenteredTruck = true;
       } else {
         leafletMap.panTo([userCurrentLocation.lat, userCurrentLocation.lng]);
@@ -2973,7 +3027,7 @@
       if ((!streamFilter || streamFilter === 'Recycling') && sch.recRun) {
         runBadgeHtml += `<span class="hdr-run-badge hdr-run-rec" onclick="event.stopPropagation(); openRunDirectlyOnMap('${sch.recRun}', 'Recycling', '${sch.day}', '${sch.weekLetter || ''}', false)">♻️ ${sch.recRun}</span> `;
       }
-      if (sch.recSummerRun) {
+      if (streamFilter === 'SummerRecycling' && sch.recSummerRun) {
         runBadgeHtml += `<span class="hdr-run-badge hdr-run-summer" onclick="event.stopPropagation(); openRunDirectlyOnMap('${sch.recSummerRun}', 'SummerRecycling', '${sch.day}', '', true)">☀️ ${sch.recSummerRun}</span> `;
       }
       if ((!streamFilter || streamFilter === 'FOGO') && sch.fogRun) {
@@ -3122,8 +3176,8 @@
         if (st.key === 'Recycling' && site.soloSchedule.recRun && streamFilter !== 'SummerRecycling') {
           soloRunBadge = `<span class="hdr-run-badge hdr-run-rec" onclick="event.stopPropagation(); openRunDirectlyOnMap('${site.soloSchedule.recRun}', 'Recycling', '${site.soloSchedule.day}', '${site.soloSchedule.weekLetter || ''}', false)">♻️ ${site.soloSchedule.recRun}</span>`;
         }
-        if (st.key === 'Recycling' && site.soloSchedule.recSummerRun) {
-          soloRunBadge += ` <span class="hdr-run-badge hdr-run-summer" onclick="event.stopPropagation(); openRunDirectlyOnMap('${site.soloSchedule.recSummerRun}', 'SummerRecycling', '${site.soloSchedule.day}', '', true)">☀️ ${site.soloSchedule.recSummerRun}</span>`;
+        if (st.key === 'Recycling' && streamFilter === 'SummerRecycling' && site.soloSchedule.recSummerRun) {
+          soloRunBadge = `<span class="hdr-run-badge hdr-run-summer" onclick="event.stopPropagation(); openRunDirectlyOnMap('${site.soloSchedule.recSummerRun}', 'SummerRecycling', '${site.soloSchedule.day}', '', true)">☀️ ${site.soloSchedule.recSummerRun}</span>`;
         }
         if (st.key === 'FOGO' && site.soloSchedule.fogRun) {
           soloRunBadge = `<span class="hdr-run-badge hdr-run-fog" onclick="event.stopPropagation(); openRunDirectlyOnMap('${site.soloSchedule.fogRun}', 'FOGO', '${site.soloSchedule.day}', '${site.soloSchedule.weekLetter || ''}', false)">🌳 ${site.soloSchedule.fogRun}</span>`;
@@ -3511,7 +3565,7 @@
       if (st.key === 'Recycling' && sch.recRun) {
         soloRunBadge = `<span class="hdr-run-badge hdr-run-rec" onclick="event.stopPropagation(); closeModal('propInspectModal'); openRunDirectlyOnMap('${sch.recRun}', 'Recycling', '${sch.day}', '${sch.weekLetter || ''}', false)">♻️ ${sch.recRun}</span>`;
       }
-      if (st.key === 'Recycling' && sch.recSummerRun) {
+      if (st.key === 'Recycling' && activeFilterStream === 'SummerRecycling' && sch.recSummerRun) {
         soloRunBadge += ` <span class="hdr-run-badge hdr-run-summer" onclick="event.stopPropagation(); closeModal('propInspectModal'); openRunDirectlyOnMap('${sch.recSummerRun}', 'SummerRecycling', '${sch.day}', '', true)">☀️ ${sch.recSummerRun}</span>`;
       }
       if (st.key === 'FOGO' && sch.fogRun) {
