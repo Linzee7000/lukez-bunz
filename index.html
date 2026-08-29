@@ -2004,25 +2004,111 @@
   function mapColor(k,i=0){ return runColorMap[mapKey(k)]||runColorMap[k]||PRESET_COLORS[i%PRESET_COLORS.length]; }
   function dotColor(k,f){ return runDotColorMap[mapKey(k)]||runDotColorMap[k]||f; }
   function hasBins(site,source,stream){ const obj=source==='solo'?site.soloStreams:site.councilStreams; return (obj?.[stream]||[]).length>0; }
-  function visibleStreams(){ if(activeFilterStream==='SummerRecycling')return ['Recycling']; return activeFilterStream?[activeFilterStream]:['Garbage','Recycling','FOGO']; }
-  function streamRunForSite(site,stream){ const s=site?.soloSchedule||{}; if(stream==='Garbage')return {normal:s.garRun||''}; if(stream==='FOGO')return {normal:s.fogRun||''}; if(stream==='Recycling')return {normal:s.recRun||'',summer:s.recSummerRun||''}; return {normal:''}; }
-  function streamMatchesSelectedRun(site,stream){ const set=selectedMapRuns(); if(!set.size)return true; const r=streamRunForSite(site,stream); return Object.values(r).filter(Boolean).some(v=>set.has(mapKey(v))); }
-  function siteMatchesMapFilters(site){ const sch=site?.soloSchedule||{};
-    if(activeFilterDay&&String(sch.day||'').trim().toLowerCase()!==String(activeFilterDay).trim().toLowerCase())return false;
-    if(activeFilterWeek&&String(sch.weekLetter||'').trim().toUpperCase()!==String(activeFilterWeek).trim().toUpperCase())return false;
+  /*
+    STRICT RUN SEPARATION
+
+    Normal Recycling and Summer Recycling are different run systems.
+    A selected normal recycling run must NEVER match recSummerRun.
+    A selected summer recycling run must NEVER match recRun.
+
+    This is deliberately stream-aware rather than searching every run field.
+  */
+  function visibleStreams(){
+    if(activeFilterStream==='SummerRecycling') return ['Recycling'];
+    return activeFilterStream ? [activeFilterStream] : ['Garbage','Recycling','FOGO'];
+  }
+
+  function streamRunForSite(site,stream){
+    const s=site?.soloSchedule||{};
+
+    if(stream==='Garbage') return String(s.garRun||'').trim();
+    if(stream==='FOGO') return String(s.fogRun||'').trim();
+
+    if(stream==='Recycling'){
+      return activeFilterStream==='SummerRecycling'
+        ? String(s.recSummerRun||'').trim()
+        : String(s.recRun||'').trim();
+    }
+
+    return '';
+  }
+
+  function streamMatchesSelectedRun(site,stream){
+    const set=selectedMapRuns();
+    if(!set.size) return true;
+    const run=streamRunForSite(site,stream);
+    return !!run && set.has(mapKey(run));
+  }
+
+  function siteMatchesMapFilters(site){
+    const sch=site?.soloSchedule||{};
+
+    if(activeFilterDay &&
+      String(sch.day||'').trim().toLowerCase()!==String(activeFilterDay).trim().toLowerCase()) return false;
+
+    if(activeFilterWeek &&
+      String(sch.weekLetter||'').trim().toUpperCase()!==String(activeFilterWeek).trim().toUpperCase()) return false;
+
+    if(activeFilterStream==='Garbage' && !String(sch.garRun||'').trim()) return false;
+    if(activeFilterStream==='Recycling' && !String(sch.recRun||'').trim()) return false;
+    if(activeFilterStream==='SummerRecycling' && !String(sch.recSummerRun||'').trim()) return false;
+    if(activeFilterStream==='FOGO' && !String(sch.fogRun||'').trim()) return false;
+
     const selected=selectedMapRuns();
-    if(selected.size&&!getSiteRunEntries(site).some(x=>selected.has(mapKey(x.key))))return false;
-    if(activeFilterStream==='Garbage'&&!sch.garRun)return false;
-    if(activeFilterStream==='Recycling'&&!sch.recRun)return false;
-    if(activeFilterStream==='SummerRecycling'&&!sch.recSummerRun)return false;
-    if(activeFilterStream==='FOGO'&&!sch.fogRun)return false;
-    const streams=visibleStreams().filter(st=>streamMatchesSelectedRun(site,st));
-    if(selected.size&&!streams.length)return false;
-    if(activeFilterDataSource==='solo'&&!streams.some(st=>hasBins(site,'solo',st)))return false;
-    if(activeFilterDataSource==='council'&&!streams.some(st=>hasBins(site,'council',st)))return false;
+
+    /*
+      With a stream selected, only the run field belonging to that stream
+      may satisfy the selected run. This prevents Summer 220 from appearing
+      when normal 220A is selected, even if the same property has both fields.
+    */
+    if(selected.size && activeFilterStream){
+      const activeRuns=visibleStreams().map(st=>streamRunForSite(site,st)).filter(Boolean);
+      if(!activeRuns.some(run=>selected.has(mapKey(run)))) return false;
+    } else if(selected.size){
+      if(!getSiteRunEntries(site).some(x=>selected.has(mapKey(x.key)))) return false;
+    }
+
+    const streams=visibleStreams().filter(st=>{
+      if(selected.size) return streamMatchesSelectedRun(site,st);
+      return true;
+    });
+
+    if(activeFilterDataSource==='solo' &&
+      !streams.some(st=>hasBins(site,'solo',st))) return false;
+
+    if(activeFilterDataSource==='council' &&
+      !streams.some(st=>hasBins(site,'council',st))) return false;
+
     return true;
   }
-  function primaryRun(site){ const a=getSiteRunEntries(site),set=selectedMapRuns(); if(!a.length)return null; if(set.size)return a.find(x=>set.has(mapKey(x.key)))||null; if(activeFilterStream==='Garbage')return a.find(x=>x.type==='gar')||null; if(activeFilterStream==='Recycling')return a.find(x=>x.type==='rec')||null; if(activeFilterStream==='SummerRecycling')return a.find(x=>x.type==='summer')||null; if(activeFilterStream==='FOGO')return a.find(x=>x.type==='fog')||null; return a[0]; }
+  function primaryRun(site){
+    const a=getSiteRunEntries(site);
+    const set=selectedMapRuns();
+
+    if(activeFilterStream==='Garbage'){
+      const run=String(site?.soloSchedule?.garRun||'').trim();
+      return run && (!set.size || set.has(mapKey(run))) ? {key:run,type:'gar'} : null;
+    }
+
+    if(activeFilterStream==='Recycling'){
+      const run=String(site?.soloSchedule?.recRun||'').trim();
+      return run && (!set.size || set.has(mapKey(run))) ? {key:run,type:'rec'} : null;
+    }
+
+    if(activeFilterStream==='SummerRecycling'){
+      const run=String(site?.soloSchedule?.recSummerRun||'').trim();
+      return run && (!set.size || set.has(mapKey(run))) ? {key:run,type:'summer'} : null;
+    }
+
+    if(activeFilterStream==='FOGO'){
+      const run=String(site?.soloSchedule?.fogRun||'').trim();
+      return run && (!set.size || set.has(mapKey(run))) ? {key:run,type:'fog'} : null;
+    }
+
+    if(!a.length) return null;
+    if(set.size) return a.find(x=>set.has(mapKey(x.key)))||null;
+    return a[0];
+  }
   function sourceCoords(site,bin){ const prop=gps(site.lat,site.lng),flip=bin&&gps(bin.lat,bin.lng); if(pinSourceMode==='property')return prop; if(pinSourceMode==='bin')return flip&&metersBetween(prop,flip)<=10?flip:null; /* flip mode: only trust a flip within 10m of its own house */ return flip&&metersBetween(prop,flip)<=10?flip:prop; }
   function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
   function initLeafletMap(){ if(leafletMap)return; const el=document.getElementById('mainLeafletMap'); if(!el||typeof L==='undefined'){console.error('Leaflet/map container unavailable');return;} leafletMap=L.map(el,{preferCanvas:true,zoomControl:true}).setView([-38.36,144.91],12); osmLayer=L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:20,attribution:'&copy; OpenStreetMap contributors'}).addTo(leafletMap); satLayer=L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{maxZoom:20,attribution:'Tiles &copy; Esri'}); mapHullsLayer=L.layerGroup().addTo(leafletMap); mapSeqLayer=L.layerGroup().addTo(leafletMap); mapMarkersLayer=L.layerGroup().addTo(leafletMap); setTimeout(()=>leafletMap&&leafletMap.invalidateSize(),100); }
