@@ -1091,6 +1091,20 @@
     .hud-run-map-link{cursor:pointer;border:0;font:inherit}
     .hud-run-map-link:active{transform:scale(.98)}
 
+
+    /* ---------- Requested map HUD refinement ---------- */
+    .map-telemetry-clean .map-telemetry-meta{min-height:30px;align-items:center}
+    .map-telemetry-context{font-size:12px;font-weight:400;color:#94a3b8;letter-spacing:.08em}
+    .map-telemetry-clean .map-telemetry-heading{font-size:20px!important;font-weight:400!important;color:#e2e8f0!important;line-height:1}
+    .map-telemetry-clean .map-telemetry-street{font-size:24px!important;font-weight:400!important;letter-spacing:0!important}
+    .map-telemetry-clean .map-telemetry-speed{font-size:44px!important;font-weight:400!important}
+    .map-telemetry-label{font-weight:400!important}
+    .map-arrival-info{margin-top:10px;padding-top:10px;border-top:1px solid rgba(148,163,184,.22)}
+    .arrival-address{font-size:17px;font-weight:500;color:#f8fafc;margin-bottom:5px}
+    .arrival-meta{display:flex;gap:8px;flex-wrap:wrap;color:#facc15;font-size:12px;margin-bottom:7px}
+    .arrival-bin-details{display:flex;flex-wrap:wrap;gap:6px}
+    .arrival-bin-details span{background:rgba(255,255,255,.08);color:#cbd5e1;border-radius:7px;padding:5px 7px;font-size:12px;font-weight:400}
+
 </style>
 </head>
 <body>
@@ -1198,13 +1212,20 @@
       <!-- BOTTOM TELEMETRY BANNER -->
       <div class="map-telemetry-banner map-telemetry-clean">
         <div class="map-telemetry-meta">
-          <span id="mapLiveRun">📍 No run selected</span>
+          <span class="map-telemetry-context">LIVE COLLECTION</span>
           <span id="mapLiveHeading" class="map-telemetry-heading">🧭 N 0°</span>
         </div>
         <div class="map-telemetry-main">
-          <div class="map-telemetry-left"><div id="mapLiveStreet" class="map-telemetry-street">Scanning Street...</div><div class="map-telemetry-label">Current Street</div></div>
-          <div class="map-telemetry-right"><div class="map-telemetry-speed-box"><span id="mapLiveSpeed" class="map-telemetry-speed">0</span></div><div class="map-telemetry-label speed-label">Speed</div></div>
+          <div class="map-telemetry-left">
+            <div id="mapLiveStreet" class="map-telemetry-street">Scanning Street...</div>
+            <div class="map-telemetry-label">Current Street</div>
+          </div>
+          <div class="map-telemetry-right">
+            <div class="map-telemetry-speed-box"><span id="mapLiveSpeed" class="map-telemetry-speed">0</span></div>
+            <div class="map-telemetry-label speed-label">Speed</div>
+          </div>
         </div>
+        <div id="mapArrivalInfo" class="map-arrival-info" hidden></div>
       </div>
 
       <div id="mainLeafletMap"></div>
@@ -2104,26 +2125,70 @@
 
     return !!run && set.has(mapKey(run));
   }
-  function siteMatchesMapFilters(site){ const sch=site?.soloSchedule||{};
-    if(activeFilterDay&&String(sch.day||'').trim().toLowerCase()!==String(activeFilterDay).trim().toLowerCase())return false;
-    if(activeFilterWeek&&String(sch.weekLetter||'').trim().toUpperCase()!==String(activeFilterWeek).trim().toUpperCase())return false;
+  function siteMatchesMapFilters(site){
+    const sch=site?.soloSchedule||{};
+    if(activeFilterDay&&String(sch.day||'').trim().toLowerCase()!==String(activeFilterDay).trim().toLowerCase()) return false;
+    if(activeFilterWeek&&String(sch.weekLetter||'').trim().toUpperCase()!==String(activeFilterWeek).trim().toUpperCase()) return false;
+
+    if(activeFilterStream==='Garbage'&&!String(sch.garRun||'').trim()) return false;
+    if(activeFilterStream==='Recycling'&&!String(sch.recRun||'').trim()) return false;
+    if(activeFilterStream==='SummerRecycling'&&!String(sch.recSummerRun||'').trim()) return false;
+    if(activeFilterStream==='FOGO'&&!String(sch.fogRun||'').trim()) return false;
+
     const selected=selectedMapRuns();
-    if(selected.size&&!getSiteRunEntries(site).some(x=>selected.has(mapKey(x.key))))return false;
-    if(activeFilterStream==='Garbage'&&!sch.garRun)return false;
-    if(activeFilterStream==='Recycling'&&!sch.recRun)return false;
-    if(activeFilterStream==='SummerRecycling'&&!sch.recSummerRun)return false;
-    if(activeFilterStream==='FOGO'&&!sch.fogRun)return false;
-    const streams=visibleStreams().filter(st=>streamMatchesSelectedRun(site,st));
-    if(selected.size&&!streams.length)return false;
-    if(activeFilterDataSource==='solo'&&!streams.some(st=>hasBins(site,'solo',st)))return false;
-    if(activeFilterDataSource==='council'&&!streams.some(st=>hasBins(site,'council',st)))return false;
+    if(selected.size&&activeFilterStream){
+      const runs=visibleStreams().map(st=>streamRunForSite(site,st)).filter(Boolean);
+      if(!runs.some(run=>selected.has(mapKey(run)))) return false;
+    } else if(selected.size&&!getSiteRunEntries(site).some(x=>selected.has(mapKey(x.key)))){
+      return false;
+    }
+
+    const streams=visibleStreams().filter(st=>!selected.size||streamMatchesSelectedRun(site,st));
+    if(selected.size&&!streams.length) return false;
+
+    if(activeFilterDataSource==='solo'&&!streams.some(st=>hasBins(site,'solo',st))) return false;
+    if(activeFilterDataSource==='council'&&!streams.some(st=>hasBins(site,'council',st))) return false;
     return true;
   }
   function primaryRun(site){ const a=getSiteRunEntries(site),set=selectedMapRuns(); if(!a.length)return null; if(set.size)return a.find(x=>set.has(mapKey(x.key)))||null; if(activeFilterStream==='Garbage')return a.find(x=>x.type==='gar')||null; if(activeFilterStream==='Recycling')return a.find(x=>x.type==='rec')||null; if(activeFilterStream==='SummerRecycling')return a.find(x=>x.type==='summer')||null; if(activeFilterStream==='FOGO')return a.find(x=>x.type==='fog')||null; return a[0]; }
   function sourceCoords(site,bin){ const prop=gps(site.lat,site.lng),flip=bin&&gps(bin.lat,bin.lng); if(pinSourceMode==='property')return prop; if(pinSourceMode==='bin')return flip&&metersBetween(prop,flip)<=10?flip:null; /* flip mode: only trust a flip within 10m of its own house */ return flip&&metersBetween(prop,flip)<=10?flip:prop; }
   function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
   function initLeafletMap(){ if(leafletMap)return; const el=document.getElementById('mainLeafletMap'); if(!el||typeof L==='undefined'){console.error('Leaflet/map container unavailable');return;} leafletMap=L.map(el,{preferCanvas:true,zoomControl:true}).setView([-38.36,144.91],12); osmLayer=L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:20,attribution:'&copy; OpenStreetMap contributors'}).addTo(leafletMap); satLayer=L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{maxZoom:20,attribution:'Tiles &copy; Esri'}); mapHullsLayer=L.layerGroup().addTo(leafletMap); mapSeqLayer=L.layerGroup().addTo(leafletMap); mapMarkersLayer=L.layerGroup().addTo(leafletMap); mapKmzRouteLayer=L.layerGroup().addTo(leafletMap); mapKmzLiftLayer=L.layerGroup().addTo(leafletMap); setTimeout(()=>leafletMap&&leafletMap.invalidateSize(),100); }
-  function updateMapHeaderInfo(sites,groups){ const box=document.getElementById('mapRunColoredBox'),title=document.getElementById('mapRunTitleText'),day=document.getElementById('mapDayText'); if(box){box.classList.remove('hdr-run-gar','hdr-run-rec','hdr-run-summer','hdr-run-fog');box.classList.add(activeFilterStream==='Recycling'?'hdr-run-rec':activeFilterStream==='SummerRecycling'?'hdr-run-summer':activeFilterStream==='FOGO'?'hdr-run-fog':'hdr-run-gar');} if(title)title.textContent=selectedRunsSet.size===1?Array.from(selectedRunsSet)[0]:groups.size===1?Array.from(groups.keys())[0]:'All Runs'; if(day)day.textContent=activeFilterDay?activeFilterDay.toUpperCase():'ALL'; const h=document.getElementById('mapTotalHouses'),b=document.getElementById('mapTotalBins');if(h)h.textContent=sites.length;let n=0;sites.forEach(site=>visibleStreams().filter(st=>streamMatchesSelectedRun(site,st)).forEach(st=>{if(activeFilterDataSource!=='council')n+=(site.soloStreams?.[st]||[]).length;if(activeFilterDataSource!=='solo')n+=(site.councilStreams?.[st]||[]).length;}));if(b)b.textContent=n; }
+  function mapRunLabel(){
+    const selected=Array.from(selectedMapRuns());
+    const rawRun=selected.length===1?selected[0].toUpperCase():'';
+    const stream=activeFilterStream||'';
+    const icon=stream==='Recycling'?'♻️':stream==='SummerRecycling'?'☀️':stream==='FOGO'?'🌿':stream==='Garbage'?'🗑️':'📍';
+    let displayRun=rawRun;
+    const week=String(activeFilterWeek||'').trim().toUpperCase();
+    if(displayRun&&week&&!/[A-Z]$/.test(displayRun)&&stream!=='SummerRecycling') displayRun+=week;
+    return displayRun?`${icon} ${displayRun}`:'All Runs';
+  }
+
+  function updateMapHeaderInfo(sites,groups){
+    const box=document.getElementById('mapRunColoredBox');
+    const title=document.getElementById('mapRunTitleText');
+    if(box){
+      box.classList.remove('hdr-run-gar','hdr-run-rec','hdr-run-summer','hdr-run-fog');
+      box.classList.add(activeFilterStream==='Recycling'?'hdr-run-rec':activeFilterStream==='SummerRecycling'?'hdr-run-summer':activeFilterStream==='FOGO'?'hdr-run-fog':'hdr-run-gar');
+    }
+    if(title) title.textContent=mapRunLabel();
+
+    const h=document.getElementById('mapTotalHouses');
+    const b=document.getElementById('mapTotalBins');
+    if(h) h.textContent=sites.length;
+
+    let total=0;
+    const activeStreams=visibleStreams();
+    sites.forEach(site=>activeStreams.forEach(st=>{
+      if(!streamMatchesSelectedRun(site,st)) return;
+      // SOLO is the master list when no source is explicitly restricted.
+      const source=activeFilterDataSource==='council'?site.councilStreams:site.soloStreams;
+      total+=(source?.[st]||[]).length;
+    }));
+    if(b) b.textContent=total;
+  }
+
   function propertyPopup(site){const id=String(site.propId||site.siteId||'');return `<div><b>${esc(cleanStreetAddress(site.addressText)||site.baseStreetLine||'Property')}</b><br><small>${esc(site.suburbLine||'')}</small><br><button type="button" onclick="openPropertyInspectModal('${esc(id)}')">Inspect</button> <button type="button" onclick="promptEditProperty('${esc(id)}')">Edit</button></div>`;}
   /*
     Build a real outer boundary instead of joining properties in CSV order.
@@ -2744,11 +2809,9 @@
 
       if (selectedRunsSet.size === 0 || selectedRunsSet.has(streamRun)) {
         activeRunHouses++;
-        SOLO_STREAMS.forEach(st => {
-          if (!streamFilter || streamFilter === st.key || (streamFilter === 'SummerRecycling' && st.key === 'Recycling')) {
-            activeRunBins += (site.soloStreams[st.key] || []).length;
-          }
-        });
+        const countStream=streamFilter==='SummerRecycling'?'Recycling':streamFilter;
+        if(countStream) activeRunBins+=(site.soloStreams[countStream]||[]).length;
+        else SOLO_STREAMS.forEach(st=>activeRunBins+=(site.soloStreams[st.key]||[]).length);
       }
 
       if (site.lat && site.lng && Number(site.lat) !== 0) {
@@ -2772,26 +2835,50 @@
     const liveStreetName = (upcoming.length > 0) ? (upcoming[0].site.baseStreetLine || upcoming[0].site.addressText.split(',')[0]).trim() : 'Scanning Street...';
     if (streetNameEl) streetNameEl.innerText = liveStreetName;
 
-    const mapLiveStreet = document.getElementById('mapLiveStreet');
-    const mapLiveNextBin = document.getElementById('mapLiveNextBin');
-    if (mapLiveStreet) mapLiveStreet.innerText = liveStreetName;
-    
-    // Format Next Bin matching filtered stream
-    if (mapLiveNextBin && upcoming.length > 0) {
-      const firstUpcomingSite = upcoming[0].site;
-      let relevantStreams = ['Garbage', 'Recycling', 'FOGO'];
-      if (streamFilter === 'Garbage') relevantStreams = ['Garbage'];
-      if (streamFilter === 'Recycling' || streamFilter === 'SummerRecycling') relevantStreams = ['Recycling'];
-      if (streamFilter === 'FOGO') relevantStreams = ['FOGO'];
+    const mapLiveStreet=document.getElementById('mapLiveStreet');
+    const mapArrivalInfo=document.getElementById('mapArrivalInfo');
+    if(mapLiveStreet) mapLiveStreet.innerText=liveStreetName;
 
-      const nextBinList = [];
-      relevantStreams.forEach(k => {
-        (firstUpcomingSite.soloStreams[k] || []).forEach(b => {
-          nextBinList.push(`${b.size || '240L'} - ${b.serial}`);
+    // When the truck reaches a bin GPS point, show collection information.
+    if(mapArrivalInfo&&userCurrentLocation){
+      let nearest=null;
+      const relevantStreams=streamFilter==='SummerRecycling'?['Recycling']:(streamFilter?[streamFilter]:['Garbage','Recycling','FOGO']);
+
+      upcoming.forEach(({site})=>{
+        relevantStreams.forEach(st=>{
+          if(!streamMatchesSelectedRun(site,st)) return;
+          const bins=site.soloStreams?.[st]||[];
+          bins.forEach((bin,index)=>{
+            const point=gps(bin.lat,bin.lng)||gps(site.lat,site.lng);
+            if(!point) return;
+            const distance=getDistanceMeters(userCurrentLocation.lat,userCurrentLocation.lng,point.lat,point.lng);
+            if(!nearest||distance<nearest.distance) nearest={site,st,bin,index,total:bins.length,distance};
+          });
         });
       });
 
-      mapLiveNextBin.innerText = nextBinList.length > 0 ? `Next: ${nextBinList.join(', ')}` : 'Next: No Bins';
+      if(nearest&&nearest.distance<=20){
+        const a=nearest;
+        const address=cleanStreetAddress(a.site.addressText)||a.site.baseStreetLine||'Address unavailable';
+        const flag=String(a.site.runFlags||'').trim();
+        const stars=Math.max(0,Math.min(5,Number(a.site.ratingStars||0)));
+        const rating=stars?`${'★'.repeat(stars)}${'☆'.repeat(5-stars)}`:'';
+        mapArrivalInfo.hidden=false;
+        mapArrivalInfo.innerHTML=`
+          <div class="arrival-address">${esc(address)}</div>
+          <div class="arrival-meta">
+            ${flag?`<span>🚩 ${esc(flag)}</span>`:''}
+            ${rating?`<span>⭐ ${rating}</span>`:''}
+          </div>
+          <div class="arrival-bin-details">
+            <span><b>Bin ${a.index+1} of ${a.total}</b></span>
+            <span>${esc(a.bin.size||'Size unknown')}</span>
+            <span>Serial: ${esc(a.bin.serial||'Serial unavailable')}</span>
+          </div>`;
+      } else {
+        mapArrivalInfo.hidden=true;
+        mapArrivalInfo.innerHTML='';
+      }
     }
 
     listContainer.innerHTML = upcoming.slice(0, 10).map(({ site, dist }) => {
