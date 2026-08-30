@@ -7038,5 +7038,198 @@ window.toggleMapToolsPanel=()=>{const p=document.querySelector('.map-controls-gr
   setTimeout(buildUnifiedFilterControls,0);
 })();
 </script>
+
+<script>
+/* Final filter/map corrections */
+(function () {
+  function q(id){ return document.getElementById(id); }
+  function clean(v){ return String(v || '').trim(); }
+
+  /* A Summer run is identified by its actual run name, not just the field it
+     happens to be stored in. Normal Recycling must never inherit it. */
+  window.isSummerRunName = function (value) {
+    return /\bsummer\b/i.test(clean(value));
+  };
+
+  /* Remove the "SELECT DATA" heading. The three source buttons are self-explanatory. */
+  function removeDataHeading(){
+    const wrap = q('unifiedFilterControls');
+    if(!wrap) return;
+    const sections = wrap.querySelectorAll('.unified-filter-section');
+    sections.forEach(section => {
+      if(section.querySelector('#unifiedSourceButtons')){
+        const label = section.querySelector('.unified-filter-label');
+        if(label) label.remove();
+      }
+    });
+  }
+
+  /* Strict run list: never put a Summer-named run into All or Recycle. */
+  window.populateModalRunsChecklist = function(){
+    const container=q('modalRunsChecklistGrid');
+    if(!container || !Array.isArray(window.siteRecords) || !window.siteRecords.length) return;
+
+    const stream=clean(q('modalStreamSelect')?.value);
+    const day=clean(q('modalDaySelect')?.value).toLowerCase();
+    const runs=new Map();
+
+    window.siteRecords.forEach(site=>{
+      const sch=site?.soloSchedule || {};
+      if(day && clean(sch.day).toLowerCase() !== day) return;
+
+      const add=(name,type)=>{
+        const run=clean(name);
+        if(!run) return;
+        if(type !== 'summer' && window.isSummerRunName(run)) return;
+        runs.set(run,type);
+      };
+
+      if(!stream || stream==='Garbage') add(sch.garRun,'gar');
+      if(!stream || stream==='Recycling') add(sch.recRun,'rec');
+      if(stream==='SummerRecycling') add(sch.recSummerRun,'summer');
+      if(!stream || stream==='FOGO') add(sch.fogRun,'fog');
+    });
+
+    const sorted=[...runs.keys()].filter(Boolean).sort((a,b)=>a.localeCompare(b,undefined,{numeric:true}));
+    container.innerHTML=sorted.map(run=>{
+      const type=runs.get(run);
+      const cls=type==='gar'?'run-chip-gar':type==='rec'?'run-chip-rec':type==='summer'?'run-chip-summer':'run-chip-fog';
+      const checked=window.selectedRunsSet && window.selectedRunsSet.has(run.toLowerCase())?'checked':'';
+      return `<label class="run-select-chip ${cls}">
+        <input type="checkbox" value="${String(run).replace(/"/g,'&quot;')}" ${checked}
+          onchange="toggleModalRunSelection(${JSON.stringify(run.toLowerCase())}, this.checked)">
+        <span class="run-chip-text">${type==='summer'?'☀️ ':''}${run}</span>
+      </label>`;
+    }).join('');
+  };
+
+  /* Exact stream-aware map filtering. */
+  window.visibleStreams = function(){
+    if(window.activeFilterStream==='SummerRecycling') return ['Recycling'];
+    return window.activeFilterStream ? [window.activeFilterStream] : ['Garbage','Recycling','FOGO'];
+  };
+
+  window.streamRunForSite = function(site,stream){
+    const sch=site?.soloSchedule || {};
+    if(stream==='Garbage'){
+      const run=clean(sch.garRun);
+      return window.isSummerRunName(run) ? '' : run;
+    }
+    if(stream==='FOGO'){
+      const run=clean(sch.fogRun);
+      return window.isSummerRunName(run) ? '' : run;
+    }
+    if(stream==='Recycling'){
+      if(window.activeFilterStream==='SummerRecycling') return clean(sch.recSummerRun);
+      const run=clean(sch.recRun);
+      return window.isSummerRunName(run) ? '' : run;
+    }
+    return '';
+  };
+
+  window.getSiteRunEntries = function(site){
+    const sch=site?.soloSchedule || {};
+    const a=[];
+    const add=(key,type)=>{
+      const run=clean(sch[key]);
+      if(!run) return;
+      if(type!=='summer' && window.isSummerRunName(run)) return;
+      a.push({key:run,type});
+    };
+    add('garRun','gar');
+    add('recRun','rec');
+    add('recSummerRun','summer');
+    add('fogRun','fog');
+    return a;
+  };
+
+  window.siteMatchesMapFilters = function(site){
+    const sch=site?.soloSchedule || {};
+    const selected=window.selectedMapRuns ? window.selectedMapRuns() : new Set();
+
+    if(window.activeFilterDay &&
+       clean(sch.day).toLowerCase() !== clean(window.activeFilterDay).toLowerCase()) return false;
+
+    if(window.activeFilterWeek &&
+       clean(sch.weekLetter).toUpperCase() !== clean(window.activeFilterWeek).toUpperCase()) return false;
+
+    const normalGar=window.streamRunForSite(site,'Garbage');
+    const normalRec=(window.activeFilterStream==='SummerRecycling') ? '' : window.streamRunForSite(site,'Recycling');
+    const normalFog=window.streamRunForSite(site,'FOGO');
+    const summer=clean(sch.recSummerRun);
+
+    if(window.activeFilterStream==='Garbage' && !normalGar) return false;
+    if(window.activeFilterStream==='Recycling' && !normalRec) return false;
+    if(window.activeFilterStream==='SummerRecycling' && !summer) return false;
+    if(window.activeFilterStream==='FOGO' && !normalFog) return false;
+
+    /* All means standard streams only. A Summer assignment alone is never enough. */
+    if(!window.activeFilterStream && !selected.size && !(normalGar || normalRec || normalFog)) return false;
+
+    if(selected.size){
+      if(window.activeFilterStream==='SummerRecycling'){
+        if(!summer || !selected.has(window.mapKey(summer))) return false;
+      } else if(window.activeFilterStream){
+        const run=window.streamRunForSite(site,window.activeFilterStream);
+        if(!run || !selected.has(window.mapKey(run))) return false;
+      } else {
+        const standard=[normalGar,normalRec,normalFog].filter(Boolean);
+        if(!standard.some(run=>selected.has(window.mapKey(run)))) return false;
+      }
+    }
+
+    const streams=window.visibleStreams().filter(st=>{
+      if(selected.size && window.streamMatchesSelectedRun) return window.streamMatchesSelectedRun(site,st);
+      return !!window.streamRunForSite(site,st);
+    });
+    if(selected.size && !streams.length) return false;
+
+    if(window.activeFilterDataSource==='solo' &&
+       !streams.some(st=>window.hasBins && window.hasBins(site,'solo',st))) return false;
+    if(window.activeFilterDataSource==='council' &&
+       !streams.some(st=>window.hasBins && window.hasBins(site,'council',st))) return false;
+
+    return true;
+  };
+
+  /* Make Apply Filters commit state first, then redraw whichever page is open,
+     with an explicit map redraw after the modal has closed. */
+  window.applyModalFilters = function(){
+    window.activeFilterStream=clean(q('modalStreamSelect')?.value);
+    window.activeFilterDataSource=clean(q('modalDataSourceSelect')?.value) || 'all';
+    window.activeFilterDay=clean(q('modalDaySelect')?.value);
+    window.activeFilterWeek=clean(q('modalWeekSelect')?.value);
+
+    if(window.activeFilterStream !== 'SummerRecycling' && window.selectedRunsSet){
+      /* Drop any stale selected Summer run that leaked in from a previous filter. */
+      const selected=[...window.selectedRunsSet];
+      selected.forEach(run=>{
+        if(window.isSummerRunName(run)) window.selectedRunsSet.delete(run);
+      });
+    }
+
+    if(typeof window.closeModal==='function') window.closeModal('filterOptionsModal');
+    if(typeof window.renderActiveFilterChips==='function') window.renderActiveFilterChips();
+    if(typeof window.triggerUniversalDataRefresh==='function') window.triggerUniversalDataRefresh();
+
+    requestAnimationFrame(()=>{
+      if(window.activeTab==='map' && typeof window.renderMapData==='function'){
+        if(window.leafletMap) window.leafletMap.invalidateSize();
+        window.renderMapData();
+      }
+    });
+    setTimeout(()=>{
+      if(window.activeTab==='map' && typeof window.renderMapData==='function') window.renderMapData();
+    },80);
+  };
+
+  document.addEventListener('DOMContentLoaded',()=>{
+    removeDataHeading();
+    setTimeout(removeDataHeading,50);
+  });
+  setTimeout(removeDataHeading,0);
+})();
+</script>
+
 </body>
 </html>
