@@ -5465,5 +5465,150 @@ window.toggleMapToolsPanel=()=>{const p=document.querySelector('.map-controls-gr
 })();
 </script>
 
+
+<style id="final-map-selection-and-telemetry-fix">
+/* Smaller text in the compact top boxes without changing their height. */
+#mapRunTitleText{font-size:clamp(15px,4.8vw,24px)!important;line-height:1.05!important}
+.map-stat-pill b{font-size:clamp(21px,6vw,27px)!important}
+.map-stat-pill .map-stat-icon{font-size:20px!important}
+
+/* Keep house markers underneath bins even when markers overlap. */
+.leaflet-pane.lukez-house-pane{z-index:620!important;pointer-events:auto}
+.leaflet-pane.lukez-bin-pane{z-index:660!important;pointer-events:auto}
+</style>
+<script id="final-map-selection-and-telemetry-fix-script">
+(function(){
+  function normDay(v){
+    const s=String(v||'').trim().toUpperCase();
+    const m={MON:'MONDAY',MONDAY:'MONDAY',TUE:'TUESDAY',TUESDAY:'TUESDAY',WED:'WEDNESDAY',WEDNESDAY:'WEDNESDAY',THU:'THURSDAY',THURS:'THURSDAY',THURSDAY:'THURSDAY',FRI:'FRIDAY',FRIDAY:'FRIDAY'};
+    return m[s]||s;
+  }
+  function selectedRun(){ const a=Array.from(selectedRunsSet||[]); return a.length===1?String(a[0]).trim().toLowerCase():''; }
+  function activeRunFor(site){
+    const x=site&&site.soloSchedule||{};
+    if(activeFilterStream==='Garbage') return String(x.garRun||'').trim();
+    if(activeFilterStream==='Recycling') return String(x.recRun||'').trim();
+    if(activeFilterStream==='SummerRecycling') return String(x.recSummerRun||'').trim();
+    if(activeFilterStream==='FOGO') return String(x.fogRun||'').trim();
+    return '';
+  }
+
+  /* Strictly separate Recycling and Summer Recycling. */
+  window.siteMatchesMapFilters=function(site){
+    const x=site&&site.soloSchedule||{};
+    const wanted=selectedRun();
+
+    if(activeFilterDay && normDay(x.day)!==normDay(activeFilterDay)) return false;
+    if(activeFilterWeek && String(x.weekLetter||'').trim().toUpperCase()!==String(activeFilterWeek).trim().toUpperCase()) return false;
+
+    if(activeFilterStream){
+      const r=activeRunFor(site);
+      if(!r) return false;
+      if(wanted && r.toLowerCase()!==wanted) return false;
+    } else if(wanted){
+      const all=[x.garRun,x.recRun,x.fogRun].map(v=>String(v||'').trim().toLowerCase());
+      if(!all.includes(wanted)) return false; // All Runs deliberately excludes Summer.
+    } else {
+      if(!(String(x.garRun||'').trim()||String(x.recRun||'').trim()||String(x.fogRun||'').trim())) return false;
+    }
+
+    const streams=activeFilterStream==='SummerRecycling'?['Recycling']:(activeFilterStream?[activeFilterStream]:['Garbage','Recycling','FOGO']);
+    if(activeFilterDataSource==='solo'&&!streams.some(st=>(site.soloStreams?.[st]||[]).length)) return false;
+    if(activeFilterDataSource==='council'&&!streams.some(st=>(site.councilStreams?.[st]||[]).length)) return false;
+    return true;
+  };
+
+  window.primaryRun=function(site){
+    const x=site&&site.soloSchedule||{};
+    if(activeFilterStream){
+      const key=activeRunFor(site);
+      if(!key) return null;
+      return {key,type:activeFilterStream==='Garbage'?'gar':activeFilterStream==='Recycling'?'rec':activeFilterStream==='SummerRecycling'?'summer':'fog'};
+    }
+    const wanted=selectedRun();
+    const entries=[
+      {key:String(x.garRun||'').trim(),type:'gar'},
+      {key:String(x.recRun||'').trim(),type:'rec'},
+      {key:String(x.fogRun||'').trim(),type:'fog'}
+    ];
+    if(wanted) return entries.find(e=>e.key.toLowerCase()===wanted)||null;
+    return entries.find(e=>e.key)||null;
+  };
+
+  function ensurePanes(){
+    if(!leafletMap) return;
+    if(!leafletMap.getPane('lukez-house-pane')) leafletMap.createPane('lukez-house-pane');
+    if(!leafletMap.getPane('lukez-bin-pane')) leafletMap.createPane('lukez-bin-pane');
+    leafletMap.getPane('lukez-house-pane').style.zIndex=620;
+    leafletMap.getPane('lukez-bin-pane').style.zIndex=660;
+  }
+
+  window.drawHouseTriangle=function(site){
+    if(!showHouseGpsDots) return;
+    ensurePanes();
+    const p=gps(site.lat,site.lng); if(!p) return;
+    const id=String(site.propId||site.siteId||''), cp=collectionPointForSite(site);
+    const selected=selectedCollectionHouseIds.has(id);
+    const color=selected?'#2563eb':(cp?collectionPointHouseColor:(houseDotsColor||'#8b5cf6'));
+    const icon=L.divIcon({className:'house-triangle-icon',html:`<div style="width:16px;height:16px;background:${esc(color)};clip-path:polygon(50% 0%,0% 100%,100% 100%);border:2px solid #fff;filter:drop-shadow(0 1px 2px rgba(0,0,0,.45));"></div>`,iconSize:[18,18],iconAnchor:[9,9]});
+    const label=cp?'Collection point house':(selected?'Selected house':'House');
+    const m=L.marker([p.lat,p.lng],{icon,keyboard:false,pane:'lukez-house-pane'});
+    m.bindPopup(`<div><b>${esc(label)}</b><br>${esc(site.addressText||'')}<br><button onclick="toggleCollectionHouse('${esc(id)}')">${selected?'Remove selection':'Select house'}</button></div>`);
+    m.on('click',()=>{if(collectionSelectionActive){toggleCollectionHouse(id);m.closePopup();}});
+    m.addTo(mapMarkersLayer);
+  };
+
+  window.drawSite=function(site,key,i){
+    ensurePanes();
+    const id=String(site.propId||site.siteId||''), c=mapColor(key,i);
+    drawHouseTriangle(site);
+    if(!showBinGpsDots) return;
+    const sources=activeFilterDataSource==='solo'?['solo']:activeFilterDataSource==='council'?['council']:['solo','council'];
+    const streams=activeFilterStream==='SummerRecycling'?['Recycling']:(activeFilterStream?[activeFilterStream]:['Garbage','Recycling','FOGO']);
+    sources.forEach(src=>streams.forEach(st=>{
+      const bins=(src==='solo'?site.soloStreams:site.councilStreams)?.[st]||[];
+      bins.forEach((bin,idx)=>{
+        const p=sourceCoords(site,bin); if(!p) return;
+        const serial=String(bin.serial||'').trim().toUpperCase();
+        const markerKey=`${id}|${src}|${st}|${idx}|${serial}`;
+        if(serial&&servicedBinSerials.has(serial)) return;
+        const fc=serial&&missedBinSerials.has(serial)?'#ef4444':dotColor(key,c);
+        const m=L.circleMarker([p.lat,p.lng],{pane:'lukez-bin-pane',radius:7,color:'#fff',weight:2,fillColor:fc,fillOpacity:1})
+          .bindPopup(`<div><b>${esc(serial||'Bin')}</b><br>${esc(st)} · ${esc(bin.size||'240L')}<br><button type="button" onclick="openPropertyInspectModal('${esc(id)}')">Property</button>${src==='solo'?` <button type="button" onclick="promptEditBin('${esc(id)}','${esc(st)}',${idx})">Edit Bin</button>`:''}</div>`)
+          .addTo(mapMarkersLayer);
+        activeMapCircleMarkers.set(markerKey,{layer:m,lat:p.lat,lng:p.lng,stream:st,siteId:id,serial});
+      });
+    }));
+  };
+
+  /* GPS accuracy + heading are always refreshed in the next-bin box. */
+  let lastAccuracyText='…';
+  const oldGpsSuccess=window.onGpsPositionSuccess;
+  window.onGpsPositionSuccess=function(pos){
+    lastAccuracyText=`±${Math.round(pos.coords.accuracy||0)}m`;
+    oldGpsSuccess.call(this,pos);
+    const deg=Number.isFinite(lastValidHeading)?Math.round(lastValidHeading):0;
+    const dir=getCardinalDirection(deg);
+    ['hudGpsDirection','mapGpsDirection'].forEach(id=>{
+      const e=document.getElementById(id);
+      if(e) e.textContent=`🛰️ ${lastAccuracyText} · 🧭 ${dir} ${deg}°`;
+    });
+  };
+
+  /* If street telemetry refreshes independently, keep GPS details visible. */
+  const oldRenderTelemetry=window.renderCurrentAddressTelemetry;
+  window.renderCurrentAddressTelemetry=function(site){
+    const r=oldRenderTelemetry.apply(this,arguments);
+    const deg=Number.isFinite(lastValidHeading)?Math.round(lastValidHeading):0;
+    const dir=getCardinalDirection(deg);
+    ['hudGpsDirection','mapGpsDirection'].forEach(id=>{
+      const e=document.getElementById(id);
+      if(e) e.textContent=`🛰️ ${lastAccuracyText} · 🧭 ${dir} ${deg}°`;
+    });
+    return r;
+  };
+})();
+</script>
+
 </body>
 </html>
