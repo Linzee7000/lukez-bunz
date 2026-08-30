@@ -5360,5 +5360,110 @@ window.toggleMapToolsPanel=()=>{const p=document.querySelector('.map-controls-gr
 })();
 </script>
 
+
+<script id="map-run-picker-repair-v3">
+(function(){
+  const STREAMS=[
+    {key:'',label:'All',cls:''},
+    {key:'Garbage',label:'🗑️',cls:'stream-gar'},
+    {key:'Recycling',label:'♻️',cls:'stream-rec'},
+    {key:'SummerRecycling',label:'🌞',cls:'stream-summer'},
+    {key:'FOGO',label:'🌳',cls:'stream-fog'}
+  ];
+  const DAY_ORDER=['Monday','Tuesday','Wednesday','Thursday','Friday'];
+  const DAY_LABEL={Monday:'M',Tuesday:'T',Wednesday:'W',Thursday:'T',Friday:'F'};
+  let stream='',day='',week='';
+  const normDay=v=>{
+    const s=String(v||'').trim().toUpperCase();
+    if(['MON','MONDAY','M'].includes(s))return 'Monday';
+    if(['TUE','TUESDAY','TU'].includes(s))return 'Tuesday';
+    if(['WED','WEDNESDAY','W'].includes(s))return 'Wednesday';
+    if(['THU','THURSDAY','THURS'].includes(s))return 'Thursday';
+    if(['FRI','FRIDAY','F'].includes(s))return 'Friday';
+    return String(v||'').trim();
+  };
+  const runFor=(site,st)=>{
+    const x=site.soloSchedule||{};
+    if(st==='Garbage')return x.garRun||'';
+    if(st==='Recycling')return x.recRun||'';
+    if(st==='SummerRecycling')return x.recSummerRun||'';
+    if(st==='FOGO')return x.fogRun||'';
+    return '';
+  };
+  const usesWeek=st=>st==='Recycling'||st==='FOGO';
+  const ids={streams:'mapRunPickerStreams',days:'mapRunPickerDays',weeks:'mapRunPickerWeeks',runs:'mapRunPickerRuns'};
+  const el=k=>document.getElementById(ids[k]);
+  const step=id=>document.getElementById(id);
+  function show(id,on){const n=step(id);if(n)n.hidden=!on}
+  function renderStreams(){
+    el('streams').innerHTML=STREAMS.map(x=>`<button type="button" data-stream="${x.key}" class="map-run-picker-btn ${x.cls} ${stream===x.key?'active':''}">${x.key?`<span class="map-run-picker-stream-icon">${x.label}</span>`:`<span class="map-run-picker-stream-all">All</span>`}</button>`).join('');
+  }
+  function renderDays(){
+    const available=new Set();
+    (siteRecords||[]).forEach(site=>{
+      const raw=(site.soloSchedule||{}).day;
+      const services=stream?[stream]:['Garbage','Recycling','SummerRecycling','FOGO'];
+      if(raw && services.some(st=>String(runFor(site,st)||'').trim()))available.add(normDay(raw));
+    });
+    el('days').innerHTML=DAY_ORDER.filter(d=>available.has(d)).map(d=>`<button type="button" data-day="${d}" class="map-run-picker-btn ${day===d?'active':''}">${DAY_LABEL[d]}</button>`).join('')||'<div style="color:#64748b">No days found.</div>';
+  }
+  function renderWeeks(){
+    const have=new Set();
+    (siteRecords||[]).forEach(site=>{
+      const x=site.soloSchedule||{};
+      if(normDay(x.day)!==day)return;
+      if(String(runFor(site,stream)||'').trim()){
+        const w=String(x.weekLetter||'').trim().toUpperCase();if(w==='A'||w==='B')have.add(w);
+      }
+    });
+    el('weeks').innerHTML=['A','B'].filter(w=>have.has(w)).map(w=>`<button type="button" data-week="${w}" class="map-run-picker-btn ${week===w?'active':''}">Week ${w}</button>`).join('')||'<div style="color:#64748b">No weeks found.</div>';
+  }
+  function renderRuns(){
+    const found=new Map();
+    (siteRecords||[]).forEach(site=>{
+      const x=site.soloSchedule||{};
+      if(day && normDay(x.day)!==day)return;
+      if(usesWeek(stream)&&String(x.weekLetter||'').trim().toUpperCase()!==week)return;
+      const add=st=>{const r=String(runFor(site,st)||'').trim();if(r&&!found.has((st+'|'+r).toLowerCase()))found.set((st+'|'+r).toLowerCase(),{run:r,stream:st});};
+      stream?add(stream):['Garbage','Recycling','SummerRecycling','FOGO'].forEach(add);
+    });
+    const vals=[...found.values()].sort((a,b)=>a.run.localeCompare(b.run,undefined,{numeric:true}));
+    step('mapRunPickerRunsStep').hidden=false;
+    document.getElementById('mapRunPickerRunsLabel').textContent='Select run';
+    el('runs').innerHTML=vals.map(v=>`<button type="button" data-run="${v.run}" data-run-stream="${v.stream}" class="map-run-picker-btn">${v.run}</button>`).join('')||'<div style="color:#64748b">No runs found for that selection.</div>';
+  }
+  function chooseStream(st){
+    stream=st;day='';week='';renderStreams();show('mapRunPickerDayStep',true);show('mapRunPickerWeekStep',false);show('mapRunPickerRunsStep',false);renderDays();
+  }
+  function chooseDay(d){
+    day=d;week='';renderDays();
+    if(usesWeek(stream)){show('mapRunPickerWeekStep',true);show('mapRunPickerRunsStep',false);renderWeeks();}
+    else {show('mapRunPickerWeekStep',false);renderRuns();}
+  }
+  function chooseWeek(w){week=w;renderWeeks();renderRuns()}
+  function applyRun(r,rs){
+    selectedRunsSet.clear();selectedRunsSet.add(String(r).trim().toLowerCase());
+    activeFilterStream=stream||rs||'';activeFilterDay=day;activeFilterWeek=usesWeek(activeFilterStream)?week:'';
+    closeModal('mapRunPickerModal');renderActiveFilterChips();triggerUniversalDataRefresh();
+  }
+  // Event delegation avoids inline-handler clashes from older picker scripts.
+  document.addEventListener('click',e=>{
+    const modal=e.target.closest('#mapRunPickerModal');if(!modal)return;
+    const b=e.target.closest('button');if(!b)return;
+    if(b.closest('#mapRunPickerStreams')){e.preventDefault();e.stopPropagation();chooseStream(b.dataset.stream||'');return;}
+    if(b.closest('#mapRunPickerDays')&&b.dataset.day){e.preventDefault();e.stopPropagation();chooseDay(b.dataset.day);return;}
+    if(b.closest('#mapRunPickerWeeks')&&b.dataset.week){e.preventDefault();e.stopPropagation();chooseWeek(b.dataset.week);return;}
+    if(b.closest('#mapRunPickerRuns')&&b.dataset.run){e.preventDefault();e.stopPropagation();applyRun(b.dataset.run,b.dataset.runStream);}
+  },true);
+  window.openMapRunPicker=()=>{
+    stream=activeFilterStream||'';day=normDay(activeFilterDay||'');week=activeFilterWeek||'';
+    renderStreams();show('mapRunPickerDayStep',false);show('mapRunPickerWeekStep',false);show('mapRunPickerRunsStep',false);
+    openModal('mapRunPickerModal');
+    if(stream)chooseStream(stream);
+  };
+  window.chooseMapPickerStream=chooseStream;window.chooseMapPickerDay=chooseDay;window.chooseMapPickerWeek=chooseWeek;window.applyMapPickerRun=applyRun;
+})();
+</script>
+
 </body>
 </html>
