@@ -1709,25 +1709,6 @@
 #mainLeafletMap .leaflet-tile-container{will-change:transform;}
 #mapScreenContainer .leaflet-control-zoom{display:block!important;visibility:visible!important;pointer-events:auto!important;}
 </style>
-
-<style id="map-stable-follow-fix">
-/* Stable Leaflet fallback: never transform Leaflet-owned panes. */
-#mainLeafletMap,
-#mainLeafletMap .leaflet-container {
-  background:#dbeafe!important;
-}
-#mainLeafletMap .leaflet-pane,
-#mainLeafletMap .leaflet-map-pane,
-#mainLeafletMap .leaflet-tile-pane,
-#mainLeafletMap .leaflet-marker-pane,
-#mainLeafletMap .leaflet-overlay-pane {
-  rotate:none!important;
-  scale:1!important;
-  transform-origin:initial!important;
-  will-change:auto!important;
-}
-</style>
-
 </head>
 <body>
 
@@ -2533,31 +2514,27 @@
   function applyHeadingUpMap() {
     if (!leafletMap) return;
 
-    /*
-     * Leaflet 1.x owns the transform on mapPane and its child panes.
-     * Applying CSS rotate/scale to those panes while Leaflet is also panning
-     * can move the entire tile grid out of view on mobile Chrome, producing
-     * the grey screen and hiding markers. Keep the Leaflet map geometry
-     * completely untouched here.
-     *
-     * Follow still keeps the truck centred and the GPS marker itself shows
-     * the current heading. This is deliberately the safe fallback until a
-     * rotation-aware Leaflet map implementation is used.
-     */
+    // IMPORTANT: do not rotate Leaflet's mapPane itself. Leaflet continuously
+    // translates that pane while GPS follow is panning, which was causing the
+    // map to expose the grey container and could make tiles/markers disappear.
+    // Rotate the visual child panes instead, leaving Leaflet's own geometry intact.
     const paneNames = ['tilePane','overlayPane','shadowPane','markerPane','tooltipPane','popupPane'];
+    const heading = isTruckFollowEnabled ? Number(lastValidHeading || 0) : 0;
+    const rotate = -heading;
+
     paneNames.forEach(name => {
       const pane = leafletMap.getPane(name);
       if (!pane) return;
-      pane.style.rotate = '';
-      pane.style.scale = '';
-      pane.style.transformOrigin = '';
+      pane.style.transformOrigin = '50% 50%';
+      pane.style.rotate = `${rotate}deg`;
+      // Only enlarge the tile pane. Scaling markers/labels makes them look wrong.
+      pane.style.scale = (isTruckFollowEnabled && name === 'tilePane') ? '1.75' : '1';
     });
 
     const mapPane = leafletMap.getPane('mapPane');
     if (mapPane) {
-      mapPane.style.rotate = '';
-      mapPane.style.scale = '';
-      mapPane.style.transformOrigin = '';
+      mapPane.style.rotate = '0deg';
+      mapPane.style.scale = '1';
     }
   }
 
@@ -2646,8 +2623,8 @@
     const pos = [userCurrentLocation.lat, userCurrentLocation.lng];
     const headingDeg = lastValidHeading || 0;
 
-    // The Leaflet map remains unrotated for reliability, so rotate the truck
-    // marker to show its actual travel heading.
+    // The map pane rotates by -heading in Follow mode. Rotating the truck by
+    // +heading here cancels that out, keeping the truck pointing straight up.
     const truckIcon = L.divIcon({
       className: 'custom-gps-icon',
       html: `
@@ -2850,20 +2827,7 @@
   }
   function sourceCoords(site,bin){ const prop=gps(site.lat,site.lng),flip=bin&&gps(bin.lat,bin.lng); if(pinSourceMode==='property')return prop; if(pinSourceMode==='bin')return flip&&metersBetween(prop,flip)<=10?flip:null; /* flip mode: only trust a flip within 10m of its own house */ return flip&&metersBetween(prop,flip)<=10?flip:prop; }
   function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
-
-  function removeStrayLiteralNewlineText() {
-    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-    const bad = [];
-    while (walker.nextNode()) {
-      const node = walker.currentNode;
-      const value = (node.nodeValue || '').trim();
-      if (value === '\\n' || value === '\\r\\n' || value === '\\\\n') bad.push(node);
-    }
-    bad.forEach(node => node.parentNode && node.parentNode.removeChild(node));
-  }
-
   function initLeafletMap(){
-    removeStrayLiteralNewlineText();
     if(leafletMap)return;
     const el=document.getElementById('mainLeafletMap');
     if(!el||typeof L==='undefined'){console.error('Leaflet/map container unavailable');return;}
