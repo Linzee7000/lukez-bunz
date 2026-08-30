@@ -6149,6 +6149,282 @@ window.toggleMapToolsPanel=()=>{const p=document.querySelector('.map-controls-gr
 })();
 </script>
 
+
+<!-- AUTHORITATIVE STABILITY FIX: preserve uploaded UI, fix only reported map behaviour -->
+<style id="authoritative-stability-fix">
+/* Floating controls exactly match the Leaflet zoom buttons: 40 x 40, same compact square shape. */
+#mapScreenContainer .map-side-layers-toggle,
+#mapScreenContainer .map-side-view-toggle{
+  width:40px!important;height:40px!important;
+  min-width:40px!important;min-height:40px!important;
+  padding:0!important;margin:0!important;
+  box-sizing:border-box!important;
+  border-radius:4px!important;
+  font-size:21px!important;line-height:40px!important;
+}
+#mapScreenContainer .map-side-layers-toggle svg{width:22px!important;height:22px!important;}
+#mapScreenContainer .map-side-view-toggle{font-size:24px!important;line-height:1!important;}
+
+/* Restore the compact top boxes: use the available width instead of shrinking/cropping the run/day text. */
+#mapScreenContainer .map-summary-bar{
+  grid-template-columns:minmax(0,1.28fr) minmax(0,1fr) minmax(0,1fr) 52px!important;
+  gap:7px!important;
+}
+#mapScreenContainer .map-run-colored-box,
+#mapScreenContainer .map-stat-pill{
+  padding:0 7px!important;
+  margin:0!important;
+  min-width:0!important;
+  box-sizing:border-box!important;
+}
+#mapScreenContainer #mapRunTitleText{
+  font-size:clamp(18px,4.8vw,24px)!important;
+  line-height:1.05!important;
+  white-space:nowrap!important;
+  overflow:visible!important;
+  text-overflow:clip!important;
+}
+#mapScreenContainer .map-stat-pill{gap:5px!important;}
+#mapScreenContainer .map-stat-pill b{font-size:clamp(21px,5.4vw,27px)!important;line-height:1!important;}
+#mapScreenContainer .map-stat-pill .map-stat-icon{font-size:20px!important;}
+
+/* Keep houses below bins in Leaflet's stacking order. */
+.leaflet-pane.lukez-house-pane{z-index:620!important;}
+.leaflet-pane.lukez-bin-pane{z-index:660!important;}
+</style>
+<script id="authoritative-stability-fix-script">
+(function(){
+  const clean=v=>String(v||'').trim();
+  const lower=v=>clean(v).toLowerCase();
+  const dayNorm=v=>clean(v).toLowerCase();
+  const sched=site=>(site&&site.soloSchedule)||{};
+  const runFor=(site,stream)=>{
+    const s=sched(site);
+    if(stream==='Garbage') return clean(s.garRun);
+    if(stream==='Recycling') return clean(s.recRun);
+    if(stream==='SummerRecycling') return clean(s.recSummerRun);
+    if(stream==='FOGO') return clean(s.fogRun);
+    return '';
+  };
+  const isSummerRun=v=>/summer/i.test(clean(v));
+  const needsWeek=stream=>stream==='Recycling'||stream==='FOGO';
+  const dayChoices=['Monday','Tuesday','Wednesday','Thursday','Friday'];
+  const shortDay={Monday:'M',Tuesday:'T',Wednesday:'W',Thursday:'T',Friday:'F'};
+  let pickerStream='',pickerDay='',pickerWeek='';
+
+  /* A normal Recycling run is recRun only. A site may also have a Summer run;
+     that must NOT hide its ordinary Recycling run. */
+  function eligible(site,stream,day,week){
+    const s=sched(site);
+    if(day && dayNorm(s.day)!==dayNorm(day)) return false;
+    const run=runFor(site,stream);
+    if(!run) return false;
+    if(stream==='Recycling'){
+      if(isSummerRun(run)) return false;
+      const w=clean(s.weekLetter).toUpperCase();
+      if(w!=='A' && w!=='B') return false;
+      if(week && w!==clean(week).toUpperCase()) return false;
+    } else if(needsWeek(stream) && week && clean(s.weekLetter).toUpperCase()!==clean(week).toUpperCase()){
+      return false;
+    }
+    return true;
+  }
+
+  function renderRuns(){
+    const box=document.getElementById('mapRunPickerRuns'); if(!box) return;
+    const found=new Map();
+    (window.siteRecords||[]).forEach(site=>{
+      if(pickerStream){
+        if(!eligible(site,pickerStream,pickerDay,pickerWeek)) return;
+        const r=runFor(site,pickerStream);
+        found.set(lower(r),{run:r,stream:pickerStream});
+      }else{
+        ['Garbage','Recycling','FOGO'].forEach(st=>{
+          if(!eligible(site,st,pickerDay,pickerWeek)) return;
+          const r=runFor(site,st);
+          found.set(st+'|'+lower(r),{run:r,stream:st});
+        });
+      }
+    });
+    const vals=[...found.values()].sort((a,b)=>a.run.localeCompare(b.run,undefined,{numeric:true}));
+    const label=document.getElementById('mapRunPickerRunsLabel');
+    if(label) label.textContent=needsWeek(pickerStream)?'4. Select run':'3. Select run';
+    box.innerHTML=vals.length?vals.map(v=>
+      `<button type="button" class="map-run-picker-btn" onclick="applyMapPickerRun(${JSON.stringify(v.run)},${JSON.stringify(v.stream)})">${String(v.run).replace(/</g,'&lt;')}</button>`
+    ).join(''):'<div style="color:#64748b">No runs found for that selection.</div>';
+  }
+
+  window.openMapRunPicker=function(){
+    pickerStream=clean(activeFilterStream);
+    pickerDay=clean(activeFilterDay);
+    pickerWeek=clean(activeFilterWeek).toUpperCase();
+    const streams=[['','All',''],['Garbage','🗑️','stream-gar'],['Recycling','♻️','stream-rec'],['SummerRecycling','🌞','stream-summer'],['FOGO','🌳','stream-fog']];
+    const box=document.getElementById('mapRunPickerStreams');
+    if(box) box.innerHTML=streams.map(([key,label,cls])=>`<button type="button" class="map-run-picker-btn ${cls} ${pickerStream===key?'active':''}" onclick="chooseMapPickerStream(${JSON.stringify(key)})">${label}</button>`).join('');
+    ['mapRunPickerDayStep','mapRunPickerWeekStep','mapRunPickerRunsStep'].forEach(id=>{const el=document.getElementById(id);if(el)el.hidden=true;});
+    if(typeof openModal==='function') openModal('mapRunPickerModal');
+    window.chooseMapPickerStream(pickerStream,true);
+  };
+  window.chooseMapPickerStream=function(stream,preserve){
+    pickerStream=stream||'';
+    if(!preserve){pickerDay='';pickerWeek='';}
+    document.querySelectorAll('#mapRunPickerStreams .map-run-picker-btn').forEach(b=>b.classList.toggle('active',b.textContent.trim()===(pickerStream===''?'All':pickerStream==='Garbage'?'🗑️':pickerStream==='Recycling'?'♻️':pickerStream==='SummerRecycling'?'🌞':'🌳')));
+    const dayStep=document.getElementById('mapRunPickerDayStep');if(dayStep)dayStep.hidden=false;
+    const weekStep=document.getElementById('mapRunPickerWeekStep');if(weekStep)weekStep.hidden=true;
+    const runStep=document.getElementById('mapRunPickerRunsStep');if(runStep)runStep.hidden=true;
+    const days=dayChoices.filter(d=>(window.siteRecords||[]).some(site=>pickerStream?eligible(site,pickerStream,d,''):['Garbage','Recycling','FOGO'].some(st=>eligible(site,st,d,''))));
+    const dayBox=document.getElementById('mapRunPickerDays');
+    if(dayBox) dayBox.innerHTML=days.map(d=>`<button type="button" class="map-run-picker-btn ${pickerDay===d?'active':''}" onclick="chooseMapPickerDay(${JSON.stringify(d)})">${shortDay[d]}</button>`).join('')||'<div style="color:#64748b">No days found.</div>';
+    if(preserve&&pickerDay&&days.includes(pickerDay)) window.chooseMapPickerDay(pickerDay,true);
+  };
+  window.chooseMapPickerDay=function(day,preserve){
+    pickerDay=day||''; if(!preserve) pickerWeek='';
+    document.querySelectorAll('#mapRunPickerDays .map-run-picker-btn').forEach(b=>b.classList.toggle('active',b.textContent===shortDay[pickerDay]));
+    const weekStep=document.getElementById('mapRunPickerWeekStep');
+    const runStep=document.getElementById('mapRunPickerRunsStep');
+    if(needsWeek(pickerStream)){
+      if(weekStep)weekStep.hidden=false;if(runStep)runStep.hidden=true;
+      const weeks=['A','B'].filter(w=>(window.siteRecords||[]).some(site=>eligible(site,pickerStream,pickerDay,w)));
+      const weekBox=document.getElementById('mapRunPickerWeeks');
+      if(weekBox)weekBox.innerHTML=weeks.map(w=>`<button type="button" class="map-run-picker-btn ${pickerWeek===w?'active':''}" onclick="chooseMapPickerWeek('${w}')">Week ${w}</button>`).join('')||'<div style="color:#64748b">No weeks found.</div>';
+      if(preserve&&pickerWeek&&weeks.includes(pickerWeek))window.chooseMapPickerWeek(pickerWeek);
+    }else{
+      if(weekStep)weekStep.hidden=true;if(runStep)runStep.hidden=false;renderRuns();
+    }
+  };
+  window.chooseMapPickerWeek=function(week){
+    pickerWeek=clean(week).toUpperCase();
+    document.querySelectorAll('#mapRunPickerWeeks .map-run-picker-btn').forEach(b=>b.classList.toggle('active',b.textContent===`Week ${pickerWeek}`));
+    const runStep=document.getElementById('mapRunPickerRunsStep');if(runStep)runStep.hidden=false;renderRuns();
+  };
+  window.applyMapPickerRun=function(run,streamOverride){
+    const stream=streamOverride||pickerStream;
+    const r=clean(run);
+    if(stream==='Recycling' && isSummerRun(r)) return;
+    selectedRunsSet.clear();selectedRunsSet.add(lower(r));
+    activeFilterStream=stream;activeFilterDay=pickerDay;activeFilterWeek=needsWeek(stream)?pickerWeek:'';
+    if(typeof closeModal==='function')closeModal('mapRunPickerModal');
+    if(typeof renderActiveFilterChips==='function')renderActiveFilterChips();
+    if(typeof triggerUniversalDataRefresh==='function')triggerUniversalDataRefresh();
+    requestAnimationFrame(()=>{if(typeof renderMapData==='function')renderMapData();if(typeof updateMapTelemetryVisibility==='function')updateMapTelemetryVisibility();});
+  };
+
+  /* Exact map filtering: day + week + selected stream/run. Normal Recycling never uses Summer data. */
+  window.siteMatchesMapFilters=function(site){
+    const s=sched(site),stream=clean(activeFilterStream),selected=new Set(Array.from(selectedRunsSet||[]).map(lower));
+    if(activeFilterDay && dayNorm(s.day)!==dayNorm(activeFilterDay)) return false;
+    if(activeFilterWeek && clean(s.weekLetter).toUpperCase()!==clean(activeFilterWeek).toUpperCase()) return false;
+    if(stream){
+      const r=runFor(site,stream);
+      if(!r) return false;
+      if(stream==='Recycling'){
+        const w=clean(s.weekLetter).toUpperCase();
+        if(w!=='A'&&w!=='B') return false;
+        if(isSummerRun(r)) return false;
+      }
+      if(selected.size&&!selected.has(lower(r))) return false;
+      const binStream=stream==='SummerRecycling'?'Recycling':stream;
+      if(activeFilterDataSource==='solo'&&!(site.soloStreams?.[binStream]||[]).length)return false;
+      if(activeFilterDataSource==='council'&&!(site.councilStreams?.[binStream]||[]).length)return false;
+      return true;
+    }
+    const normal=['Garbage','Recycling','FOGO'].some(st=>{
+      const r=runFor(site,st);if(!r)return false;
+      if(st==='Recycling'&&isSummerRun(r))return false;
+      return !selected.size||selected.has(lower(r));
+    });
+    return normal;
+  };
+
+  /* Boundary points come only from sites that actually belong to this exact run.
+     No stale custom border and no unrelated run/site points are used. */
+  window.drawBoundary=function(key,sites,i){
+    const selected=Array.from(selectedMapRuns?selectedMapRuns():selectedRunsSet||[]).map(lower);
+    const stream=clean(activeFilterStream);
+    const valid=(sites||[]).filter(site=>{
+      if(!site)return false;
+      if(!window.siteMatchesMapFilters(site))return false;
+      if(stream){const r=runFor(site,stream);return !!r&&(!selected.length||selected.includes(lower(r)));}
+      return true;
+    });
+    const pts=valid.map(site=>gps(site.lat,site.lng)).filter(Boolean);
+    const hull=typeof buildRunConvexHull==='function'?buildRunConvexHull(pts):pts;
+    if(!window.L||!mapHullsLayer||hull.length<3)return;
+    const color=typeof mapColor==='function'?mapColor(key,i):'#2563eb';
+    const poly=L.polygon(hull.map(p=>[p.lat,p.lng]),{color,weight:2,fillColor:color,fillOpacity:.1,lineJoin:'round'});
+    poly._runGroupKey=key;poly.addTo(mapHullsLayer);
+  };
+
+  /* Create real stacking panes once and put houses below bin markers. */
+  const oldInit=window.initLeafletMap;
+  window.initLeafletMap=function(){
+    const out=oldInit&&oldInit.apply(this,arguments);
+    if(window.leafletMap){
+      if(!leafletMap.getPane('lukez-house-pane')) leafletMap.createPane('lukez-house-pane').style.zIndex=620;
+      if(!leafletMap.getPane('lukez-bin-pane')) leafletMap.createPane('lukez-bin-pane').style.zIndex=660;
+    }
+    return out;
+  };
+  const oldHouse=window.drawHouseTriangle;
+  window.drawHouseTriangle=function(site){
+    if(!showHouseGpsDots)return;
+    const p=gps(site.lat,site.lng);if(!p)return;
+    const id=String(site.propId||site.siteId||'');const cp=collectionPointForSite(site);
+    const selected=selectedCollectionHouseIds.has(id);
+    const color=selected?'#2563eb':(cp?collectionPointHouseColor:(houseDotsColor||'#8b5cf6'));
+    const icon=L.divIcon({className:'house-triangle-icon',html:`<div style="width:16px;height:16px;background:${esc(color)};clip-path:polygon(50% 0%,0% 100%,100% 100%);border:2px solid #fff;filter:drop-shadow(0 1px 2px rgba(0,0,0,.45));"></div>`,iconSize:[18,18],iconAnchor:[9,9]});
+    const m=L.marker([p.lat,p.lng],{icon,keyboard:false,pane:'lukez-house-pane'});m.addTo(mapMarkersLayer);
+  };
+  window.drawSite=function(site,key,i){
+    const id=String(site.propId||site.siteId||'');
+    const c=mapColor(key,i);
+    drawHouseTriangle(site);
+    if(!showBinGpsDots) return;
+    const sources=activeFilterDataSource==='solo'?['solo']:(activeFilterDataSource==='council'?['council']:['solo','council']);
+    sources.forEach(src=>{
+      visibleStreams().filter(st=>streamMatchesSelectedRun(site,st)).forEach(st=>{
+        const bins=(src==='solo'?site.soloStreams:site.councilStreams)?.[st]||[];
+        bins.forEach((bin,idx)=>{
+          const p=sourceCoords(site,bin); if(!p)return;
+          const serial=String(bin.serial||'').trim().toUpperCase();
+          const markerKey=`${id}|${src}|${st}|${idx}|${serial}`;
+          if(serial&&servicedBinSerials.has(serial))return;
+          const fc=serial&&missedBinSerials.has(serial)?'#ef4444':dotColor(key,c);
+          const m=L.circleMarker([p.lat,p.lng],{pane:'lukez-bin-pane',radius:7,color:'#fff',weight:2,fillColor:fc,fillOpacity:1})
+            .bindPopup(`<div><b>${esc(serial||'Bin')}</b><br>${esc(st)} · ${esc(bin.size||'240L')}<br><button type="button" onclick="openPropertyInspectModal('${esc(id)}')">Property</button>${src==='solo'?` <button type="button" onclick="promptEditBin('${esc(id)}','${esc(st)}',${idx})">Edit Bin</button>`:''}</div>`)
+            .addTo(mapMarkersLayer);
+          activeMapCircleMarkers.set(markerKey,{layer:m,lat:p.lat,lng:p.lng,stream:st,siteId:id,serial});
+        });
+      });
+    });
+  };
+
+  /* Next-bin toggle: one direct handler, including mobile taps. */
+  document.addEventListener('pointerup',function(e){
+    const btn=e.target.closest&&e.target.closest('#btnSideNextBin');if(!btn)return;
+    e.preventDefault();e.stopImmediatePropagation();
+    isNextBinBoxVisible=!isNextBinBoxVisible;
+    localStorage.setItem('lukezBunzNextBinBoxVisible',isNextBinBoxVisible?'true':'false');
+    if(typeof updateMapTelemetryVisibility==='function')updateMapTelemetryVisibility();
+    if(typeof updateMapSideLayersUI==='function')updateMapSideLayersUI();
+  },true);
+
+  /* GPS always recentres; if no cached fix exists, request one and focus when it arrives. */
+  window.focusMapOnGps=function(){
+    const focus=pos=>{
+      if(!leafletMap||!pos)return false;
+      const lat=Number(pos.lat),lng=Number(pos.lng);if(!Number.isFinite(lat)||!Number.isFinite(lng))return false;
+      userCurrentLocation={...(userCurrentLocation||{}),lat,lng};
+      leafletMap.setView([lat,lng],Math.max(Number(leafletMap.getZoom())||0,17),{animate:true});return true;
+    };
+    if(focus(userCurrentLocation))return true;
+    if(navigator.geolocation)navigator.geolocation.getCurrentPosition(p=>focus({lat:p.coords.latitude,lng:p.coords.longitude}),()=>{}, {enableHighAccuracy:true,maximumAge:5000,timeout:10000});
+    if(typeof startLiveLocationWatcher==='function')startLiveLocationWatcher();
+    return false;
+  };
+})();
+</script>
+
 </body>
 </html>
 
