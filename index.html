@@ -5791,5 +5791,133 @@ window.toggleMapToolsPanel=()=>{const p=document.querySelector('.map-controls-gr
 })();
 </script>
 
+<!-- FINAL 2026-08-31 COMPACT HEADER / CONTROL SIZE / STRICT RECYCLE PICKER -->
+<style id="final-compact-header-and-controls">
+/* Match the GPS and Layers buttons to Leaflet's zoom buttons exactly. */
+#mapScreenContainer .map-side-layers-toggle,
+#mapScreenContainer .map-side-view-toggle{
+  width:40px!important;
+  height:40px!important;
+  min-width:40px!important;
+  min-height:40px!important;
+  box-sizing:border-box!important;
+  border-radius:8px!important;
+}
+
+/* Remove wasted horizontal padding from the four boxes at the top. */
+.map-summary-bar{gap:8px!important;}
+.map-run-colored-box,
+.map-stat-pill{
+  padding:4px 5px!important;
+  box-sizing:border-box!important;
+}
+.map-run-colored-box{gap:4px!important;}
+.map-stat-pill{gap:4px!important;}
+/* With the padding gone, text can be readable instead of aggressively truncated. */
+#mapRunTitleText{
+  font-size:clamp(15px,4.5vw,22px)!important;
+  line-height:1.08!important;
+}
+.map-stat-pill b{font-size:clamp(21px,5.4vw,26px)!important;}
+.map-stat-pill .map-stat-icon{font-size:19px!important;}
+@media(max-width:560px){
+  .map-summary-bar{grid-template-columns:minmax(0,1.3fr) minmax(0,1fr) minmax(0,1fr) 52px!important;gap:7px!important;}
+  .map-run-colored-box,.map-stat-pill{padding:3px 4px!important;}
+  #mapRunTitleText{font-size:clamp(14px,4.3vw,20px)!important;}
+}
+</style>
+<script id="final-strict-recycle-picker">
+(function(){
+  const norm=v=>String(v||'').trim().toLowerCase();
+  const normDay=v=>{
+    const x=String(v||'').trim().toLowerCase();
+    if(['m','mon','monday'].includes(x))return 'Monday';
+    if(['tu','tue','tuesday'].includes(x))return 'Tuesday';
+    if(['w','wed','wednesday'].includes(x))return 'Wednesday';
+    if(['th','thu','thur','thursday'].includes(x))return 'Thursday';
+    if(['f','fri','friday'].includes(x))return 'Friday';
+    return String(v||'').trim();
+  };
+  const runFor=(site,stream)=>{
+    const s=site&&site.soloSchedule||{};
+    if(stream==='Garbage')return String(s.garRun||'').trim();
+    if(stream==='Recycling')return String(s.recRun||'').trim();
+    if(stream==='SummerRecycling')return String(s.recSummerRun||'').trim();
+    if(stream==='FOGO')return String(s.fogRun||'').trim();
+    return '';
+  };
+  const usesWeek=s=>s==='Recycling'||s==='FOGO';
+
+  /* Rebuild the run list from the exact schedule field for the selected stream.
+     A Summer Recycling field is NEVER consulted while Recycling is selected. */
+  window.__renderStrictMapPickerRuns=function(){
+    const box=document.getElementById('mapRunPickerRuns');
+    const label=document.getElementById('mapRunPickerRunsLabel');
+    if(!box)return;
+    const stream=window.__pickerStreamStrict || window.activeFilterStream || '';
+    const day=window.__pickerDayStrict || '';
+    const week=window.__pickerWeekStrict || '';
+    const found=new Map();
+    (window.siteRecords||[]).forEach(site=>{
+      const sch=site&&site.soloSchedule||{};
+      if(day && normDay(sch.day)!==day)return;
+      if(usesWeek(stream) && String(sch.weekLetter||'').trim().toUpperCase()!==week)return;
+      const add=st=>{
+        const r=runFor(site,st);
+        if(!r)return;
+        /* Extra guard: normal Recycling can never use a run whose source is Summer. */
+        if(st==='Recycling' && norm(r).includes('summer'))return;
+        found.set(st+'|'+norm(r),{run:r,stream:st});
+      };
+      if(stream) add(stream);
+      else ['Garbage','Recycling','FOGO'].forEach(add);
+    });
+    const vals=[...found.values()].sort((a,b)=>a.run.localeCompare(b.run,undefined,{numeric:true}));
+    if(label)label.textContent='Select run';
+    box.innerHTML=vals.length?vals.map(v=>{
+      const safe=String(v.run).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');
+      return `<button type="button" data-final-picker="run" data-run="${safe}" data-run-stream="${v.stream}" class="map-run-picker-btn">${safe}</button>`;
+    }).join(''):'<div style="color:#64748b">No runs found for that selection.</div>';
+    const step=document.getElementById('mapRunPickerRunsStep');if(step)step.hidden=false;
+  };
+
+  /* Keep strict picker state in sync at capture phase, then overwrite the list. */
+  document.addEventListener('click',function(e){
+    const b=e.target.closest&&e.target.closest('#mapRunPickerModal [data-final-picker]');
+    if(!b)return;
+    const kind=b.dataset.finalPicker;
+    if(kind==='stream'){
+      window.__pickerStreamStrict=b.dataset.stream||'';
+      window.__pickerDayStrict='';window.__pickerWeekStrict='';
+    }else if(kind==='day'){
+      window.__pickerDayStrict=normDay(b.dataset.day||'');window.__pickerWeekStrict='';
+    }else if(kind==='week'){
+      window.__pickerWeekStrict=String(b.dataset.week||'').trim().toUpperCase();
+    }
+    /* Older picker handlers run too; rebuild after they finish. */
+    setTimeout(function(){
+      const stream=window.__pickerStreamStrict||'';
+      const day=window.__pickerDayStrict||'';
+      const week=window.__pickerWeekStrict||'';
+      if(kind==='stream'){
+        /* wait for the day selection for exact run filtering */
+        return;
+      }
+      if(kind==='day' && usesWeek(stream))return;
+      if(kind==='week' || kind==='day')window.__renderStrictMapPickerRuns();
+    },0);
+  },false);
+
+  const oldOpen=window.openMapRunPicker;
+  window.openMapRunPicker=function(){
+    window.__pickerStreamStrict=window.activeFilterStream||'';
+    window.__pickerDayStrict=normDay(window.activeFilterDay||'');
+    window.__pickerWeekStrict=String(window.activeFilterWeek||'').trim().toUpperCase();
+    return oldOpen&&oldOpen.apply(this,arguments);
+  };
+})();
+</script>
+
 </body>
 </html>
+
