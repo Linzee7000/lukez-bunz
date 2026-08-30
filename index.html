@@ -1888,11 +1888,11 @@
       <label>Collection Day</label>
       <select id="modalDaySelect" class="main-search-input" style="font-size:14px; height:40px;" onchange="populateModalRunsChecklist()">
         <option value="">All Days</option>
-        <option value="Monday">Monday</option>
-        <option value="Tuesday">Tuesday</option>
-        <option value="Wednesday">Wednesday</option>
-        <option value="Thursday">Thursday</option>
-        <option value="Friday">Friday</option>
+        <option value="Monday">Mon</option>
+        <option value="Tuesday">Tue</option>
+        <option value="Wednesday">Wed</option>
+        <option value="Thursday">Thu</option>
+        <option value="Friday">Fri</option>
       </select>
     </div>
 
@@ -1971,11 +1971,11 @@
       <div class="form-group">
         <label>Collection Day</label>
         <select id="modalPropDay" class="main-search-input" style="font-size:14px; height:40px;">
-          <option value="Monday">Monday</option>
-          <option value="Tuesday">Tuesday</option>
-          <option value="Wednesday">Wednesday</option>
-          <option value="Thursday">Thursday</option>
-          <option value="Friday">Friday</option>
+          <option value="Monday">Mon</option>
+          <option value="Tuesday">Tue</option>
+          <option value="Wednesday">Wed</option>
+          <option value="Thursday">Thu</option>
+          <option value="Friday">Fri</option>
         </select>
       </div>
       <div class="form-group">
@@ -6548,6 +6548,205 @@ window.toggleMapToolsPanel=()=>{const p=document.querySelector('.map-controls-gr
 })();
 </script>
 
+
+
+<style id="final-summer-day-bin-fix">
+/* Keep the day buttons compact and unambiguous. */
+#mapRunPickerDays .map-run-picker-btn{font-size:18px!important;}
+</style>
+<script id="final-summer-day-bin-fix-script">
+(function(){
+  const clean=v=>String(v||'').trim();
+  const lower=v=>clean(v).toLowerCase();
+  const hasSummerWord=v=>/\bsummer\b/i.test(clean(v));
+  const dayKey=v=>{
+    const x=lower(v);
+    if(['m','mon','monday'].includes(x)) return 'Monday';
+    if(['tu','tue','tuesday'].includes(x)) return 'Tuesday';
+    if(['w','wed','wednesday'].includes(x)) return 'Wednesday';
+    if(['th','thu','thur','thurs','thursday'].includes(x)) return 'Thursday';
+    if(['f','fri','friday'].includes(x)) return 'Friday';
+    return clean(v);
+  };
+  const dayLabel={Monday:'MON',Tuesday:'TUE',Wednesday:'WED',Thursday:'THU',Friday:'FRI'};
+  const schedule=site=>(site&&site.soloSchedule)||{};
+  const runFor=(site,stream)=>{
+    const s=schedule(site);
+    if(stream==='Garbage') return clean(s.garRun);
+    if(stream==='Recycling') return clean(s.recRun);
+    if(stream==='SummerRecycling') return clean(s.recSummerRun);
+    if(stream==='FOGO') return clean(s.fogRun);
+    return '';
+  };
+  const selected=()=>new Set(Array.from(selectedRunsSet||[]).map(lower));
+
+  /* The rule requested: a run whose NAME says Summer is never a normal recycle run.
+     Do not use recRun merely because a summer property can also have one. */
+  function belongs(site,stream,day=activeFilterDay,week=activeFilterWeek,selectedSet=selected()){
+    const s=schedule(site);
+    if(day && dayKey(s.day)!==dayKey(day)) return false;
+    const run=runFor(site,stream);
+    if(!run) return false;
+    if(stream==='Recycling'){
+      if(hasSummerWord(run)) return false;
+      const w=clean(s.weekLetter).toUpperCase();
+      if(w!=='A' && w!=='B') return false;
+      if(week && w!==clean(week).toUpperCase()) return false;
+    }
+    if(stream==='SummerRecycling'){
+      /* Summer is opt-in only, and uses its dedicated summer assignment. */
+      if(!clean(s.recSummerRun)) return false;
+      if(week) return false;
+    }
+    if(stream==='FOGO' && week && clean(s.weekLetter).toUpperCase()!==clean(week).toUpperCase()) return false;
+    if(selectedSet.size && !selectedSet.has(lower(run))) return false;
+    return true;
+  }
+
+  window.__lukezBelongs=belongs;
+  window.siteMatchesMapFilters=function(site){
+    const st=clean(activeFilterStream), sel=selected();
+    if(st) return belongs(site,st,activeFilterDay,activeFilterWeek,sel);
+    /* All means standard services only. Summer remains completely hidden. */
+    return ['Garbage','Recycling','FOGO'].some(x=>belongs(site,x,activeFilterDay,activeFilterWeek,sel));
+  };
+  window.getDriveEligibleStreams=function(site){
+    const st=clean(activeFilterStream), sel=selected();
+    const list=st?[st]:['Garbage','Recycling','FOGO'];
+    return list.filter(x=>belongs(site,x,activeFilterDay,activeFilterWeek,sel))
+      .map(x=>({stream:x,binStream:x==='SummerRecycling'?'Recycling':x}));
+  };
+
+  /* Three-letter day names everywhere in the run picker, with full names retained internally. */
+  const pickerDays=['Monday','Tuesday','Wednesday','Thursday','Friday'];
+  let pickerStream='', pickerDay='', pickerWeek='';
+  function pickerEligible(site,st,d,w){ return belongs(site,st,d,w,new Set()); }
+  function renderPickerRuns(){
+    const box=document.getElementById('mapRunPickerRuns'); if(!box) return;
+    const found=new Map(), types=pickerStream?[pickerStream]:['Garbage','Recycling','FOGO'];
+    (siteRecords||[]).forEach(site=>types.forEach(st=>{
+      if(!pickerEligible(site,st,pickerDay,pickerWeek)) return;
+      const r=runFor(site,st); found.set(st+'|'+lower(r),{run:r,stream:st});
+    }));
+    const vals=[...found.values()].sort((a,b)=>a.run.localeCompare(b.run,undefined,{numeric:true}));
+    box.innerHTML=vals.length?vals.map(v=>`<button type="button" class="map-run-picker-btn" onclick="applyMapPickerRun(${JSON.stringify(v.run)},${JSON.stringify(v.stream)})">${String(v.run).replace(/</g,'&lt;')}</button>`).join(''):'<div style="color:#64748b">No runs found for that selection.</div>';
+  }
+  window.openMapRunPicker=function(){
+    pickerStream=clean(activeFilterStream); pickerDay=dayKey(activeFilterDay); pickerWeek=clean(activeFilterWeek).toUpperCase();
+    const streams=[['','All',''],['Garbage','🗑️','stream-gar'],['Recycling','♻️','stream-rec'],['SummerRecycling','🌞','stream-summer'],['FOGO','🌳','stream-fog']];
+    const box=document.getElementById('mapRunPickerStreams');
+    if(box) box.innerHTML=streams.map(([key,label,cls])=>`<button type="button" class="map-run-picker-btn ${cls} ${pickerStream===key?'active':''}" onclick="chooseMapPickerStream(${JSON.stringify(key)})">${label}</button>`).join('');
+    ['mapRunPickerDayStep','mapRunPickerWeekStep','mapRunPickerRunsStep'].forEach(id=>{const e=document.getElementById(id);if(e)e.hidden=true;});
+    if(typeof openModal==='function') openModal('mapRunPickerModal');
+    window.chooseMapPickerStream(pickerStream,true);
+  };
+  window.chooseMapPickerStream=function(st,preserve){
+    pickerStream=st||''; if(!preserve){pickerDay='';pickerWeek='';}
+    const ds=document.getElementById('mapRunPickerDayStep'), ws=document.getElementById('mapRunPickerWeekStep'), rs=document.getElementById('mapRunPickerRunsStep');
+    if(ds)ds.hidden=false; if(ws)ws.hidden=true; if(rs)rs.hidden=true;
+    const types=pickerStream?[pickerStream]:['Garbage','Recycling','FOGO'];
+    const available=pickerDays.filter(d=>(siteRecords||[]).some(site=>types.some(x=>pickerEligible(site,x,d,''))));
+    const box=document.getElementById('mapRunPickerDays');
+    if(box) box.innerHTML=available.map(d=>`<button type="button" class="map-run-picker-btn ${pickerDay===d?'active':''}" onclick="chooseMapPickerDay(${JSON.stringify(d)})">${dayLabel[d]}</button>`).join('');
+    if(preserve&&pickerDay&&available.includes(pickerDay)) window.chooseMapPickerDay(pickerDay,true);
+  };
+  window.chooseMapPickerDay=function(d,preserve){
+    pickerDay=dayKey(d); if(!preserve)pickerWeek='';
+    document.querySelectorAll('#mapRunPickerDays .map-run-picker-btn').forEach(b=>b.classList.toggle('active',b.textContent===dayLabel[pickerDay]));
+    const needsWeek=pickerStream==='Recycling'||pickerStream==='FOGO';
+    const ws=document.getElementById('mapRunPickerWeekStep'), rs=document.getElementById('mapRunPickerRunsStep');
+    if(needsWeek){
+      if(ws)ws.hidden=false; if(rs)rs.hidden=true;
+      const weeks=['A','B'].filter(w=>(siteRecords||[]).some(site=>pickerEligible(site,pickerStream,pickerDay,w)));
+      const box=document.getElementById('mapRunPickerWeeks');
+      if(box)box.innerHTML=weeks.map(w=>`<button type="button" class="map-run-picker-btn ${pickerWeek===w?'active':''}" onclick="chooseMapPickerWeek('${w}')">Week ${w}</button>`).join('');
+      if(preserve&&pickerWeek&&weeks.includes(pickerWeek))window.chooseMapPickerWeek(pickerWeek);
+    }else{if(ws)ws.hidden=true;if(rs)rs.hidden=false;renderPickerRuns();}
+  };
+  window.chooseMapPickerWeek=function(w){pickerWeek=clean(w).toUpperCase();const rs=document.getElementById('mapRunPickerRunsStep');if(rs)rs.hidden=false;renderPickerRuns();};
+  window.applyMapPickerRun=function(run,streamOverride){
+    const st=streamOverride||pickerStream, r=clean(run);
+    if(st==='Recycling'&&hasSummerWord(r)) return;
+    selectedRunsSet.clear(); selectedRunsSet.add(lower(r));
+    activeFilterStream=st; activeFilterDay=pickerDay; activeFilterWeek=(st==='Recycling'||st==='FOGO')?pickerWeek:'';
+    if(typeof closeModal==='function')closeModal('mapRunPickerModal');
+    if(typeof renderActiveFilterChips==='function')renderActiveFilterChips();
+    window.renderMapData();
+  };
+
+  /* Filter drawer run list uses the same exact membership rule. */
+  window.populateModalRunsChecklist=function(){
+    const box=document.getElementById('modalRunsChecklistGrid'); if(!box)return;
+    const st=clean(document.getElementById('modalStreamSelect')?.value);
+    const day=dayKey(document.getElementById('modalDaySelect')?.value);
+    const week=clean(document.getElementById('modalWeekSelect')?.value).toUpperCase();
+    const types=st?[st]:['Garbage','Recycling','FOGO']; const found=new Map();
+    (siteRecords||[]).forEach(site=>types.forEach(x=>{
+      if(!belongs(site,x,day,week,new Set()))return;
+      const r=runFor(site,x); found.set(x+'|'+lower(r),{run:r,stream:x});
+    }));
+    const cls={Garbage:'run-chip-gar',Recycling:'run-chip-rec',SummerRecycling:'run-chip-summer',FOGO:'run-chip-fog'};
+    box.innerHTML=[...found.values()].sort((a,b)=>a.run.localeCompare(b.run,undefined,{numeric:true})).map(v=>{
+      const checked=selectedRunsSet.has(lower(v.run))?'checked':'';
+      return `<label class="run-select-chip ${cls[v.stream]||''}"><input type="checkbox" value="${v.run}" ${checked} onchange="toggleModalRunSelection('${lower(v.run)}',this.checked)"><span class="run-chip-text">${v.stream==='SummerRecycling'?'☀️ ':''}${v.run}</span></label>`;
+    }).join('');
+  };
+
+  /* Definitive renderer. Bins use their actual bin GPS directly; the old 10 m
+     flip-distance guard was suppressing valid bin dots after a filter was applied. */
+  window.renderMapData=function(){
+    if(typeof updateMapLiveRun==='function')updateMapLiveRun();
+    if(!leafletMap&&typeof initLeafletMap==='function')initLeafletMap();
+    if(!leafletMap)return;
+    mapMarkersLayer.clearLayers(); mapHullsLayer.clearLayers(); mapSeqLayer.clearLayers(); activeMapCircleMarkers.clear();
+    const st=clean(activeFilterStream), sel=selected();
+    const types=st?[st]:['Garbage','Recycling','FOGO'];
+    const groups=new Map();
+    (siteRecords||[]).forEach(site=>types.forEach(stream=>{
+      if(!belongs(site,stream,activeFilterDay,activeFilterWeek,sel))return;
+      const run=runFor(site,stream); const id=stream+'|'+lower(run);
+      if(!groups.has(id))groups.set(id,{stream,run,sites:[]}); groups.get(id).sites.push(site);
+    }));
+    currentlyShowingRunKeys=[...groups.values()].map(g=>g.run);
+    const allVisible=[];
+    [...groups.values()].forEach((g,i)=>{
+      const pts=g.sites.map(x=>gps(x.lat,x.lng)).filter(Boolean);
+      const hull=typeof buildRunConvexHull==='function'?buildRunConvexHull(pts):pts;
+      if(hull.length>=3){const c=mapColor(g.run,i);L.polygon(hull.map(p=>[p.lat,p.lng]),{color:c,weight:2,fillColor:c,fillOpacity:.1,lineJoin:'round'}).addTo(mapHullsLayer);}
+      g.sites.forEach(site=>{
+        allVisible.push(site);
+        if(typeof drawHouseTriangle==='function')drawHouseTriangle(site);
+        if(!showBinGpsDots)return;
+        const sources=activeFilterDataSource==='solo'?['solo']:activeFilterDataSource==='council'?['council']:['solo','council'];
+        const binStream=g.stream==='SummerRecycling'?'Recycling':g.stream;
+        sources.forEach(src=>{
+          const bins=(src==='solo'?site.soloStreams:site.councilStreams)?.[binStream]||[];
+          bins.forEach((bin,idx)=>{
+            const p=gps(bin.lat,bin.lng)||sourceCoords(site,bin); if(!p)return;
+            const serial=clean(bin.serial).toUpperCase(); if(serial&&servicedBinSerials.has(serial))return;
+            const c=serial&&missedBinSerials.has(serial)?'#ef4444':dotColor(g.run,mapColor(g.run,i));
+            const key=`${site.propId||site.siteId}|${src}|${g.stream}|${idx}|${serial}`;
+            const m=L.circleMarker([p.lat,p.lng],{pane:'lukez-bin-pane',radius:7,color:'#fff',weight:2,fillColor:c,fillOpacity:1}).addTo(mapMarkersLayer);
+            activeMapCircleMarkers.set(key,{layer:m,lat:p.lat,lng:p.lng,stream:binStream,siteId:String(site.propId||site.siteId||''),serial});
+          });
+        });
+      });
+    });
+    if(typeof drawCollectionPointMarkers==='function')drawCollectionPointMarkers();
+    if(typeof renderKmzEvidence==='function')renderKmzEvidence();
+    if(typeof updateMapHeaderInfo==='function')updateMapHeaderInfo(allVisible,groups);
+    if(userCurrentLocation&&typeof updateMapTruckPosition==='function')updateMapTruckPosition();
+    requestAnimationFrame(()=>leafletMap&&leafletMap.invalidateSize());
+  };
+
+  /* Force a map redraw after modal filters are applied, so filtered bins appear immediately. */
+  const originalApply=window.applyModalFilters;
+  window.applyModalFilters=function(){
+    if(typeof originalApply==='function')originalApply();
+    setTimeout(()=>window.renderMapData(),0);
+  };
+  setTimeout(()=>{ if(leafletMap&&siteRecords&&siteRecords.length)window.renderMapData(); },100);
+})();
+</script>
 </body>
 </html>
-
