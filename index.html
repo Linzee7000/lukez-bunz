@@ -1798,7 +1798,7 @@
       <div class="map-header-panel">
         <!-- COMPACT MAP SUMMARY -->
         <div class="map-top-bar map-summary-bar">
-          <button type="button" id="mapRunColoredBox" class="map-run-colored-box hdr-run-gar" onclick="openMapRunPicker()" title="Select run"><span id="mapRunTitleText">Select run</span></button>
+          <button type="button" id="mapRunColoredBox" class="map-run-colored-box hdr-run-gar" onclick="openFilterDrawerModal()" title="Select run"><span id="mapRunTitleText">Select run</span></button>
           <div class="map-pill-box map-stat-pill"><span class="map-stat-icon">🏠</span><b id="mapTotalHouses">0</b></div>
           <div class="map-pill-box map-stat-pill"><span class="map-stat-icon">🗑️</span><b id="mapTotalBins">0</b></div>
           <button type="button" id="btnMapSettingsTop" class="map-settings-top-btn" onclick="toggleMapToolsPanel()" title="Map settings">⚙️</button>
@@ -6949,6 +6949,85 @@ window.toggleMapToolsPanel=()=>{const p=document.querySelector('.map-controls-gr
 
   stripSummerSelectionsWhenNotExplicit();
   setTimeout(()=>{ if(leafletMap&&siteRecords&&siteRecords.length) window.renderMapData(); },0);
+})();
+</script>
+
+<!-- UNIFIED FILTER UI: one filter design and behaviour on every page -->
+<style id="unified-filter-ui">
+  #filterOptionsModal .modal-box{max-width:760px;width:min(94vw,760px)}
+  .unified-filter-section{margin:16px 0}
+  .unified-filter-label{display:block;font-size:18px;font-weight:700;color:#52606d;margin:0 0 8px}
+  .unified-filter-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px}
+  .unified-filter-grid.streams{grid-template-columns:repeat(5,minmax(0,1fr))}
+  .unified-filter-grid.weeks{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .unified-filter-btn{min-height:70px;border:1px solid #cbd5e1;border-radius:18px;background:#f8fafc;color:#334155;font-size:17px;font-weight:700;cursor:pointer;box-shadow:0 2px 5px rgba(15,23,42,.06)}
+  .unified-filter-btn.active{border:3px solid #22b8cf;box-shadow:0 0 0 5px rgba(34,184,207,.12);background:#fff}
+  .unified-filter-btn.stream-gar{background:#fff1f2}.unified-filter-btn.stream-rec{background:#fffbeb}.unified-filter-btn.stream-summer{background:#fff7ed}.unified-filter-btn.stream-fog{background:#ecfdf5}
+  .unified-filter-btn.stream-gar.active,.unified-filter-btn.stream-rec.active,.unified-filter-btn.stream-summer.active,.unified-filter-btn.stream-fog.active{border-color:#22b8cf}
+  #modalStreamSelect,#modalDaySelect,#modalWeekSelect{display:none!important}
+  #modalRunsChecklistGrid{max-height:42vh;overflow:auto;padding:6px}
+  @media(max-width:600px){.unified-filter-grid,.unified-filter-grid.streams{gap:8px}.unified-filter-btn{min-height:64px;font-size:16px}}
+</style>
+<script id="unified-filter-behaviour">
+(function(){
+  const DAY_OPTIONS=[['Monday','MON'],['Tuesday','TUE'],['Wednesday','WED'],['Thursday','THU'],['Friday','FRI']];
+  const STREAM_OPTIONS=[['','All',''],['Garbage','🗑️','stream-gar'],['Recycling','♻️','stream-rec'],['SummerRecycling','☀️','stream-summer'],['FOGO','🌳','stream-fog']];
+  function q(id){return document.getElementById(id)}
+  function clean(v){return String(v||'').trim()}
+  const originalOpenFilter=window.openFilterDrawerModal;
+  const originalApplyFilter=window.applyModalFilters;
+  function buildUnifiedFilterControls(){
+    const modal=q('filterOptionsModal'); if(!modal||q('unifiedFilterControls')) return;
+    const streamGroup=q('modalStreamSelect')?.closest('.form-group');
+    const dataGroup=q('modalDataSourceSelect')?.closest('.form-group');
+    const dayGroup=q('modalDaySelect')?.closest('.form-group');
+    const weekGroup=q('modalWeekSelect')?.closest('.form-group');
+    if(!streamGroup||!dayGroup||!weekGroup) return;
+    streamGroup.style.display='none'; dayGroup.style.display='none'; weekGroup.style.display='none';
+    const wrap=document.createElement('div'); wrap.id='unifiedFilterControls';
+    const streamUI=document.createElement('div'); streamUI.className='unified-filter-section';
+    streamUI.innerHTML='<span class="unified-filter-label">1. SELECT STREAM</span><div id="unifiedStreamButtons" class="unified-filter-grid streams"></div>';
+    const dayUI=document.createElement('div'); dayUI.className='unified-filter-section';
+    dayUI.innerHTML='<span class="unified-filter-label">2. SELECT DAY</span><div id="unifiedDayButtons" class="unified-filter-grid"></div>';
+    const weekUI=document.createElement('div'); weekUI.className='unified-filter-section';
+    weekUI.innerHTML='<span class="unified-filter-label">3. SELECT WEEK</span><div id="unifiedWeekButtons" class="unified-filter-grid weeks"></div>';
+    wrap.append(streamUI,dayUI,weekUI);
+    streamGroup.before(wrap);
+    function render(){
+      const st=clean(q('modalStreamSelect')?.value), day=clean(q('modalDaySelect')?.value), week=clean(q('modalWeekSelect')?.value);
+      const sb=q('unifiedStreamButtons'), db=q('unifiedDayButtons'), wb=q('unifiedWeekButtons');
+      if(sb)sb.innerHTML=STREAM_OPTIONS.map(([v,label,cls])=>`<button type="button" class="unified-filter-btn ${cls} ${st===v?'active':''}" data-filter-stream="${v}">${label}</button>`).join('');
+      if(db)db.innerHTML=DAY_OPTIONS.map(([v,label])=>`<button type="button" class="unified-filter-btn ${day===v?'active':''}" data-filter-day="${v}">${label}</button>`).join('');
+      if(wb)wb.innerHTML=`<button type="button" class="unified-filter-btn ${week==='A'?'active':''}" data-filter-week="A">Week A</button><button type="button" class="unified-filter-btn ${week==='B'?'active':''}" data-filter-week="B">Week B</button>`;
+    }
+    wrap.addEventListener('click',ev=>{
+      const b=ev.target.closest('button'); if(!b)return;
+      if(b.dataset.filterStream!==undefined){q('modalStreamSelect').value=b.dataset.filterStream; selectedRunsSet.clear();}
+      else if(b.dataset.filterDay!==undefined){q('modalDaySelect').value=b.dataset.filterDay; selectedRunsSet.clear();}
+      else if(b.dataset.filterWeek!==undefined){q('modalWeekSelect').value=b.dataset.filterWeek; selectedRunsSet.clear();}
+      else return;
+      render(); if(typeof window.populateModalRunsChecklist==='function')window.populateModalRunsChecklist();
+    });
+    window.__renderUnifiedFilterControls=render;
+    render();
+  }
+  function openUnified(){
+    buildUnifiedFilterControls();
+    if(typeof originalOpenFilter==='function') originalOpenFilter();
+    else if(typeof window.openModal==='function') window.openModal('filterOptionsModal');
+    if(window.__renderUnifiedFilterControls)window.__renderUnifiedFilterControls();
+  }
+  window.openFilterDrawerModal=openUnified;
+  /* The map's old run picker now opens the exact same filter UI as Search and Drive. */
+  window.openMapRunPicker=openUnified;
+  window.applyModalFilters=function(){
+    /* Use the original application's state update so all pages share the same
+       activeFilter variables, then force the unified map redraw. */
+    if(typeof originalApplyFilter==='function') originalApplyFilter();
+    if(typeof window.renderMapData==='function') window.renderMapData();
+  };
+  document.addEventListener('DOMContentLoaded',buildUnifiedFilterControls);
+  setTimeout(buildUnifiedFilterControls,0);
 })();
 </script>
 </body>
