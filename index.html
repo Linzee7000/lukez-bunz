@@ -6387,6 +6387,167 @@ window.toggleMapToolsPanel=()=>{const p=document.querySelector('.map-controls-gr
 })();
 </script>
 
+
+
+<!-- FINAL REPAIR: Summer is opt-in; exact run dots; exact boundaries -->
+<script id="summer-opt-in-exact-run-repair">
+(function(){
+  const clean=v=>String(v||'').trim();
+  const lower=v=>clean(v).toLowerCase();
+  const dayNorm=v=>{
+    const x=lower(v);
+    if(['m','mon','monday'].includes(x)) return 'monday';
+    if(['t','tu','tue','tuesday'].includes(x)) return 'tuesday';
+    if(['w','wed','wednesday'].includes(x)) return 'wednesday';
+    if(['th','thu','thur','thurs','thursday'].includes(x)) return 'thursday';
+    if(['f','fri','friday'].includes(x)) return 'friday';
+    return x;
+  };
+  const sch=site=>(site&&site.soloSchedule)||{};
+  const runFor=(site,stream)=>{
+    const s=sch(site);
+    if(stream==='Garbage') return clean(s.garRun);
+    if(stream==='Recycling') return clean(s.recRun);
+    if(stream==='SummerRecycling') return clean(s.recSummerRun);
+    if(stream==='FOGO') return clean(s.fogRun);
+    return '';
+  };
+  const isSummerSite=site=>!!clean(sch(site).recSummerRun);
+  const needsWeek=stream=>stream==='Recycling'||stream==='FOGO';
+  const selectedRuns=()=>new Set(Array.from(selectedRunsSet||[]).map(lower));
+  const exactWeek=w=>{const x=clean(w).toUpperCase();return x==='A'||x==='B';};
+
+  /* One authoritative membership test.  Summer is NEVER inferred from recRun:
+     summer membership comes from recSummerRun only. */
+  function belongs(site,stream,day=activeFilterDay,week=activeFilterWeek,selected=selectedRuns()){
+    const s=sch(site);
+    if(day && dayNorm(s.day)!==dayNorm(day)) return false;
+    const run=runFor(site,stream);
+    if(!run) return false;
+    if(stream==='SummerRecycling'){
+      if(!isSummerSite(site)) return false;
+    } else if(stream==='Recycling'){
+      // Summer properties may also carry recRun.  They are summer-only unless
+      // Summer Recycling itself was explicitly selected.
+      if(isSummerSite(site)) return false;
+      if(!exactWeek(s.weekLetter)) return false;
+      if(week && clean(s.weekLetter).toUpperCase()!==clean(week).toUpperCase()) return false;
+    } else if(needsWeek(stream) && week && clean(s.weekLetter).toUpperCase()!==clean(week).toUpperCase()) return false;
+    if(selected.size && !selected.has(lower(run))) return false;
+    return true;
+  }
+
+  /* All pages that use the common map/site filter now get the same summer rule. */
+  window.siteMatchesMapFilters=function(site){
+    const selected=selectedRuns();
+    const stream=clean(activeFilterStream);
+    const day=activeFilterDay, week=activeFilterWeek;
+    if(stream) return belongs(site,stream,day,week,selected);
+    // All means standard services only. Summer is opt-in and is not represented
+    // by houses, bins or totals until Summer Recycling is explicitly selected.
+    return ['Garbage','Recycling','FOGO'].some(st=>belongs(site,st,day,week,selected));
+  };
+
+  window.getDriveEligibleStreams=function(site){
+    const selected=selectedRuns();
+    const stream=clean(activeFilterStream);
+    const candidates=stream?[stream]:['Garbage','Recycling','FOGO'];
+    return candidates.filter(st=>belongs(site,st,activeFilterDay,activeFilterWeek,selected))
+      .map(st=>({stream:st,binStream:st==='SummerRecycling'?'Recycling':st}));
+  };
+
+  /* Filter drawer run list: exact day/week and Summer is a separate stream. */
+  window.populateModalRunsChecklist=function(){
+    const container=document.getElementById('modalRunsChecklistGrid');
+    if(!container) return;
+    const stream=clean(document.getElementById('modalStreamSelect')?.value);
+    const day=clean(document.getElementById('modalDaySelect')?.value);
+    const week=clean(document.getElementById('modalWeekSelect')?.value).toUpperCase();
+    const types=stream?[stream]:['Garbage','Recycling','FOGO'];
+    const found=new Map();
+    (siteRecords||[]).forEach(site=>types.forEach(st=>{
+      if(!belongs(site,st,day,week,new Set())) return;
+      const r=runFor(site,st); if(!r) return;
+      found.set(st+'|'+lower(r),{run:r,stream:st});
+    }));
+    const cls={Garbage:'run-chip-gar',Recycling:'run-chip-rec',SummerRecycling:'run-chip-summer',FOGO:'run-chip-fog'};
+    const vals=[...found.values()].sort((a,b)=>a.run.localeCompare(b.run,undefined,{numeric:true}));
+    container.innerHTML=vals.map(v=>{
+      const checked=selectedRunsSet.has(lower(v.run))?'checked':'';
+      return `<label class="run-select-chip ${cls[v.stream]||''}"><input type="checkbox" value="${esc(v.run)}" ${checked} onchange="toggleModalRunSelection(${JSON.stringify(lower(v.run))},this.checked)"><span class="run-chip-text">${v.stream==='SummerRecycling'?'☀️ ':''}${esc(v.run)}</span></label>`;
+    }).join('');
+  };
+
+  /* Exact map renderer: group by STREAM + RUN, so same-number runs cannot mix.
+     Each dot is drawn only from the one stream/run that owns it. */
+  function drawExactSite(site,stream,key,index){
+    if(typeof drawHouseTriangle==='function') drawHouseTriangle(site);
+    if(!showBinGpsDots) return;
+    const id=String(site.propId||site.siteId||'');
+    const sources=activeFilterDataSource==='solo'?['solo']:activeFilterDataSource==='council'?['council']:['solo','council'];
+    const binStream=stream==='SummerRecycling'?'Recycling':stream;
+    const color=mapColor(key,index);
+    sources.forEach(src=>{
+      const bins=(src==='solo'?site.soloStreams:site.councilStreams)?.[binStream]||[];
+      bins.forEach((bin,idx)=>{
+        const p=sourceCoords(site,bin); if(!p) return;
+        const serial=clean(bin.serial).toUpperCase();
+        if(serial&&servicedBinSerials.has(serial)) return;
+        const markerKey=`${id}|${src}|${stream}|${idx}|${serial}`;
+        const fill=serial&&missedBinSerials.has(serial)?'#ef4444':dotColor(key,color);
+        const m=L.circleMarker([p.lat,p.lng],{pane:'lukez-bin-pane',radius:7,color:'#fff',weight:2,fillColor:fill,fillOpacity:1})
+          .bindPopup(`<div><b>${esc(serial||'Bin')}</b><br>${esc(stream==='SummerRecycling'?'Summer Recycle':binStream)} · ${esc(bin.size||'240L')}</div>`)
+          .addTo(mapMarkersLayer);
+        activeMapCircleMarkers.set(markerKey,{layer:m,lat:p.lat,lng:p.lng,stream:binStream,siteId:id,serial});
+      });
+    });
+  }
+
+  window.renderMapData=function(){
+    if(typeof updateMapLiveRun==='function') updateMapLiveRun();
+    if(!leafletMap&&typeof initLeafletMap==='function') initLeafletMap();
+    if(!leafletMap) return;
+    mapMarkersLayer&&mapMarkersLayer.clearLayers();
+    mapHullsLayer&&mapHullsLayer.clearLayers();
+    mapSeqLayer&&mapSeqLayer.clearLayers();
+    activeMapCircleMarkers&&activeMapCircleMarkers.clear();
+
+    const stream=clean(activeFilterStream);
+    const selected=selectedRuns();
+    const groups=new Map();
+    const add=(st,r,site)=>{const id=st+'|'+lower(r);if(!groups.has(id))groups.set(id,{stream:st,run:r,sites:[]});groups.get(id).sites.push(site);};
+    const streams=stream?[stream]:['Garbage','Recycling','FOGO'];
+    (siteRecords||[]).forEach(site=>streams.forEach(st=>{
+      if(!belongs(site,st,activeFilterDay,activeFilterWeek,selected)) return;
+      const r=runFor(site,st); add(st,r,site);
+    }));
+
+    currentlyShowingRunKeys=[...groups.values()].map(g=>g.run);
+    let allVisible=[];
+    [...groups.values()].forEach((g,i)=>{
+      const pts=g.sites.map(site=>gps(site.lat,site.lng)).filter(Boolean);
+      const hull=typeof buildRunConvexHull==='function'?buildRunConvexHull(pts):pts;
+      if(L&&mapHullsLayer&&hull.length>=3){
+        const color=mapColor(g.run,i);
+        const poly=L.polygon(hull.map(p=>[p.lat,p.lng]),{color,weight:2,fillColor:color,fillOpacity:.1,lineJoin:'round'});
+        poly._runGroupKey=g.run; poly._runStream=g.stream; poly.addTo(mapHullsLayer);
+      }
+      g.sites.forEach(site=>{drawExactSite(site,g.stream,g.run,i);allVisible.push(site);});
+    });
+
+    if(typeof drawCollectionPointMarkers==='function') drawCollectionPointMarkers();
+    if(typeof renderKmzEvidence==='function') renderKmzEvidence();
+    if(typeof updateMapHeaderInfo==='function') updateMapHeaderInfo(allVisible,groups);
+    if(userCurrentLocation&&typeof updateMapTruckPosition==='function') updateMapTruckPosition();
+    requestAnimationFrame(()=>leafletMap&&leafletMap.invalidateSize());
+  };
+
+  /* Picker uses the same membership rule. */
+  window.__lukezBelongs=belongs;
+  setTimeout(()=>{ if(leafletMap&&siteRecords&&siteRecords.length) window.renderMapData(); },100);
+})();
+</script>
+
 </body>
 </html>
 
