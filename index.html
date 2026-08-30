@@ -2483,13 +2483,16 @@
     const mapPane = leafletMap.getPane('mapPane');
     if (!mapPane) return;
 
-    // In Follow mode the map rotates under the truck, like turn-by-turn GPS,
-    // so the direction of travel is always straight up the screen.
+    // Use the CSS rotate/scale longhands so we do NOT overwrite Leaflet's own
+    // translate3d transform. The scale prevents rotated map corners exposing
+    // the grey Leaflet container while following the truck.
+    mapPane.style.transformOrigin = '50% 50%';
     if (isTruckFollowEnabled) {
-      mapPane.style.transformOrigin = '50% 50%';
       mapPane.style.rotate = `${-(lastValidHeading || 0)}deg`;
+      mapPane.style.scale = '1.45';
     } else {
       mapPane.style.rotate = '0deg';
+      mapPane.style.scale = '1';
     }
   }
 
@@ -3399,27 +3402,26 @@
     }
 
     activeMapCircleMarkers.forEach((markerObj, markerKey) => {
-      if (!servicedBinSerials.has(markerKey)) {
-        const d = getDistanceMeters(userCurrentLocation.lat, userCurrentLocation.lng, markerObj.lat, markerObj.lng);
-        if (d <= 25) {
-          if (speedKmh <= 5) {
-            servicedBinSerials.add(markerKey);
-            if (mapMarkersLayer && markerObj.layer) {
-              mapMarkersLayer.removeLayer(markerObj.layer);
-            }
-          } else {
-            // Only flag bins on the driver's LEFT as missed. That is the
-            // kerbside being flipped, so bins on the opposite side stay normal.
-            const binBearing = getBearing(userCurrentLocation.lat, userCurrentLocation.lng, markerObj.lat, markerObj.lng);
-            const relAngle = (binBearing - (lastValidHeading || 0) + 360) % 360;
-            const isLeftOfTravel = relAngle > 180 && relAngle < 360;
-            if (d <= 15 && isLeftOfTravel && !missedBinSerials.has(markerKey)) {
-              missedBinSerials.add(markerKey);
-              if (markerObj.layer) {
-                markerObj.layer.setStyle({ fillColor: '#ef4444', color: '#ffffff', weight: 2 });
-              }
-            }
-          }
+      const binId = markerObj.serial || markerKey;
+      if (servicedBinSerials.has(binId)) return;
+
+      const d = getDistanceMeters(userCurrentLocation.lat, userCurrentLocation.lng, markerObj.lat, markerObj.lng);
+      if (d > 25) return;
+
+      // We flip ONLY the left-hand side of the street. No bin on the right
+      // may change state just because the truck passes it.
+      const binBearing = getBearing(userCurrentLocation.lat, userCurrentLocation.lng, markerObj.lat, markerObj.lng);
+      const relAngle = (binBearing - (lastValidHeading || 0) + 360) % 360;
+      const isLeftOfTravel = relAngle > 180 && relAngle < 360;
+      if (!isLeftOfTravel) return;
+
+      if (speedKmh <= 5) {
+        servicedBinSerials.add(binId);
+        if (mapMarkersLayer && markerObj.layer) mapMarkersLayer.removeLayer(markerObj.layer);
+      } else if (d <= 15 && !missedBinSerials.has(binId)) {
+        missedBinSerials.add(binId);
+        if (markerObj.layer) {
+          markerObj.layer.setStyle({ fillColor: '#ef4444', color: '#ffffff', weight: 2 });
         }
       }
     });
@@ -3606,6 +3608,10 @@
     // when filtered to Recycling, only recycling bins/serials belong here even
     // though the stop card still shows every run that services the address.
     if (activeFilterStream) {
+      // The Map serial rows are strictly for the filtered stream only.
+      // Other services can still appear in the run badges above, but never
+      // contribute bins or serial numbers to the bottom rows.
+      if (activeFilterStream === 'SummerRecycling') return new Set(['SummerRecycling']);
       return new Set([activeFilterStream]);
     }
 
