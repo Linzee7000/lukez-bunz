@@ -1802,7 +1802,7 @@
             <div class="map-toolbar-row">
               <button type="button" class="map-tool-btn" onclick="loadKmzForCurrentRun()">📥 KMZ File</button>
               <button type="button" class="map-tool-btn" onclick="openRunStyleModal()">🎨 Customise</button>
-              <button type="button" id="btnRoadSnap" class="map-tool-btn" onclick="toggleRoadSnapEditing()">✂️ Edit Boundary</button><button type="button" id="btnCreateCollectionPoint" class="map-tool-btn" onclick="startCollectionPointMode()">📍 Create collection point</button>
+              <button type="button" id="btnRoadSnap" class="map-tool-btn" onclick="toggleRoadSnapEditing()">✂️ Edit Boundary</button><button type="button" id="btnCreateCollectionPoint" class="map-tool-btn" onclick="startCollectionPointMode()">📍 Create collection point</button><button type="button" id="btnRoadInOut" class="map-tool-btn" onclick="startRoadMode('drive-reverse-out')">↩️ Drive in · reverse out</button><button type="button" id="btnRoadReverseIn" class="map-tool-btn" onclick="startRoadMode('reverse-in-drive-out')">↪️ Reverse in · drive out</button>
             </div>
           </div>
         </details>
@@ -2138,6 +2138,11 @@
   let collectionPoints = JSON.parse(localStorage.getItem('lukezBunzCollectionPoints')||'{}');
   let collectionPointMode = false;
   let collectionPointDraftMarker = null;
+  let collectionSelectionActive = false;
+  let roadModes = JSON.parse(localStorage.getItem('lukezBunzRoadModes')||'[]');
+  let roadModeDrawing = null;
+  let roadModeDraft = null;
+  let roadModeColors = { 'drive-reverse-out':'#f97316', 'reverse-in-drive-out':'#2563eb' };
 
   /*
     KMZ evidence is deliberately kept separate from property/bin master data.
@@ -2841,10 +2846,10 @@
     if(pinSourceMode==='property') return prop; return flip;
   }
   function saveCollectionPoints(){ localStorage.setItem('lukezBunzCollectionPoints',JSON.stringify(collectionPoints)); }
-  function toggleCollectionHouse(siteId){ const id=String(siteId); if(selectedCollectionHouseIds.has(id)) selectedCollectionHouseIds.delete(id); else selectedCollectionHouseIds.add(id); renderMapData(); }
-  function startCollectionPointMode(){ if(!selectedCollectionHouseIds.size){ alert('Select one or more houses first by tapping their triangles.'); return; } collectionPointMode=true; const b=document.getElementById('btnCreateCollectionPoint'); if(b)b.classList.add('active'); alert('Tap the map to place the collection point. You can drag the pin before saving.'); }
+  function toggleCollectionHouse(siteId){ const id=String(siteId); if(selectedCollectionHouseIds.has(id)) selectedCollectionHouseIds.delete(id); else selectedCollectionHouseIds.add(id); collectionSelectionActive=selectedCollectionHouseIds.size>0; renderMapData(); }
+  function startCollectionPointMode(){ if(!selectedCollectionHouseIds.size){ alert('Select the first house using Select house, then tap any additional houses directly to select or unselect them.'); return; } collectionPointMode=true; const b=document.getElementById('btnCreateCollectionPoint'); if(b)b.classList.add('active'); alert('Tap the map to place the collection point. You can drag the pin before saving.'); }
   function placeCollectionPointDraft(latlng){ if(!leafletMap)return; if(collectionPointDraftMarker) leafletMap.removeLayer(collectionPointDraftMarker); collectionPointDraftMarker=L.marker(latlng,{draggable:true}).addTo(leafletMap).bindPopup('Collection point — drag to adjust, then Save').openPopup(); collectionPointDraftMarker.bindPopup(`<div><b>Collection point</b><br>${selectedCollectionHouseIds.size} house${selectedCollectionHouseIds.size===1?'':'s'} selected<br><button onclick="saveCollectionPointDraft()">Save collection point</button></div>`).openPopup(); }
-  function saveCollectionPointDraft(){ if(!collectionPointDraftMarker)return; const p=collectionPointDraftMarker.getLatLng(); const groupId='cp_'+Date.now(); selectedCollectionHouseIds.forEach(id=>collectionPoints[id]={id:groupId,lat:p.lat,lng:p.lng}); saveCollectionPoints(); selectedCollectionHouseIds.clear(); collectionPointMode=false; leafletMap.removeLayer(collectionPointDraftMarker); collectionPointDraftMarker=null; const b=document.getElementById('btnCreateCollectionPoint');if(b)b.classList.remove('active'); renderMapData(); }
+  function saveCollectionPointDraft(){ if(!collectionPointDraftMarker)return; const p=collectionPointDraftMarker.getLatLng(); const groupId='cp_'+Date.now(); selectedCollectionHouseIds.forEach(id=>collectionPoints[id]={id:groupId,lat:p.lat,lng:p.lng}); saveCollectionPoints(); selectedCollectionHouseIds.clear(); collectionSelectionActive=false; collectionPointMode=false; leafletMap.removeLayer(collectionPointDraftMarker); collectionPointDraftMarker=null; const b=document.getElementById('btnCreateCollectionPoint');if(b)b.classList.remove('active'); renderMapData(); }
   function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
   function initLeafletMap(){
     if(leafletMap)return;
@@ -2863,7 +2868,7 @@
     const followBtn=document.getElementById('btnTruckFollow');
     if(followBtn) followBtn.classList.toggle('active', isTruckFollowEnabled);
     applyHeadingUpMap();
-    leafletMap.on('click', e=>{ if(collectionPointMode) placeCollectionPointDraft(e.latlng); });
+    leafletMap.on('click', e=>{ if(collectionPointMode) { placeCollectionPointDraft(e.latlng); return; } if(roadModeDrawing) addRoadModePoint(e.latlng); });
     setTimeout(()=>leafletMap&&leafletMap.invalidateSize(),100);
   }
   function mapRunLabel(){
@@ -2901,6 +2906,34 @@
       total+=(source?.[st]||[]).length;
     }));
     if(b) b.textContent=total;
+  }
+
+
+  function saveRoadModes(){ localStorage.setItem('lukezBunzRoadModes',JSON.stringify(roadModes)); }
+  function startRoadMode(type){
+    if(roadModeDraft&&leafletMap) leafletMap.removeLayer(roadModeDraft);
+    roadModeDrawing={type,points:[]};
+    document.getElementById('btnRoadInOut')?.classList.toggle('active',type==='drive-reverse-out');
+    document.getElementById('btnRoadReverseIn')?.classList.toggle('active',type==='reverse-in-drive-out');
+    alert('Tap along the road to draw the highlighted line. Tap the last point again, then choose Save road.');
+  }
+  function addRoadModePoint(latlng){
+    if(!roadModeDrawing)return;
+    const pts=roadModeDrawing.points;
+    if(pts.length>=2){ const last=pts[pts.length-1]; const d=leafletMap.distance(last,latlng); if(d<8){ finishRoadMode(); return; } }
+    pts.push(latlng);
+    if(roadModeDraft) leafletMap.removeLayer(roadModeDraft);
+    roadModeDraft=L.polyline(pts,{color:roadModeColors[roadModeDrawing.type],weight:7,opacity:.9}).addTo(leafletMap);
+    if(pts.length>=2) roadModeDraft.bindPopup('<button onclick="finishRoadMode()">Save road</button>').openPopup();
+  }
+  function finishRoadMode(){
+    if(!roadModeDrawing||roadModeDrawing.points.length<2){ roadModeDrawing=null; if(roadModeDraft){leafletMap.removeLayer(roadModeDraft);roadModeDraft=null;} return; }
+    roadModes.push({id:'road_'+Date.now(),type:roadModeDrawing.type,points:roadModeDrawing.points.map(p=>({lat:p.lat,lng:p.lng}))});
+    saveRoadModes(); roadModeDrawing=null; roadModeDraft=null;
+    document.getElementById('btnRoadInOut')?.classList.remove('active'); document.getElementById('btnRoadReverseIn')?.classList.remove('active'); renderMapData();
+  }
+  function drawRoadModes(){
+    roadModes.forEach(r=>{ if(!Array.isArray(r.points)||r.points.length<2)return; const label=r.type==='drive-reverse-out'?'Drive in · reverse out':'Reverse in · drive out'; L.polyline(r.points.map(p=>[p.lat,p.lng]),{color:roadModeColors[r.type]||'#f97316',weight:7,opacity:.9}).bindPopup(`<b>${label}</b>`).addTo(mapSeqLayer); });
   }
 
   function propertyPopup(site){const id=String(site.propId||site.siteId||'');return `<div><b>${esc(cleanStreetAddress(site.addressText)||site.baseStreetLine||'Property')}</b><br><small>${esc(site.suburbLine||'')}</small><br><button type="button" onclick="openPropertyInspectModal('${esc(id)}')">Inspect</button> <button type="button" onclick="promptEditProperty('${esc(id)}')">Edit</button></div>`;}
@@ -3031,7 +3064,7 @@
     const color=selected?'#2563eb':(cp?collectionPointHouseColor:(houseDotsColor||'#8b5cf6'));
     const icon=L.divIcon({className:'house-triangle-icon',html:`<div style="width:16px;height:16px;background:${esc(color)};clip-path:polygon(50% 0%,0% 100%,100% 100%);border:2px solid #fff;filter:drop-shadow(0 1px 2px rgba(0,0,0,.45));"></div>`,iconSize:[18,18],iconAnchor:[9,9]});
     const label=cp?'Collection point house':(selected?'Selected house':'House');
-    L.marker([p.lat,p.lng],{icon,keyboard:false}).bindPopup(`<div><b>${esc(label)}</b><br>${esc(site.addressText||'')}<br><button onclick="toggleCollectionHouse('${esc(id)}')">${selected?'Remove selection':'Select house'}</button></div>`).on('click',()=>{}).addTo(mapMarkersLayer);
+    const houseMarker=L.marker([p.lat,p.lng],{icon,keyboard:false}); houseMarker.bindPopup(`<div><b>${esc(label)}</b><br>${esc(site.addressText||'')}<br><button onclick="toggleCollectionHouse('${esc(id)}')">${selected?'Remove selection':'Select house'}</button></div>`); houseMarker.on('click',()=>{ if(collectionSelectionActive){ toggleCollectionHouse(id); houseMarker.closePopup(); } }); houseMarker.addTo(mapMarkersLayer);
   }
   function drawCollectionPointMarkers(){
     const groups={}; Object.entries(collectionPoints).forEach(([houseId,cp])=>{ if(!groups[cp.id])groups[cp.id]={cp,houses:[]}; groups[cp.id].houses.push(houseId); });
@@ -3262,6 +3295,7 @@
     if(!mapKmzRouteLayer||!mapKmzLiftLayer) return;
     mapKmzRouteLayer.clearLayers();
     mapKmzLiftLayer.clearLayers();
+    drawRoadModes();
 
     if(!kmzLayersVisible) return;
 
@@ -3416,7 +3450,7 @@
     }).join('') : `<section class="run-style-section"><div class="run-style-help">Select exactly one run to change that run's colours.</div></section>`;
 
     const mapSection=`<section class="run-style-section"><div class="run-style-section-title">Map locations</div>
-      <div class="run-style-grid"><label class="color-control-card"><span>🔺 House triangles</span><input id="styleHouseDotsColor" type="color" value="${houseDotsColor||'#8b5cf6'}"></label><label class="color-control-card"><span>📍 Collection-point houses</span><input id="styleCollectionHouseColor" type="color" value="${collectionPointHouseColor||'#f59e0b'}"></label></div>
+      <div class="run-style-grid"><label class="color-control-card"><span>🔺 House triangles</span><input id="styleHouseDotsColor" type="color" value="${houseDotsColor||'#8b5cf6'}"></label><label class="color-control-card"><span>📍 Collection-point houses</span><input id="styleCollectionHouseColor" type="color" value="${collectionPointHouseColor||'#f59e0b'}"></label><label class="color-control-card"><span>↩️ Drive in · reverse out</span><input id="styleRoadInOutColor" type="color" value="${roadModeColors['drive-reverse-out']}"></label><label class="color-control-card"><span>↪️ Reverse in · drive out</span><input id="styleRoadReverseInColor" type="color" value="${roadModeColors['reverse-in-drive-out']}"></label></div>
       <div class="run-style-help">Houses are triangles. Bin dots only appear at a valid kerbside flip location.</div></section>`;
 
     const liftSection=`<section class="run-style-section"><div class="run-style-section-title">Bin lift points</div>
@@ -3434,7 +3468,7 @@
   }
 
   async function saveAndApplyRunStyles(){
-    const h=document.getElementById('styleHouseDotsColor');if(h)houseDotsColor=h.value; const ch=document.getElementById('styleCollectionHouseColor');if(ch)collectionPointHouseColor=ch.value;
+    const h=document.getElementById('styleHouseDotsColor');if(h)houseDotsColor=h.value; const ch=document.getElementById('styleCollectionHouseColor');if(ch)collectionPointHouseColor=ch.value; const rio=document.getElementById('styleRoadInOutColor');if(rio)roadModeColors['drive-reverse-out']=rio.value; const rri=document.getElementById('styleRoadReverseInColor');if(rri)roadModeColors['reverse-in-drive-out']=rri.value;
     const r=document.getElementById('styleRecyclingLiftColor');if(r)recyclingLiftColor=r.value;
     const g=document.getElementById('styleGarbageLiftColor');if(g)garbageLiftColor=g.value;
     const f=document.getElementById('styleFogoLiftColor');if(f)fogoLiftColor=f.value;
