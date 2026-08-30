@@ -2125,6 +2125,12 @@
   let missedBinSerials = new Set();
   let activeMapCircleMarkers = new Map();
 
+  // Live navigation trail: keeps the recent path without growing forever.
+  let gpsTrailPoints = [];
+  let gpsTrailLine = null;
+  const GPS_TRAIL_MAX_POINTS = 600;
+  const GPS_TRAIL_MIN_STEP_METERS = 2;
+
   let leafletMap = null;
   let osmLayer = null;
   let satLayer = null;
@@ -2472,10 +2478,26 @@
     }
   }
 
+  function applyHeadingUpMap() {
+    if (!leafletMap) return;
+    const mapPane = leafletMap.getPane('mapPane');
+    if (!mapPane) return;
+
+    // In Follow mode the map rotates under the truck, like turn-by-turn GPS,
+    // so the direction of travel is always straight up the screen.
+    if (isTruckFollowEnabled) {
+      mapPane.style.transformOrigin = '50% 50%';
+      mapPane.style.rotate = `${-(lastValidHeading || 0)}deg`;
+    } else {
+      mapPane.style.rotate = '0deg';
+    }
+  }
+
   function toggleTruckFollow() {
     isTruckFollowEnabled = !isTruckFollowEnabled;
     const btn = document.getElementById('btnTruckFollow');
     btn.classList.toggle('active', isTruckFollowEnabled);
+    applyHeadingUpMap();
     if (isTruckFollowEnabled && userCurrentLocation && leafletMap) {
       leafletMap.setView([userCurrentLocation.lat, userCurrentLocation.lng], 18);
     }
@@ -2549,12 +2571,14 @@
     return Object.keys(counts).map(sz => `${counts[sz]}x ${sz}`).join(', ');
   }
 
-  /* Live Map Truck GPS Marker with Directional Heading Arrow */
+  /* Live Map Truck GPS Marker, heading-up follow mode, and snail trail */
   function updateMapTruckPosition() {
     if (!leafletMap || !userCurrentLocation) return;
     const pos = [userCurrentLocation.lat, userCurrentLocation.lng];
     const headingDeg = lastValidHeading || 0;
 
+    // The map pane rotates by -heading in Follow mode. Rotating the truck by
+    // +heading here cancels that out, keeping the truck pointing straight up.
     const truckIcon = L.divIcon({
       className: 'custom-gps-icon',
       html: `
@@ -2573,6 +2597,24 @@
       mapTruckMarker.setLatLng(pos);
       mapTruckMarker.setIcon(truckIcon);
     }
+
+    const previous = gpsTrailPoints[gpsTrailPoints.length - 1];
+    const moved = previous
+      ? getDistanceMeters(previous[0], previous[1], userCurrentLocation.lat, userCurrentLocation.lng)
+      : Infinity;
+    if (moved >= GPS_TRAIL_MIN_STEP_METERS) {
+      gpsTrailPoints.push(pos);
+      if (gpsTrailPoints.length > GPS_TRAIL_MAX_POINTS) gpsTrailPoints.shift();
+      if (!gpsTrailLine) {
+        gpsTrailLine = L.polyline(gpsTrailPoints, {
+          color: '#22c55e', weight: 4, opacity: 0.8, lineCap: 'round', lineJoin: 'round'
+        }).addTo(leafletMap);
+      } else {
+        gpsTrailLine.setLatLngs(gpsTrailPoints);
+      }
+    }
+
+    applyHeadingUpMap();
   }
 
   function openLocationPickerModal(targetType) {
@@ -2754,6 +2796,7 @@
     mapKmzLiftLayer=L.layerGroup().addTo(leafletMap);
     const followBtn=document.getElementById('btnTruckFollow');
     if(followBtn) followBtn.classList.add('active');
+    applyHeadingUpMap();
     setTimeout(()=>leafletMap&&leafletMap.invalidateSize(),100);
   }
   function mapRunLabel(){
@@ -3355,19 +3398,26 @@
       }
     }
 
-    activeMapCircleMarkers.forEach((markerObj, serial) => {
-      if (!servicedBinSerials.has(serial)) {
+    activeMapCircleMarkers.forEach((markerObj, markerKey) => {
+      if (!servicedBinSerials.has(markerKey)) {
         const d = getDistanceMeters(userCurrentLocation.lat, userCurrentLocation.lng, markerObj.lat, markerObj.lng);
         if (d <= 25) {
           if (speedKmh <= 5) {
-            servicedBinSerials.add(serial);
+            servicedBinSerials.add(markerKey);
             if (mapMarkersLayer && markerObj.layer) {
               mapMarkersLayer.removeLayer(markerObj.layer);
             }
-          } else if (d <= 15 && speedKmh > 15 && !missedBinSerials.has(serial)) {
-            missedBinSerials.add(serial);
-            if (markerObj.layer) {
-              markerObj.layer.setStyle({ fillColor: '#ef4444', color: '#ffffff', weight: 2 });
+          } else {
+            // Only flag bins on the driver's LEFT as missed. That is the
+            // kerbside being flipped, so bins on the opposite side stay normal.
+            const binBearing = getBearing(userCurrentLocation.lat, userCurrentLocation.lng, markerObj.lat, markerObj.lng);
+            const relAngle = (binBearing - (lastValidHeading || 0) + 360) % 360;
+            const isLeftOfTravel = relAngle > 180 && relAngle < 360;
+            if (d <= 15 && isLeftOfTravel && !missedBinSerials.has(markerKey)) {
+              missedBinSerials.add(markerKey);
+              if (markerObj.layer) {
+                markerObj.layer.setStyle({ fillColor: '#ef4444', color: '#ffffff', weight: 2 });
+              }
             }
           }
         }
