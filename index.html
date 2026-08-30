@@ -1681,6 +1681,15 @@
   .map-address-telemetry .address-telemetry-bins{margin-top:5px!important;padding-top:5px!important}
 }
 </style>
+
+<style id="map-serial-visibility-controls">
+.map-bins-toolbar{display:flex!important;align-items:center!important;justify-content:flex-end!important;margin:0 0 2px!important;min-height:26px!important;}
+.map-serial-toggle{border:1px solid rgba(148,163,184,.45)!important;background:rgba(255,255,255,.10)!important;color:#e2e8f0!important;border-radius:8px!important;padding:4px 8px!important;font-size:12px!important;font-weight:700!important;line-height:1!important;min-height:26px!important;cursor:pointer!important;}
+.map-serial-toggle:hover{background:rgba(255,255,255,.16)!important;}
+.map-serial-auto-note{color:#facc15!important;font-size:11px!important;font-weight:700!important;margin-right:auto!important;}
+.map-address-telemetry .address-bin-mini.serials-hidden .address-bin-stream{flex:1 1 auto!important;width:auto!important;}
+.map-address-telemetry .address-bin-mini.serials-hidden .address-bin-actions{margin-left:auto!important;}
+</style>
 </head>
 <body>
 
@@ -2123,6 +2132,11 @@
 
   let servicedBinSerials = new Set();
   let missedBinSerials = new Set();
+
+  // Map serial visibility: manual hide plus automatic hiding above 5 km/h.
+  let hideMapSerialNumbers = false;
+  let currentMapSpeedKmh = 0;
+  let lastTelemetrySite = null;
   let activeMapCircleMarkers = new Map();
 
   // Live navigation trail: keeps the recent path without growing forever.
@@ -3355,6 +3369,10 @@
     const accuracy = Math.round(pos.coords.accuracy);
     const speedKmh = pos.coords.speed !== null && !isNaN(pos.coords.speed) ? Math.round(pos.coords.speed * 3.6) : 0;
     
+    const wasSerialAutoHidden = Number(currentMapSpeedKmh || 0) > 5;
+    currentMapSpeedKmh = speedKmh;
+    const isSerialAutoHidden = speedKmh > 5;
+    
     userCurrentLocation = {
       lat: pos.coords.latitude,
       lng: pos.coords.longitude,
@@ -3390,6 +3408,11 @@
     }
 
     updateMapTelemetryVisibility();
+    if (wasSerialAutoHidden !== isSerialAutoHidden && lastTelemetrySite) {
+      renderCurrentAddressTelemetry(lastTelemetrySite);
+    } else {
+      updateMapSerialToggleUI();
+    }
     updateMapTruckPosition();
 
     if (isTruckFollowEnabled && leafletMap) {
@@ -3597,34 +3620,70 @@
   function getSelectedStreamsAtAddress(site) {
     if (!site || !site.soloSchedule) return new Set();
     const sch = site.soloSchedule;
-    const runToStream = [
-      ['Garbage', sch.garRun],
-      ['Recycling', sch.recRun],
-      ['SummerRecycling', sch.recSummerRun],
-      ['FOGO', sch.fogRun]
-    ];
 
-    // The selected STREAM is authoritative for Map bin details. For example,
-    // when filtered to Recycling, only recycling bins/serials belong here even
-    // though the stop card still shows every run that services the address.
-    if (activeFilterStream) {
-      // The Map serial rows are strictly for the filtered stream only.
-      // Other services can still appear in the run badges above, but never
-      // contribute bins or serial numbers to the bottom rows.
-      if (activeFilterStream === 'SummerRecycling') return new Set(['SummerRecycling']);
-      return new Set([activeFilterStream]);
+    // The selected stream is authoritative for the Map bin rows.
+    if (activeFilterStream === 'SummerRecycling') return new Set(['Recycling']);
+    if (activeFilterStream === 'Garbage') return new Set(['Garbage']);
+    if (activeFilterStream === 'Recycling') return new Set(['Recycling']);
+    if (activeFilterStream === 'FOGO') return new Set(['FOGO']);
+
+    // If only a run is selected, resolve exactly which stream(s) own that run.
+    const selected = selectedMapRuns();
+    if (selected.size) {
+      const streams = new Set();
+      if (sch.garRun && selected.has(mapKey(sch.garRun))) streams.add('Garbage');
+      if (sch.recRun && selected.has(mapKey(sch.recRun))) streams.add('Recycling');
+      if (sch.recSummerRun && selected.has(mapKey(sch.recSummerRun))) streams.add('Recycling');
+      if (sch.fogRun && selected.has(mapKey(sch.fogRun))) streams.add('FOGO');
+      return streams;
     }
 
-    // If there is no explicit stream filter, fall back to the selected run.
-    if ((selectedRunsSet || new Set()).size > 0) {
-      return new Set(
-        runToStream
-          .filter(([, run]) => run && addressRunIsSelected(run))
-          .map(([stream]) => stream)
-      );
-    }
+    return new Set(['Garbage','Recycling','FOGO']);
+  }
 
-    return new Set(runToStream.map(([stream]) => stream));
+  function streamIsCurrentFilteredStream(site, streamKey) {
+    const sch = site?.soloSchedule || {};
+    const selected = selectedMapRuns();
+
+    if (activeFilterStream === 'SummerRecycling') {
+      return streamKey === 'Recycling' &&
+        (!selected.size || (!!sch.recSummerRun && selected.has(mapKey(sch.recSummerRun))));
+    }
+    if (activeFilterStream) return streamKey === activeFilterStream;
+
+    if (!selected.size) return true;
+
+    if (streamKey === 'Garbage') return !!sch.garRun && selected.has(mapKey(sch.garRun));
+    if (streamKey === 'Recycling') {
+      return (!!sch.recRun && selected.has(mapKey(sch.recRun))) ||
+             (!!sch.recSummerRun && selected.has(mapKey(sch.recSummerRun)));
+    }
+    if (streamKey === 'FOGO') return !!sch.fogRun && selected.has(mapKey(sch.fogRun));
+    return false;
+  }
+
+  function shouldShowMapSerialNumbers() {
+    return !hideMapSerialNumbers && Number(currentMapSpeedKmh || 0) <= 5;
+  }
+
+  function updateMapSerialToggleUI() {
+    const btn = document.getElementById('mapSerialToggle');
+    const note = document.getElementById('mapSerialAutoNote');
+    const autoHidden = Number(currentMapSpeedKmh || 0) > 5;
+    if (btn) {
+      btn.textContent = hideMapSerialNumbers ? '👁 Show serials' : '🙈 Hide serials';
+      btn.setAttribute('aria-pressed', hideMapSerialNumbers ? 'true' : 'false');
+    }
+    if (note) {
+      note.textContent = autoHidden ? `Serials hidden while moving (${Math.round(currentMapSpeedKmh)} km/h)` : '';
+      note.style.display = autoHidden ? 'inline' : 'none';
+    }
+  }
+
+  function toggleMapSerialNumbers() {
+    hideMapSerialNumbers = !hideMapSerialNumbers;
+    if (lastTelemetrySite) renderCurrentAddressTelemetry(lastTelemetrySite);
+    else updateMapSerialToggleUI();
   }
 
   function buildBinsAtAddress(site, showSerial = true, includeIssueButton = false) {
@@ -3633,18 +3692,20 @@
     const allowedStreams = getSelectedStreamsAtAddress(site);
 
     SOLO_STREAMS.forEach(st=>{
-      const streamSelected = allowedStreams.has(st.key) ||
-        (st.key === 'Recycling' && allowedStreams.has('SummerRecycling'));
-      if (!streamSelected) return;
+      // Hard stop: a filtered card may only contain bins from its filtered stream.
+      if (!allowedStreams.has(st.key)) return;
+      if (!streamIsCurrentFilteredStream(site, st.key)) return;
+
       const cls=st.key==='Garbage'?'address-bin-gar':(st.key==='Recycling'?'address-bin-rec':'address-bin-fog');
       (site.soloStreams[st.key]||[]).forEach((bin, binIndex)=>{
-        const serialHtml = showSerial ? `<div class="address-bin-serial">${esc(String(bin.serial||'—'))}</div>` : '';
+        const showThisSerial = showSerial && shouldShowMapSerialNumbers();
+        const serialHtml = showThisSerial ? `<div class="address-bin-serial">${esc(String(bin.serial||'—'))}</div>` : '';
         let issueHtml = '';
         if (includeIssueButton) {
           const menuId = `mapBinIssue_${site.propId || site.siteId}_${st.key}_${binIndex}`.replace(/[^a-zA-Z0-9_]/g, '_');
           issueHtml = `<div class="address-bin-actions"><button class="bin-face-btn" title="Note a bin problem" onclick="toggleBinIssueMenu(event, '${menuId}')">🙂</button><div class="bin-issue-menu" id="${menuId}">${['Contaminated','Heavy','Overfull','Prior spill','Jammed'].map(issue => `<button data-issue="${issue}" onclick="setBinIssue(event, '${menuId}', '${issue}')">${issue}</button>`).join('')}</div></div>`;
         }
-        out.push(`<div class="address-bin-mini ${cls}"><div class="address-bin-stream"><span>${st.icon}</span><span>${esc(String(bin.size||'—'))}</span></div>${serialHtml}${issueHtml}</div>`);
+        out.push(`<div class="address-bin-mini ${cls}${showThisSerial ? '' : ' serials-hidden'}"><div class="address-bin-stream"><span>${st.icon}</span><span>${esc(String(bin.size||'—'))}</span></div>${serialHtml}${issueHtml}</div>`);
       });
     });
     return out.join('');
@@ -3668,6 +3729,7 @@
   }
 
   function renderCurrentAddressTelemetry(site) {
+    lastTelemetrySite = site || null;
     const address = site ? (cleanStreetAddress(site.addressText)||site.baseStreetLine||'Address unavailable') : 'Scanning Street...';
     const meta = site ? (String(site.runFlags||'').trim() ? `🚩 ${esc(String(site.runFlags).trim())}` : getAddressSuburb(site)) : 'Scanning suburb...';
     const driveRuns = buildRunsAtAddress(site, false);
@@ -3686,8 +3748,12 @@
     if(mapRunsEl) mapRunsEl.innerHTML=mapRuns;
     const mapBinsEl=document.getElementById('mapBinsAtAddress');
     if(mapBinsEl) {
-      mapBinsEl.innerHTML=mapBins;
-      mapBinsEl.style.display=mapBins ? 'flex' : 'none';
+      const toolbar = mapBins
+        ? `<div class="map-bins-toolbar"><span id="mapSerialAutoNote" class="map-serial-auto-note"></span><button type="button" id="mapSerialToggle" class="map-serial-toggle" onclick="toggleMapSerialNumbers()">🙈 Hide serials</button></div>`
+        : '';
+      mapBinsEl.innerHTML = toolbar + mapBins;
+      mapBinsEl.style.display = mapBins ? 'flex' : 'none';
+      updateMapSerialToggleUI();
     }
 
     updateMapTelemetryVisibility();
