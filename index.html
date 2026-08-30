@@ -1708,6 +1708,16 @@
 .map-address-telemetry .address-bin-mini.serials-hidden .address-bin-actions{margin-left:auto!important;}
 </style>
 
+<style id="map-side-layers-control-style">
+/* Compact Google Maps-style layers control beside the zoom buttons */
+.map-side-layers-control{background:transparent!important;border:0!important;box-shadow:none!important;position:relative!important;}
+.map-side-layers-toggle{width:42px;height:42px;border:1px solid #94a3b8;border-radius:8px;background:#fff;color:#1e293b;font-size:21px;font-weight:700;box-shadow:0 2px 7px rgba(15,23,42,.24);cursor:pointer;display:flex;align-items:center;justify-content:center;}
+.map-side-layers-menu{display:none;position:absolute;right:48px;top:0;width:180px;padding:7px;background:rgba(255,255,255,.98);border:1px solid #cbd5e1;border-radius:10px;box-shadow:0 8px 24px rgba(15,23,42,.24);}
+.map-side-layers-control.open .map-side-layers-menu{display:block;}
+.map-side-layer-option{width:100%;min-height:36px;border:0;border-radius:7px;background:transparent;color:#334155;text-align:left;padding:7px 9px;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:7px;}
+.map-side-layer-option.active{background:#e8f5ee;color:#14532d;}.map-side-layer-option .layer-check{margin-left:auto;font-size:14px;}
+@media(max-width:560px){.map-side-layers-menu{width:166px}.map-side-layers-toggle{width:40px;height:40px}}
+</style>
 <style id="map-follow-zoom-final-fix">
 /* Keep Leaflet controls visible above the map but below app overlays. */
 #mapScreenContainer .leaflet-control-zoom{display:block!important;visibility:visible!important;opacity:1!important;}
@@ -1791,7 +1801,7 @@
           <div class="map-pill-box map-stat-pill"><span class="map-stat-icon">🗑️</span><b id="mapTotalBins">0</b><small>Bins</small></div>
         </div>
         <details class="map-controls-group">
-          <summary><span>⚙️ Map tools</span><span class="map-controls-hint">Layers · KMZ · Colours</span></summary>
+          <summary><span>⚙️ Map tools</span><span class="map-controls-hint">View · KMZ · Colours</span></summary>
 
           <div class="map-control-section">
             <div class="map-control-section-title">View</div>
@@ -1799,15 +1809,6 @@
               <button type="button" class="map-tool-btn" onclick="fitMapToVisibleRuns()">🎯 Fit</button>
               <button type="button" id="btnTruckFollow" class="map-tool-btn" onclick="toggleTruckFollow()">🧭 Follow</button>
               <button type="button" id="btnSatelliteLayer" class="map-tool-btn" onclick="toggleSatelliteView()">🛰️ Satellite</button>
-            </div>
-          </div>
-
-          <div class="map-control-section">
-            <div class="map-control-section-title">Layers</div>
-            <div class="map-toolbar-row">
-              <button type="button" id="btnBinGpsToggle" class="map-tool-btn active" onclick="toggleBinGpsDots()">🗑️ Bins</button>
-              <button type="button" id="btnHouseGpsToggle" class="map-tool-btn" onclick="toggleHouseGpsDots()">🏠 Houses</button>
-              <button type="button" id="btnKmzToggle" class="map-tool-btn" onclick="toggleKmzLayers()">🚛 KMZ</button>
             </div>
           </div>
 
@@ -2146,6 +2147,7 @@
   let isSatelliteView = false;
 
   let isTruckFollowEnabled = false;
+  let isNextBinBoxVisible = localStorage.getItem('lukezBunzNextBinBoxVisible') !== 'false';
   let hasAutoCenteredTruck = false;
   let isRoadSnapEditing = false;
 
@@ -2517,14 +2519,16 @@
 
   function toggleBinGpsDots() {
     showBinGpsDots = !showBinGpsDots;
-    document.getElementById('btnBinGpsToggle').classList.toggle('active', showBinGpsDots);
+    const b=document.getElementById('btnBinGpsToggle'); if(b)b.classList.toggle('active', showBinGpsDots);
     renderMapData();
+    updateMapSideLayersUI();
   }
 
   function toggleHouseGpsDots() {
     showHouseGpsDots = !showHouseGpsDots;
-    document.getElementById('btnHouseGpsToggle').classList.toggle('active', showHouseGpsDots);
+    const b=document.getElementById('btnHouseGpsToggle'); if(b)b.classList.toggle('active', showHouseGpsDots);
     renderMapData();
+    updateMapSideLayersUI();
   }
 
   function toggleSatelliteView() {
@@ -2871,6 +2875,18 @@
   function placeCollectionPointDraft(latlng){ if(!leafletMap)return; if(collectionPointDraftMarker) leafletMap.removeLayer(collectionPointDraftMarker); collectionPointDraftMarker=L.marker(latlng,{draggable:true}).addTo(leafletMap).bindPopup('Collection point — drag to adjust, then Save').openPopup(); collectionPointDraftMarker.bindPopup(`<div><b>Collection point</b><br>${selectedCollectionHouseIds.size} house${selectedCollectionHouseIds.size===1?'':'s'} selected<br><button onclick="saveCollectionPointDraft()">Save collection point</button></div>`).openPopup(); }
   function saveCollectionPointDraft(){ if(!collectionPointDraftMarker)return; const p=collectionPointDraftMarker.getLatLng(); const groupId='cp_'+Date.now(); selectedCollectionHouseIds.forEach(id=>collectionPoints[id]={id:groupId,lat:p.lat,lng:p.lng}); saveCollectionPoints(); selectedCollectionHouseIds.clear(); collectionSelectionActive=false; collectionPointMode=false; leafletMap.removeLayer(collectionPointDraftMarker); collectionPointDraftMarker=null; const b=document.getElementById('btnCreateCollectionPoint');if(b)b.classList.remove('active'); renderMapData(); }
   function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+  function addMapSideLayersControl(){
+    if(!leafletMap || document.getElementById('mapSideLayersControl')) return;
+    const control=L.control({position:'topright'});
+    control.onAdd=function(){
+      const wrap=L.DomUtil.create('div','leaflet-control map-side-layers-control');
+      wrap.id='mapSideLayersControl';
+      wrap.innerHTML=`<button type="button" class="map-side-layers-toggle" onclick="toggleMapSideLayers(event)" title="Layers">▰</button><div class="map-side-layers-menu"><button type="button" id="btnSideBins" class="map-side-layer-option" onclick="toggleBinGpsDots()">🗑️ Bins <span class="layer-check"></span></button><button type="button" id="btnSideHouses" class="map-side-layer-option" onclick="toggleHouseGpsDots()">🏠 Houses <span class="layer-check"></span></button><button type="button" id="btnSideKmz" class="map-side-layer-option" onclick="toggleKmzLayers()">🚛 KMZ <span class="layer-check"></span></button><button type="button" id="btnSideNextBin" class="map-side-layer-option" onclick="toggleNextBinBox()">📍 Next bin box <span class="layer-check"></span></button></div>`;
+      L.DomEvent.disableClickPropagation(wrap);L.DomEvent.disableScrollPropagation(wrap);return wrap;
+    };
+    control.addTo(leafletMap);updateMapSideLayersUI();leafletMap.on('click',closeMapSideLayers);
+  }
+
   function initLeafletMap(){
     if(leafletMap)return;
     const el=document.getElementById('mainLeafletMap');
@@ -2878,6 +2894,7 @@
 
     leafletMap=L.map(el,{preferCanvas:true,zoomControl:false,zoomSnap:1}).setView([-38.36,144.91],18);
     L.control.zoom({position:'topright'}).addTo(leafletMap);
+    addMapSideLayersControl();
     osmLayer=L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:20,keepBuffer:10,updateWhenIdle:false,attribution:'&copy; OpenStreetMap contributors'}).addTo(leafletMap);
     satLayer=L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{maxZoom:20,attribution:'Tiles &copy; Esri'});
     mapHullsLayer=L.layerGroup().addTo(leafletMap);
@@ -3402,6 +3419,7 @@
     const b=document.getElementById('btnKmzToggle');
     if(b) b.classList.toggle('active',kmzLayersVisible);
     renderMapData();
+    updateMapSideLayersUI();
   }
 
   function renderMapData(){
@@ -3887,8 +3905,22 @@
   function updateMapTelemetryVisibility() {
     const box = document.querySelector('.map-address-telemetry');
     if (!box) return;
-    box.classList.toggle('map-telemetry-hidden', !hasActiveMapTelemetryFilter());
+    box.classList.toggle('map-telemetry-hidden', !isNextBinBoxVisible || !hasActiveMapTelemetryFilter());
   }
+
+  function toggleNextBinBox(){
+    isNextBinBoxVisible=!isNextBinBoxVisible;
+    localStorage.setItem('lukezBunzNextBinBoxVisible', isNextBinBoxVisible ? 'true' : 'false');
+    updateMapTelemetryVisibility();
+    updateMapSideLayersUI();
+  }
+
+  function updateMapSideLayersUI(){
+    const pairs=[['btnSideBins',showBinGpsDots],['btnSideHouses',showHouseGpsDots],['btnSideKmz',kmzLayersVisible],['btnSideNextBin',isNextBinBoxVisible]];
+    pairs.forEach(([id,on])=>{const b=document.getElementById(id);if(!b)return;b.classList.toggle('active',!!on);const c=b.querySelector('.layer-check');if(c)c.textContent=on?'✓':'';});
+  }
+  function closeMapSideLayers(){const c=document.getElementById('mapSideLayersControl');if(c)c.classList.remove('open');}
+  function toggleMapSideLayers(event){if(event)event.stopPropagation();const c=document.getElementById('mapSideLayersControl');if(c)c.classList.toggle('open');}
 
   function renderCurrentAddressTelemetry(site) {
     lastTelemetrySite = site || null;
