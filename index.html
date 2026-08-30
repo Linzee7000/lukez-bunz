@@ -1262,6 +1262,39 @@
     .hud-count{white-space:nowrap}.hud-side-toggle{margin-top:10px}
     @media(max-width:560px){.address-telemetry-card{padding:12px}.address-telemetry-address{font-size:22px}.address-telemetry-gps{font-size:12px}.address-telemetry-meta{font-size:14px}.address-telemetry-speed span{font-size:40px}.address-bin-mini{min-height:32px}.address-bin-serial{font-size:12px}.address-telemetry-runs .hdr-run-badge{font-size:12px;padding:3px 7px}}
 
+
+
+    /* FINAL: compact current-address card on Map. Keep runs horizontal and bins below. */
+    .map-address-telemetry{max-height:none!important;overflow:hidden!important}
+    .map-address-telemetry .address-telemetry-grid{display:grid!important;grid-template-columns:minmax(0,1fr) auto!important;grid-template-rows:auto auto auto!important;gap:8px 14px!important;width:100%!important}
+    .map-address-telemetry .address-telemetry-address{grid-column:1!important;grid-row:1!important}
+    .map-address-telemetry .address-telemetry-gps{grid-column:2!important;grid-row:1!important}
+    .map-address-telemetry .address-telemetry-meta{grid-column:1!important;grid-row:2!important}
+    .map-address-telemetry .address-telemetry-speed{grid-column:2!important;grid-row:2 / span 2!important}
+    .map-address-telemetry .address-telemetry-runs{grid-column:1!important;grid-row:3!important;display:flex!important;flex-direction:row!important;align-items:center!important;justify-content:flex-start!important;gap:6px!important;flex-wrap:wrap!important;min-width:0!important}
+    .map-address-telemetry .address-telemetry-bins{display:flex!important;flex-direction:row!important;flex-wrap:wrap!important;align-items:center!important;justify-content:flex-start!important;gap:6px!important;width:100%!important}
+    @media(max-width:560px){
+      .map-address-telemetry{padding:12px 14px!important}
+      .map-address-telemetry .address-telemetry-grid{grid-template-columns:minmax(0,1fr) 74px!important;gap:7px 12px!important}
+      .map-address-telemetry .address-telemetry-runs{gap:5px!important}
+      .map-address-telemetry .hdr-run-badge{padding:4px 7px!important;font-size:12px!important}
+      .map-address-telemetry .address-bin-mini{margin:0!important}
+    }
+</style>
+
+<style>
+/* Drive: run badges are one compact row only; never wrap to a second line. */
+#hudRunsAtAddress.address-telemetry-runs {
+  display:flex !important;
+  flex-wrap:nowrap !important;
+  align-items:center;
+  gap:10px;
+  min-width:0;
+  overflow:hidden;
+}
+#hudRunsAtAddress .hdr-run-badge {
+  flex:0 0 auto;
+}
 </style>
 </head>
 <body>
@@ -3089,11 +3122,11 @@
     return 'Suburb unavailable';
   }
 
-  function buildRunsAtAddress(site) {
+  function buildRunsAtAddress(site, selectedOnly = false) {
     if (!site || !site.soloSchedule) return '';
     const sch=site.soloSchedule, week=(sch.weekLetter||'').trim().toUpperCase();
     const bits=[];
-    const add=(run, cls, icon, withWeek, stream, summer=false)=>{ if(run) bits.push(`<span class="hdr-run-badge ${cls}" onclick="event.stopPropagation(); openRunDirectlyOnMap('${esc(String(run))}', '${stream}', '${esc(String(sch.day||''))}', '${esc(week)}', ${summer})">${icon} ${esc(String(run))}${withWeek&&week?' '+esc(week):''}</span>`); };
+    const add=(run, cls, icon, withWeek, stream, summer=false)=>{ if(run && (!selectedOnly || addressRunIsSelected(run))) bits.push(`<span class="hdr-run-badge ${cls}" onclick="event.stopPropagation(); openRunDirectlyOnMap('${esc(String(run))}', '${stream}', '${esc(String(sch.day||''))}', '${esc(week)}', ${summer})">${icon} ${esc(String(run))}${withWeek&&week?' '+esc(week):''}</span>`); };
     add(sch.garRun,'hdr-run-gar','🗑️',false,'Garbage');
     add(sch.recRun,'hdr-run-rec','♻️',true,'Recycling');
     add(sch.recSummerRun,'hdr-run-summer','☀️',false,'SummerRecycling',true);
@@ -3101,10 +3134,31 @@
     return bits.join('');
   }
 
+  function normaliseRunForAddressFilter(value) {
+    return String(value || '').trim().toUpperCase().replace(/\s+/g, '');
+  }
+
+  function addressRunIsSelected(runValue) {
+    const run = normaliseRunForAddressFilter(runValue);
+    const selected = Array.from(selectedRunsSet || []).map(normaliseRunForAddressFilter).filter(Boolean);
+    if (!selected.length) return false;
+
+    return selected.some(sel => {
+      if (sel === run) return true;
+
+      // Filters can store the numeric run separately from the selected week.
+      // Example: selected run 220 + week A must match schedule run 220A.
+      const week = String(activeFilterWeek || '').trim().toUpperCase();
+      if (week && /^[0-9]+$/.test(sel) && run === sel + week) return true;
+      if (week && /^[0-9]+$/.test(run) && sel === run + week) return true;
+
+      return false;
+    });
+  }
+
   function getSelectedStreamsAtAddress(site) {
     if (!site || !site.soloSchedule) return new Set();
     const sch = site.soloSchedule;
-    const selected = selectedRunsSet || new Set();
     const runToStream = [
       ['Garbage', sch.garRun],
       ['Recycling', sch.recRun],
@@ -3112,12 +3166,12 @@
       ['FOGO', sch.fogRun]
     ];
 
-    // A selected run controls which stream's bins are shown in the live address box.
-    // If no run is selected, respect a stream filter; otherwise show all streams.
-    if (selected.size > 0) {
+    // A run selection is authoritative for the bin list. Match the run even
+    // when the week letter is held separately by the filter UI.
+    if ((selectedRunsSet || new Set()).size > 0) {
       return new Set(
         runToStream
-          .filter(([stream, run]) => run && selected.has(String(run).trim().toLowerCase()))
+          .filter(([, run]) => run && addressRunIsSelected(run))
           .map(([stream]) => stream)
       );
     }
@@ -3148,11 +3202,13 @@
   function renderCurrentAddressTelemetry(site) {
     const address = site ? (cleanStreetAddress(site.addressText)||site.baseStreetLine||'Address unavailable') : 'Scanning Street...';
     const meta = site ? (String(site.runFlags||'').trim() ? `🚩 ${esc(String(site.runFlags).trim())}` : getAddressSuburb(site)) : 'Scanning suburb...';
-    const runs = buildRunsAtAddress(site);
+    const driveRuns = buildRunsAtAddress(site, true);
+    const mapRuns = buildRunsAtAddress(site);
     const mapBins = buildBinsAtAddress(site, true);
     ['hudStreetName','mapLiveStreet'].forEach(id=>{const el=document.getElementById(id); if(el) el.innerText=address;});
     ['hudAddressMeta','mapAddressMeta'].forEach(id=>{const el=document.getElementById(id); if(el) el.innerHTML=meta;});
-    ['hudRunsAtAddress','mapRunsAtAddress'].forEach(id=>{const el=document.getElementById(id); if(el) el.innerHTML=runs;});
+    const hudRunsEl=document.getElementById('hudRunsAtAddress'); if(hudRunsEl) hudRunsEl.innerHTML=driveRuns || mapRuns;
+    const mapRunsEl=document.getElementById('mapRunsAtAddress'); if(mapRunsEl) mapRunsEl.innerHTML=mapRuns;
     const mapBinsEl=document.getElementById('mapBinsAtAddress');
     if(mapBinsEl) mapBinsEl.innerHTML=mapBins;
   }
