@@ -2820,7 +2820,20 @@
     // All Runs means the standard services. Summer is opt-in only.
     return a.find(x=>x.type==='gar') || a.find(x=>x.type==='rec') || a.find(x=>x.type==='fog') || null;
   }
-  function sourceCoords(site,bin){ const prop=gps(site.lat,site.lng),flip=bin&&gps(bin.lat,bin.lng); if(pinSourceMode==='property')return prop; if(pinSourceMode==='bin')return flip&&metersBetween(prop,flip)<=10?flip:null; /* flip mode: only trust a flip within 10m of its own house */ return flip&&metersBetween(prop,flip)<=10?flip:prop; }
+  // A bin marker must represent a real, valid kerbside flip location.  Do not
+  // fall back to the house GPS: properties without a flip location are collection
+  // point / no-service candidates and must never masquerade as bin dots.
+  function validBinFlipCoords(site,bin){
+    const prop=gps(site?.lat,site?.lng);
+    const flip=bin&&gps(bin.lat,bin.lng);
+    return flip && (!prop || metersBetween(prop,flip)<=10) ? flip : null;
+  }
+  function sourceCoords(site,bin){
+    const prop=gps(site.lat,site.lng);
+    const flip=validBinFlipCoords(site,bin);
+    if(pinSourceMode==='property') return prop;
+    return flip;
+  }
   function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
   function initLeafletMap(){
     if(leafletMap)return;
@@ -2998,7 +3011,61 @@
     poly.addTo(mapHullsLayer);
   }
 
-  function drawSite(site,key,i){const id=String(site.propId||site.siteId||''),c=mapColor(key,i);if(showHouseGpsDots){const p=gps(site.lat,site.lng);if(p)L.circleMarker([p.lat,p.lng],{radius:5,color:'#fff',weight:1.5,fillColor:houseDotsColor||c,fillOpacity:1}).bindPopup(propertyPopup(site)).addTo(mapMarkersLayer);} if(!showBinGpsDots)return;const sources=activeFilterDataSource==='solo'?['solo']:activeFilterDataSource==='council'?['council']:['solo','council'];sources.forEach(src=>visibleStreams().filter(st=>streamMatchesSelectedRun(site,st)).forEach(st=>{const bins=(src==='solo'?site.soloStreams:site.councilStreams)?.[st]||[];bins.forEach((bin,idx)=>{const p=sourceCoords(site,bin);if(!p)return;const serial=String(bin.serial||'').trim().toUpperCase();const markerKey=`${id}|${src}|${st}|${idx}|${serial}`; if(serial&&servicedBinSerials.has(serial))return;const fc=serial&&missedBinSerials.has(serial)?'#ef4444':dotColor(key,c);const m=L.circleMarker([p.lat,p.lng],{radius:7,color:'#fff',weight:2,fillColor:fc,fillOpacity:1}).bindPopup(`<div><b>${esc(serial||'Bin')}</b><br>${esc(st)} · ${esc(bin.size||'240L')}<br><button type="button" onclick="openPropertyInspectModal('${esc(id)}')">Property</button>${src==='solo'?` <button type="button" onclick="promptEditBin('${esc(id)}','${esc(st)}',${idx})">Edit Bin</button>`:''}</div>`).addTo(mapMarkersLayer);activeMapCircleMarkers.set(markerKey,{layer:m,lat:p.lat,lng:p.lng,stream:st,siteId:id,serial});});})); }
+  function drawHouseTriangle(site){
+    if(!showHouseGpsDots) return;
+    const p=gps(site.lat,site.lng);
+    if(!p) return;
+    const color=houseDotsColor||'#8b5cf6';
+    const icon=L.divIcon({
+      className:'house-triangle-icon',
+      html:`<div style="width:15px;height:15px;background:${esc(color)};clip-path:polygon(50% 0%,0% 100%,100% 100%);border:1.5px solid #fff;filter:drop-shadow(0 1px 2px rgba(0,0,0,.45));"></div>`,
+      iconSize:[17,17],
+      iconAnchor:[8.5,8.5]
+    });
+    L.marker([p.lat,p.lng],{icon,keyboard:false})
+      .bindPopup(propertyPopup(site))
+      .addTo(mapMarkersLayer);
+  }
+
+  function drawSite(site,key,i){
+    const id=String(site.propId||site.siteId||'');
+    const c=mapColor(key,i);
+    drawHouseTriangle(site);
+
+    if(!showBinGpsDots) return;
+
+    const sources=activeFilterDataSource==='solo'
+      ? ['solo']
+      : activeFilterDataSource==='council'
+        ? ['council']
+        : ['solo','council'];
+
+    sources.forEach(src=>{
+      visibleStreams()
+        .filter(st=>streamMatchesSelectedRun(site,st))
+        .forEach(st=>{
+          const bins=(src==='solo'?site.soloStreams:site.councilStreams)?.[st]||[];
+          bins.forEach((bin,idx)=>{
+            const p=sourceCoords(site,bin);
+            // No valid flip location = not a bin dot.
+            if(!p) return;
+
+            const serial=String(bin.serial||'').trim().toUpperCase();
+            const markerKey=`${id}|${src}|${st}|${idx}|${serial}`;
+            if(serial&&servicedBinSerials.has(serial)) return;
+
+            const fc=serial&&missedBinSerials.has(serial)?'#ef4444':dotColor(key,c);
+            const m=L.circleMarker([p.lat,p.lng],{
+              radius:7,color:'#fff',weight:2,fillColor:fc,fillOpacity:1
+            }).bindPopup(`<div><b>${esc(serial||'Bin')}</b><br>${esc(st)} · ${esc(bin.size||'240L')}<br><button type="button" onclick="openPropertyInspectModal('${esc(id)}')">Property</button>${src==='solo'?` <button type="button" onclick="promptEditBin('${esc(id)}','${esc(st)}',${idx})">Edit Bin</button>`:''}</div>`).addTo(mapMarkersLayer);
+
+            activeMapCircleMarkers.set(markerKey,{
+              layer:m,lat:p.lat,lng:p.lng,stream:st,siteId:id,serial
+            });
+          });
+        });
+    });
+  }
   /*
     KMZ IMPORT
     ----------
@@ -3337,7 +3404,8 @@
     }).join('') : `<section class="run-style-section"><div class="run-style-help">Select exactly one run to change that run's colours.</div></section>`;
 
     const mapSection=`<section class="run-style-section"><div class="run-style-section-title">Map locations</div>
-      <div class="run-style-grid"><label class="color-control-card"><span>🏠 House GPS</span><input id="styleHouseDotsColor" type="color" value="${houseDotsColor||'#8b5cf6'}"></label></div></section>`;
+      <div class="run-style-grid"><label class="color-control-card"><span>🔺 House triangles</span><input id="styleHouseDotsColor" type="color" value="${houseDotsColor||'#8b5cf6'}"></label></div>
+      <div class="run-style-help">Houses are triangles. Bin dots only appear at a valid kerbside flip location.</div></section>`;
 
     const liftSection=`<section class="run-style-section"><div class="run-style-section-title">Bin lift points</div>
       <div class="run-style-grid">
@@ -3809,6 +3877,51 @@
     menu.classList.remove('open');
   }
 
+  function getDriveEligibleStreams(site){
+    const sch=site?.soloSchedule||{};
+    const selected=selectedRunsSet||new Set();
+    const streamFilter=String(activeFilterStream||'').trim();
+
+    let candidates=streamFilter
+      ? [streamFilter]
+      : ['Garbage','Recycling','FOGO','SummerRecycling'];
+
+    return candidates.filter(stream=>{
+      let run='';
+      let binStream=stream;
+      if(stream==='Garbage') run=String(sch.garRun||'').trim();
+      else if(stream==='FOGO') run=String(sch.fogRun||'').trim();
+      else if(stream==='Recycling') run=String(sch.recRun||'').trim();
+      else if(stream==='SummerRecycling'){
+        run=String(sch.recSummerRun||'').trim();
+        binStream='Recycling';
+      }
+      if(!run) return false;
+      if(selected.size && !selected.has(run.toLowerCase())) return false;
+      return true;
+    }).map(stream=>({stream,binStream:stream==='SummerRecycling'?'Recycling':stream}));
+  }
+
+  function siteMatchesDriveFilters(site){
+    const sch=site?.soloSchedule||{};
+    const day=String(activeFilterDay||'').trim().toLowerCase();
+    const week=String(activeFilterWeek||'').trim().toUpperCase();
+
+    if(day && String(sch.day||'').trim().toLowerCase()!==day) return false;
+    if(week && String(sch.weekLetter||'').trim().toUpperCase()!==week) return false;
+
+    const eligible=getDriveEligibleStreams(site);
+    if(!eligible.length) return false;
+
+    const sources=activeFilterDataSource==='solo'
+      ? [site.soloStreams||{}]
+      : activeFilterDataSource==='council'
+        ? [site.councilStreams||{}]
+        : [site.soloStreams||{},site.councilStreams||{}];
+
+    return eligible.some(({binStream})=>sources.some(src=>(src[binStream]||[]).length>0));
+  }
+
   function updateDriverHud() {
     const listContainer = document.getElementById('hudUpcomingList');
     const streetNameEl = document.getElementById('hudStreetName');
@@ -3823,43 +3936,35 @@
     }
 
     const streamFilter = activeFilterStream;
-    const dayFilter = activeFilterDay.toLowerCase();
-    const weekFilter = activeFilterWeek.toUpperCase();
-
     const upcoming = [];
+    const countedHouseIds = new Set();
     let activeRunHouses = 0;
     let activeRunBins = 0;
 
     siteRecords.forEach(site => {
-      const sch = site.soloSchedule;
-      if (dayFilter && !sch.day.toLowerCase().includes(dayFilter)) return;
-      if (weekFilter && sch.weekLetter.toUpperCase() !== weekFilter) return;
+      // Drive totals and upcoming cards must use the same active filters.
+      if(!siteMatchesDriveFilters(site)) return;
 
-      const scheduleRuns = {
-        Garbage: (sch.garRun || '').trim().toLowerCase(),
-        Recycling: (sch.recRun || '').trim().toLowerCase(),
-        SummerRecycling: (sch.recSummerRun || '').trim().toLowerCase(),
-        FOGO: (sch.fogRun || '').trim().toLowerCase()
-      };
-      const matchingSelectedStreams = Object.entries(scheduleRuns)
-        .filter(([stream, run]) => run && selectedRunsSet.has(run))
-        .map(([stream]) => stream);
-      const matchesSelectedRun = selectedRunsSet.size === 0 || matchingSelectedStreams.length > 0;
+      const eligibleStreams=getDriveEligibleStreams(site);
+      const sources=activeFilterDataSource==='solo'
+        ? [site.soloStreams||{}]
+        : activeFilterDataSource==='council'
+          ? [site.councilStreams||{}]
+          : [site.soloStreams||{},site.councilStreams||{}];
 
-      // A run filter can match any stream at the property, not just Garbage.
-      if (selectedRunsSet.size > 0 && !matchesSelectedRun) return;
-
-      if (matchesSelectedRun) {
+      // A property is counted once, even if two selected runs collect bins
+      // from the exact same house. The bin total still increases per service.
+      const houseId=String(site.propId||site.siteId||site.addressText||'');
+      if(!countedHouseIds.has(houseId)){
+        countedHouseIds.add(houseId);
         activeRunHouses++;
-        const countStreams = selectedRunsSet.size > 0
-          ? matchingSelectedStreams
-          : (streamFilter ? [streamFilter] : SOLO_STREAMS.map(st => st.key));
-        countStreams.forEach(key => {
-          // Summer recycling uses the Recycling bin stream.
-          const binKey = key === 'SummerRecycling' ? 'Recycling' : key;
-          activeRunBins += (site.soloStreams[binKey] || []).length;
-        });
       }
+
+      eligibleStreams.forEach(({binStream})=>{
+        sources.forEach(src=>{
+          activeRunBins += (src[binStream]||[]).length;
+        });
+      });
 
       if (site.lat && site.lng && Number(site.lat) !== 0) {
         const d = getDistanceMeters(userCurrentLocation.lat, userCurrentLocation.lng, Number(site.lat), Number(site.lng));
@@ -3927,9 +4032,13 @@
       }
 
       let hasAnyBins = false;
+      const eligibleDriveStreams=new Set(getDriveEligibleStreams(site).map(x=>x.binStream));
+      const displaySources=activeFilterDataSource==='council'
+        ? (site.councilStreams||{})
+        : (site.soloStreams||{});
       const binPills = SOLO_STREAMS.map(st => {
-        if (streamFilter && streamFilter !== 'SummerRecycling' && st.key !== streamFilter) return '';
-        const bins = site.soloStreams[st.key] || [];
+        if (!eligibleDriveStreams.has(st.key)) return '';
+        const bins = displaySources[st.key] || [];
         if (bins.length === 0) return '';
         hasAnyBins = true;
 
