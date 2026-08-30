@@ -1765,6 +1765,24 @@
   .map-address-telemetry .address-telemetry-gps{min-width:128px!important;font-size:11px!important;}
 }
 </style>
+
+<style id="settings-topright-run-picker-fix">
+/* Requested: settings belongs in the top-right corner, not in the vertical map controls. */
+.map-header-panel{position:absolute!important;}
+.map-summary-bar{padding-right:48px!important;}
+.map-top-settings-btn{position:absolute;top:0;right:0;width:40px;height:40px;border:1px solid #94a3b8;border-radius:8px;background:#fff;color:#1e293b;font-size:21px;box-shadow:0 2px 7px rgba(15,23,42,.24);cursor:pointer;display:flex;align-items:center;justify-content:center;z-index:1310;}
+.map-top-settings-btn:active{transform:scale(.97)}
+/* Run summary should be only as wide as its text. */
+.map-run-colored-box{flex:0 1 auto!important;width:auto!important;min-width:0!important;max-width:calc(100vw - 260px);padding:0 12px!important;white-space:nowrap!important;overflow:hidden;text-overflow:ellipsis;cursor:pointer;}
+.map-run-colored-box:hover{filter:brightness(1.03)}
+/* Hide the old Leaflet side settings button; the new button is in the top-right corner. */
+#mapSideSettingsControl{display:none!important;}
+.run-picker-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;max-height:58vh;overflow:auto;padding:2px;}
+.run-picker-btn{border:1px solid #cbd5e1;border-radius:9px;padding:11px 10px;font-weight:800;font-size:15px;cursor:pointer;background:#f8fafc;color:#1e293b;text-align:left;}
+.run-picker-btn.active{outline:3px solid rgba(56,189,248,.25);border-color:#0284c7;}
+.run-picker-btn.gar{background:#fee2e2;color:#991b1b;border-color:#fca5a5}.run-picker-btn.rec{background:#fef08a;color:#854d0e;border-color:#facc15}.run-picker-btn.summer{background:#ffedd5;color:#9a3412;border-color:#fdba74}.run-picker-btn.fog{background:#dcfce7;color:#166534;border-color:#86efac}
+@media(max-width:560px){.map-summary-bar{padding-right:46px!important}.map-top-settings-btn{width:40px;height:40px}.map-run-colored-box{max-width:calc(100vw - 238px);padding:0 10px!important}.run-picker-list{grid-template-columns:1fr 1fr;gap:6px}.run-picker-btn{padding:10px 8px;font-size:14px}}
+</style>
 </head>
 <body>
 
@@ -1826,9 +1844,10 @@
   <div id="mapScreen" class="screen-view">
     <div id="mapScreenContainer">
       <div class="map-header-panel">
+        <button type="button" id="mapTopSettingsBtn" class="map-top-settings-btn" onclick="toggleMapSettingsPanel(event)" title="Map settings" aria-label="Map settings">⚙</button>
         <!-- COMPACT MAP SUMMARY -->
         <div class="map-top-bar map-summary-bar">
-          <div id="mapRunColoredBox" class="map-run-colored-box hdr-run-gar"><span id="mapRunTitleText">All Runs</span></div>
+          <button type="button" id="mapRunColoredBox" class="map-run-colored-box hdr-run-gar" onclick="openMapRunPicker()" title="Select run"><span id="mapRunTitleText">All Runs</span></button>
           <div class="map-pill-box map-stat-pill"><span class="map-stat-icon">🏠</span><b id="mapTotalHouses">0</b><small>Houses</small></div>
           <div class="map-pill-box map-stat-pill"><span class="map-stat-icon">🗑️</span><b id="mapTotalBins">0</b><small>Bins</small></div>
         </div>
@@ -2941,6 +2960,48 @@
       L.DomEvent.disableClickPropagation(wrap);L.DomEvent.disableScrollPropagation(wrap);return wrap;
     };
     control.addTo(leafletMap);updateMapSideLayersUI();leafletMap.on('click',closeMapSideLayers);
+  }
+
+
+  function getMapRunPickerOptions(){
+    const runs=new Map();
+    (siteRecords||[]).forEach(site=>{
+      const sch=site.soloSchedule||{};
+      const add=(run,type,label,stream)=>{
+        if(!run)return; const key=String(run).trim().toLowerCase();
+        if(!key)return;
+        if(!runs.has(key)) runs.set(key,{run:String(run).trim(),type,label,stream,day:sch.day||'',week:sch.weekLetter||''});
+      };
+      add(sch.garRun,'gar','🗑️','Garbage');
+      add(sch.recRun,'rec','♻️','Recycling');
+      add(sch.recSummerRun,'summer','☀️','SummerRecycling');
+      add(sch.fogRun,'fog','🌳','FOGO');
+    });
+    return Array.from(runs.values()).sort((a,b)=>a.run.localeCompare(b.run,undefined,{numeric:true}));
+  }
+  function openMapRunPicker(){
+    const list=document.getElementById('mapRunPickerList'); if(!list)return;
+    const selected=Array.from(selectedRunsSet||[]);
+    const options=getMapRunPickerOptions();
+    list.innerHTML=`<button type="button" class="run-picker-btn ${selected.length===0?'active':''}" onclick="selectRunFromMapPicker('', '', false)">🎯 All runs</button>`+options.map(o=>{
+      const safeRun=esc(o.run).replace(/&quot;/g,'&#39;');
+      return `<button type="button" class="run-picker-btn ${o.type} ${selected.includes(o.run.toLowerCase())?'active':''}" data-run="${safeRun}" data-stream="${o.stream}" data-summer="${o.type==='summer'?'1':'0'}" onclick="selectRunFromMapPicker(this.dataset.run,this.dataset.stream,this.dataset.summer==='1')">${o.label} ${esc(o.run)}</button>`;
+    }).join('');
+    openModal('mapRunPickerModal');
+  }
+  function selectRunFromMapPicker(run,stream,isSummer){
+    selectedRunsSet.clear();
+    if(run){
+      selectedRunsSet.add(String(run).toLowerCase());
+      activeFilterStream=isSummer==='true'||isSummer===true?'SummerRecycling':stream;
+      // Pick the run first; keep day/week unrestricted so the selection is never hidden by stale filters.
+      activeFilterDay=''; activeFilterWeek='';
+    } else {
+      activeFilterStream=''; activeFilterDay=''; activeFilterWeek='';
+    }
+    renderActiveFilterChips();
+    closeModal('mapRunPickerModal');
+    triggerUniversalDataRefresh();
   }
 
   function initLeafletMap(){
@@ -5123,5 +5184,12 @@
 </script>
 
   <input id="kmzFileInput" type="file" accept=".kmz,application/vnd.google-earth.kmz,application/zip" multiple style="display:none">
+
+  <div id="mapRunPickerModal" class="modal-overlay picker-modal-layer">
+    <div class="modal-box" style="max-width:560px">
+      <div class="modal-header"><h3>🚛 Select run</h3><button class="modal-close-btn" type="button" onclick="closeModal('mapRunPickerModal')">×</button></div>
+      <div id="mapRunPickerList" class="run-picker-list"></div>
+    </div>
+  </div>
 </body>
 </html>
