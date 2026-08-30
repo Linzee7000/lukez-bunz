@@ -1468,7 +1468,7 @@
 .map-address-telemetry.map-telemetry-hidden{display:none!important;}
 </style>
 
-\n<style id="map-card-drive-style-bin-rows-fix">
+<style id="map-card-drive-style-bin-rows-fix">
 /* FINAL: Drive and Map both keep every run at the current stop. */
 .drive-address-telemetry #hudRunsAtAddress,
 .map-address-telemetry #mapRunsAtAddress{
@@ -1701,6 +1701,13 @@
 #mapScreenContainer .leaflet-control-zoom a{width:40px!important;height:40px!important;line-height:40px!important;font-size:28px!important;font-weight:700!important;}
 /* Never show Leaflet's grey background while the map is rotated for heading-up follow. */
 #mainLeafletMap{background:#dbeafe!important;}
+</style>
+
+<style id="map-follow-reliability-fix">
+#mapScreenContainer,#mainLeafletMap{background:#dbeafe!important;}
+#mainLeafletMap .leaflet-pane{will-change:transform,rotate;}
+#mainLeafletMap .leaflet-tile-container{will-change:transform;}
+#mapScreenContainer .leaflet-control-zoom{display:block!important;visibility:visible!important;pointer-events:auto!important;}
 </style>
 </head>
 <body>
@@ -2506,24 +2513,26 @@
 
   function applyHeadingUpMap() {
     if (!leafletMap) return;
-    const mapPane = leafletMap.getPane('mapPane');
-    const mapEl = document.getElementById('mainLeafletMap');
-    if (!mapPane || !mapEl) return;
 
-    mapPane.style.transformOrigin = '50% 50%';
-    if (isTruckFollowEnabled) {
-      const heading = Number(lastValidHeading || 0);
-      const radians = Math.abs(heading % 180) * Math.PI / 180;
-      const c = Math.abs(Math.cos(radians));
-      const sn = Math.abs(Math.sin(radians));
-      const w = Math.max(1, mapEl.clientWidth);
-      const h = Math.max(1, mapEl.clientHeight);
-      // A portrait phone needs more than 1.45x when the map is rotated.
-      // Calculate enough overscan for the current heading so no grey corners appear.
-      const scale = Math.min(2.5, Math.max(1.02, (w*c + h*sn)/w, (w*sn + h*c)/h) + 0.04);
-      mapPane.style.rotate = `${-heading}deg`;
-      mapPane.style.scale = String(scale);
-    } else {
+    // IMPORTANT: do not rotate Leaflet's mapPane itself. Leaflet continuously
+    // translates that pane while GPS follow is panning, which was causing the
+    // map to expose the grey container and could make tiles/markers disappear.
+    // Rotate the visual child panes instead, leaving Leaflet's own geometry intact.
+    const paneNames = ['tilePane','overlayPane','shadowPane','markerPane','tooltipPane','popupPane'];
+    const heading = isTruckFollowEnabled ? Number(lastValidHeading || 0) : 0;
+    const rotate = -heading;
+
+    paneNames.forEach(name => {
+      const pane = leafletMap.getPane(name);
+      if (!pane) return;
+      pane.style.transformOrigin = '50% 50%';
+      pane.style.rotate = `${rotate}deg`;
+      // Only enlarge the tile pane. Scaling markers/labels makes them look wrong.
+      pane.style.scale = (isTruckFollowEnabled && name === 'tilePane') ? '1.75' : '1';
+    });
+
+    const mapPane = leafletMap.getPane('mapPane');
+    if (mapPane) {
       mapPane.style.rotate = '0deg';
       mapPane.style.scale = '1';
     }
@@ -2825,7 +2834,7 @@
 
     leafletMap=L.map(el,{preferCanvas:true,zoomControl:false,zoomSnap:1}).setView([-38.36,144.91],18);
     L.control.zoom({position:'topright'}).addTo(leafletMap);
-    osmLayer=L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:20,attribution:'&copy; OpenStreetMap contributors'}).addTo(leafletMap);
+    osmLayer=L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:20,keepBuffer:10,updateWhenIdle:false,attribution:'&copy; OpenStreetMap contributors'}).addTo(leafletMap);
     satLayer=L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{maxZoom:20,attribution:'Tiles &copy; Esri'});
     mapHullsLayer=L.layerGroup().addTo(leafletMap);
     mapSeqLayer=L.layerGroup().addTo(leafletMap);
@@ -3438,11 +3447,12 @@
 
     if (isTruckFollowEnabled && leafletMap) {
       if (!hasAutoCenteredTruck) {
-        leafletMap.setView([userCurrentLocation.lat, userCurrentLocation.lng], 18);
+        leafletMap.setView([userCurrentLocation.lat, userCurrentLocation.lng], Math.max(leafletMap.getZoom(), 18), {animate:false});
         hasAutoCenteredTruck = true;
       } else {
-        leafletMap.panTo([userCurrentLocation.lat, userCurrentLocation.lng]);
+        leafletMap.panTo([userCurrentLocation.lat, userCurrentLocation.lng], {animate:false});
       }
+      applyHeadingUpMap();
     }
 
     activeMapCircleMarkers.forEach((markerObj, markerKey) => {
