@@ -5918,6 +5918,237 @@ window.toggleMapToolsPanel=()=>{const p=document.querySelector('.map-controls-gr
 })();
 </script>
 
+
+<!-- FINAL 2026-08-31 HARD FIXES -->
+<style id="hard-fix-controls-and-header">
+/* Make Layers and GPS the same footprint and shape as the large zoom controls. */
+#mapScreenContainer .map-side-layers-toggle,
+#mapScreenContainer .map-side-view-toggle{
+  width:68px!important;
+  height:68px!important;
+  min-width:68px!important;
+  min-height:68px!important;
+  border-radius:10px!important;
+  border:1px solid #b8c0ca!important;
+  background:#fff!important;
+  box-sizing:border-box!important;
+  box-shadow:0 2px 7px rgba(15,23,42,.24)!important;
+}
+#mapScreenContainer .map-side-layers-toggle svg{width:31px!important;height:31px!important;}
+#mapScreenContainer .map-side-view-toggle{font-size:34px!important;line-height:1!important;}
+
+/* Remove the wasted padding in the four top boxes before shrinking any text. */
+#mapScreenContainer .map-summary-bar{gap:7px!important;}
+#mapScreenContainer .map-run-colored-box,
+#mapScreenContainer .map-stat-pill{
+  padding:0 4px!important;
+  margin:0!important;
+  box-sizing:border-box!important;
+}
+#mapScreenContainer .map-run-colored-box{justify-content:center!important;}
+#mapScreenContainer #mapRunTitleText{
+  display:block!important;
+  min-width:0!important;
+  font-size:clamp(19px,5.4vw,27px)!important;
+  line-height:1!important;
+  white-space:nowrap!important;
+  overflow:hidden!important;
+  text-overflow:ellipsis!important;
+}
+#mapScreenContainer .map-stat-pill{gap:4px!important;}
+#mapScreenContainer .map-stat-pill b{font-size:clamp(24px,6.2vw,31px)!important;line-height:1!important;}
+#mapScreenContainer .map-stat-pill .map-stat-icon{font-size:22px!important;}
+@media(max-width:560px){
+  #mapScreenContainer .map-side-layers-toggle,
+  #mapScreenContainer .map-side-view-toggle{width:68px!important;height:68px!important;min-width:68px!important;min-height:68px!important;}
+  #mapScreenContainer .map-summary-bar{grid-template-columns:minmax(0,1.28fr) minmax(0,1fr) minmax(0,1fr) 58px!important;gap:6px!important;}
+  #mapScreenContainer .map-run-colored-box,#mapScreenContainer .map-stat-pill{padding:0 3px!important;}
+  #mapScreenContainer #mapRunTitleText{font-size:clamp(18px,5vw,25px)!important;}
+  #mapScreenContainer .map-stat-pill b{font-size:clamp(22px,5.8vw,28px)!important;}
+}
+</style>
+<script id="hard-fix-picker-gps-boundaries">
+(function(){
+  const clean=v=>String(v||'').trim();
+  const lower=v=>clean(v).toLowerCase();
+  const dayNorm=v=>clean(v).toLowerCase();
+  const schedule=site=>(site&&site.soloSchedule)||{};
+  const runFor=(site,stream)=>{
+    const s=schedule(site);
+    if(stream==='Garbage') return clean(s.garRun);
+    if(stream==='Recycling') return clean(s.recRun);
+    if(stream==='SummerRecycling') return clean(s.recSummerRun);
+    if(stream==='FOGO') return clean(s.fogRun);
+    return '';
+  };
+  const isSummerText=v=>/summer/i.test(clean(v));
+  const streamNeedsWeek=stream=>stream==='Recycling'||stream==='FOGO';
+
+  let pickerStream='',pickerDay='',pickerWeek='';
+  const dayChoices=['Monday','Tuesday','Wednesday','Thursday','Friday'];
+  const shortDay={Monday:'M',Tuesday:'T',Wednesday:'W',Thursday:'T',Friday:'F'};
+
+  function eligible(site,stream,day,week){
+    const s=schedule(site);
+    if(day && dayNorm(s.day)!==dayNorm(day)) return false;
+    if(streamNeedsWeek(stream)){
+      const w=clean(s.weekLetter).toUpperCase();
+      if(stream==='Recycling' && w!=='A' && w!=='B') return false;
+      if(week && w!==week) return false;
+    }
+    const run=runFor(site,stream);
+    if(!run) return false;
+    /* Normal Recycling is recRun only: never surface Summer assignments. */
+    if(stream==='Recycling' && (isSummerText(run) || clean(s.recSummerRun))) return false;
+    return true;
+  }
+
+  function pickerRuns(){
+    const out=new Map();
+    (siteRecords||[]).forEach(site=>{
+      if(pickerStream){
+        if(eligible(site,pickerStream,pickerDay,pickerWeek)){
+          const r=runFor(site,pickerStream);out.set(lower(r),r);
+        }
+      }else{
+        ['Garbage','Recycling','FOGO'].forEach(st=>{
+          if(eligible(site,st,pickerDay,pickerWeek)){
+            const r=runFor(site,st);out.set(st+'|'+lower(r),{run:r,stream:st});
+          }
+        });
+      }
+    });
+    return [...out.values()].sort((a,b)=>String(a.run||a).localeCompare(String(b.run||b),undefined,{numeric:true}));
+  }
+
+  function renderRuns(){
+    const box=document.getElementById('mapRunPickerRuns');if(!box)return;
+    const vals=pickerRuns();
+    const label=document.getElementById('mapRunPickerRunsLabel');
+    if(label)label.textContent=streamNeedsWeek(pickerStream)?'4. Select run':'3. Select run';
+    box.innerHTML=vals.length?vals.map(v=>{
+      const obj=typeof v==='string'?{run:v,stream:pickerStream}:v;
+      return `<button type="button" class="map-run-picker-btn" onclick="applyMapPickerRun(${JSON.stringify(obj.run)},${JSON.stringify(obj.stream)})">${String(obj.run).replace(/</g,'&lt;')}</button>`;
+    }).join(''):'<div style="color:#64748b">No runs found for that selection.</div>';
+  }
+
+  window.openMapRunPicker=function(){
+    pickerStream=activeFilterStream||'';
+    pickerDay=clean(activeFilterDay);
+    pickerWeek=clean(activeFilterWeek).toUpperCase();
+    const streams=[['','All',''],['Garbage','🗑️','stream-gar'],['Recycling','♻️','stream-rec'],['SummerRecycling','🌞','stream-summer'],['FOGO','🌳','stream-fog']];
+    const box=document.getElementById('mapRunPickerStreams');
+    box.innerHTML=streams.map(([key,label,cls])=>`<button type="button" class="map-run-picker-btn ${cls} ${pickerStream===key?'active':''}" onclick="chooseMapPickerStream(${JSON.stringify(key)})">${label}</button>`).join('');
+    ['mapRunPickerDayStep','mapRunPickerWeekStep','mapRunPickerRunsStep'].forEach(id=>{const el=document.getElementById(id);if(el)el.hidden=true;});
+    if(typeof window.openModal==='function')window.openModal('mapRunPickerModal');
+    if(pickerStream!==undefined)window.chooseMapPickerStream(pickerStream,true);
+  };
+
+  window.chooseMapPickerStream=function(stream,preserve){
+    pickerStream=stream||'';
+    if(!preserve){pickerDay='';pickerWeek='';}
+    document.querySelectorAll('#mapRunPickerStreams .map-run-picker-btn').forEach(b=>b.classList.toggle('active',b.textContent.trim()===(pickerStream===''?'All':pickerStream==='Garbage'?'🗑️':pickerStream==='Recycling'?'♻️':pickerStream==='SummerRecycling'?'🌞':'🌳')));
+    const dayStep=document.getElementById('mapRunPickerDayStep');if(dayStep)dayStep.hidden=false;
+    const weekStep=document.getElementById('mapRunPickerWeekStep');if(weekStep)weekStep.hidden=true;
+    const runStep=document.getElementById('mapRunPickerRunsStep');if(runStep)runStep.hidden=true;
+    const days=dayChoices.filter(d=>(siteRecords||[]).some(site=>pickerStream?eligible(site,pickerStream,d,''):['Garbage','Recycling','FOGO'].some(st=>eligible(site,st,d,''))));
+    const dayBox=document.getElementById('mapRunPickerDays');
+    dayBox.innerHTML=days.map(d=>`<button type="button" class="map-run-picker-btn ${pickerDay===d?'active':''}" onclick="chooseMapPickerDay(${JSON.stringify(d)})">${shortDay[d]}</button>`).join('')||'<div style="color:#64748b">No days found.</div>';
+    if(preserve&&pickerDay&&days.includes(pickerDay))window.chooseMapPickerDay(pickerDay,true);
+  };
+
+  window.chooseMapPickerDay=function(day,preserve){
+    pickerDay=day||'';if(!preserve)pickerWeek='';
+    document.querySelectorAll('#mapRunPickerDays .map-run-picker-btn').forEach(b=>b.classList.toggle('active',b.textContent===shortDay[pickerDay]));
+    const needs=streamNeedsWeek(pickerStream);
+    const weekStep=document.getElementById('mapRunPickerWeekStep');
+    const runStep=document.getElementById('mapRunPickerRunsStep');
+    if(needs){
+      weekStep.hidden=false;runStep.hidden=true;
+      const weeks=['A','B'].filter(w=>(siteRecords||[]).some(site=>eligible(site,pickerStream,pickerDay,w)));
+      document.getElementById('mapRunPickerWeeks').innerHTML=weeks.map(w=>`<button type="button" class="map-run-picker-btn ${pickerWeek===w?'active':''}" onclick="chooseMapPickerWeek('${w}')">Week ${w}</button>`).join('')||'<div style="color:#64748b">No weeks found.</div>';
+      if(preserve&&pickerWeek&&weeks.includes(pickerWeek))window.chooseMapPickerWeek(pickerWeek);
+    }else{
+      weekStep.hidden=true;runStep.hidden=false;renderRuns();
+    }
+  };
+
+  window.chooseMapPickerWeek=function(week){
+    pickerWeek=clean(week).toUpperCase();
+    document.querySelectorAll('#mapRunPickerWeeks .map-run-picker-btn').forEach(b=>b.classList.toggle('active',b.textContent===`Week ${pickerWeek}`));
+    document.getElementById('mapRunPickerRunsStep').hidden=false;renderRuns();
+  };
+
+  window.applyMapPickerRun=function(run,streamOverride){
+    const stream=streamOverride||pickerStream;
+    const r=clean(run);
+    /* Last line of defence: normal Recycling can never apply a Summer run. */
+    if(stream==='Recycling' && isSummerText(r)) return;
+    selectedRunsSet.clear();
+    selectedRunsSet.add(lower(r));
+    activeFilterStream=stream;
+    activeFilterDay=pickerDay;
+    activeFilterWeek=streamNeedsWeek(stream)?pickerWeek:'';
+    if(typeof window.closeModal==='function')window.closeModal('mapRunPickerModal');
+    if(typeof window.renderActiveFilterChips==='function')window.renderActiveFilterChips();
+    if(typeof window.triggerUniversalDataRefresh==='function')window.triggerUniversalDataRefresh();
+  };
+
+  /* GPS button: always focus the actual GPS position. If a fix is not yet cached,
+     request one and focus as soon as it arrives. */
+  window.focusMapOnGps=function(){
+    const focus=pos=>{
+      if(!leafletMap||!pos)return false;
+      const lat=Number(pos.lat),lng=Number(pos.lng);
+      if(!Number.isFinite(lat)||!Number.isFinite(lng))return false;
+      userCurrentLocation={lat,lng};
+      leafletMap.setView([lat,lng],Math.max(Number(leafletMap.getZoom())||0,17),{animate:true});
+      return true;
+    };
+    if(focus(userCurrentLocation))return true;
+    if(navigator.geolocation){
+      navigator.geolocation.getCurrentPosition(p=>focus({lat:p.coords.latitude,lng:p.coords.longitude}),()=>{}, {enableHighAccuracy:true,maximumAge:10000,timeout:10000});
+    }
+    if(typeof startLiveLocationWatcher==='function')startLiveLocationWatcher();
+    return false;
+  };
+  document.addEventListener('click',function(e){
+    const btn=e.target.closest&&e.target.closest('#mapSideViewControl .map-side-view-toggle');
+    if(!btn)return;
+    e.preventDefault();e.stopPropagation();
+    window.focusMapOnGps();
+  },true);
+
+  /* Boundaries are generated only from properties currently in the selected run.
+     Ignore stale custom polygons entirely so unrelated bins can never leak in. */
+  window.drawBoundary=function(key,sites,i){
+    const stream=activeFilterStream||'';
+    const selected=window.selectedMapRuns instanceof Set?[...window.selectedMapRuns].map(lower):[];
+    let valid=(sites||[]).filter(site=>{
+      if(!site)return false;
+      if(stream==='Recycling'){
+        const s=schedule(site);const r=runFor(site,'Recycling');
+        if(!r||isSummerText(r)||clean(s.recSummerRun))return false;
+        if(activeFilterDay&&dayNorm(s.day)!==dayNorm(activeFilterDay))return false;
+        if(!['A','B'].includes(clean(s.weekLetter).toUpperCase()))return false;
+        if(activeFilterWeek&&clean(s.weekLetter).toUpperCase()!==clean(activeFilterWeek).toUpperCase())return false;
+        return !selected.length||selected.includes(lower(r));
+      }
+      if(stream){
+        const r=runFor(site,stream);return !!r&&(!selected.length||selected.includes(lower(r)));
+      }
+      return true;
+    });
+    const pts=valid.map(site=>gps(site.lat,site.lng)).filter(Boolean);
+    const hull=typeof buildRunConvexHull==='function'?buildRunConvexHull(pts):pts;
+    if(!L||!mapHullsLayer||hull.length<3)return;
+    const color=typeof mapColor==='function'?mapColor(key,i):'#2563eb';
+    const poly=L.polygon(hull.map(p=>[p.lat,p.lng]),{color,weight:2,fillColor:color,fillOpacity:.1,lineJoin:'round'});
+    poly._runGroupKey=key;poly.addTo(mapHullsLayer);
+  };
+})();
+</script>
+
 </body>
 </html>
 
