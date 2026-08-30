@@ -5194,5 +5194,171 @@ window.applyMapPickerRun=r=>{selectedRunsSet.clear();selectedRunsSet.add(String(
 window.toggleMapToolsPanel=()=>{const p=document.querySelector('.map-controls-group');if(p)p.open=!p.open};
 })();
 </script>
+
+<style id="map-run-picker-clean-final">
+/* The top-right gear is the Map Tools control: no duplicate settings bar. */
+.map-controls-group > summary{display:none!important}
+.map-controls-group{margin-top:0!important}
+.map-controls-group[open]{display:block!important}
+
+/* Compact picker: five stream icons, then MTWTF, then week when required. */
+.map-run-picker-box{width:min(560px,calc(100vw - 28px))!important;padding:14px!important}
+.map-run-picker-step{padding:9px 14px!important}
+.map-run-picker-label{margin-bottom:6px!important}
+#mapRunPickerStreams{grid-template-columns:repeat(5,minmax(0,1fr))!important;gap:7px!important}
+#mapRunPickerDays{grid-template-columns:repeat(5,minmax(0,1fr))!important;gap:7px!important}
+#mapRunPickerWeeks{grid-template-columns:repeat(2,minmax(0,1fr))!important}
+#mapRunPickerRuns{grid-template-columns:repeat(3,minmax(0,1fr))!important}
+.map-run-picker-btn{min-height:46px!important;padding:7px 5px!important}
+.map-run-picker-stream-icon{font-size:25px;line-height:1}
+.map-run-picker-stream-all{font-size:14px;font-weight:800}
+@media(max-width:480px){
+  .map-run-picker-box{padding:10px!important}
+  .map-run-picker-step{padding:8px 10px!important}
+  #mapRunPickerStreams{gap:5px!important}
+  #mapRunPickerDays{gap:5px!important}
+  .map-run-picker-btn{min-height:44px!important;font-size:15px!important}
+  .map-run-picker-stream-icon{font-size:22px}
+}
+</style>
+<script id="map-run-picker-clean-final-script">
+(function(){
+  const STREAMS=[
+    {key:'',label:'All',cls:''},
+    {key:'Garbage',label:'🗑️',cls:'stream-gar'},
+    {key:'Recycling',label:'♻️',cls:'stream-rec'},
+    {key:'SummerRecycling',label:'🌞',cls:'stream-summer'},
+    {key:'FOGO',label:'🌳',cls:'stream-fog'}
+  ];
+  const DAYS=[
+    ['Monday','M'],['Tuesday','T'],['Wednesday','W'],['Thursday','T'],['Friday','F']
+  ];
+  let stream='', day='', week='';
+
+  const runFor=(site,st)=>{
+    const x=site.soloSchedule||{};
+    if(st==='Garbage') return x.garRun||'';
+    if(st==='Recycling') return x.recRun||'';
+    if(st==='SummerRecycling') return x.recSummerRun||'';
+    if(st==='FOGO') return x.fogRun||'';
+    return '';
+  };
+  const usesWeek=st=>st==='Recycling'||st==='FOGO';
+
+  function streamMatchesDay(site,st){
+    const x=site.soloSchedule||{};
+    return !day || String(x.day||'').trim()===day;
+  }
+  function runsForCurrentSelection(){
+    const runs=new Map();
+    (siteRecords||[]).forEach(site=>{
+      const x=site.soloSchedule||{};
+      if(day && String(x.day||'').trim()!==day) return;
+      if(usesWeek(stream) && String(x.weekLetter||'').trim().toUpperCase()!==week) return;
+
+      const add=(st)=>{
+        const r=String(runFor(site,st)||'').trim();
+        if(r && !runs.has(r.toLowerCase())) runs.set(r.toLowerCase(),{run:r,stream:st});
+      };
+      if(stream) add(stream);
+      else ['Garbage','Recycling','SummerRecycling','FOGO'].forEach(add);
+    });
+    return [...runs.values()].sort((a,b)=>a.run.localeCompare(b.run,undefined,{numeric:true}));
+  }
+  function renderRuns(){
+    const vals=runsForCurrentSelection();
+    const label=document.getElementById('mapRunPickerRunsLabel');
+    label.textContent='Select run';
+    document.getElementById('mapRunPickerRuns').innerHTML=
+      vals.length
+      ? vals.map(v=>`<button type="button" class="map-run-picker-btn" onclick="applyMapPickerRun(${JSON.stringify(v.run)},${JSON.stringify(v.stream)})">${v.run}</button>`).join('')
+      : '<div style="color:#64748b">No runs found for that selection.</div>';
+  }
+  function renderDays(){
+    const available=new Set();
+    (siteRecords||[]).forEach(site=>{
+      const x=site.soloSchedule||{};
+      const services=stream ? [stream] : ['Garbage','Recycling','SummerRecycling','FOGO'];
+      if(services.some(st=>String(runFor(site,st)||'').trim()) && x.day) available.add(String(x.day).trim());
+    });
+    document.getElementById('mapRunPickerDays').innerHTML=DAYS
+      .filter(([full])=>available.has(full))
+      .map(([full,short])=>`<button type="button" class="map-run-picker-btn ${day===full?'active':''}" onclick="chooseMapPickerDay(${JSON.stringify(full)})">${short}</button>`)
+      .join('') || '<div style="color:#64748b">No days found.</div>';
+  }
+
+  window.openMapRunPicker=()=>{
+    stream=activeFilterStream||'';
+    day=activeFilterDay||'';
+    week=activeFilterWeek||'';
+    document.getElementById('mapRunPickerStreams').innerHTML=STREAMS.map(x=>
+      `<button type="button" data-stream="${x.key}" class="map-run-picker-btn ${x.cls} ${stream===x.key?'active':''}" onclick="chooseMapPickerStream(${JSON.stringify(x.key)})" title="${x.key||'All'}">`+
+      (x.key ? `<span class="map-run-picker-stream-icon">${x.label}</span>` : `<span class="map-run-picker-stream-all">${x.label}</span>`) +
+      `</button>`).join('');
+    document.getElementById('mapRunPickerDayStep').hidden=true;
+    document.getElementById('mapRunPickerWeekStep').hidden=true;
+    document.getElementById('mapRunPickerRunsStep').hidden=true;
+    openModal('mapRunPickerModal');
+    if(stream || day) chooseMapPickerStream(stream,true);
+  };
+
+  window.chooseMapPickerStream=(st,preserve=false)=>{
+    stream=st;
+    if(!preserve){ day=''; week=''; }
+    document.querySelectorAll('#mapRunPickerStreams .map-run-picker-btn').forEach(b=>b.classList.toggle('active',(b.dataset.stream||'')===st));
+    document.getElementById('mapRunPickerDayStep').hidden=false;
+    document.getElementById('mapRunPickerWeekStep').hidden=true;
+    document.getElementById('mapRunPickerRunsStep').hidden=true;
+    renderDays();
+    if(preserve && day){
+      const exists=[...document.querySelectorAll('#mapRunPickerDays .map-run-picker-btn')].some(b=>b.textContent===DAYS.find(d=>d[0]===day)?.[1]);
+      if(exists) chooseMapPickerDay(day,true);
+    }
+  };
+
+  window.chooseMapPickerDay=(v,preserve=false)=>{
+    day=v;
+    if(!preserve) week='';
+    document.querySelectorAll('#mapRunPickerDays .map-run-picker-btn').forEach(b=>{
+      const expected=(DAYS.find(d=>d[0]===v)||[])[1];
+      b.classList.toggle('active',b.textContent===expected);
+    });
+    if(usesWeek(stream)){
+      document.getElementById('mapRunPickerWeekStep').hidden=false;
+      document.getElementById('mapRunPickerRunsStep').hidden=true;
+      const vals=['A','B'];
+      document.getElementById('mapRunPickerWeeks').innerHTML=vals.map(w=>
+        `<button type="button" class="map-run-picker-btn ${week===w?'active':''}" onclick="chooseMapPickerWeek('${w}')">Week ${w}</button>`
+      ).join('');
+      if(preserve && week) chooseMapPickerWeek(week);
+    } else {
+      document.getElementById('mapRunPickerWeekStep').hidden=true;
+      document.getElementById('mapRunPickerRunsStep').hidden=false;
+      renderRuns();
+    }
+  };
+
+  window.chooseMapPickerWeek=w=>{
+    week=w;
+    document.querySelectorAll('#mapRunPickerWeeks .map-run-picker-btn').forEach(b=>b.classList.toggle('active',b.textContent===`Week ${w}`));
+    document.getElementById('mapRunPickerRunsStep').hidden=false;
+    renderRuns();
+  };
+
+  window.applyMapPickerRun=(r,runStream)=>{
+    selectedRunsSet.clear();
+    selectedRunsSet.add(String(r).trim().toLowerCase());
+    // "All" is only a browsing option. Once a run is picked, lock the actual
+    // owning stream so map filtering and colours stay correct.
+    activeFilterStream=stream || runStream || '';
+    activeFilterDay=day;
+    activeFilterWeek=usesWeek(activeFilterStream)?week:'';
+    closeModal('mapRunPickerModal');
+    renderActiveFilterChips();
+    triggerUniversalDataRefresh();
+  };
+})();
+</script>
+
 </body>
 </html>
