@@ -1587,7 +1587,7 @@
 }
 /* No filter still means no Map stop card. */
 .map-address-telemetry.map-telemetry-hidden{display:none!important}
-</style>\n
+</style>
 <style id="map-card-structure-final-fix">
 /* DEFINITIVE MAP CARD STRUCTURE: top Drive-style information first, filtered bins underneath. */
 .map-address-telemetry{
@@ -1692,6 +1692,15 @@
 .map-address-telemetry #mapBinsAtAddress.map-bins-collapsed .map-bins-toolbar{width:100%!important;}
 .map-address-telemetry .address-bin-mini.serials-hidden .address-bin-stream{flex:1 1 auto!important;width:auto!important;}
 .map-address-telemetry .address-bin-mini.serials-hidden .address-bin-actions{margin-left:auto!important;}
+</style>
+
+<style id="map-follow-zoom-final-fix">
+/* Keep Leaflet controls visible above the map but below app overlays. */
+#mapScreenContainer .leaflet-control-zoom{display:block!important;visibility:visible!important;opacity:1!important;}
+#mapScreenContainer .leaflet-top.leaflet-right{top:180px!important;right:8px!important;z-index:1100!important;}
+#mapScreenContainer .leaflet-control-zoom a{width:40px!important;height:40px!important;line-height:40px!important;font-size:28px!important;font-weight:700!important;}
+/* Never show Leaflet's grey background while the map is rotated for heading-up follow. */
+#mainLeafletMap{background:#dbeafe!important;}
 </style>
 </head>
 <body>
@@ -2498,15 +2507,22 @@
   function applyHeadingUpMap() {
     if (!leafletMap) return;
     const mapPane = leafletMap.getPane('mapPane');
-    if (!mapPane) return;
+    const mapEl = document.getElementById('mainLeafletMap');
+    if (!mapPane || !mapEl) return;
 
-    // Use the CSS rotate/scale longhands so we do NOT overwrite Leaflet's own
-    // translate3d transform. The scale prevents rotated map corners exposing
-    // the grey Leaflet container while following the truck.
     mapPane.style.transformOrigin = '50% 50%';
     if (isTruckFollowEnabled) {
-      mapPane.style.rotate = `${-(lastValidHeading || 0)}deg`;
-      mapPane.style.scale = '1.45';
+      const heading = Number(lastValidHeading || 0);
+      const radians = Math.abs(heading % 180) * Math.PI / 180;
+      const c = Math.abs(Math.cos(radians));
+      const sn = Math.abs(Math.sin(radians));
+      const w = Math.max(1, mapEl.clientWidth);
+      const h = Math.max(1, mapEl.clientHeight);
+      // A portrait phone needs more than 1.45x when the map is rotated.
+      // Calculate enough overscan for the current heading so no grey corners appear.
+      const scale = Math.min(2.5, Math.max(1.02, (w*c + h*sn)/w, (w*sn + h*c)/h) + 0.04);
+      mapPane.style.rotate = `${-heading}deg`;
+      mapPane.style.scale = String(scale);
     } else {
       mapPane.style.rotate = '0deg';
       mapPane.style.scale = '1';
@@ -2518,6 +2534,7 @@
     const btn = document.getElementById('btnTruckFollow');
     btn.classList.toggle('active', isTruckFollowEnabled);
     applyHeadingUpMap();
+    if (leafletMap) setTimeout(()=>leafletMap.invalidateSize({pan:false}),0);
     if (isTruckFollowEnabled && userCurrentLocation && leafletMap) {
       leafletMap.setView([userCurrentLocation.lat, userCurrentLocation.lng], 18);
     }
@@ -2806,7 +2823,8 @@
     const el=document.getElementById('mainLeafletMap');
     if(!el||typeof L==='undefined'){console.error('Leaflet/map container unavailable');return;}
 
-    leafletMap=L.map(el,{preferCanvas:true,zoomControl:true,zoomSnap:1}).setView([-38.36,144.91],18);
+    leafletMap=L.map(el,{preferCanvas:true,zoomControl:false,zoomSnap:1}).setView([-38.36,144.91],18);
+    L.control.zoom({position:'topright'}).addTo(leafletMap);
     osmLayer=L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:20,attribution:'&copy; OpenStreetMap contributors'}).addTo(leafletMap);
     satLayer=L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{maxZoom:20,attribution:'Tiles &copy; Esri'});
     mapHullsLayer=L.layerGroup().addTo(leafletMap);
