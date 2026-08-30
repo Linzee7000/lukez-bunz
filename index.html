@@ -6748,5 +6748,208 @@ window.toggleMapToolsPanel=()=>{const p=document.querySelector('.map-controls-gr
   setTimeout(()=>{ if(leafletMap&&siteRecords&&siteRecords.length)window.renderMapData(); },100);
 })();
 </script>
+
+<script id="final-filter-map-layer-consistency">
+(function(){
+  const clean=v=>String(v||'').trim();
+  const lower=v=>clean(v).toLowerCase();
+  const hasSummerWord=v=>/\bsummer\b/i.test(clean(v));
+  const schedule=site=>(site&&site.soloSchedule)||{};
+  const summerRunNames=()=>new Set((siteRecords||[]).map(site=>clean(schedule(site).recSummerRun)).filter(Boolean).map(lower));
+
+  /* One final guard used by every refresh: Summer is opt-in.  "All" and
+     normal Recycling never include a run whose NAME says Summer, and never
+     fall back to recRun to decide that a Summer service is normal recycling. */
+  function stripSummerSelectionsWhenNotExplicit(){
+    if(clean(activeFilterStream)==='SummerRecycling') return;
+    const summer=summerRunNames();
+    [...selectedRunsSet].forEach(k=>{
+      if(hasSummerWord(k)||summer.has(lower(k))) selectedRunsSet.delete(k);
+    });
+  }
+
+  const previousApply=window.applyModalFilters;
+  window.applyModalFilters=function(){
+    const out=previousApply&&previousApply.apply(this,arguments);
+    stripSummerSelectionsWhenNotExplicit();
+    if(typeof renderActiveFilterChips==='function') renderActiveFilterChips();
+    if(typeof triggerUniversalDataRefresh==='function') triggerUniversalDataRefresh();
+    if(typeof window.renderMapData==='function') window.renderMapData();
+    return out;
+  };
+
+  const previousClear=window.clearAllActiveFilters;
+  window.clearAllActiveFilters=function(){
+    const out=previousClear&&previousClear.apply(this,arguments);
+    stripSummerSelectionsWhenNotExplicit();
+    return out;
+  };
+
+  function streamFill(stream){
+    if(stream==='Garbage') return '#dc2626';
+    if(stream==='Recycling') return '#facc15';
+    if(stream==='SummerRecycling') return '#f59e0b';
+    if(stream==='FOGO') return '#16a34a';
+    return '#64748b';
+  }
+
+  /* Collection-point pins are shown only when at least one house associated
+     with that collection point has a visible bin collected by the exact
+     currently displayed stream/run. */
+  window.drawCollectionPointMarkers=function(){
+    if(!leafletMap || !window.L) return;
+    const visible=window.__lukezVisibleCollectionMembership || new Map();
+    const groups={};
+    Object.entries(collectionPoints||{}).forEach(([houseId,cp])=>{
+      if(!cp || !cp.id) return;
+      if(!groups[cp.id]) groups[cp.id]={cp,houses:[]};
+      groups[cp.id].houses.push(String(houseId));
+    });
+    Object.values(groups).forEach(g=>{
+      const members=g.houses.filter(id=>visible.has(id));
+      if(!members.length) return;
+      const streams=[...new Set(members.flatMap(id=>[...visible.get(id)]))];
+      const text=streams.length ? streams.join(', ') : 'Selected run';
+      L.marker([Number(g.cp.lat),Number(g.cp.lng)],{
+        pane:'markerPane',
+        icon:L.divIcon({
+          className:'collection-point-pin',
+          html:'<div style="font-size:24px;filter:drop-shadow(0 1px 2px #0006)">📍</div>',
+          iconSize:[28,32],iconAnchor:[14,32]
+        })
+      }).bindPopup(`<div><b>Collection point</b><br>${members.length} visible house${members.length===1?'':'s'}<br>${esc(text)}</div>`)
+        .addTo(mapMarkersLayer);
+    });
+  };
+
+  /* Definitive map renderer:
+     - Summer only when the Summer stream is explicitly selected.
+     - Houses are below bins.
+     - Bin fill = stream colour.
+     - Bin outline = run colour.
+     - One bin is drawn only for the exact selected stream/run membership. */
+  window.renderMapData=function(){
+    if(typeof updateMapLiveRun==='function') updateMapLiveRun();
+    if(!leafletMap && typeof initLeafletMap==='function') initLeafletMap();
+    if(!leafletMap) return;
+
+    if(!leafletMap.getPane('lukez-house-pane')) leafletMap.createPane('lukez-house-pane');
+    if(!leafletMap.getPane('lukez-bin-pane')) leafletMap.createPane('lukez-bin-pane');
+    leafletMap.getPane('lukez-house-pane').style.zIndex=620;
+    leafletMap.getPane('lukez-bin-pane').style.zIndex=660;
+
+    mapMarkersLayer.clearLayers();
+    mapHullsLayer.clearLayers();
+    mapSeqLayer.clearLayers();
+    activeMapCircleMarkers.clear();
+
+    const st=clean(activeFilterStream);
+    const selected=new Set([...selectedRunsSet].map(lower));
+    const types=st ? [st] : ['Garbage','Recycling','FOGO'];
+    const groups=new Map();
+
+    (siteRecords||[]).forEach(site=>{
+      types.forEach(stream=>{
+        if(stream==='Recycling' && hasSummerWord(schedule(site).recRun)) return;
+        if(stream==='SummerRecycling' && st!=='SummerRecycling') return;
+        if(typeof window.__lukezBelongs==='function' &&
+           !window.__lukezBelongs(site,stream,activeFilterDay,activeFilterWeek,selected)) return;
+        const run=clean(
+          stream==='Garbage' ? schedule(site).garRun :
+          stream==='Recycling' ? schedule(site).recRun :
+          stream==='SummerRecycling' ? schedule(site).recSummerRun :
+          schedule(site).fogRun
+        );
+        if(!run) return;
+        const key=stream+'|'+lower(run);
+        if(!groups.has(key)) groups.set(key,{stream,run,sites:[]});
+        groups.get(key).sites.push(site);
+      });
+    });
+
+    currentlyShowingRunKeys=[...groups.values()].map(g=>g.run);
+    const collectionMembership=new Map();
+    const seenHouses=new Set();
+    const allVisible=[];
+
+    [...groups.values()].forEach((g,i)=>{
+      const runColor=mapColor(g.run,i);
+      const pts=g.sites.map(x=>gps(x.lat,x.lng)).filter(Boolean);
+      const hull=typeof buildRunConvexHull==='function' ? buildRunConvexHull(pts) : pts;
+      if(hull.length>=3){
+        L.polygon(hull.map(p=>[p.lat,p.lng]),{
+          color:runColor,weight:2,fillColor:runColor,fillOpacity:.1,lineJoin:'round'
+        }).addTo(mapHullsLayer);
+      }
+
+      g.sites.forEach(site=>{
+        const siteId=String(site.propId||site.siteId||'');
+        allVisible.push(site);
+        if(!seenHouses.has(siteId)){
+          seenHouses.add(siteId);
+          if(typeof window.drawHouseTriangle==='function') window.drawHouseTriangle(site);
+        }
+        if(!showBinGpsDots) return;
+
+        const sources=activeFilterDataSource==='solo' ? ['solo'] :
+          activeFilterDataSource==='council' ? ['council'] : ['solo','council'];
+        const binStream=g.stream==='SummerRecycling' ? 'Recycling' : g.stream;
+        let hasVisibleCollectedBin=false;
+
+        sources.forEach(src=>{
+          const bins=(src==='solo'?site.soloStreams:site.councilStreams)?.[binStream]||[];
+          bins.forEach((bin,idx)=>{
+            const p=gps(bin&&bin.lat,bin&&bin.lng) || sourceCoords(site,bin);
+            if(!p) return;
+            const serial=clean(bin.serial).toUpperCase();
+            if(serial && servicedBinSerials.has(serial)) return;
+
+            hasVisibleCollectedBin=true;
+            const key=`${siteId}|${src}|${g.stream}|${idx}|${serial}`;
+            const marker=L.circleMarker([p.lat,p.lng],{
+              pane:'lukez-bin-pane',
+              radius:7,
+              color:runColor,
+              weight:3,
+              fillColor:streamFill(g.stream),
+              fillOpacity:1
+            }).addTo(mapMarkersLayer);
+            marker.bindPopup(`<div><b>${esc(serial||'Bin')}</b><br>${esc(g.stream==='SummerRecycling'?'Summer Recycle':g.stream)} · ${esc(bin.size||'240L')}<br>Run ${esc(g.run)}</div>`);
+            activeMapCircleMarkers.set(key,{
+              layer:marker,lat:p.lat,lng:p.lng,stream:g.stream,
+              siteId,serial,run:g.run
+            });
+          });
+        });
+
+        if(hasVisibleCollectedBin && collectionPointForSite(site)){
+          if(!collectionMembership.has(siteId)) collectionMembership.set(siteId,new Set());
+          collectionMembership.get(siteId).add(g.run);
+        }
+      });
+    });
+
+    window.__lukezVisibleCollectionMembership=collectionMembership;
+    if(typeof window.drawCollectionPointMarkers==='function') window.drawCollectionPointMarkers();
+    if(typeof renderKmzEvidence==='function') renderKmzEvidence();
+    if(typeof updateMapHeaderInfo==='function') updateMapHeaderInfo(allVisible,groups);
+    if(window.userCurrentLocation && typeof updateMapTruckPosition==='function') updateMapTruckPosition();
+    requestAnimationFrame(()=>leafletMap&&leafletMap.invalidateSize());
+  };
+
+  /* Keep the picker labels and filter state in sync on the first tap. */
+  const oldChooseDay=window.chooseMapPickerDay;
+  window.chooseMapPickerDay=function(day,preserve){
+    const out=oldChooseDay&&oldChooseDay.apply(this,arguments);
+    document.querySelectorAll('#mapRunPickerDays .map-run-picker-btn').forEach(btn=>{
+      btn.classList.toggle('active',clean(btn.textContent)===({Monday:'MON',Tuesday:'TUE',Wednesday:'WED',Thursday:'THU',Friday:'FRI'}[String(day)]||clean(btn.textContent)));
+    });
+    return out;
+  };
+
+  stripSummerSelectionsWhenNotExplicit();
+  setTimeout(()=>{ if(leafletMap&&siteRecords&&siteRecords.length) window.renderMapData(); },0);
+})();
+</script>
 </body>
 </html>
