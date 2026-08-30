@@ -1802,7 +1802,7 @@
             <div class="map-toolbar-row">
               <button type="button" class="map-tool-btn" onclick="loadKmzForCurrentRun()">📥 KMZ File</button>
               <button type="button" class="map-tool-btn" onclick="openRunStyleModal()">🎨 Customise</button>
-              <button type="button" id="btnRoadSnap" class="map-tool-btn" onclick="toggleRoadSnapEditing()">✂️ Edit Boundary</button>
+              <button type="button" id="btnRoadSnap" class="map-tool-btn" onclick="toggleRoadSnapEditing()">✂️ Edit Boundary</button><button type="button" id="btnCreateCollectionPoint" class="map-tool-btn" onclick="startCollectionPointMode()">📍 Create collection point</button>
             </div>
           </div>
         </details>
@@ -2133,6 +2133,11 @@
   let runColorMap = {};
   let runDotColorMap = {};
   let houseDotsColor = '#8b5cf6';
+  let collectionPointHouseColor = '#f59e0b';
+  let selectedCollectionHouseIds = new Set();
+  let collectionPoints = JSON.parse(localStorage.getItem('lukezBunzCollectionPoints')||'{}');
+  let collectionPointMode = false;
+  let collectionPointDraftMarker = null;
 
   /*
     KMZ evidence is deliberately kept separate from property/bin master data.
@@ -2828,12 +2833,18 @@
     const flip=bin&&gps(bin.lat,bin.lng);
     return flip && (!prop || metersBetween(prop,flip)<=10) ? flip : null;
   }
+  function collectionPointForSite(site){ return collectionPoints[String(site.propId||site.siteId||'')]||null; }
   function sourceCoords(site,bin){
-    const prop=gps(site.lat,site.lng);
-    const flip=validBinFlipCoords(site,bin);
-    if(pinSourceMode==='property') return prop;
-    return flip;
+    const cp=collectionPointForSite(site);
+    if(cp&&Number.isFinite(Number(cp.lat))&&Number.isFinite(Number(cp.lng))) return {lat:Number(cp.lat),lng:Number(cp.lng),collectionPoint:true};
+    const prop=gps(site.lat,site.lng); const flip=validBinFlipCoords(site,bin);
+    if(pinSourceMode==='property') return prop; return flip;
   }
+  function saveCollectionPoints(){ localStorage.setItem('lukezBunzCollectionPoints',JSON.stringify(collectionPoints)); }
+  function toggleCollectionHouse(siteId){ const id=String(siteId); if(selectedCollectionHouseIds.has(id)) selectedCollectionHouseIds.delete(id); else selectedCollectionHouseIds.add(id); renderMapData(); }
+  function startCollectionPointMode(){ if(!selectedCollectionHouseIds.size){ alert('Select one or more houses first by tapping their triangles.'); return; } collectionPointMode=true; const b=document.getElementById('btnCreateCollectionPoint'); if(b)b.classList.add('active'); alert('Tap the map to place the collection point. You can drag the pin before saving.'); }
+  function placeCollectionPointDraft(latlng){ if(!leafletMap)return; if(collectionPointDraftMarker) leafletMap.removeLayer(collectionPointDraftMarker); collectionPointDraftMarker=L.marker(latlng,{draggable:true}).addTo(leafletMap).bindPopup('Collection point — drag to adjust, then Save').openPopup(); collectionPointDraftMarker.bindPopup(`<div><b>Collection point</b><br>${selectedCollectionHouseIds.size} house${selectedCollectionHouseIds.size===1?'':'s'} selected<br><button onclick="saveCollectionPointDraft()">Save collection point</button></div>`).openPopup(); }
+  function saveCollectionPointDraft(){ if(!collectionPointDraftMarker)return; const p=collectionPointDraftMarker.getLatLng(); const groupId='cp_'+Date.now(); selectedCollectionHouseIds.forEach(id=>collectionPoints[id]={id:groupId,lat:p.lat,lng:p.lng}); saveCollectionPoints(); selectedCollectionHouseIds.clear(); collectionPointMode=false; leafletMap.removeLayer(collectionPointDraftMarker); collectionPointDraftMarker=null; const b=document.getElementById('btnCreateCollectionPoint');if(b)b.classList.remove('active'); renderMapData(); }
   function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
   function initLeafletMap(){
     if(leafletMap)return;
@@ -2852,6 +2863,7 @@
     const followBtn=document.getElementById('btnTruckFollow');
     if(followBtn) followBtn.classList.toggle('active', isTruckFollowEnabled);
     applyHeadingUpMap();
+    leafletMap.on('click', e=>{ if(collectionPointMode) placeCollectionPointDraft(e.latlng); });
     setTimeout(()=>leafletMap&&leafletMap.invalidateSize(),100);
   }
   function mapRunLabel(){
@@ -3013,18 +3025,17 @@
 
   function drawHouseTriangle(site){
     if(!showHouseGpsDots) return;
-    const p=gps(site.lat,site.lng);
-    if(!p) return;
-    const color=houseDotsColor||'#8b5cf6';
-    const icon=L.divIcon({
-      className:'house-triangle-icon',
-      html:`<div style="width:15px;height:15px;background:${esc(color)};clip-path:polygon(50% 0%,0% 100%,100% 100%);border:1.5px solid #fff;filter:drop-shadow(0 1px 2px rgba(0,0,0,.45));"></div>`,
-      iconSize:[17,17],
-      iconAnchor:[8.5,8.5]
-    });
-    L.marker([p.lat,p.lng],{icon,keyboard:false})
-      .bindPopup(propertyPopup(site))
-      .addTo(mapMarkersLayer);
+    const p=gps(site.lat,site.lng); if(!p) return;
+    const id=String(site.propId||site.siteId||''); const cp=collectionPointForSite(site);
+    const selected=selectedCollectionHouseIds.has(id);
+    const color=selected?'#2563eb':(cp?collectionPointHouseColor:(houseDotsColor||'#8b5cf6'));
+    const icon=L.divIcon({className:'house-triangle-icon',html:`<div style="width:16px;height:16px;background:${esc(color)};clip-path:polygon(50% 0%,0% 100%,100% 100%);border:2px solid #fff;filter:drop-shadow(0 1px 2px rgba(0,0,0,.45));"></div>`,iconSize:[18,18],iconAnchor:[9,9]});
+    const label=cp?'Collection point house':(selected?'Selected house':'House');
+    L.marker([p.lat,p.lng],{icon,keyboard:false}).bindPopup(`<div><b>${esc(label)}</b><br>${esc(site.addressText||'')}<br><button onclick="toggleCollectionHouse('${esc(id)}')">${selected?'Remove selection':'Select house'}</button></div>`).on('click',()=>{}).addTo(mapMarkersLayer);
+  }
+  function drawCollectionPointMarkers(){
+    const groups={}; Object.entries(collectionPoints).forEach(([houseId,cp])=>{ if(!groups[cp.id])groups[cp.id]={cp,houses:[]}; groups[cp.id].houses.push(houseId); });
+    Object.values(groups).forEach(g=>{ L.marker([g.cp.lat,g.cp.lng],{icon:L.divIcon({className:'collection-point-pin',html:'<div style="font-size:24px;filter:drop-shadow(0 1px 2px #0006)">📍</div>',iconSize:[28,32],iconAnchor:[14,32]})}).bindPopup(`<div><b>Collection point</b><br>${g.houses.length} house${g.houses.length===1?'':'s'}<br>Bins collected here</div>`).addTo(mapMarkersLayer); });
   }
 
   function drawSite(site,key,i){
@@ -3376,6 +3387,7 @@
       runSites.forEach(site=>drawSite(site,key,i));
     });
 
+    drawCollectionPointMarkers();
     renderKmzEvidence();
     updateMapHeaderInfo(sites,groups);
     if(userCurrentLocation) updateMapTruckPosition();
@@ -3404,7 +3416,7 @@
     }).join('') : `<section class="run-style-section"><div class="run-style-help">Select exactly one run to change that run's colours.</div></section>`;
 
     const mapSection=`<section class="run-style-section"><div class="run-style-section-title">Map locations</div>
-      <div class="run-style-grid"><label class="color-control-card"><span>🔺 House triangles</span><input id="styleHouseDotsColor" type="color" value="${houseDotsColor||'#8b5cf6'}"></label></div>
+      <div class="run-style-grid"><label class="color-control-card"><span>🔺 House triangles</span><input id="styleHouseDotsColor" type="color" value="${houseDotsColor||'#8b5cf6'}"></label><label class="color-control-card"><span>📍 Collection-point houses</span><input id="styleCollectionHouseColor" type="color" value="${collectionPointHouseColor||'#f59e0b'}"></label></div>
       <div class="run-style-help">Houses are triangles. Bin dots only appear at a valid kerbside flip location.</div></section>`;
 
     const liftSection=`<section class="run-style-section"><div class="run-style-section-title">Bin lift points</div>
@@ -3422,7 +3434,7 @@
   }
 
   async function saveAndApplyRunStyles(){
-    const h=document.getElementById('styleHouseDotsColor');if(h)houseDotsColor=h.value;
+    const h=document.getElementById('styleHouseDotsColor');if(h)houseDotsColor=h.value; const ch=document.getElementById('styleCollectionHouseColor');if(ch)collectionPointHouseColor=ch.value;
     const r=document.getElementById('styleRecyclingLiftColor');if(r)recyclingLiftColor=r.value;
     const g=document.getElementById('styleGarbageLiftColor');if(g)garbageLiftColor=g.value;
     const f=document.getElementById('styleFogoLiftColor');if(f)fogoLiftColor=f.value;
