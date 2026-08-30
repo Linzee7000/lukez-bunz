@@ -2126,7 +2126,7 @@
   let showHouseGpsDots = false;
   let isSatelliteView = false;
 
-  let isTruckFollowEnabled = true;
+  let isTruckFollowEnabled = false;
   let hasAutoCenteredTruck = false;
   let isRoadSnapEditing = false;
 
@@ -2514,38 +2514,33 @@
   function applyHeadingUpMap() {
     if (!leafletMap) return;
 
-    // IMPORTANT: do not rotate Leaflet's mapPane itself. Leaflet continuously
-    // translates that pane while GPS follow is panning, which was causing the
-    // map to expose the grey container and could make tiles/markers disappear.
-    // Rotate the visual child panes instead, leaving Leaflet's own geometry intact.
-    const paneNames = ['tilePane','overlayPane','shadowPane','markerPane','tooltipPane','popupPane'];
-    const heading = isTruckFollowEnabled ? Number(lastValidHeading || 0) : 0;
-    const rotate = -heading;
-
+    // Keep Leaflet's panes completely under Leaflet's own control. The previous
+    // CSS pane rotation fought Leaflet's pan/zoom transforms and was the cause
+    // of the grey screen and disappearing tiles/markers as soon as Follow moved.
+    // Clear any leftover rotation/scale from an older session before following.
+    const paneNames = ['tilePane','overlayPane','shadowPane','markerPane','tooltipPane','popupPane','mapPane'];
     paneNames.forEach(name => {
       const pane = leafletMap.getPane(name);
       if (!pane) return;
-      pane.style.transformOrigin = '50% 50%';
-      pane.style.rotate = `${rotate}deg`;
-      // Only enlarge the tile pane. Scaling markers/labels makes them look wrong.
-      pane.style.scale = (isTruckFollowEnabled && name === 'tilePane') ? '1.75' : '1';
+      pane.style.removeProperty('rotate');
+      pane.style.removeProperty('scale');
+      pane.style.removeProperty('transform-origin');
     });
-
-    const mapPane = leafletMap.getPane('mapPane');
-    if (mapPane) {
-      mapPane.style.rotate = '0deg';
-      mapPane.style.scale = '1';
-    }
   }
 
   function toggleTruckFollow() {
     isTruckFollowEnabled = !isTruckFollowEnabled;
+    hasAutoCenteredTruck = false;
+
     const btn = document.getElementById('btnTruckFollow');
-    btn.classList.toggle('active', isTruckFollowEnabled);
+    if (btn) btn.classList.toggle('active', isTruckFollowEnabled);
+
     applyHeadingUpMap();
-    if (leafletMap) setTimeout(()=>leafletMap.invalidateSize({pan:false}),0);
+
     if (isTruckFollowEnabled && userCurrentLocation && leafletMap) {
-      leafletMap.setView([userCurrentLocation.lat, userCurrentLocation.lng], 18);
+      // Follow immediately, then every later GPS update keeps the same view.
+      leafletMap.setView([userCurrentLocation.lat, userCurrentLocation.lng], Math.max(leafletMap.getZoom(), 18), { animate:false });
+      hasAutoCenteredTruck = true;
     }
   }
 
@@ -2623,8 +2618,8 @@
     const pos = [userCurrentLocation.lat, userCurrentLocation.lng];
     const headingDeg = lastValidHeading || 0;
 
-    // The map pane rotates by -heading in Follow mode. Rotating the truck by
-    // +heading here cancels that out, keeping the truck pointing straight up.
+    // Keep the truck marker aligned with the real GPS heading. Follow mode only
+    // recentres the map here; it does not apply CSS transforms to Leaflet panes.
     const truckIcon = L.divIcon({
       className: 'custom-gps-icon',
       html: `
@@ -2842,7 +2837,7 @@
     mapKmzRouteLayer=L.layerGroup().addTo(leafletMap);
     mapKmzLiftLayer=L.layerGroup().addTo(leafletMap);
     const followBtn=document.getElementById('btnTruckFollow');
-    if(followBtn) followBtn.classList.add('active');
+    if(followBtn) followBtn.classList.toggle('active', isTruckFollowEnabled);
     applyHeadingUpMap();
     setTimeout(()=>leafletMap&&leafletMap.invalidateSize(),100);
   }
@@ -3447,12 +3442,11 @@
 
     if (isTruckFollowEnabled && leafletMap) {
       if (!hasAutoCenteredTruck) {
-        leafletMap.setView([userCurrentLocation.lat, userCurrentLocation.lng], Math.max(leafletMap.getZoom(), 18), {animate:false});
+        leafletMap.setView([userCurrentLocation.lat, userCurrentLocation.lng], Math.max(leafletMap.getZoom(), 18), { animate:false });
         hasAutoCenteredTruck = true;
       } else {
-        leafletMap.panTo([userCurrentLocation.lat, userCurrentLocation.lng], {animate:false});
+        leafletMap.panTo([userCurrentLocation.lat, userCurrentLocation.lng], { animate:false });
       }
-      applyHeadingUpMap();
     }
 
     activeMapCircleMarkers.forEach((markerObj, markerKey) => {
