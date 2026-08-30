@@ -3102,13 +3102,45 @@
     return bits.join('');
   }
 
-  function buildBinsAtAddress(site) {
+  function getSelectedStreamsAtAddress(site) {
+    if (!site || !site.soloSchedule) return new Set();
+    const sch = site.soloSchedule;
+    const selected = selectedRunsSet || new Set();
+    const runToStream = [
+      ['Garbage', sch.garRun],
+      ['Recycling', sch.recRun],
+      ['SummerRecycling', sch.recSummerRun],
+      ['FOGO', sch.fogRun]
+    ];
+
+    // A selected run controls which stream's bins are shown in the live address box.
+    // If no run is selected, respect a stream filter; otherwise show all streams.
+    if (selected.size > 0) {
+      return new Set(
+        runToStream
+          .filter(([stream, run]) => run && selected.has(String(run).trim().toLowerCase()))
+          .map(([stream]) => stream)
+      );
+    }
+
+    if (activeFilterStream) {
+      return new Set([activeFilterStream]);
+    }
+
+    return new Set(runToStream.map(([stream]) => stream));
+  }
+
+  function buildBinsAtAddress(site, showSerial = true) {
     if (!site || !site.soloStreams) return '';
     const out=[];
+    const allowedStreams = getSelectedStreamsAtAddress(site);
+
     SOLO_STREAMS.forEach(st=>{
+      if (!allowedStreams.has(st.key)) return;
       const cls=st.key==='Garbage'?'address-bin-gar':(st.key==='Recycling'?'address-bin-rec':'address-bin-fog');
       (site.soloStreams[st.key]||[]).forEach(bin=>{
-        out.push(`<div class="address-bin-mini ${cls}"><div class="address-bin-stream"><span>${st.icon}</span><span>${esc(String(bin.size||'—'))}</span></div><div class="address-bin-serial">${esc(String(bin.serial||'—'))}</div></div>`);
+        const serialHtml = showSerial ? `<div class="address-bin-serial">${esc(String(bin.serial||'—'))}</div>` : '';
+        out.push(`<div class="address-bin-mini ${cls}"><div class="address-bin-stream"><span>${st.icon}</span><span>${esc(String(bin.size||'—'))}</span></div>${serialHtml}</div>`);
       });
     });
     return out.join('');
@@ -3118,11 +3150,15 @@
     const address = site ? (cleanStreetAddress(site.addressText)||site.baseStreetLine||'Address unavailable') : 'Scanning Street...';
     const meta = site ? (String(site.runFlags||'').trim() ? `🚩 ${esc(String(site.runFlags).trim())}` : getAddressSuburb(site)) : 'Scanning suburb...';
     const runs = buildRunsAtAddress(site);
-    const bins = buildBinsAtAddress(site);
+    const driveBins = buildBinsAtAddress(site, false);
+    const mapBins = buildBinsAtAddress(site, true);
     ['hudStreetName','mapLiveStreet'].forEach(id=>{const el=document.getElementById(id); if(el) el.innerText=address;});
     ['hudAddressMeta','mapAddressMeta'].forEach(id=>{const el=document.getElementById(id); if(el) el.innerHTML=meta;});
     ['hudRunsAtAddress','mapRunsAtAddress'].forEach(id=>{const el=document.getElementById(id); if(el) el.innerHTML=runs;});
-    ['hudBinsAtAddress','mapBinsAtAddress'].forEach(id=>{const el=document.getElementById(id); if(el) el.innerHTML=bins;});
+    const hudBins=document.getElementById('hudBinsAtAddress');
+    if(hudBins) hudBins.innerHTML=driveBins;
+    const mapBinsEl=document.getElementById('mapBinsAtAddress');
+    if(mapBinsEl) mapBinsEl.innerHTML=mapBins;
   }
 
   /* Driver HUD Screen Engine */
@@ -3169,20 +3205,30 @@
       if (dayFilter && !sch.day.toLowerCase().includes(dayFilter)) return;
       if (weekFilter && sch.weekLetter.toUpperCase() !== weekFilter) return;
 
-      let streamRun = '';
-      if (streamFilter === 'Garbage') streamRun = (sch.garRun || '').trim().toLowerCase();
-      else if (streamFilter === 'Recycling') streamRun = (sch.recRun || '').trim().toLowerCase();
-      else if (streamFilter === 'SummerRecycling') streamRun = (sch.recSummerRun || '').trim().toLowerCase();
-      else if (streamFilter === 'FOGO') streamRun = (sch.fogRun || '').trim().toLowerCase();
-      else streamRun = (sch.garRun || sch.recRun || sch.fogRun || '').trim().toLowerCase();
+      const scheduleRuns = {
+        Garbage: (sch.garRun || '').trim().toLowerCase(),
+        Recycling: (sch.recRun || '').trim().toLowerCase(),
+        SummerRecycling: (sch.recSummerRun || '').trim().toLowerCase(),
+        FOGO: (sch.fogRun || '').trim().toLowerCase()
+      };
+      const matchingSelectedStreams = Object.entries(scheduleRuns)
+        .filter(([stream, run]) => run && selectedRunsSet.has(run))
+        .map(([stream]) => stream);
+      const matchesSelectedRun = selectedRunsSet.size === 0 || matchingSelectedStreams.length > 0;
 
-      if (selectedRunsSet.size > 0 && isRunLocked && !selectedRunsSet.has(streamRun)) return;
+      // A run filter can match any stream at the property, not just Garbage.
+      if (selectedRunsSet.size > 0 && !matchesSelectedRun) return;
 
-      if (selectedRunsSet.size === 0 || selectedRunsSet.has(streamRun)) {
+      if (matchesSelectedRun) {
         activeRunHouses++;
-        const countStream=streamFilter==='SummerRecycling'?'Recycling':streamFilter;
-        if(countStream) activeRunBins+=(site.soloStreams[countStream]||[]).length;
-        else SOLO_STREAMS.forEach(st=>activeRunBins+=(site.soloStreams[st.key]||[]).length);
+        const countStreams = selectedRunsSet.size > 0
+          ? matchingSelectedStreams
+          : (streamFilter ? [streamFilter] : SOLO_STREAMS.map(st => st.key));
+        countStreams.forEach(key => {
+          // Summer recycling uses the Recycling bin stream.
+          const binKey = key === 'SummerRecycling' ? 'Recycling' : key;
+          activeRunBins += (site.soloStreams[binKey] || []).length;
+        });
       }
 
       if (site.lat && site.lng && Number(site.lat) !== 0) {
