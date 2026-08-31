@@ -5216,9 +5216,10 @@
   .map-stat-pill b { font-size: 20px !important; line-height: 1 !important; color: #166534 !important; }
   .map-stat-pill small { display: none !important; }
 
-  /* 3. Map Floating GPS & Layers Buttons */
+  /* 3. Floating Map Controls (Zoom, Layers, Target Follow, Track-Up) */
   #mapScreenContainer .map-side-layers-control,
   #mapScreenContainer .map-side-view-control,
+  #mapScreenContainer .map-side-track-control,
   #mapScreenContainer .leaflet-control-zoom,
   #mapScreenContainer .leaflet-bar {
     border: none !important;
@@ -5226,6 +5227,7 @@
   }
   #mapScreenContainer .map-side-layers-toggle,
   #mapScreenContainer .map-side-view-toggle,
+  #mapScreenContainer .map-side-track-toggle,
   #mapScreenContainer .leaflet-control-zoom a {
     width: 44px !important;
     height: 44px !important;
@@ -5246,11 +5248,33 @@
     overflow: hidden !important;
     font-size: 22px !important;
     line-height: 1 !important;
+    transition: all 0.15s ease !important;
   }
+
+  #mapScreenContainer .map-side-view-toggle.active {
+    background: #0284c7 !important;
+    border-color: #0369a1 !important;
+    color: #ffffff !important;
+    box-shadow: 0 0 0 3px rgba(2,132,199,0.3) !important;
+  }
+  #mapScreenContainer .map-side-view-toggle.active svg,
+  #mapScreenContainer .map-side-view-toggle.active img {
+    filter: brightness(0) invert(1) !important;
+  }
+
+  #mapScreenContainer .map-side-track-toggle.active {
+    background: #166534 !important;
+    border-color: #14532d !important;
+    color: #ffffff !important;
+    box-shadow: 0 0 0 3px rgba(22,101,52,0.3) !important;
+  }
+
   #mapScreenContainer .map-side-layers-toggle img,
   #mapScreenContainer .map-side-view-toggle img,
+  #mapScreenContainer .map-side-track-toggle img,
   #mapScreenContainer .map-side-layers-toggle svg,
-  #mapScreenContainer .map-side-view-toggle svg {
+  #mapScreenContainer .map-side-view-toggle svg,
+  #mapScreenContainer .map-side-track-toggle svg {
     width: 24px !important;
     height: 24px !important;
     max-width: 24px !important;
@@ -5367,6 +5391,8 @@
     ['Monday', 'MON'], ['Tuesday', 'TUE'], ['Wednesday', 'WED'], ['Thursday', 'THU'], ['Friday', 'FRI']
   ];
 
+  let isTrackUpEnabled = false;
+
   const q = id => document.getElementById(id);
   const clean = v => (v === null || v === undefined) ? '' : String(v).trim();
   const lower = v => clean(v).toLowerCase();
@@ -5398,25 +5424,16 @@
     };
   }
 
-  /* Strict validation rules for Recycling to exclude all summer runs */
   function isValidRecycleRun(runStr, dayStr, weekStr) {
     const r = parseInt(runStr, 10);
     if (isNaN(r)) return false;
     const d = lower(dayStr);
     const w = clean(weekStr).toUpperCase();
 
-    // 228 only on Thursday Week B
     if (r === 228) return d === 'thursday' && w === 'B';
-
-    // Base standard runs: 219 - 227
     if (r < 219 || r > 227) return false;
-
-    // Week B doesn't have 222 on Monday or Tuesday
     if (w === 'B' && r === 222 && (d === 'monday' || d === 'tuesday')) return false;
-
-    // Week A doesn't have 220 or 222 on Monday
     if (w === 'A' && (r === 220 || r === 222) && d === 'monday') return false;
-
     return true;
   }
 
@@ -5434,22 +5451,18 @@
     const d = dayKey(activeFilterDay);
     const wk = clean(activeFilterWeek).toUpperCase();
 
-    // 1. Stream
     q('mapRunPickerStreams').innerHTML = STREAMS.map(x =>
       `<button type="button" class="unified-filter-btn ${x.cls} ${st === x.key ? 'active' : ''}" data-st="${x.key}">${x.label}</button>`
     ).join('');
 
-    // 2. Data Source
     q('mapRunPickerSources').innerHTML = SOURCES.map(x =>
       `<button type="button" class="unified-filter-btn ${src === x.key ? 'active' : ''}" data-src="${x.key}">${x.label}</button>`
     ).join('');
 
-    // 3. Day
     q('mapRunPickerDays').innerHTML = DAYS.map(([full, short]) =>
       `<button type="button" class="unified-filter-btn ${d === full ? 'active' : ''}" data-day="${full}">${short}</button>`
     ).join('');
 
-    // 4. Week (Only for Recycling & FOGO)
     const isRecOrFog = (st === 'Recycling' || st === 'FOGO');
     q('mapRunPickerWeekStep').style.display = isRecOrFog ? 'block' : 'none';
     if (isRecOrFog) {
@@ -5458,7 +5471,6 @@
       ).join('');
     }
 
-    // 5. Runs
     renderUnifiedRuns(st, d, isRecOrFog ? wk : '');
   }
 
@@ -5488,7 +5500,6 @@
           if (item.fogRun) runsMap.set(item.fogRun, { run: item.fogRun, cls: 'stream-fog' });
         }
       } else {
-        // ALL Streams
         if (item.garRun) runsMap.set(item.garRun, { run: item.garRun, cls: 'stream-gar' });
         if (item.recRun && isValidRecycleRun(item.recRun, item.day, item.week)) {
           runsMap.set(item.recRun, { run: item.recRun, cls: 'stream-rec' });
@@ -5509,7 +5520,6 @@
     }).join('');
   }
 
-  // Click Handlers for Modal Buttons
   q('mapRunPickerModal').addEventListener('click', e => {
     const b = e.target.closest('button');
     if (!b) return;
@@ -5566,25 +5576,488 @@
     if (p) p.open = !p.open;
   };
 
-  // Immediate Center on GPS Target Button Click
-  window.toggleMapSideView = function(ev) {
+  window.toggleTruckFollow = function(ev) {
     if (ev) ev.stopPropagation();
-    if (userCurrentLocation && Number.isFinite(userCurrentLocation.lat)) {
-      if (leafletMap) leafletMap.setView([userCurrentLocation.lat, userCurrentLocation.lng], Math.max(leafletMap.getZoom() || 0, 18), { animate: true });
-    } else {
-      forceRecheckGps();
+    isTruckFollowEnabled = !isTruckFollowEnabled;
+    hasAutoCenteredTruck = false;
+
+    const btn = document.getElementById('btnTruckFollowTarget');
+    if (btn) btn.classList.toggle('active', isTruckFollowEnabled);
+
+    if (isTruckFollowEnabled && userCurrentLocation && leafletMap) {
+      leafletMap.setView([userCurrentLocation.lat, userCurrentLocation.lng], Math.max(leafletMap.getZoom(), 18), { animate: true });
+      hasAutoCenteredTruck = true;
     }
-    const wrap = q('mapSideViewControl');
-    if (wrap) wrap.classList.toggle('open');
+  };
+  window.toggleMapSideView = window.toggleTruckFollow;
+
+  window.toggleTrackUpOrientation = function(ev) {
+    if (ev) ev.stopPropagation();
+    isTrackUpEnabled = !isTrackUpEnabled;
+
+    const btn = document.getElementById('btnTrackUpOrientation');
+    if (btn) {
+      btn.classList.toggle('active', isTrackUpEnabled);
+      btn.setAttribute('title', isTrackUpEnabled ? 'Track-Up (Heading active)' : 'North-Up');
+    }
+
+    applyMapHeadingRotation();
   };
 
-  /* Render Map Data Overrides (Correct Layer Panes, Outline vs Fill Colors, Boundaries) */
+  function applyMapHeadingRotation() {
+    const mapEl = document.getElementById('mainLeafletMap');
+    if (!mapEl) return;
+    if (isTrackUpEnabled && lastValidHeading !== undefined && isTruckFollowEnabled) {
+      mapEl.style.transform = `rotate(${-lastValidHeading}deg)`;
+      mapEl.style.transformOrigin = 'center center';
+    } else {
+      mapEl.style.transform = 'none';
+    }
+  }
+
+  const origInitLeafletMap = window.initLeafletMap;
+  window.initLeafletMap = function() {
+    if (origInitLeafletMap) origInitLeafletMap.apply(this, arguments);
+    if (!leafletMap) return;
+
+    if (!document.getElementById('mapSideFollowControl')) {
+      const followControl = L.control({ position: 'topright' });
+      followControl.onAdd = function() {
+        const wrap = L.DomUtil.create('div', 'leaflet-control map-side-view-control');
+        wrap.id = 'mapSideFollowControl';
+        wrap.innerHTML = `<button type="button" id="btnTruckFollowTarget" class="map-side-view-toggle ${isTruckFollowEnabled ? 'active' : ''}" onclick="toggleTruckFollow(event)" title="Follow GPS Position">🎯</button>`;
+        L.DomEvent.disableClickPropagation(wrap);
+        L.DomEvent.disableScrollPropagation(wrap);
+        return wrap;
+      };
+      followControl.addTo(leafletMap);
+    }
+
+    if (!document.getElementById('mapSideTrackControl')) {
+      const trackControl = L.control({ position: 'topright' });
+      trackControl.onAdd = function() {
+        const wrap = L.DomUtil.create('div', 'leaflet-control map-side-track-control');
+        wrap.id = 'mapSideTrackControl';
+        wrap.innerHTML = `<button type="button" id="btnTrackUpOrientation" class="map-side-track-toggle ${isTrackUpEnabled ? 'active' : ''}" onclick="toggleTrackUpOrientation(event)" title="Compass / Track-Up">🧭</button>`;
+        L.DomEvent.disableClickPropagation(wrap);
+        L.DomEvent.disableScrollPropagation(wrap);
+        return wrap;
+      };
+      trackControl.addTo(leafletMap);
+    }
+  };
+
+  /* Unified Site Matching across Search, Drive, and Map */
+  function siteMatchesAllActiveFilters(site) {
+    const item = getSiteRuns(site);
+    const dayFilter = dayKey(activeFilterDay);
+    const weekFilter = clean(activeFilterWeek).toUpperCase();
+    const st = clean(activeFilterStream);
+
+    if (dayFilter && item.day !== dayFilter) return false;
+    if ((st === 'Recycling' || st === 'FOGO') && weekFilter && item.week !== weekFilter) return false;
+
+    // Stream & Run Filtering
+    if (selectedRunsSet && selectedRunsSet.size > 0) {
+      const matchesRun = (
+        (st === 'Garbage' && selectedRunsSet.has(lower(item.garRun))) ||
+        (st === 'Recycling' && selectedRunsSet.has(lower(item.recRun)) && isValidRecycleRun(item.recRun, item.day, item.week)) ||
+        (st === 'SummerRecycling' && selectedRunsSet.has(lower(item.summerRun))) ||
+        (st === 'FOGO' && selectedRunsSet.has(lower(item.fogRun))) ||
+        (!st && (
+          selectedRunsSet.has(lower(item.garRun)) ||
+          (selectedRunsSet.has(lower(item.recRun)) && isValidRecycleRun(item.recRun, item.day, item.week)) ||
+          selectedRunsSet.has(lower(item.fogRun))
+        ))
+      );
+      if (!matchesRun) return false;
+    } else if (st) {
+      if (st === 'Garbage' && !item.garRun) return false;
+      if (st === 'Recycling' && (!item.recRun || !isValidRecycleRun(item.recRun, item.day, item.week))) return false;
+      if (st === 'SummerRecycling' && !item.summerRun) return false;
+      if (st === 'FOGO' && !item.fogRun) return false;
+    }
+
+    // Data Source Filter
+    if (activeFilterDataSource === 'solo') {
+      const hasSolo = (site.soloStreams?.Garbage?.length || site.soloStreams?.Recycling?.length || site.soloStreams?.FOGO?.length);
+      if (!hasSolo) return false;
+    } else if (activeFilterDataSource === 'council') {
+      const hasCouncil = (site.councilStreams?.Garbage?.length || site.councilStreams?.Recycling?.length || site.councilStreams?.FOGO?.length);
+      if (!hasCouncil) return false;
+    }
+
+    return true;
+  }
+
+  /* Search Page Handler: connects text query + modal stream/day/week/run filters */
+  window.handleSearch = function() {
+    const query = clean(q('searchInput')?.value).toLowerCase();
+    const resultsContainer = q('resultsList');
+    const summaryContainer = q('resultsSummary');
+    if (!resultsContainer) return;
+
+    const records = getRecordsArray();
+    const streamFilter = clean(activeFilterStream);
+    let matches = [];
+
+    records.forEach((site, idx) => {
+      if (!siteMatchesAllActiveFilters(site)) return;
+
+      const sch = site.soloSchedule || {};
+      const addrMatch = clean(site.addressText).toLowerCase().includes(query) ||
+                        clean(site.propId).toLowerCase().includes(query) ||
+                        clean(site.siteId).toLowerCase().includes(query);
+
+      const binMatch = query ? [
+        ...(site.soloStreams?.Garbage || []),
+        ...(site.soloStreams?.Recycling || []),
+        ...(site.soloStreams?.FOGO || [])
+      ].some(b => clean(b.serial).toLowerCase().includes(query)) : false;
+
+      const runMatch = query ? [
+        sch.garRun, sch.recRun, (streamFilter === 'SummerRecycling' ? sch.recSummerRun : ''), sch.fogRun
+      ].some(r => clean(r).toLowerCase().includes(query)) : false;
+
+      if (!query || addrMatch || binMatch || runMatch) {
+        let d = null;
+        if (userCurrentLocation && site.lat && site.lng) {
+          d = getDistanceMeters(userCurrentLocation.lat, userCurrentLocation.lng, Number(site.lat), Number(site.lng));
+        }
+        matches.push({ site, idx, dist: d });
+      }
+    });
+
+    if (userCurrentLocation) matches.sort((a, b) => (a.dist || 999999) - (b.dist || 999999));
+
+    if (summaryContainer) {
+      summaryContainer.style.display = 'block';
+      summaryContainer.innerText = `Found ${matches.length} properties:`;
+    }
+
+    resultsContainer.innerHTML = matches.slice(0, 30).map(({ site, dist }) => {
+      const navUrl = `https://www.google.com/maps/dir/?api=1&destination=${site.lat},${site.lng}&travelmode=driving`;
+      let hasAnyBins = false;
+
+      const councilBinsList = [
+        ...(site.councilStreams?.Garbage || []),
+        ...(site.councilStreams?.Recycling || []),
+        ...(site.councilStreams?.FOGO || [])
+      ];
+      const councilSerialsSet = new Set(councilBinsList.map(cb => clean(cb.serial).toUpperCase()));
+
+      let streamCountPillsHtml = '';
+      SOLO_STREAMS.forEach(st => {
+        if (streamFilter && streamFilter !== 'SummerRecycling' && st.key !== streamFilter) return;
+        const streamBins = site.soloStreams?.[st.key] || [];
+        if (streamBins.length > 0) {
+          streamCountPillsHtml += `<span class="stream-count-pill ${st.pillClass}">${st.icon} ${formatSizeSummary(streamBins)}</span>`;
+        }
+      });
+      const countsRowHtml = streamCountPillsHtml ? `<div class="stream-counts-row">${streamCountPillsHtml}</div>` : '';
+      const nextScheduledCollectionText = getNextCollectionDate(site.soloSchedule?.day, site.soloSchedule?.weekLetter);
+
+      const streamBoxesHtml = SOLO_STREAMS.map(st => {
+        if (streamFilter && streamFilter !== 'SummerRecycling' && streamFilter !== st.key) return '';
+        const soloBins = site.soloStreams?.[st.key] || [];
+        const councilBins = site.councilStreams?.[st.key] || [];
+
+        if (activeFilterDataSource === 'solo' && soloBins.length === 0) return '';
+        if (activeFilterDataSource === 'council' && councilBins.length === 0) return '';
+        if (soloBins.length === 0 && councilBins.length === 0) return '';
+        hasAnyBins = true;
+
+        let soloRunBadge = '';
+        if (st.key === 'Garbage' && site.soloSchedule?.garRun) {
+          soloRunBadge = `<span class="hdr-run-badge hdr-run-gar">🗑️ ${site.soloSchedule.garRun}</span>`;
+        }
+        if (st.key === 'Recycling' && site.soloSchedule?.recRun && streamFilter !== 'SummerRecycling') {
+          soloRunBadge = `<span class="hdr-run-badge hdr-run-rec">♻️ ${site.soloSchedule.recRun}</span>`;
+        }
+        if (st.key === 'Recycling' && streamFilter === 'SummerRecycling' && site.soloSchedule?.recSummerRun) {
+          soloRunBadge = `<span class="hdr-run-badge hdr-run-summer">☀️ ${site.soloSchedule.recSummerRun}</span>`;
+        }
+        if (st.key === 'FOGO' && site.soloSchedule?.fogRun) {
+          soloRunBadge = `<span class="hdr-run-badge hdr-run-fog">🌳 ${site.soloSchedule.fogRun}</span>`;
+        }
+
+        return `
+          <div class="stream-group-card">
+            <div class="stream-group-header ${st.headerClass}">
+              <span>${st.icon} ${st.label}</span>
+              <div>${soloRunBadge}</div>
+            </div>
+            <div class="serials-list">
+              ${activeFilterDataSource !== 'council' ? soloBins.map((b, bIdx) => `
+                <div class="bin-entry">
+                  <div class="serial-row">
+                    <div class="serial-left">
+                      ${b.unitLabel ? `<span class="unit-pill">${b.unitLabel}</span>` : ''}
+                      <span class="size-badge">${b.size || '240L'}</span>
+                      <span class="serial-text">${b.serial}</span>
+                    </div>
+                  </div>
+                </div>
+              `).join('') : ''}
+            </div>
+          </div>
+        `;
+      }).join('');
+
+      const cleanStreetOnly = (site.baseStreetLine || site.addressText?.split(',')[0] || '').trim();
+
+      return `
+        <div class="address-card" onclick="openPropertyInspectModal('${site.propId || site.siteId}')">
+          <div class="address-header-row">
+            <div>
+              <div class="address-line1">${cleanStreetOnly}</div>
+              <div class="address-line2">${site.suburbLine || ''}</div>
+            </div>
+            <div class="prop-header-actions">
+              <a href="${navUrl}" target="_blank" class="single-nav-btn" onclick="event.stopPropagation()">📍 Nav</a>
+              ${dist !== null ? `<span class="distance-pill">${Math.round(dist)}m</span>` : ''}
+            </div>
+          </div>
+          ${countsRowHtml}
+          <div class="schedule-bar">
+            <span>📅 ${site.soloSchedule?.day || ''} ${site.soloSchedule?.weekFormatted || ''}</span>
+            <span class="next-collection-tag">${nextScheduledCollectionText}</span>
+          </div>
+          ${hasAnyBins ? streamBoxesHtml : '<div style="font-size:13px; color:#94a3b8; font-style:italic; padding:4px 0;">no bins</div>'}
+        </div>
+      `;
+    }).join('') || '<div style="text-align:center; padding:30px; color:#64748b;">No matching properties found.</div>';
+  };
+
+  /* Drive HUD Page Handler: connects search input text + modal stream/day/week/run filters */
+  window.updateDriverHud = function() {
+    const listContainer = q('hudUpcomingList');
+    const streetNameEl = q('hudStreetName');
+    const runSummaryEl = q('hudRunSummary');
+    const houseCountEl = q('hudHouseCount');
+    const binCountEl = q('hudBinCount');
+    if (!listContainer) return;
+
+    if (!userCurrentLocation) {
+      listContainer.innerHTML = '<div style="text-align:center; padding:30px; color:#64748b;">Acquiring live GPS...</div>';
+      return;
+    }
+
+    const searchQuery = clean(q('searchInput')?.value).toLowerCase();
+    const records = getRecordsArray();
+    const upcoming = [];
+    const countedHouseIds = new Set();
+    let activeRunHouses = 0;
+    let activeRunBins = 0;
+
+    records.forEach(site => {
+      if (!siteMatchesAllActiveFilters(site)) return;
+
+      // Text Search Filtering on Drive Page
+      if (searchQuery) {
+        const addrMatch = clean(site.addressText).toLowerCase().includes(searchQuery) ||
+                          clean(site.propId).toLowerCase().includes(searchQuery) ||
+                          clean(site.siteId).toLowerCase().includes(searchQuery) ||
+                          clean(site.baseStreetLine).toLowerCase().includes(searchQuery);
+        if (!addrMatch) return;
+      }
+
+      const houseId = String(site.propId || site.siteId || site.addressText || '');
+      if (!countedHouseIds.has(houseId)) {
+        countedHouseIds.add(houseId);
+        activeRunHouses++;
+      }
+
+      const eligibleStreams = getDriveEligibleStreams(site);
+      const sources = activeFilterDataSource === 'solo' ? [site.soloStreams || {}] :
+                      activeFilterDataSource === 'council' ? [site.councilStreams || {}] :
+                      [site.soloStreams || {}, site.councilStreams || {}];
+
+      eligibleStreams.forEach(({ binStream }) => {
+        sources.forEach(src => {
+          activeRunBins += (src[binStream] || []).length;
+        });
+      });
+
+      if (site.lat && site.lng && Number(site.lat) !== 0) {
+        const d = getDistanceMeters(userCurrentLocation.lat, userCurrentLocation.lng, Number(site.lat), Number(site.lng));
+        const travelEval = evaluateTravelDirection(userCurrentLocation.lat, userCurrentLocation.lng, lastValidHeading, Number(site.lat), Number(site.lng), site.baseStreetLine);
+
+        if (travelMode === 'left' && travelEval.side !== 'left') return;
+        if (travelMode === 'right' && travelEval.side !== 'right') return;
+
+        if (d <= 200 && travelEval.isUpcoming) {
+          upcoming.push({ site, dist: d, travelEval });
+        }
+      }
+    });
+
+    if (houseCountEl) houseCountEl.innerText = activeRunHouses.toLocaleString();
+    if (binCountEl) binCountEl.innerText = activeRunBins.toLocaleString();
+    if (runSummaryEl) runSummaryEl.innerText = selectedRunsSet.size > 0 ? `Run: ${Array.from(selectedRunsSet).map(r => r.toUpperCase()).join(', ')}` : 'Run: All';
+
+    upcoming.sort((a, b) => a.dist - b.dist);
+    const liveStreetName = (upcoming.length > 0) ? (upcoming[0].site.baseStreetLine || upcoming[0].site.addressText?.split(',')[0] || '').trim() : 'Scanning Street...';
+    if (streetNameEl) streetNameEl.innerText = liveStreetName;
+
+    const mapLiveStreet = q('mapLiveStreet');
+    if (mapLiveStreet) mapLiveStreet.innerText = liveStreetName;
+
+    const currentSite = upcoming.length ? upcoming[0].site : null;
+    renderCurrentAddressTelemetry(currentSite);
+
+    listContainer.innerHTML = upcoming.slice(0, 10).map(({ site, dist }) => {
+      const sch = site.soloSchedule || {};
+      const cleanStreetOnly = (site.baseStreetLine || cleanStreetAddress(site.addressText)).trim();
+      const navUrl = `https://www.google.com/maps/dir/?api=1&destination=${site.lat},${site.lng}&travelmode=driving`;
+
+      let hasAnyBins = false;
+      const eligibleDriveStreams = new Set(getDriveEligibleStreams(site).map(x => x.binStream));
+      const displaySources = activeFilterDataSource === 'council' ? (site.councilStreams || {}) : (site.soloStreams || {});
+
+      const binPills = SOLO_STREAMS.map(st => {
+        if (!eligibleDriveStreams.has(st.key)) return '';
+        const bins = displaySources[st.key] || [];
+        if (bins.length === 0) return '';
+        hasAnyBins = true;
+
+        const themeClass = st.key === 'Garbage' ? 'hud-bin-gar' : (st.key === 'Recycling' ? 'hud-bin-rec' : 'hud-bin-fog');
+
+        return bins.map((b, binIndex) => {
+          const menuId = `binIssue_${site.propId || site.siteId}_${st.key}_${binIndex}`.replace(/[^a-zA-Z0-9_]/g, '_');
+          return `
+            <div class="hud-bin-item ${themeClass}">
+              <div class="hud-bin-stream">
+                <span class="hud-bin-icon">${st.icon}</span>
+                <span class="hud-bin-size">${b.size || '240L'}</span>
+              </div>
+              <div class="hud-bin-main">
+                <span class="hud-serial-large">${b.serial || '—'}</span>
+                <button class="bin-face-btn" title="Bin options" onclick="toggleBinIssueMenu(event, '${menuId}')">🙂</button>
+              </div>
+              <div class="bin-issue-menu" id="${menuId}">
+                ${['Contaminated','Heavy','Overfull','Prior spill','Jammed'].map(issue =>
+                  `<button data-issue="${issue}" onclick="setBinIssue(event, '${menuId}', '${issue}')">${issue}</button>`
+                ).join('')}
+              </div>
+            </div>`;
+        }).join('');
+      }).join('');
+
+      return `
+        <div class="address-card" onclick="openPropertyInspectModal('${site.propId || site.siteId}')">
+          <div class="address-header-row">
+            <div>
+              <div class="address-line1">${cleanStreetOnly}</div>
+            </div>
+            <div class="prop-header-actions">
+              <a href="${navUrl}" target="_blank" class="single-nav-btn" onclick="event.stopPropagation()">📍</a>
+              <span class="distance-pill">${Math.round(dist)}m</span>
+            </div>
+          </div>
+          <div class="hud-bin-container">
+            ${hasAnyBins ? binPills : '<span style="color:#94a3b8; font-style:italic; font-size:13px;">no bins</span>'}
+          </div>
+        </div>
+      `;
+    }).join('') || '<div style="text-align:center; padding:30px; color:#64748b; font-weight:700;">No upcoming bins ahead matching filter.</div>';
+  };
+
+  /* GPS Position Watcher & Side-of-Street Check */
+  window.onGpsPositionSuccess = function(pos) {
+    const accuracy = Math.round(pos.coords.accuracy);
+    const speedKmh = pos.coords.speed !== null && !isNaN(pos.coords.speed) ? Math.round(pos.coords.speed * 3.6) : 0;
+    
+    currentMapSpeedKmh = speedKmh;
+    userCurrentLocation = {
+      lat: pos.coords.latitude,
+      lng: pos.coords.longitude,
+      speed: speedKmh
+    };
+
+    if (pos.coords.heading !== null && !isNaN(pos.coords.heading) && pos.coords.heading >= 0) {
+      lastValidHeading = Math.round(pos.coords.heading);
+    } else if (lastGpsCoords.lat !== 0) {
+      const deltaDist = getDistanceMeters(lastGpsCoords.lat, lastGpsCoords.lng, userCurrentLocation.lat, userCurrentLocation.lng);
+      if (deltaDist >= 2.0) {
+        const calcHeading = getBearing(lastGpsCoords.lat, lastGpsCoords.lng, userCurrentLocation.lat, userCurrentLocation.lng);
+        if (!isNaN(calcHeading)) lastValidHeading = Math.round(calcHeading);
+      }
+    }
+
+    updateGpsBadgeUI(true, `🟢 ±${accuracy}m`);
+
+    const speedEl = document.getElementById('hudSpeed');
+    const headingEl = document.getElementById('hudGpsDirection');
+    if (speedEl) speedEl.innerText = `${speedKmh}`;
+    if (headingEl) {
+      const cardinal = getCardinalDirection(lastValidHeading);
+      headingEl.innerText = `🛰️ ±${accuracy}m · 🧭 ${cardinal} ${lastValidHeading}°`;
+    }
+
+    const mapSpeedEl = document.getElementById('mapLiveSpeed');
+    const mapHeadingEl = document.getElementById('mapGpsDirection');
+    if (mapSpeedEl) mapSpeedEl.innerText = `${speedKmh}`;
+    if (mapHeadingEl) {
+      const cardinal = getCardinalDirection(lastValidHeading);
+      mapHeadingEl.innerText = `🛰️ ±${accuracy}m · 🧭 ${cardinal} ${lastValidHeading}°`;
+    }
+
+    if (isTruckFollowEnabled && leafletMap) {
+      if (!hasAutoCenteredTruck) {
+        leafletMap.setView([userCurrentLocation.lat, userCurrentLocation.lng], Math.max(leafletMap.getZoom(), 18), { animate: false });
+        hasAutoCenteredTruck = true;
+      } else {
+        leafletMap.panTo([userCurrentLocation.lat, userCurrentLocation.lng], { animate: false });
+      }
+      applyMapHeadingRotation();
+    }
+
+    updateMapTruckPosition();
+
+    // Side of road check
+    activeMapCircleMarkers.forEach((markerObj, markerKey) => {
+      const binId = markerObj.serial || markerKey;
+      if (servicedBinSerials.has(binId)) return;
+
+      const d = getDistanceMeters(userCurrentLocation.lat, userCurrentLocation.lng, markerObj.lat, markerObj.lng);
+      if (d > 12) return;
+
+      const binBearing = getBearing(userCurrentLocation.lat, userCurrentLocation.lng, markerObj.lat, markerObj.lng);
+      const relAngle = (binBearing - (lastValidHeading || 0) + 360) % 360;
+
+      const isLeft = relAngle >= 200 && relAngle <= 340;
+      const isRight = relAngle >= 20 && relAngle <= 160;
+
+      if (travelMode === 'left' && !isLeft) return;
+      if (travelMode === 'right' && !isRight) return;
+      if (travelMode === 'all' && !(isLeft || isRight)) return;
+
+      if (speedKmh <= 6) {
+        servicedBinSerials.add(binId);
+        if (mapMarkersLayer && markerObj.layer) mapMarkersLayer.removeLayer(markerObj.layer);
+      } else if (d <= 9 && !missedBinSerials.has(binId)) {
+        missedBinSerials.add(binId);
+        if (markerObj.layer) {
+          markerObj.layer.setStyle({ fillColor: '#ef4444', color: '#ffffff', weight: 2 });
+        }
+      }
+    });
+
+    const movedDist = getDistanceMeters(lastGpsCoords.lat, lastGpsCoords.lng, userCurrentLocation.lat, userCurrentLocation.lng);
+    if (movedDist >= 2.0 || !lastTelemetrySite) {
+      lastGpsCoords = { ...userCurrentLocation };
+      if (activeTab === 'search') handleSearch();
+      updateDriverHud();
+    }
+  };
+
+  /* Render Map Data (Panes, Colors & Boundaries) */
   window.renderMapData = function() {
     if (typeof updateMapLiveRun === 'function') updateMapLiveRun();
     if (!leafletMap && typeof initLeafletMap === 'function') initLeafletMap();
     if (!leafletMap) return;
 
-    // Ensure dedicated z-index panes exist: Houses below Bins
     if (!leafletMap.getPane('lukez-house-pane')) leafletMap.createPane('lukez-house-pane');
     if (!leafletMap.getPane('lukez-bin-pane')) leafletMap.createPane('lukez-bin-pane');
     leafletMap.getPane('lukez-house-pane').style.zIndex = 620;
@@ -5661,9 +6134,9 @@
             const m = L.circleMarker([p.lat, p.lng], {
               pane: 'lukez-bin-pane',
               radius: 7,
-              color: runOutlineColor,      /* Outline is the run color */
+              color: runOutlineColor,
               weight: 2.5,
-              fillColor: fillColor,       /* Color is the stream color */
+              fillColor: fillColor,
               fillOpacity: 1
             }).bindPopup(`<div><b>${esc(serial || 'Bin')}</b><br>${esc(g.stream === 'SummerRecycling' ? 'Summer Recycle' : binStream)} · ${esc(bin.size || '240L')}<br>Run: ${esc(g.run)}</div>`).addTo(mapMarkersLayer);
 
@@ -5680,7 +6153,6 @@
     requestAnimationFrame(() => leafletMap && leafletMap.invalidateSize());
   };
 
-  /* Update Map Header info to apply correct stream background color to the run box */
   window.updateMapHeaderInfo = function(sites, groups) {
     const box = document.getElementById('mapRunColoredBox');
     const title = document.getElementById('mapRunTitleText');
@@ -5711,8 +6183,8 @@
   };
 
   window.triggerUniversalDataRefresh = function() {
-    if (activeTab === 'search' && typeof handleSearch === 'function') handleSearch();
-    if (activeTab === 'hud' && typeof updateDriverHud === 'function') updateDriverHud();
+    handleSearch();
+    updateDriverHud();
     if (activeTab === 'map') {
       if (!leafletMap && typeof initLeafletMap === 'function') initLeafletMap();
       if (leafletMap) leafletMap.invalidateSize();
