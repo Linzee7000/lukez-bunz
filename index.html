@@ -1818,6 +1818,12 @@
               <button type="button" id="btnRoadInOut" class="map-tool-btn" onclick="startRoadMode('drive-reverse-out')">↩️ Drive in · reverse out</button>
               <button type="button" id="btnRoadReverseIn" class="map-tool-btn" onclick="startRoadMode('reverse-in-drive-out')">↪️ Reverse in · drive out</button>
             </div>
+            <div class="map-toolbar-row map-run-setup-primary">
+              <button type="button" class="map-tool-btn" onclick="loadKmzForCurrentRun()">📥 KMZ File</button>
+              <button type="button" class="map-tool-btn" onclick="openRunStyleModal()">🎨 Customise</button>
+              <button type="button" id="btnRoadSnap" class="map-tool-btn" onclick="toggleRoadSnapEditing()">✂️ Edit Boundary</button>
+              <button type="button" id="btnSnapToRoads" class="map-tool-btn" onclick="snapActiveBoundaryToRoads()">🧲 Snap to Roads</button>
+            </div>
           </div>
         </details>
       </div>
@@ -5410,6 +5416,35 @@ function promptEditBin(propId, streamKey, binIdx) {
     gap: 6px !important;
   }
 
+  /* Special warning banner for Drive in/out and Collection Points */
+  .street-mode-flag-banner {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    border-radius: 8px;
+    font-size: 13.5px;
+    font-weight: 700;
+    margin-top: 6px;
+    margin-bottom: 6px;
+    letter-spacing: 0.02em;
+  }
+  .mode-flag-drive-out {
+    background: #ffedd5;
+    border: 1.5px solid #f97316;
+    color: #9a3412;
+  }
+  .mode-flag-reverse-in {
+    background: #dbeafe;
+    border: 1.5px solid #2563eb;
+    color: #1e40af;
+  }
+  .mode-flag-cp {
+    background: #fef3c7;
+    border: 1.5px solid #f59e0b;
+    color: #92400e;
+  }
+
   /* 5. Hide Duplicate Map Tools Summary */
   .map-controls-group > summary {
     display: none !important;
@@ -5585,6 +5620,7 @@ function promptEditBin(propId, streamKey, binIdx) {
   ];
 
   let isTrackUpEnabled = false;
+  let houseStreetModes = JSON.parse(localStorage.getItem('lukezBunzHouseStreetModes') || '{}');
 
   const q = id => document.getElementById(id);
   const clean = v => (v === null || v === undefined) ? '' : String(v).trim();
@@ -5914,6 +5950,62 @@ function promptEditBin(propId, streamKey, binIdx) {
     if (mapEditHandlesLayer) mapEditHandlesLayer.clearLayers();
   };
 
+  // Snap Boundary Vertices to Nearest Road/Kerbside Points
+  window.snapActiveBoundaryToRoads = async function() {
+    const runs = Array.from(selectedMapRuns());
+    if (runs.length !== 1) {
+      alert("Please select exactly one run to snap its boundary to roads.");
+      return;
+    }
+    const runKey = runs[0];
+    const records = getRecordsArray();
+    const kerbPoints = [];
+
+    records.forEach(site => {
+      if (siteMatchesAllActiveFilters(site)) {
+        if (site.lat && site.lng) kerbPoints.push({ lat: Number(site.lat), lng: Number(site.lng) });
+        ['Garbage','Recycling','FOGO'].forEach(st => {
+          (site.soloStreams?.[st] || []).forEach(b => {
+            if (b.lat && b.lng) kerbPoints.push({ lat: Number(b.lat), lng: Number(b.lng) });
+          });
+        });
+      }
+    });
+
+    if (kerbPoints.length < 3) {
+      alert("Not enough property coordinates found to snap boundary.");
+      return;
+    }
+
+    const snappedHull = typeof buildRunConvexHull === 'function' ? buildRunConvexHull(kerbPoints) : kerbPoints;
+    customRunBorders[runKey] = snappedHull.map(p => [p.lat, p.lng]);
+    await saveToDB("customRunBorders", customRunBorders);
+
+    renderMapData();
+    if (isRoadSnapEditing) enableBoundaryVertexHandles();
+    alert(`Boundary snapped to ${snappedHull.length} road collection points.`);
+  };
+
+  // Unified House Selection for Street Modes (Drive in / Reverse out & Reverse in / Drive out)
+  window.startRoadMode = function(type) {
+    if (!selectedCollectionHouseIds.size) {
+      alert('Select the houses on the street first by tapping on them, then click this button to apply.');
+      return;
+    }
+
+    const label = type === 'drive-reverse-out' ? 'Drive in · reverse out' : 'Reverse in · drive out';
+    selectedCollectionHouseIds.forEach(id => {
+      houseStreetModes[id] = { type, label };
+    });
+
+    localStorage.setItem('lukezBunzHouseStreetModes', JSON.stringify(houseStreetModes));
+    selectedCollectionHouseIds.clear();
+    collectionSelectionActive = false;
+
+    renderMapData();
+    alert(`Marked ${Object.keys(houseStreetModes).length} house(s) as ${label}.`);
+  };
+
   // Inject Controls onto Leaflet Map
   const origInitLeafletMap = window.initLeafletMap;
   window.initLeafletMap = function() {
@@ -6213,7 +6305,7 @@ function promptEditBin(propId, streamKey, binIdx) {
     const mapLiveStreet = q('mapLiveStreet');
     if (mapLiveStreet) mapLiveStreet.innerText = liveStreetName;
 
-    // Find nearest site for Street & Suburb header
+    // Nearest site for Street & Suburb header
     let nearestSiteOverall = null;
     let nearestDistOverall = Infinity;
     records.forEach(site => {
@@ -6266,6 +6358,19 @@ function promptEditBin(propId, streamKey, binIdx) {
         }).join('');
       }).join('');
 
+      // Check for Street Modes / Collection Point flags
+      const houseId = String(site.propId || site.siteId || '');
+      const streetMode = houseStreetModes[houseId];
+      const cp = collectionPoints[houseId];
+      let flagBannerHtml = '';
+
+      if (streetMode) {
+        const cls = streetMode.type === 'drive-reverse-out' ? 'mode-flag-drive-out' : 'mode-flag-reverse-in';
+        flagBannerHtml = `<div class="street-mode-flag-banner ${cls}">🚩 ${streetMode.label.toUpperCase()}</div>`;
+      } else if (cp) {
+        flagBannerHtml = `<div class="street-mode-flag-banner mode-flag-cp">🚩 📍 COLLECTION POINT HOUSE</div>`;
+      }
+
       return `
         <div class="address-card" onclick="openPropertyInspectModal('${site.propId || site.siteId}')">
           <div class="address-header-row">
@@ -6277,6 +6382,7 @@ function promptEditBin(propId, streamKey, binIdx) {
               <span class="distance-pill">${Math.round(dist)}m</span>
             </div>
           </div>
+          ${flagBannerHtml}
           <div class="hud-bin-container">
             ${hasAnyBins ? binPills : '<span style="color:#94a3b8; font-style:italic; font-size:13px;">no bins</span>'}
           </div>
@@ -6289,7 +6395,18 @@ function promptEditBin(propId, streamKey, binIdx) {
   function renderCurrentAddressTelemetry(site) {
     lastTelemetrySite = site || null;
     const address = site ? (cleanStreetAddress(site.addressText)||site.baseStreetLine||'Address unavailable') : 'Scanning Street...';
-    const meta = site ? (String(site.runFlags||'').trim() ? `🚩 ${esc(String(site.runFlags).trim())}` : getAddressSuburb(site)) : 'Scanning suburb...';
+    
+    // Check for Street Mode / Collection Point flags on current property
+    const houseId = site ? String(site.propId || site.siteId || '') : '';
+    const streetMode = houseStreetModes[houseId];
+    const cp = collectionPoints[houseId];
+    
+    let meta = site ? (String(site.runFlags||'').trim() ? `🚩 ${esc(String(site.runFlags).trim())}` : getAddressSuburb(site)) : 'Scanning suburb...';
+    if (streetMode) {
+      meta = `🚩 ${streetMode.label.toUpperCase()} · ` + meta;
+    } else if (cp) {
+      meta = `🚩 📍 COLLECTION POINT · ` + meta;
+    }
     
     ['hudStreetName','mapLiveStreet'].forEach(id=>{const el=document.getElementById(id); if(el) el.innerText=address;});
     ['hudAddressMeta','mapAddressMeta'].forEach(id=>{const el=document.getElementById(id); if(el) el.innerHTML=meta;});
@@ -6412,7 +6529,7 @@ function promptEditBin(propId, streamKey, binIdx) {
     }
   };
 
-  /* Interactive House Triangles */
+  /* Interactive House Triangles (Street Modes Coloring & Easy Tap Selection) */
   window.drawHouseTriangle = function(site) {
     const id = String(site.propId || site.siteId || '');
     const isSelected = selectedCollectionHouseIds.has(id);
@@ -6423,7 +6540,13 @@ function promptEditBin(propId, streamKey, binIdx) {
     if (!p) return;
     
     const cp = collectionPointForSite(site);
-    const color = isSelected ? '#2563eb' : (cp ? collectionPointHouseColor : (houseDotsColor || '#8b5cf6'));
+    const streetMode = houseStreetModes[id];
+    
+    // Dynamic Color Priority: Selected (Blue) > Drive in/out (Orange) > Reverse in/out (Blue) > Collection Point (Amber) > Default (Purple)
+    let color = isSelected ? '#2563eb' : (
+      streetMode ? (streetMode.type === 'drive-reverse-out' ? '#f97316' : '#2563eb') :
+      (cp ? collectionPointHouseColor : (houseDotsColor || '#8b5cf6'))
+    );
     
     const icon = L.divIcon({
       className: 'house-map-marker-icon',
@@ -6436,7 +6559,11 @@ function promptEditBin(propId, streamKey, binIdx) {
       iconAnchor: [17, 17]
     });
 
-    const label = cp ? 'Collection point house' : (isSelected ? 'Selected house' : 'House');
+    const label = isSelected ? 'Selected house' : (
+      streetMode ? streetMode.label :
+      (cp ? 'Collection point house' : 'House')
+    );
+
     const marker = L.marker([p.lat, p.lng], {
       icon,
       keyboard: false,
@@ -6465,7 +6592,7 @@ function promptEditBin(propId, streamKey, binIdx) {
     marker.addTo(mapMarkersLayer);
   };
 
-  /* Render Map Data (Scalable to 97k Sites with Zero Crashes) */
+  /* Render Map Data (Zero Crash Scaling) */
   window.renderMapData = function() {
     if (typeof updateMapLiveRun === 'function') updateMapLiveRun();
     if (!leafletMap && typeof initLeafletMap === 'function') initLeafletMap();
@@ -6522,7 +6649,6 @@ function promptEditBin(propId, streamKey, binIdx) {
     let totalMatchingSites = 0;
     groups.forEach(g => { totalMatchingSites += g.sites.length; });
 
-    // Performance safety: Only mount individual DOM dots when a filter is applied or <= 3,500 sites
     const shouldDrawIndividualMarkers = (st !== '' || selected.size > 0 || activeFilterDay !== '' || totalMatchingSites <= 3500);
 
     [...groups.values()].forEach((g, i) => {
