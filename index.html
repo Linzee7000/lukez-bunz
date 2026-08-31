@@ -7101,5 +7101,140 @@ window.toggleMapToolsPanel=()=>{const p=document.querySelector('.map-controls-gr
 })();
 </script>
 
+
+<script id="filter-button-hard-fix">
+(function(){
+  function clean(v){ return String(v == null ? '' : v).trim(); }
+
+  function get(id){ return document.getElementById(id); }
+
+  function syncModalFromActive(){
+    var stream=get('modalStreamSelect');
+    var source=get('modalDataSourceSelect');
+    var day=get('modalDaySelect');
+    var week=get('modalWeekSelect');
+
+    if(stream) stream.value=clean(window.activeFilterStream || activeFilterStream);
+    if(source) source.value=clean(window.activeFilterDataSource || activeFilterDataSource) || 'all';
+    if(day) day.value=clean(window.activeFilterDay || activeFilterDay);
+    if(week) week.value=clean(window.activeFilterWeek || activeFilterWeek);
+  }
+
+  function openFiltersNow(){
+    var modal=get('filterOptionsModal');
+    if(!modal) return;
+
+    syncModalFromActive();
+
+    try {
+      if(typeof window.__renderUnifiedFilterControls==='function') {
+        window.__renderUnifiedFilterControls();
+      }
+      if(typeof window.populateModalRunsChecklist==='function') {
+        window.populateModalRunsChecklist();
+      }
+    } catch(e) {
+      console.error('Filter controls refresh failed', e);
+    }
+
+    modal.classList.add('open');
+  }
+
+  function applyFiltersNow(){
+    var stream=get('modalStreamSelect');
+    var source=get('modalDataSourceSelect');
+    var day=get('modalDaySelect');
+    var week=get('modalWeekSelect');
+
+    activeFilterStream=clean(stream && stream.value);
+    activeFilterDataSource=clean(source && source.value) || 'all';
+    activeFilterDay=clean(day && day.value);
+    activeFilterWeek=clean(week && week.value);
+
+    /* Summer is explicit only. Remove any selected run that belongs to
+       recSummerRun unless the Summer stream itself is selected. */
+    if(activeFilterStream !== 'SummerRecycling' && typeof siteRecords !== 'undefined'){
+      var summerRuns=new Set();
+      (siteRecords || []).forEach(function(site){
+        var sch=site && site.soloSchedule;
+        var r=clean(sch && sch.recSummerRun).toLowerCase();
+        if(r) summerRuns.add(r);
+      });
+      if(typeof selectedRunsSet !== 'undefined' && selectedRunsSet){
+        Array.from(selectedRunsSet).forEach(function(run){
+          var key=clean(run).toLowerCase();
+          if(/\bsummer\b/i.test(key) || summerRuns.has(key)) selectedRunsSet.delete(run);
+        });
+      }
+    }
+
+    var modal=get('filterOptionsModal');
+    if(modal) modal.classList.remove('open');
+
+    try {
+      if(typeof window.renderActiveFilterChips==='function') window.renderActiveFilterChips();
+      if(typeof window.triggerUniversalDataRefresh==='function') window.triggerUniversalDataRefresh();
+    } catch(e) {
+      console.error('Filter refresh failed', e);
+    }
+
+    requestAnimationFrame(function(){
+      try {
+        if(typeof leafletMap !== 'undefined' && leafletMap) leafletMap.invalidateSize();
+        if(typeof window.renderMapData==='function') window.renderMapData();
+      } catch(e) {
+        console.error('Map filter redraw failed', e);
+      }
+    });
+  }
+
+  /* These global functions are used by the existing HTML onclick handlers. */
+  window.openFilterDrawerModal=openFiltersNow;
+  window.openMapRunPicker=openFiltersNow;
+  window.applyModalFilters=applyFiltersNow;
+
+  function wireButtons(){
+    var filter=get('btnFilterMenu');
+    if(filter){
+      filter.onclick=function(ev){
+        ev.preventDefault();
+        ev.stopPropagation();
+        openFiltersNow();
+      };
+    }
+
+    var mapRun=get('mapRunColoredBox');
+    if(mapRun){
+      mapRun.onclick=function(ev){
+        ev.preventDefault();
+        openFiltersNow();
+      };
+    }
+
+    var modal=get('filterOptionsModal');
+    if(modal){
+      var applyButtons=Array.from(modal.querySelectorAll('button'));
+      applyButtons.forEach(function(btn){
+        if(clean(btn.textContent).toLowerCase().indexOf('apply filters')!==-1){
+          btn.onclick=function(ev){
+            ev.preventDefault();
+            ev.stopPropagation();
+            applyFiltersNow();
+          };
+        }
+      });
+    }
+  }
+
+  if(document.readyState==='loading'){
+    document.addEventListener('DOMContentLoaded', wireButtons);
+  } else {
+    wireButtons();
+  }
+  setTimeout(wireButtons, 0);
+  setTimeout(wireButtons, 250);
+})();
+</script>
+
 </body>
 </html>
