@@ -5228,7 +5228,7 @@ function promptEditBin(propId, streamKey, binIdx) {
 </div>
 
 <style id="unified-clean-styles">
-  /* 1. Hide the standalone Map Tools bar under top bar */
+  /* 1. Hide the standalone Map Tools summary bar under top bar */
   .map-controls-group > summary {
     display: none !important;
   }
@@ -5295,7 +5295,7 @@ function promptEditBin(propId, streamKey, binIdx) {
   .map-stat-pill b { font-size: 20px !important; line-height: 1 !important; color: #166534 !important; }
   .map-stat-pill small { display: none !important; }
 
-  /* 3. Floating Map Controls (Zoom, Layers, Target Follow, Track-Up) */
+  /* 3. Floating Map Controls (Zoom, Layers, Target Follow, Track-Up Arrow) */
   #mapScreenContainer .map-side-layers-control,
   #mapScreenContainer .map-side-view-control,
   #mapScreenContainer .map-side-track-control,
@@ -5330,7 +5330,6 @@ function promptEditBin(propId, streamKey, binIdx) {
     transition: all 0.15s ease !important;
   }
 
-  /* Active states for Follow Me and Track-Up buttons */
   #mapScreenContainer .map-side-view-toggle.active {
     background: #0284c7 !important;
     border-color: #0369a1 !important;
@@ -5692,7 +5691,6 @@ function promptEditBin(propId, streamKey, binIdx) {
     applyMapHeadingRotation();
   };
 
-  // Dynamic real-time arrow rotation matching truck heading
   function applyMapHeadingRotation() {
     const arrowBtnSvg = document.querySelector('#btnTrackUpOrientation svg');
     if (arrowBtnSvg) {
@@ -5708,7 +5706,6 @@ function promptEditBin(propId, streamKey, binIdx) {
     if (origInitLeafletMap) origInitLeafletMap.apply(this, arguments);
     if (!leafletMap) return;
 
-    // Focus immediately on driver's current position if known
     if (userCurrentLocation && Number.isFinite(userCurrentLocation.lat)) {
       leafletMap.setView([userCurrentLocation.lat, userCurrentLocation.lng], leafletMap.getZoom() || 18);
     }
@@ -5756,7 +5753,6 @@ function promptEditBin(propId, streamKey, binIdx) {
     if (dayFilter && item.day !== dayFilter) return false;
     if ((st === 'Recycling' || st === 'FOGO') && weekFilter && item.week !== weekFilter) return false;
 
-    // Stream & Run Filtering
     if (selectedRunsSet && selectedRunsSet.size > 0) {
       const matchesRun = (
         (st === 'Garbage' && selectedRunsSet.has(lower(item.garRun))) ||
@@ -6052,7 +6048,7 @@ function promptEditBin(propId, streamKey, binIdx) {
     }).join('') || '<div style="text-align:center; padding:30px; color:#64748b; font-weight:700;">No upcoming bins ahead matching filter.</div>';
   };
 
-  /* GPS Position Watcher: Preserves user manual zoom and updates real-time arrow rotation */
+  /* GPS Position Watcher */
   window.onGpsPositionSuccess = function(pos) {
     const accuracy = Math.round(pos.coords.accuracy);
     const speedKmh = pos.coords.speed !== null && !isNaN(pos.coords.speed) ? Math.round(pos.coords.speed * 3.6) : 0;
@@ -6092,7 +6088,6 @@ function promptEditBin(propId, streamKey, binIdx) {
       mapHeadingEl.innerText = `🛰️ ±${accuracy}m · 🧭 ${cardinal} ${lastValidHeading}°`;
     }
 
-    // Follow Me
     if (isTruckFollowEnabled && leafletMap) {
       if (!hasAutoCenteredTruck) {
         leafletMap.setView([userCurrentLocation.lat, userCurrentLocation.lng], leafletMap.getZoom() || 18, { animate: false });
@@ -6102,11 +6097,9 @@ function promptEditBin(propId, streamKey, binIdx) {
       }
     }
 
-    // Real-time navigation arrow rotation
     applyMapHeadingRotation();
     updateMapTruckPosition();
 
-    // Strict Side-of-Street Check
     activeMapCircleMarkers.forEach((markerObj, markerKey) => {
       const binId = markerObj.serial || markerKey;
       if (servicedBinSerials.has(binId)) return;
@@ -6143,7 +6136,47 @@ function promptEditBin(propId, streamKey, binIdx) {
     }
   };
 
-  /* Render Map Data */
+  /* Enhanced Interactive House Triangles */
+  window.drawHouseTriangle = function(site) {
+    const p = gps(site.lat, site.lng);
+    if (!p) return;
+    const id = String(site.propId || site.siteId || '');
+    const cp = collectionPointForSite(site);
+    const selected = selectedCollectionHouseIds.has(id);
+    const color = selected ? '#2563eb' : (cp ? collectionPointHouseColor : (houseDotsColor || '#8b5cf6'));
+    
+    const icon = L.divIcon({
+      className: 'house-triangle-icon',
+      html: `<div style="width:16px;height:16px;background:${esc(color)};clip-path:polygon(50% 0%,0% 100%,100% 100%);border:2px solid #fff;filter:drop-shadow(0 1px 2px rgba(0,0,0,.45));"></div>`,
+      iconSize: [18,18],
+      iconAnchor: [9,9]
+    });
+
+    const label = cp ? 'Collection point house' : (selected ? 'Selected house' : 'House');
+    const marker = L.marker([p.lat, p.lng], { icon, keyboard: false, pane: 'lukez-house-pane' });
+    
+    marker.bindPopup(`
+      <div>
+        <b>${esc(label)}</b><br>
+        ${esc(site.addressText || '')}<br>
+        <div style="display:flex; gap:4px; margin-top:6px;">
+          <button type="button" style="padding:3px 8px; border-radius:4px; border:1px solid #cbd5e1; background:#f1f5f9; cursor:pointer;" onclick="toggleCollectionHouse('${esc(id)}')">${selected ? 'Remove selection' : 'Select house'}</button>
+          <button type="button" style="padding:3px 8px; border-radius:4px; border:1px solid #cbd5e1; background:#f1f5f9; cursor:pointer;" onclick="openPropertyInspectModal('${esc(id)}')">Inspect</button>
+        </div>
+      </div>
+    `);
+
+    marker.on('click', () => {
+      if (collectionSelectionActive) {
+        toggleCollectionHouse(id);
+        marker.closePopup();
+      }
+    });
+
+    marker.addTo(mapMarkersLayer);
+  };
+
+  /* Render Map Data (Interactive Houses & Editable Bin Popups) */
   window.renderMapData = function() {
     if (typeof updateMapLiveRun === 'function') updateMapLiveRun();
     if (!leafletMap && typeof initLeafletMap === 'function') initLeafletMap();
@@ -6205,8 +6238,12 @@ function promptEditBin(propId, streamKey, binIdx) {
       }
 
       g.sites.forEach(site => {
+        const siteId = String(site.propId || site.siteId || '');
         allVisible.push(site);
-        if (typeof drawHouseTriangle === 'function') drawHouseTriangle(site);
+        
+        // Render interactive house marker
+        window.drawHouseTriangle(site);
+
         if (!showBinGpsDots) return;
 
         const sources = activeFilterDataSource === 'solo' ? ['solo'] : activeFilterDataSource === 'council' ? ['council'] : ['solo', 'council'];
@@ -6221,7 +6258,7 @@ function promptEditBin(propId, streamKey, binIdx) {
             const serial = clean(bin.serial).toUpperCase();
             if (serial && servicedBinSerials.has(serial)) return;
 
-            const key = `${site.propId || site.siteId}|${src}|${g.stream}|${idx}|${serial}`;
+            const key = `${siteId}|${src}|${g.stream}|${idx}|${serial}`;
             const m = L.circleMarker([p.lat, p.lng], {
               pane: 'lukez-bin-pane',
               radius: 7,
@@ -6229,9 +6266,23 @@ function promptEditBin(propId, streamKey, binIdx) {
               weight: 2.5,
               fillColor: fillColor,
               fillOpacity: 1
-            }).bindPopup(`<div><b>${esc(serial || 'Bin')}</b><br>${esc(g.stream === 'SummerRecycling' ? 'Summer Recycle' : binStream)} · ${esc(bin.size || '240L')}<br>Run: ${esc(g.run)}</div>`).addTo(mapMarkersLayer);
+            });
 
-            activeMapCircleMarkers.set(key, { layer: m, lat: p.lat, lng: p.lng, stream: binStream, siteId: String(site.propId || site.siteId || ''), serial });
+            // Action popup with Property & Edit Bin buttons
+            m.bindPopup(`
+              <div style="min-width:170px;">
+                <b>${esc(serial || 'Bin')}</b><br>
+                <span>${esc(g.stream === 'SummerRecycling' ? 'Summer Recycle' : binStream)} · ${esc(bin.size || '240L')}</span><br>
+                <small style="color:#64748b;">Run: ${esc(g.run)}</small>
+                <div style="display:flex; gap:6px; margin-top:8px;">
+                  <button type="button" style="flex:1; padding:4px 6px; font-size:12px; border-radius:4px; border:1px solid #cbd5e1; background:#f8fafc; cursor:pointer;" onclick="openPropertyInspectModal('${esc(siteId)}')">Property</button>
+                  ${src === 'solo' ? `<button type="button" style="flex:1; padding:4px 6px; font-size:12px; border-radius:4px; border:none; background:#2d6a4f; color:white; cursor:pointer;" onclick="promptEditBin('${esc(siteId)}', '${esc(binStream)}', ${idx})">Edit Bin</button>` : ''}
+                </div>
+              </div>
+            `);
+
+            m.addTo(mapMarkersLayer);
+            activeMapCircleMarkers.set(key, { layer: m, lat: p.lat, lng: p.lng, stream: binStream, siteId, serial });
           });
         });
       });
