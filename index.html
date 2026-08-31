@@ -5119,13 +5119,15 @@ function promptEditBin(propId, streamKey, binIdx) {
       } catch(e) {}
     }
 
-    pFill.style.width = '45%';
-    statusMsg.innerText = 'Step 2/3: Downloading master dataset...';
+   pFill.style.width = '45%';
+    statusMsg.innerText = 'Step 2/3: Downloading compressed master dataset (8.3 MB)...';
 
     try {
       let csvText = '';
 
+      // 1. Fetch the compressed .csv.gz file
       const res = await fetch("master_combined.csv.gz");
+      
       if (res.ok) {
         if (typeof DecompressionStream !== 'undefined') {
           const ds = new DecompressionStream('gzip');
@@ -5135,6 +5137,7 @@ function promptEditBin(propId, streamKey, binIdx) {
           throw new Error("DecompressionStream not supported in this browser.");
         }
       } else {
+        // Fallback: fetch uncompressed CSV if gz isn't found
         const fallbackRes = await fetch("master_combined_with_metadata.csv");
         if (!fallbackRes.ok) throw new Error("Could not download master dataset.");
         csvText = await fallbackRes.text();
@@ -5143,7 +5146,70 @@ function promptEditBin(propId, streamKey, binIdx) {
       pFill.style.width = '75%';
       statusMsg.innerText = 'Step 3/3: Re-indexing & caching runs...';
 
-      await processMasterCsvText(csvText);
+      const rows = parseCsvText(csvText);
+      const parsed = [];
+
+      for (let i = 1; i < rows.length; i++) {
+        const r = rows[i];
+        if (r.length < 5) continue;
+
+        const streetPart = (r[2] || '').split(',')[0].trim();
+        const baseStreet = streetPart.replace(/^(?:UNIT|FLAT|APT)\s*\d+\s*(?:\/|\s+)/i, '').replace(/^\d+\s*\/\s*/i, '').trim();
+
+        const soloStreams = { Garbage: [], Recycling: [], FOGO: [] };
+        SOLO_STREAMS.forEach(st => {
+          st.cols.forEach(cfg => {
+            const rawVal = r[cfg.idx] || '';
+            if (rawVal) soloStreams[st.key].push(...parseSoloBinCell(rawVal, cfg.sz));
+          });
+        });
+
+        const councilStreams = { Garbage: [], Recycling: [], FOGO: [] };
+        COUNCIL_STREAMS.forEach(st => {
+          st.cols.forEach(cfg => {
+            const rawVal = r[cfg.idx] || '';
+            if (rawVal) councilStreams[st.key].push(...parseCouncilBinCell(rawVal, cfg.sz));
+          });
+        });
+
+        parsed.push({
+          siteId: r[0] || '',
+          propId: r[1] || '',
+          addressText: r[2] || '',
+          baseStreetLine: baseStreet,
+          suburbLine: `${r[3] || ''} ${r[4] || ''}`.trim(),
+          soloSchedule: {
+            day: r[5] || 'Monday',
+            weekLetter: r[6] || 'A',
+            weekFormatted: r[6] ? `Week ${r[6]}` : 'Week A',
+            garRun: r[7] || '',
+            recRun: r[8] || '',
+            recSummerRun: r[9] || '',
+            fogRun: r[10] || ''
+          },
+          soloStreams: soloStreams,
+          councilStreams: councilStreams,
+          runFlags: r[18] || '',
+          parentSiteAddress: r[19] || '',
+          councilPropType: r[22] || 'Residential',
+          lat: r[20] || '',
+          lng: r[21] || ''
+        });
+      }
+
+      siteRecords = mergeEditsIntoRecords(parsed, masterEditsLog);
+      buildFastStreetIndex();
+      await saveToDB("masterRecords", siteRecords);
+      renderActiveFilterChips();
+      updateDriverHud();
+      if (activeTab === 'search') handleSearch();
+      if (activeTab === 'map') {
+        requestAnimationFrame(() => {
+          if (!leafletMap) initLeafletMap();
+          else leafletMap.invalidateSize();
+          renderMapData();
+        });
+      }
 
       pFill.style.width = '100%';
       statusMsg.innerText = '✅ Sync Complete!';
@@ -5155,15 +5221,17 @@ function promptEditBin(propId, streamKey, binIdx) {
 
     } catch(err) {
       console.warn(err);
-      pFill.style.width = '0%';
       statusMsg.innerHTML = '⚠️ Dataset not found online. <b>Tap here to select master CSV file</b>';
+      setTimeout(() => {
+        pWrap.style.display = 'none';
+        statusMsg.style.display = 'none';
+      }, 3000);
     } finally {
       if (btn) {
         btn.disabled = false;
         btn.classList.remove('spinning');
       }
     }
-  }
 
   function parseSoloBinCell(cellStr, size) {
     if (!cellStr) return [];
