@@ -5024,10 +5024,79 @@ function promptEditBin(propId, streamKey, binIdx) {
     }
   });
 
+  async function processMasterCsvText(csvText) {
+    const rows = parseCsvText(csvText);
+    const parsed = [];
+
+    for (let i = 1; i < rows.length; i++) {
+      const r = rows[i];
+      if (r.length < 5) continue;
+
+      const streetPart = (r[2] || '').split(',')[0].trim();
+      const baseStreet = streetPart.replace(/^(?:UNIT|FLAT|APT)\s*\d+\s*(?:\/|\s+)/i, '').replace(/^\d+\s*\/\s*/i, '').trim();
+
+      const soloStreams = { Garbage: [], Recycling: [], FOGO: [] };
+      SOLO_STREAMS.forEach(st => {
+        st.cols.forEach(cfg => {
+          const rawVal = r[cfg.idx] || '';
+          if (rawVal) soloStreams[st.key].push(...parseSoloBinCell(rawVal, cfg.sz));
+        });
+      });
+
+      const councilStreams = { Garbage: [], Recycling: [], FOGO: [] };
+      COUNCIL_STREAMS.forEach(st => {
+        st.cols.forEach(cfg => {
+          const rawVal = r[cfg.idx] || '';
+          if (rawVal) councilStreams[st.key].push(...parseCouncilBinCell(rawVal, cfg.sz));
+        });
+      });
+
+      parsed.push({
+        siteId: r[0] || '',
+        propId: r[1] || '',
+        addressText: r[2] || '',
+        baseStreetLine: baseStreet,
+        suburbLine: `${r[3] || ''} ${r[4] || ''}`.trim(),
+        soloSchedule: {
+          day: r[5] || 'Monday',
+          weekLetter: r[6] || 'A',
+          weekFormatted: r[6] ? `Week ${r[6]}` : 'Week A',
+          garRun: r[7] || '',
+          recRun: r[8] || '',
+          recSummerRun: r[9] || '',
+          fogRun: r[10] || ''
+        },
+        soloStreams: soloStreams,
+        councilStreams: councilStreams,
+        runFlags: r[18] || '',
+        parentSiteAddress: r[19] || '',
+        councilPropType: r[22] || 'Residential',
+        lat: r[20] || '',
+        lng: r[21] || ''
+      });
+    }
+
+    siteRecords = mergeEditsIntoRecords(parsed, masterEditsLog);
+    buildFastStreetIndex();
+    await saveToDB("masterRecords", siteRecords);
+    renderActiveFilterChips();
+    updateDriverHud();
+    if (activeTab === 'search') handleSearch();
+    if (activeTab === 'map') {
+      requestAnimationFrame(() => {
+        if (!leafletMap) initLeafletMap();
+        else leafletMap.invalidateSize();
+        renderMapData();
+      });
+    }
+  }
+
   async function startUpdateProcess() {
     const btn = document.getElementById('syncBtn');
-    btn.disabled = true;
-    btn.classList.add('spinning');
+    if (btn) {
+      btn.disabled = true;
+      btn.classList.add('spinning');
+    }
     startLiveLocationWatcher();
 
     const pWrap = document.getElementById('pBarWrap');
@@ -5051,80 +5120,33 @@ function promptEditBin(propId, streamKey, binIdx) {
     }
 
     pFill.style.width = '45%';
-    statusMsg.innerText = 'Step 2/3: Fetching latest master dataset...';
+    statusMsg.innerText = 'Step 2/3: Downloading master dataset...';
 
     try {
-      const res = await fetch("master_combined_with_metadata.csv");
-      if (!res.ok) throw new Error("Could not download CSV");
-      const csvText = await res.text();
+      let csvText = '';
+
+      // 1. Fetch 8.3 MB compressed file
+      const res = await fetch("master_combined.csv.gz");
       
+      if (res.ok) {
+        if (typeof DecompressionStream !== 'undefined') {
+          const ds = new DecompressionStream('gzip');
+          const decompressedStream = res.body.pipeThrough(ds);
+          csvText = await new Response(decompressedStream).text();
+        } else {
+          throw new Error("DecompressionStream not supported in this browser.");
+        }
+      } else {
+        // Fallback: fetch uncompressed CSV
+        const fallbackRes = await fetch("master_combined_with_metadata.csv");
+        if (!fallbackRes.ok) throw new Error("Could not download master dataset.");
+        csvText = await fallbackRes.text();
+      }
+
       pFill.style.width = '75%';
       statusMsg.innerText = 'Step 3/3: Re-indexing & caching runs...';
 
-      const rows = parseCsvText(csvText);
-      const parsed = [];
-
-      for (let i = 1; i < rows.length; i++) {
-        const r = rows[i];
-        if (r.length < 5) continue;
-
-        const streetPart = (r[2] || '').split(',')[0].trim();
-        const baseStreet = streetPart.replace(/^(?:UNIT|FLAT|APT)\s*\d+\s*(?:\/|\s+)/i, '').replace(/^\d+\s*\/\s*/i, '').trim();
-
-        const soloStreams = { Garbage: [], Recycling: [], FOGO: [] };
-        SOLO_STREAMS.forEach(st => {
-          st.cols.forEach(cfg => {
-            const rawVal = r[cfg.idx] || '';
-            if (rawVal) soloStreams[st.key].push(...parseSoloBinCell(rawVal, cfg.sz));
-          });
-        });
-
-        const councilStreams = { Garbage: [], Recycling: [], FOGO: [] };
-        COUNCIL_STREAMS.forEach(st => {
-          st.cols.forEach(cfg => {
-            const rawVal = r[cfg.idx] || '';
-            if (rawVal) councilStreams[st.key].push(...parseCouncilBinCell(rawVal, cfg.sz));
-          });
-        });
-
-        parsed.push({
-          siteId: r[0] || '',
-          propId: r[1] || '',
-          addressText: r[2] || '',
-          baseStreetLine: baseStreet,
-          suburbLine: `${r[3] || ''} ${r[4] || ''}`.trim(),
-          soloSchedule: {
-            day: r[5] || 'Monday',
-            weekLetter: r[6] || 'A',
-            weekFormatted: r[6] ? `Week ${r[6]}` : 'Week A',
-            garRun: r[7] || '',
-            recRun: r[8] || '',
-            recSummerRun: r[9] || '',
-            fogRun: r[10] || ''
-          },
-          soloStreams: soloStreams,
-          councilStreams: councilStreams,
-          runFlags: r[18] || '',
-          parentSiteAddress: r[19] || '',
-          councilPropType: r[22] || 'Residential',
-          lat: r[20] || '',
-          lng: r[21] || ''
-        });
-      }
-
-      siteRecords = mergeEditsIntoRecords(parsed, masterEditsLog);
-      buildFastStreetIndex();
-      await saveToDB("masterRecords", siteRecords);
-      renderActiveFilterChips();
-      updateDriverHud();
-      if (activeTab === 'search') handleSearch();
-      if (activeTab === 'map') {
-        requestAnimationFrame(() => {
-          if (!leafletMap) initLeafletMap();
-          else leafletMap.invalidateSize();
-          renderMapData();
-        });
-      }
+      await processMasterCsvText(csvText);
 
       pFill.style.width = '100%';
       statusMsg.innerText = '✅ Sync Complete!';
@@ -5136,14 +5158,13 @@ function promptEditBin(propId, streamKey, binIdx) {
 
     } catch(err) {
       console.warn(err);
-      statusMsg.innerText = '⚠️ Refresh complete with cached offline data.';
-      setTimeout(() => {
-        pWrap.style.display = 'none';
-        statusMsg.style.display = 'none';
-      }, 2000);
+      pFill.style.width = '0%';
+      statusMsg.innerHTML = '⚠️ Dataset not found online. <b>Tap here to select master CSV file</b>';
     } finally {
-      btn.disabled = false;
-      btn.classList.remove('spinning');
+      if (btn) {
+        btn.disabled = false;
+        btn.classList.remove('spinning');
+      }
     }
   }
 
@@ -5196,9 +5217,10 @@ function promptEditBin(propId, streamKey, binIdx) {
   }
 </script>
 
-  <input id="kmzFileInput" type="file" accept=".kmz,application/vnd.google-earth.kmz,application/zip" multiple style="display:none">
-<!-- Map Run Picker -->
-  
+<input id="kmzFileInput" type="file" accept=".kmz,.kml,application/vnd.google-earth.kmz,application/vnd.google-earth.kml+xml,application/zip,text/xml" multiple style="display:none">
+<input type="file" id="masterCsvFileInput" accept=".csv,text/csv" style="display:none;" onchange="handleMasterCsvFileSelect(event)">
+<input type="file" id="changesCsvFileInput" accept=".csv,text/csv" style="display:none;" onchange="handleChangesCsvFileSelect(event)">
+
 <!-- UNIFIED MODAL, FILTER ENGINE & MAP CONTROLS -->
 <div id="mapRunPickerModal" class="modal-overlay sub-modal-layer">
   <div class="modal-box map-run-picker-box">
@@ -5234,7 +5256,6 @@ function promptEditBin(propId, streamKey, binIdx) {
 </div>
 
 <style id="unified-clean-styles">
-  /* 1. Map Viewport & Track-Up Rotation Canvas */
   #mapScreenContainer {
     position: absolute !important;
     top: 0 !important;
@@ -5259,7 +5280,6 @@ function promptEditBin(propId, streamKey, binIdx) {
     z-index: 1 !important;
   }
 
-  /* 2. Floating Map Action Buttons Pinned to Viewport */
   #mapScreenContainer .leaflet-control-container {
     position: absolute !important;
     top: 0 !important;
@@ -5359,7 +5379,6 @@ function promptEditBin(propId, streamKey, binIdx) {
     margin: auto !important;
   }
 
-  /* 3. Layer Panes & Handle Interactivity */
   .leaflet-pane.lukez-house-pane,
   .leaflet-pane.lukez-bin-pane,
   .leaflet-pane.lukez-handle-pane {
@@ -5370,6 +5389,26 @@ function promptEditBin(propId, streamKey, binIdx) {
   .leaflet-pane.lukez-handle-pane .leaflet-marker-icon {
     pointer-events: auto !important;
     cursor: pointer !important;
+  }
+
+  .house-map-marker-icon {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    background: transparent !important;
+    border: none !important;
+  }
+
+  .bin-map-marker-icon {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    background: transparent !important;
+    border: none !important;
+    cursor: grab !important;
+  }
+  .bin-map-marker-icon:active {
+    cursor: grabbing !important;
   }
 
   .poly-edit-handle-dot {
@@ -5387,7 +5426,6 @@ function promptEditBin(propId, streamKey, binIdx) {
     cursor: grabbing !important;
   }
 
-  /* 4. Telemetry Card on Map (Identical to Drive HUD) */
   .map-address-telemetry {
     position: absolute !important;
     left: 10px !important;
@@ -5436,7 +5474,6 @@ function promptEditBin(propId, streamKey, binIdx) {
     color: #92400e;
   }
 
-  /* 5. Hide Duplicate Map Tools Summary */
   .map-controls-group > summary {
     display: none !important;
   }
@@ -5447,7 +5484,6 @@ function promptEditBin(propId, streamKey, binIdx) {
     box-shadow: none !important;
   }
 
-  /* 6. Top Summary Bar Styling */
   .map-summary-bar {
     display: grid !important;
     grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr) minmax(0, 1fr) 52px !important;
@@ -5503,7 +5539,6 @@ function promptEditBin(propId, streamKey, binIdx) {
   .map-stat-pill b { font-size: 20px !important; line-height: 1 !important; color: #166534 !important; }
   .map-stat-pill small { display: none !important; }
 
-  /* 7. Filter Modal Layout */
   .map-run-picker-box {
     max-width: 540px !important;
     width: min(94vw, 540px) !important;
@@ -5796,7 +5831,6 @@ function promptEditBin(propId, streamKey, binIdx) {
     if (p) p.open = !p.open;
   };
 
-  // Close Map Tools panel automatically upon clicking any tool or selecting a file
   document.addEventListener('click', e => {
     const btn = e.target.closest('.map-run-setup-section button');
     if (btn) {
@@ -5913,7 +5947,6 @@ function promptEditBin(propId, streamKey, binIdx) {
 
     records.forEach(site => {
       if (siteMatchesAllActiveFilters(site)) {
-        // STRICTLY use house coordinates (site.lat, site.lng), completely ignoring bins
         if (site.lat && site.lng && Number(site.lat) !== 0 && Number(site.lng) !== 0) {
           housePoints.push({ lat: Number(site.lat), lng: Number(site.lng) });
         }
@@ -6062,7 +6095,7 @@ function promptEditBin(propId, streamKey, binIdx) {
     if (mapEditHandlesLayer) mapEditHandlesLayer.clearLayers();
   };
 
-  // Unified House Selection for Street Modes (Drive in / Reverse out & Reverse in / Drive out)
+  // Unified House Selection for Street Modes
   window.startRoadMode = function(type) {
     if (!selectedCollectionHouseIds.size) {
       alert('Select the houses on the street first by tapping on them, then click this button to apply.');
@@ -6081,6 +6114,130 @@ function promptEditBin(propId, streamKey, binIdx) {
     renderMapData();
     alert(`Marked ${Object.keys(houseStreetModes).length} house(s) as ${label}.`);
   };
+
+  // 1. Export all edits to a dedicated changes CSV file
+  window.exportEditsCsv = function() {
+    if (!masterEditsLog || masterEditsLog.length === 0) {
+      alert("No changes recorded yet. Make edits to bins or properties first.");
+      return;
+    }
+
+    const headers = [
+      "timestamp", "editType", "propId", "siteId", "address", 
+      "origStream", "stream", "serial", "size", "make", 
+      "lidColour", "lat", "lng", "day", "weekLetter", 
+      "garRun", "recRun", "recSummerRun", "fogRun", "runFlags", "ratingStars", "ratingComment"
+    ];
+
+    const escapeCsv = val => {
+      if (val === null || val === undefined) return '""';
+      const str = String(val).replace(/"/g, '""');
+      return `"${str}"`;
+    };
+
+    const csvRows = [
+      headers.join(','),
+      ...masterEditsLog.map(ed => headers.map(h => escapeCsv(ed[h] || '')).join(','))
+    ];
+
+    const csvContent = csvRows.join('\r\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const now = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 16);
+    
+    a.href = url;
+    a.download = `LukezBunz_Changes_${now}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  // 2. Trigger Changes CSV File Dialog
+  window.triggerChangesCsvImport = function() {
+    const input = document.getElementById('changesCsvFileInput');
+    if (input) {
+      input.value = '';
+      input.click();
+    }
+  };
+
+  // 3. Handle and Apply Imported Changes File over Base Master Data
+  window.handleChangesCsvFileSelect = async function(event) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    try {
+      const csvText = await file.text();
+      const rows = parseCsvText(csvText);
+      if (rows.length < 2) throw new Error("File is empty or invalid format.");
+
+      const headers = rows[0].map(h => h.trim());
+      const newEdits = [];
+
+      for (let i = 1; i < rows.length; i++) {
+        const row = rows[i];
+        if (row.length < 2) continue;
+        const editObj = {};
+        headers.forEach((h, idx) => {
+          editObj[h] = row[idx] || '';
+        });
+        newEdits.push(editObj);
+      }
+
+      masterEditsLog = [...masterEditsLog, ...newEdits];
+      siteRecords = mergeEditsIntoRecords(siteRecords, masterEditsLog);
+
+      await saveToDB("masterRecords", siteRecords);
+      await saveToDB("masterEditsLog", masterEditsLog);
+
+      triggerUniversalDataRefresh();
+      alert(`Successfully loaded and applied ${newEdits.length} changes from ${file.name}!`);
+    } catch(err) {
+      console.error(err);
+      alert("Error importing changes CSV: " + err.message);
+    }
+  };
+
+  function triggerMasterCsvUpload() {
+    const fileInput = document.getElementById('masterCsvFileInput');
+    if (fileInput) fileInput.click();
+  }
+
+  async function handleMasterCsvFileSelect(event) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    const pWrap = document.getElementById('pBarWrap');
+    const pFill = document.getElementById('pBarFill');
+    const statusMsg = document.getElementById('syncStatusMsg');
+
+    pWrap.style.display = 'block';
+    statusMsg.style.display = 'block';
+    pFill.style.width = '30%';
+    statusMsg.innerText = 'Reading CSV file from device...';
+
+    try {
+      const csvText = await file.text();
+      pFill.style.width = '70%';
+      statusMsg.innerText = 'Indexing properties, runs & bins...';
+
+      await processMasterCsvText(csvText);
+
+      pFill.style.width = '100%';
+      statusMsg.innerText = '✅ Master data loaded & saved offline!';
+      setTimeout(() => {
+        pWrap.style.display = 'none';
+        statusMsg.style.display = 'none';
+        pFill.style.width = '0%';
+      }, 2000);
+    } catch(err) {
+      console.error(err);
+      alert("Failed to parse CSV: " + err.message);
+      statusMsg.innerText = '⚠️ Error parsing CSV file.';
+    }
+  }
 
   // Inject Controls onto Leaflet Map
   const origInitLeafletMap = window.initLeafletMap;
@@ -6134,6 +6291,47 @@ function promptEditBin(propId, streamKey, binIdx) {
       trackControl.addTo(leafletMap);
     }
   };
+
+  /* Unified Site Matching across Search, Drive, and Map */
+  function siteMatchesAllActiveFilters(site) {
+    const item = getSiteRuns(site);
+    const dayFilter = dayKey(activeFilterDay);
+    const weekFilter = clean(activeFilterWeek).toUpperCase();
+    const st = clean(activeFilterStream);
+
+    if (dayFilter && item.day !== dayFilter) return false;
+    if ((st === 'Recycling' || st === 'FOGO') && weekFilter && item.week !== weekFilter) return false;
+
+    if (selectedRunsSet && selectedRunsSet.size > 0) {
+      const matchesRun = (
+        (st === 'Garbage' && selectedRunsSet.has(lower(item.garRun))) ||
+        (st === 'Recycling' && selectedRunsSet.has(lower(item.recRun)) && isValidRecycleRun(item.recRun, item.day, item.week)) ||
+        (st === 'SummerRecycling' && selectedRunsSet.has(lower(item.summerRun))) ||
+        (st === 'FOGO' && selectedRunsSet.has(lower(item.fogRun))) ||
+        (!st && (
+          selectedRunsSet.has(lower(item.garRun)) ||
+          (selectedRunsSet.has(lower(item.recRun)) && isValidRecycleRun(item.recRun, item.day, item.week)) ||
+          selectedRunsSet.has(lower(item.fogRun))
+        ))
+      );
+      if (!matchesRun) return false;
+    } else if (st) {
+      if (st === 'Garbage' && !item.garRun) return false;
+      if (st === 'Recycling' && (!item.recRun || !isValidRecycleRun(item.recRun, item.day, item.week))) return false;
+      if (st === 'SummerRecycling' && !item.summerRun) return false;
+      if (st === 'FOGO' && !item.fogRun) return false;
+    }
+
+    if (activeFilterDataSource === 'solo') {
+      const hasSolo = (site.soloStreams?.Garbage?.length || site.soloStreams?.Recycling?.length || site.soloStreams?.FOGO?.length);
+      if (!hasSolo) return false;
+    } else if (activeFilterDataSource === 'council') {
+      const hasCouncil = (site.councilStreams?.Garbage?.length || site.councilStreams?.Recycling?.length || site.councilStreams?.FOGO?.length);
+      if (!hasCouncil) return false;
+    }
+
+    return true;
+  }
 
   /* Search Page Handler */
   window.handleSearch = function() {
