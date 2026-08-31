@@ -5228,7 +5228,25 @@ function promptEditBin(propId, streamKey, binIdx) {
 </div>
 
 <style id="unified-clean-styles">
-  /* 1. Hide the standalone Map Tools summary bar under top bar */
+  /* 1. Map Layer Pane Click Interactivity */
+  .leaflet-pane.lukez-house-pane {
+    z-index: 620 !important;
+    pointer-events: auto !important;
+  }
+  .leaflet-pane.lukez-house-pane * {
+    pointer-events: auto !important;
+    cursor: pointer !important;
+  }
+  .leaflet-pane.lukez-bin-pane {
+    z-index: 660 !important;
+    pointer-events: auto !important;
+  }
+  .leaflet-pane.lukez-bin-pane * {
+    pointer-events: auto !important;
+    cursor: pointer !important;
+  }
+
+  /* 2. Hide the duplicate Map Tools summary bar under top bar */
   .map-controls-group > summary {
     display: none !important;
   }
@@ -5239,7 +5257,7 @@ function promptEditBin(propId, streamKey, binIdx) {
     box-shadow: none !important;
   }
 
-  /* 2. Top Summary Bar Styling & Stream Colors */
+  /* 3. Top Summary Bar Styling & Stream Colors */
   .map-summary-bar {
     display: grid !important;
     grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr) minmax(0, 1fr) 52px !important;
@@ -5295,7 +5313,7 @@ function promptEditBin(propId, streamKey, binIdx) {
   .map-stat-pill b { font-size: 20px !important; line-height: 1 !important; color: #166534 !important; }
   .map-stat-pill small { display: none !important; }
 
-  /* 3. Floating Map Controls (Zoom, Layers, Target Follow, Track-Up Arrow) */
+  /* 4. Floating Map Controls (Zoom, Layers, Target Follow, Track-Up Arrow) */
   #mapScreenContainer .map-side-layers-control,
   #mapScreenContainer .map-side-view-control,
   #mapScreenContainer .map-side-track-control,
@@ -5369,7 +5387,7 @@ function promptEditBin(propId, streamKey, binIdx) {
     margin: auto !important;
   }
 
-  /* 4. Filter Modal Layout & Compact Buttons */
+  /* 5. Filter Modal Layout & Compact Buttons */
   .map-run-picker-box {
     max-width: 540px !important;
     width: min(94vw, 540px) !important;
@@ -5700,7 +5718,7 @@ function promptEditBin(propId, streamKey, binIdx) {
     }
   }
 
-  // Inject Zoom, Follow, and Arrow Controls onto the Map
+  // Inject Controls onto Leaflet Map
   const origInitLeafletMap = window.initLeafletMap;
   window.initLeafletMap = function() {
     if (origInitLeafletMap) origInitLeafletMap.apply(this, arguments);
@@ -6136,14 +6154,19 @@ function promptEditBin(propId, streamKey, binIdx) {
     }
   };
 
-  /* Enhanced Interactive House Triangles */
+  /* Interactive House Triangles (Respects Layer Visibility Toggle) */
   window.drawHouseTriangle = function(site) {
+    const id = String(site.propId || site.siteId || '');
+    const isSelected = selectedCollectionHouseIds.has(id);
+    
+    // Only render if Houses layer is ON or house is actively selected in drafting mode
+    if (!showHouseGpsDots && !collectionSelectionActive && !isSelected) return;
+
     const p = gps(site.lat, site.lng);
     if (!p) return;
-    const id = String(site.propId || site.siteId || '');
+    
     const cp = collectionPointForSite(site);
-    const selected = selectedCollectionHouseIds.has(id);
-    const color = selected ? '#2563eb' : (cp ? collectionPointHouseColor : (houseDotsColor || '#8b5cf6'));
+    const color = isSelected ? '#2563eb' : (cp ? collectionPointHouseColor : (houseDotsColor || '#8b5cf6'));
     
     const icon = L.divIcon({
       className: 'house-triangle-icon',
@@ -6152,16 +6175,16 @@ function promptEditBin(propId, streamKey, binIdx) {
       iconAnchor: [9,9]
     });
 
-    const label = cp ? 'Collection point house' : (selected ? 'Selected house' : 'House');
+    const label = cp ? 'Collection point house' : (isSelected ? 'Selected house' : 'House');
     const marker = L.marker([p.lat, p.lng], { icon, keyboard: false, pane: 'lukez-house-pane' });
     
     marker.bindPopup(`
-      <div>
+      <div style="min-width:180px;">
         <b>${esc(label)}</b><br>
-        ${esc(site.addressText || '')}<br>
-        <div style="display:flex; gap:4px; margin-top:6px;">
-          <button type="button" style="padding:3px 8px; border-radius:4px; border:1px solid #cbd5e1; background:#f1f5f9; cursor:pointer;" onclick="toggleCollectionHouse('${esc(id)}')">${selected ? 'Remove selection' : 'Select house'}</button>
-          <button type="button" style="padding:3px 8px; border-radius:4px; border:1px solid #cbd5e1; background:#f1f5f9; cursor:pointer;" onclick="openPropertyInspectModal('${esc(id)}')">Inspect</button>
+        <span style="font-size:13px; color:#475569;">${esc(site.addressText || '')}</span><br>
+        <div style="display:flex; gap:6px; margin-top:8px;">
+          <button type="button" style="flex:1; padding:4px 8px; font-size:12px; font-weight:700; border-radius:5px; border:1px solid #cbd5e1; background:#f1f5f9; cursor:pointer;" onclick="toggleCollectionHouse('${esc(id)}')">${isSelected ? 'Remove' : 'Select house'}</button>
+          <button type="button" style="flex:1; padding:4px 8px; font-size:12px; font-weight:700; border-radius:5px; border:none; background:#2d6a4f; color:white; cursor:pointer;" onclick="openPropertyInspectModal('${esc(id)}')">Inspect</button>
         </div>
       </div>
     `);
@@ -6176,7 +6199,7 @@ function promptEditBin(propId, streamKey, binIdx) {
     marker.addTo(mapMarkersLayer);
   };
 
-  /* Render Map Data (Interactive Houses & Editable Bin Popups) */
+  /* Render Map Data */
   window.renderMapData = function() {
     if (typeof updateMapLiveRun === 'function') updateMapLiveRun();
     if (!leafletMap && typeof initLeafletMap === 'function') initLeafletMap();
@@ -6231,9 +6254,15 @@ function promptEditBin(propId, streamKey, binIdx) {
       const pts = g.sites.map(x => gps(x.lat, x.lng)).filter(Boolean);
       const hull = typeof buildRunConvexHull === 'function' ? buildRunConvexHull(pts) : pts;
       
+      // non-interactive polygon boundary to prevent blocking clicks
       if (hull.length >= 3) {
         L.polygon(hull.map(p => [p.lat, p.lng]), {
-          color: runOutlineColor, weight: 2, fillColor: runOutlineColor, fillOpacity: 0.1, lineJoin: 'round'
+          color: runOutlineColor,
+          weight: 2,
+          fillColor: runOutlineColor,
+          fillOpacity: 0.1,
+          lineJoin: 'round',
+          interactive: false
         }).addTo(mapHullsLayer);
       }
 
@@ -6241,7 +6270,6 @@ function promptEditBin(propId, streamKey, binIdx) {
         const siteId = String(site.propId || site.siteId || '');
         allVisible.push(site);
         
-        // Render interactive house marker
         window.drawHouseTriangle(site);
 
         if (!showBinGpsDots) return;
@@ -6268,15 +6296,14 @@ function promptEditBin(propId, streamKey, binIdx) {
               fillOpacity: 1
             });
 
-            // Action popup with Property & Edit Bin buttons
             m.bindPopup(`
               <div style="min-width:170px;">
                 <b>${esc(serial || 'Bin')}</b><br>
                 <span>${esc(g.stream === 'SummerRecycling' ? 'Summer Recycle' : binStream)} · ${esc(bin.size || '240L')}</span><br>
                 <small style="color:#64748b;">Run: ${esc(g.run)}</small>
                 <div style="display:flex; gap:6px; margin-top:8px;">
-                  <button type="button" style="flex:1; padding:4px 6px; font-size:12px; border-radius:4px; border:1px solid #cbd5e1; background:#f8fafc; cursor:pointer;" onclick="openPropertyInspectModal('${esc(siteId)}')">Property</button>
-                  ${src === 'solo' ? `<button type="button" style="flex:1; padding:4px 6px; font-size:12px; border-radius:4px; border:none; background:#2d6a4f; color:white; cursor:pointer;" onclick="promptEditBin('${esc(siteId)}', '${esc(binStream)}', ${idx})">Edit Bin</button>` : ''}
+                  <button type="button" style="flex:1; padding:4px 6px; font-size:12px; font-weight:700; border-radius:4px; border:1px solid #cbd5e1; background:#f8fafc; cursor:pointer;" onclick="openPropertyInspectModal('${esc(siteId)}')">Property</button>
+                  ${src === 'solo' ? `<button type="button" style="flex:1; padding:4px 6px; font-size:12px; font-weight:700; border-radius:4px; border:none; background:#2d6a4f; color:white; cursor:pointer;" onclick="promptEditBin('${esc(siteId)}', '${esc(binStream)}', ${idx})">Edit Bin</button>` : ''}
                 </div>
               </div>
             `);
