@@ -5353,7 +5353,7 @@ function promptEditBin(propId, streamKey, binIdx) {
     margin: auto !important;
   }
 
-  /* 3. Layer Panes Click Interactivity */
+  /* 3. Map Layer Panes Click Interactivity */
   .leaflet-pane.lukez-house-pane,
   .leaflet-pane.lukez-bin-pane {
     pointer-events: auto !important;
@@ -5537,6 +5537,37 @@ function promptEditBin(propId, streamKey, binIdx) {
     white-space: nowrap !important;
     overflow: hidden !important;
     text-overflow: ellipsis !important;
+  }
+
+  /* 7. Map Telemetry Card & Matching Bin Box Padding */
+  .map-address-telemetry {
+    position: absolute !important;
+    left: 10px !important;
+    right: 10px !important;
+    bottom: 70px !important;
+    z-index: 1000 !important;
+    margin: 0 !important;
+    pointer-events: none !important;
+    background: rgba(30,41,59,.97) !important;
+    border-radius: 16px !important;
+    padding: 10px 12px !important;
+  }
+  .map-address-telemetry.map-telemetry-hidden {
+    display: none !important;
+  }
+  .map-address-telemetry #mapBinsAtAddress {
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 6px !important;
+    width: 100% !important;
+    margin-top: 8px !important;
+    padding-top: 8px !important;
+    border-top: 1px solid rgba(148,163,184,.22) !important;
+    pointer-events: auto !important;
+  }
+  .map-address-telemetry #mapBinsAtAddress .hud-bin-item {
+    margin: 0 !important;
+    min-height: 44px !important;
   }
 </style>
 
@@ -5738,10 +5769,18 @@ function promptEditBin(propId, streamKey, binIdx) {
     triggerUniversalDataRefresh();
   };
 
-  window.toggleMapToolsPanel = function() {
+  // Toggle and auto-close the Map Tools panel
+  window.toggleMapToolsPanel = function(forceState) {
     const p = document.querySelector('.map-controls-group');
-    if (p) p.open = !p.open;
+    if (p) p.open = (typeof forceState === 'boolean') ? forceState : !p.open;
   };
+
+  // Auto-close settings panel after clicking any tool action inside it
+  document.addEventListener('click', e => {
+    if (e.target.closest('.map-controls-group .map-tool-btn')) {
+      window.toggleMapToolsPanel(false);
+    }
+  });
 
   // Direct Run Navigation from Address Cards
   window.openRunDirectlyOnMap = function(runName, streamKey, dayName, weekLetter, isSummer, propLat, propLng) {
@@ -5764,7 +5803,7 @@ function promptEditBin(propId, streamKey, binIdx) {
     }, 150);
   };
 
-  // Follow Me Toggle
+  // Follow Me Toggle (Centers on current position and keeps following)
   window.toggleTruckFollow = function(ev) {
     if (ev) ev.stopPropagation();
     isTruckFollowEnabled = !isTruckFollowEnabled;
@@ -5818,7 +5857,7 @@ function promptEditBin(propId, streamKey, binIdx) {
     }
   }
 
-  // Inject Controls onto Leaflet Map (Single Target & Compass Arrow)
+  // Inject Controls onto Leaflet Map (Zoom, Follow Target, Compass Arrow)
   const origInitLeafletMap = window.initLeafletMap;
   window.initLeafletMap = function() {
     if (origInitLeafletMap) origInitLeafletMap.apply(this, arguments);
@@ -6173,6 +6212,75 @@ function promptEditBin(propId, streamKey, binIdx) {
     }).join('') || '<div style="text-align:center; padding:30px; color:#64748b; font-weight:700;">No upcoming bins ahead matching filter.</div>';
   };
 
+  /* Map Next Bin Box: Identical layout to Drive HUD */
+  function buildBinsAtAddress(site) {
+    if (!site || !site.soloStreams) return '';
+    const out = [];
+    const isFiltered = (selectedRunsSet && selectedRunsSet.size > 0) || clean(activeFilterStream);
+    
+    // If a filter is active, only show serials if this property belongs to the filtered run
+    if (isFiltered && !siteMatchesAllActiveFilters(site)) {
+      return '';
+    }
+
+    const allowedStreams = getSelectedStreamsAtAddress(site);
+
+    SOLO_STREAMS.forEach(st => {
+      if (!allowedStreams.has(st.key)) return;
+      if (!streamIsCurrentFilteredStream(site, st.key)) return;
+
+      const cls = st.key === 'Garbage' ? 'hud-bin-gar' : (st.key === 'Recycling' ? 'hud-bin-rec' : (st.key === 'SummerRecycling' ? 'hud-bin-summer' : 'hud-bin-fog'));
+      (site.soloStreams[st.key] || []).forEach((bin, binIndex) => {
+        const menuId = `mapBinIssue_${site.propId || site.siteId}_${st.key}_${binIndex}`.replace(/[^a-zA-Z0-9_]/g, '_');
+        out.push(`
+          <div class="hud-bin-item ${cls}">
+            <div class="hud-bin-stream">
+              <span class="hud-bin-icon">${st.icon}</span>
+              <span class="hud-bin-size">${bin.size || '240L'}</span>
+            </div>
+            <div class="hud-bin-main">
+              <span class="hud-serial-large">${bin.serial || '—'}</span>
+              <button class="bin-face-btn" title="Bin options" onclick="toggleBinIssueMenu(event, '${menuId}')">🙂</button>
+            </div>
+            <div class="bin-issue-menu" id="${menuId}">
+              ${['Contaminated','Heavy','Overfull','Prior spill','Jammed'].map(issue =>
+                `<button data-issue="${issue}" onclick="setBinIssue(event, '${menuId}', '${issue}')">${issue}</button>`
+              ).join('')}
+            </div>
+          </div>
+        `);
+      });
+    });
+    return out.join('');
+  }
+
+  function renderCurrentAddressTelemetry(site) {
+    lastTelemetrySite = site || null;
+    const address = site ? (cleanStreetAddress(site.addressText) || site.baseStreetLine || 'Address unavailable') : 'Scanning Street...';
+    const meta = site ? (String(site.runFlags || '').trim() ? `🚩 ${esc(String(site.runFlags).trim())}` : getAddressSuburb(site)) : 'Scanning suburb...';
+    const driveRuns = buildRunsAtAddress(site, false);
+    const mapRuns = buildRunsAtAddress(site, false);
+    const mapBinsHtml = buildBinsAtAddress(site);
+
+    ['hudStreetName','mapLiveStreet'].forEach(id => { const el = document.getElementById(id); if (el) el.innerText = address; });
+    ['hudAddressMeta','mapAddressMeta'].forEach(id => { const el = document.getElementById(id); if (el) el.innerHTML = meta; });
+
+    const hudRunsEl = document.getElementById('hudRunsAtAddress');
+    if (hudRunsEl) hudRunsEl.innerHTML = driveRuns || mapRuns;
+
+    const mapRunsEl = document.getElementById('mapRunsAtAddress');
+    if (mapRunsEl) mapRunsEl.innerHTML = mapRuns;
+
+    const mapBinsEl = document.getElementById('mapBinsAtAddress');
+    if (mapBinsEl) {
+      mapBinsEl.innerHTML = mapBinsHtml;
+      mapBinsEl.style.display = mapBinsHtml ? 'flex' : 'none';
+    }
+
+    const box = document.querySelector('.map-address-telemetry');
+    if (box) box.classList.toggle('map-telemetry-hidden', !isNextBinBoxVisible);
+  }
+
   /* GPS Position Watcher */
   window.onGpsPositionSuccess = function(pos) {
     const accuracy = Math.round(pos.coords.accuracy);
@@ -6315,7 +6423,7 @@ function promptEditBin(propId, streamKey, binIdx) {
     marker.addTo(mapMarkersLayer);
   };
 
-  /* Render Map Data */
+  /* Render Map Data (Protected against no-filter memory freeze) */
   window.renderMapData = function() {
     if (typeof updateMapLiveRun === 'function') updateMapLiveRun();
     if (!leafletMap && typeof initLeafletMap === 'function') initLeafletMap();
@@ -6335,6 +6443,16 @@ function promptEditBin(propId, streamKey, binIdx) {
 
     const st = clean(activeFilterStream);
     const selected = selectedMapRuns();
+
+    // Prevent rendering 100,000+ un-filtered pins at once
+    const hasAnyFilter = st || selected.size > 0 || activeFilterDay || activeFilterWeek;
+    if (!hasAnyFilter) {
+      currentlyShowingRunKeys = [];
+      updateMapHeaderInfo([], new Map());
+      if (userCurrentLocation && typeof updateMapTruckPosition === 'function') updateMapTruckPosition();
+      return;
+    }
+
     const types = st ? [st] : ['Garbage', 'Recycling', 'FOGO'];
     const groups = new Map();
     const records = getRecordsArray();
