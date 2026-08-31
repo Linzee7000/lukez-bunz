@@ -6953,8 +6953,6 @@ window.toggleMapToolsPanel=()=>{const p=document.querySelector('.map-controls-gr
 </script>
 
 <!-- UNIFIED FILTER UI: one filter design and behaviour on every page -->
-<!-- Replace the existing #unified-filter-ui <style> and #unified-filter-behaviour <script> blocks with this updated implementation -->
-
 <style id="unified-filter-ui">
   #filterOptionsModal .modal-box {
     max-width: 760px;
@@ -6974,11 +6972,19 @@ window.toggleMapToolsPanel=()=>{const p=document.querySelector('.map-controls-gr
     margin: 0 0 6px;
   }
   
-  /* 5-Column Grid for Stream & Data */
+  /* Grid Layouts */
   .unified-filter-grid {
     display: grid;
-    grid-template-columns: repeat(5, minmax(0, 1fr));
     gap: 8px;
+  }
+  .unified-filter-grid.streams {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+  }
+  .unified-filter-grid.sources {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .unified-filter-grid.days {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
   }
   .unified-filter-grid.weeks {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -6987,7 +6993,7 @@ window.toggleMapToolsPanel=()=>{const p=document.querySelector('.map-controls-gr
     grid-template-columns: repeat(3, minmax(0, 1fr));
     max-height: 220px;
     overflow-y: auto;
-    padding: 4px;
+    padding: 6px;
     border: 1px solid #cbd5e1;
     border-radius: 12px;
     background: #f8fafc;
@@ -6995,9 +7001,9 @@ window.toggleMapToolsPanel=()=>{const p=document.querySelector('.map-controls-gr
 
   /* Compact Button Styling */
   .unified-filter-btn {
-    min-height: 52px;
-    height: 52px;
-    padding: 2px 4px;
+    min-height: 50px;
+    height: 50px;
+    padding: 0;
     border: 1px solid #cbd5e1;
     border-radius: 12px;
     background: #f8fafc;
@@ -7010,11 +7016,14 @@ window.toggleMapToolsPanel=()=>{const p=document.querySelector('.map-controls-gr
     justify-content: center;
     box-shadow: 0 1px 3px rgba(15,23,42,0.06);
     line-height: 1;
+    transition: all 0.15s ease;
   }
   .unified-filter-btn span.stream-icon {
     font-size: 26px;
     line-height: 1;
-    display: block;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
   }
   .unified-filter-btn.active {
     border: 3px solid #0284c7;
@@ -7026,15 +7035,47 @@ window.toggleMapToolsPanel=()=>{const p=document.querySelector('.map-controls-gr
   .unified-filter-btn.stream-summer { background: #ffedd5; border-color: #fed7aa; color: #c2410c; }
   .unified-filter-btn.stream-fog { background: #dcfce7; border-color: #86efac; color: #166534; }
 
-  /* Runs as clean selectable action buttons */
+  /* Runs buttons */
   .unified-run-btn {
-    min-height: 44px;
+    min-height: 42px;
+    height: 42px;
     border-radius: 8px;
-    font-size: 14px;
-    padding: 4px;
+    font-size: 13px;
+    padding: 0 4px;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+
+  /* GPS & Layer Button Size Normalization */
+  .leaflet-control-locate a,
+  .leaflet-control-layers-toggle,
+  .map-control-btn,
+  #gpsBtn,
+  #layersBtn {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    width: 36px !important;
+    height: 36px !important;
+    line-height: 36px !important;
+    font-size: 18px !important;
+    overflow: hidden !important;
+    box-sizing: border-box !important;
+  }
+  .leaflet-control-locate a svg,
+  .leaflet-control-layers-toggle svg,
+  #gpsBtn svg,
+  #layersBtn svg,
+  .leaflet-control-locate a img,
+  .leaflet-control-layers-toggle img,
+  #gpsBtn img,
+  #layersBtn img {
+    width: 20px !important;
+    height: 20px !important;
+    max-width: 20px !important;
+    max-height: 20px !important;
+    object-fit: contain !important;
   }
 
   #modalStreamSelect, #modalDataSourceSelect, #modalDaySelect, #modalWeekSelect, #modalRunsChecklistGrid {
@@ -7043,7 +7084,7 @@ window.toggleMapToolsPanel=()=>{const p=document.querySelector('.map-controls-gr
 
   @media(max-width: 600px) {
     .unified-filter-grid { gap: 6px; }
-    .unified-filter-btn { min-height: 46px; height: 46px; font-size: 14px; }
+    .unified-filter-btn { min-height: 44px; height: 44px; font-size: 14px; }
     .unified-filter-btn span.stream-icon { font-size: 22px; }
     .unified-filter-grid.runs-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   }
@@ -7059,7 +7100,6 @@ window.toggleMapToolsPanel=()=>{const p=document.querySelector('.map-controls-gr
     ['SummerRecycling', '<span class="stream-icon">☀️</span>', 'stream-summer'],
     ['FOGO', '<span class="stream-icon">🌳</span>', 'stream-fog']
   ];
-  // 1 & 2: All + 🚛 + 🏛️ with minimized padding matching select stream
   const SOURCE_OPTIONS = [
     ['all', 'All'],
     ['solo', '<span class="stream-icon">🚛</span>'],
@@ -7069,13 +7109,14 @@ window.toggleMapToolsPanel=()=>{const p=document.querySelector('.map-controls-gr
   function q(id) { return document.getElementById(id); }
   function clean(v) { return String(v || '').trim(); }
   const lower = v => clean(v).toLowerCase();
-  const isSummerName = v => /summer/i.test(clean(v));
+  
+  // Robust check to identify and filter out summer runs
+  const isSummerName = v => /summer|\bsum\b|\bsr\b/i.test(clean(v));
 
   function buildUnifiedFilterControls() {
     const modal = q('filterOptionsModal');
     if (!modal || q('unifiedFilterControls')) return;
 
-    // Hide legacy select elements and old checklists
     const formGroups = modal.querySelectorAll('.form-group');
     formGroups.forEach(g => g.style.display = 'none');
 
@@ -7089,11 +7130,11 @@ window.toggleMapToolsPanel=()=>{const p=document.querySelector('.map-controls-gr
       </div>
       <div class="unified-filter-section">
         <span class="unified-filter-label">2. Data</span>
-        <div id="unifiedSourceButtons" class="unified-filter-grid"></div>
+        <div id="unifiedSourceButtons" class="unified-filter-grid sources"></div>
       </div>
       <div class="unified-filter-section">
         <span class="unified-filter-label">3. Day</span>
-        <div id="unifiedDayButtons" class="unified-filter-grid"></div>
+        <div id="unifiedDayButtons" class="unified-filter-grid days"></div>
       </div>
       <div id="unifiedWeekSection" class="unified-filter-section">
         <span class="unified-filter-label">4. Week</span>
@@ -7114,19 +7155,21 @@ window.toggleMapToolsPanel=()=>{const p=document.querySelector('.map-controls-gr
 
       if (b.dataset.filterStream !== undefined) {
         q('modalStreamSelect').value = b.dataset.filterStream;
-        selectedRunsSet.clear();
+        if (typeof selectedRunsSet !== 'undefined') selectedRunsSet.clear();
       } else if (b.dataset.filterSource !== undefined) {
         q('modalDataSourceSelect').value = b.dataset.filterSource;
       } else if (b.dataset.filterDay !== undefined) {
         q('modalDaySelect').value = b.dataset.filterDay;
-        selectedRunsSet.clear();
+        if (typeof selectedRunsSet !== 'undefined') selectedRunsSet.clear();
       } else if (b.dataset.filterWeek !== undefined) {
         q('modalWeekSelect').value = b.dataset.filterWeek;
-        selectedRunsSet.clear();
+        if (typeof selectedRunsSet !== 'undefined') selectedRunsSet.clear();
       } else if (b.dataset.filterRun !== undefined) {
         const runLower = lower(b.dataset.filterRun);
-        if (selectedRunsSet.has(runLower)) selectedRunsSet.delete(runLower);
-        else selectedRunsSet.add(runLower);
+        if (typeof selectedRunsSet !== 'undefined') {
+          if (selectedRunsSet.has(runLower)) selectedRunsSet.delete(runLower);
+          else selectedRunsSet.add(runLower);
+        }
       } else return;
 
       render();
@@ -7138,7 +7181,7 @@ window.toggleMapToolsPanel=()=>{const p=document.querySelector('.map-controls-gr
       const day = clean(q('modalDaySelect')?.value);
       const week = clean(q('modalWeekSelect')?.value);
 
-      // Render Streams
+      // 1. Stream
       const sb = q('unifiedStreamButtons');
       if (sb) {
         sb.innerHTML = STREAM_OPTIONS.map(([v, label, cls]) =>
@@ -7146,7 +7189,7 @@ window.toggleMapToolsPanel=()=>{const p=document.querySelector('.map-controls-gr
         ).join('');
       }
 
-      // Render Data Sources (Same dimensions as stream)
+      // 2. Data Source
       const srcb = q('unifiedSourceButtons');
       if (srcb) {
         srcb.innerHTML = SOURCE_OPTIONS.map(([v, label]) =>
@@ -7154,7 +7197,7 @@ window.toggleMapToolsPanel=()=>{const p=document.querySelector('.map-controls-gr
         ).join('');
       }
 
-      // Render Days
+      // 3. Day
       const db = q('unifiedDayButtons');
       if (db) {
         db.innerHTML = DAY_OPTIONS.map(([v, label]) =>
@@ -7162,23 +7205,25 @@ window.toggleMapToolsPanel=()=>{const p=document.querySelector('.map-controls-gr
         ).join('');
       }
 
-      // 4: Week Display Rule - ONLY for Recycling & FOGO
+      // 4. Week - Only active & visible for Recycling and FOGO
       const weekSection = q('unifiedWeekSection');
-      const showWeek = (st === 'Recycling' || st === 'FOGO');
+      const isRecycleOrFogo = (st === 'Recycling' || st === 'FOGO');
       if (weekSection) {
-        weekSection.style.display = showWeek ? 'block' : 'none';
-        if (!showWeek) q('modalWeekSelect').value = '';
+        weekSection.style.display = isRecycleOrFogo ? 'block' : 'none';
+        if (!isRecycleOrFogo && q('modalWeekSelect')) {
+          q('modalWeekSelect').value = '';
+        }
       }
       const wb = q('unifiedWeekButtons');
-      if (wb && showWeek) {
+      if (wb && isRecycleOrFogo) {
         wb.innerHTML = `
           <button type="button" class="unified-filter-btn ${week === 'A' ? 'active' : ''}" data-filter-week="A">Week A</button>
           <button type="button" class="unified-filter-btn ${week === 'B' ? 'active' : ''}" data-filter-week="B">Week B</button>
         `;
       }
 
-      // 5: Runs List as Buttons + Exclude Summer Runs from ALL & Recycle
-      renderRunsButtons(st, day, week);
+      // 5. Filter and Render Runs
+      renderRunsButtons(st, day, isRecycleOrFogo ? week : '');
     }
 
     function renderRunsButtons(st, day, week) {
@@ -7189,39 +7234,51 @@ window.toggleMapToolsPanel=()=>{const p=document.querySelector('.map-controls-gr
       const dayFilter = lower(day);
       const weekFilter = clean(week).toUpperCase();
 
-      (siteRecords || []).forEach(site => {
+      (window.siteRecords || []).forEach(site => {
         const sch = site.soloSchedule || {};
         if (dayFilter && lower(sch.day) !== dayFilter) return;
-        if (weekFilter && clean(sch.weekLetter).toUpperCase() !== weekFilter) return;
 
-        // Garbage
-        if (!st || st === 'Garbage') {
+        // Garbage: Only garbage runs
+        if (st === 'Garbage') {
           const r = clean(sch.garRun);
           if (r && !isSummerName(r)) runsMap.set(r, { run: r, stream: 'Garbage' });
+          return;
         }
-        // Recycle: strictly exclude Summer runs
+
+        // Recycling: Only standard recycle runs matching selected week (exclude summer completely)
         if (st === 'Recycling') {
+          if (weekFilter && clean(sch.weekLetter).toUpperCase() !== weekFilter) return;
           const r = clean(sch.recRun);
-          if (r && !isSummerName(r) && !isSummerName(sch.recSummerRun)) {
+          if (r && !isSummerName(r)) {
             runsMap.set(r, { run: r, stream: 'Recycling' });
           }
+          return;
         }
-        // Summer Recycle: only when Summer stream is explicitly chosen
+
+        // Summer Recycling: Only summer runs
         if (st === 'SummerRecycling') {
           const r = clean(sch.recSummerRun) || (isSummerName(sch.recRun) ? clean(sch.recRun) : '');
           if (r) runsMap.set(r, { run: r, stream: 'SummerRecycling' });
+          return;
         }
-        // FOGO
-        if (!st || st === 'FOGO') {
+
+        // FOGO: Only fogo runs matching selected week
+        if (st === 'FOGO') {
+          if (weekFilter && clean(sch.weekLetter).toUpperCase() !== weekFilter) return;
           const r = clean(sch.fogRun);
           if (r && !isSummerName(r)) runsMap.set(r, { run: r, stream: 'FOGO' });
+          return;
         }
-        // All Streams: include regular recycling, exclude summer runs
+
+        // ALL Streams: Collect Garbage, Regular Recycling, and FOGO (Exclude all Summer runs)
         if (!st) {
-          const r = clean(sch.recRun);
-          if (r && !isSummerName(r) && !isSummerName(sch.recSummerRun)) {
-            runsMap.set(r, { run: r, stream: 'Recycling' });
-          }
+          const gar = clean(sch.garRun);
+          const rec = clean(sch.recRun);
+          const fog = clean(sch.fogRun);
+
+          if (gar && !isSummerName(gar)) runsMap.set(gar, { run: gar, stream: 'Garbage' });
+          if (rec && !isSummerName(rec)) runsMap.set(rec, { run: rec, stream: 'Recycling' });
+          if (fog && !isSummerName(fog)) runsMap.set(fog, { run: fog, stream: 'FOGO' });
         }
       });
 
@@ -7234,10 +7291,11 @@ window.toggleMapToolsPanel=()=>{const p=document.querySelector('.map-controls-gr
       }
 
       runBox.innerHTML = sorted.map(item => {
-        const isSelected = selectedRunsSet.has(lower(item.run));
+        const isSelected = typeof selectedRunsSet !== 'undefined' && selectedRunsSet.has(lower(item.run));
         const chipCls = cls[item.stream] || '';
         const icon = item.stream === 'SummerRecycling' ? '☀️ ' : '';
-        return `<button type="button" class="unified-filter-btn unified-run-btn ${chipCls} ${isSelected ? 'active' : ''}" data-filter-run="${esc(item.run)}">${icon}${esc(item.run)}</button>`;
+        const escapeVal = typeof esc === 'function' ? esc(item.run) : item.run;
+        return `<button type="button" class="unified-filter-btn unified-run-btn ${chipCls} ${isSelected ? 'active' : ''}" data-filter-run="${escapeVal}">${icon}${escapeVal}</button>`;
       }).join('');
     }
 
@@ -7247,12 +7305,12 @@ window.toggleMapToolsPanel=()=>{const p=document.querySelector('.map-controls-gr
 
   function openUnified() {
     buildUnifiedFilterControls();
-    q('modalStreamSelect').value = activeFilterStream;
-    q('modalDataSourceSelect').value = activeFilterDataSource || 'all';
-    q('modalDaySelect').value = activeFilterDay;
-    q('modalWeekSelect').value = activeFilterWeek;
+    if (q('modalStreamSelect')) q('modalStreamSelect').value = typeof activeFilterStream !== 'undefined' ? activeFilterStream : '';
+    if (q('modalDataSourceSelect')) q('modalDataSourceSelect').value = typeof activeFilterDataSource !== 'undefined' ? activeFilterDataSource : 'all';
+    if (q('modalDaySelect')) q('modalDaySelect').value = typeof activeFilterDay !== 'undefined' ? activeFilterDay : '';
+    if (q('modalWeekSelect')) q('modalWeekSelect').value = typeof activeFilterWeek !== 'undefined' ? activeFilterWeek : '';
     if (window.__renderUnifiedFilterControls) window.__renderUnifiedFilterControls();
-    openModal('filterOptionsModal');
+    if (typeof openModal === 'function') openModal('filterOptionsModal');
   }
 
   window.openFilterDrawerModal = openUnified;
