@@ -5228,7 +5228,33 @@ function promptEditBin(propId, streamKey, binIdx) {
 </div>
 
 <style id="unified-clean-styles">
-  /* 1. Map Layer Panes Click Interactivity */
+  /* 1. Track-Up Map Container Sizing (Prevents Grey Corner Borders) */
+  #mapScreenContainer {
+    position: absolute !important;
+    top: 0 !important;
+    left: 0 !important;
+    right: 0 !important;
+    bottom: 58px !important;
+    width: 100vw !important;
+    height: calc(100vh - 58px) !important;
+    overflow: hidden !important;
+    background: #e2e8f0 !important;
+  }
+
+  #mainLeafletMap {
+    position: absolute !important;
+    top: 50% !important;
+    left: 50% !important;
+    width: 150vmax !important;
+    height: 150vmax !important;
+    margin-top: -75vmax !important;
+    margin-left: -75vmax !important;
+    transition: transform 0.25s linear !important;
+    transform-origin: center center !important;
+    z-index: 1 !important;
+  }
+
+  /* 2. Map Layer Panes Click Interactivity */
   .leaflet-pane.lukez-house-pane,
   .leaflet-pane.lukez-bin-pane {
     pointer-events: auto !important;
@@ -5259,7 +5285,7 @@ function promptEditBin(propId, streamKey, binIdx) {
     cursor: grabbing !important;
   }
 
-  /* 2. Hide the duplicate Map Tools summary bar under top bar */
+  /* 3. Hide the duplicate Map Tools summary bar under top bar */
   .map-controls-group > summary {
     display: none !important;
   }
@@ -5270,7 +5296,7 @@ function promptEditBin(propId, streamKey, binIdx) {
     box-shadow: none !important;
   }
 
-  /* 3. Top Summary Bar Styling & Stream Colors */
+  /* 4. Top Summary Bar Styling & Stream Colors */
   .map-summary-bar {
     display: grid !important;
     grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr) minmax(0, 1fr) 52px !important;
@@ -5326,7 +5352,7 @@ function promptEditBin(propId, streamKey, binIdx) {
   .map-stat-pill b { font-size: 20px !important; line-height: 1 !important; color: #166534 !important; }
   .map-stat-pill small { display: none !important; }
 
-  /* 4. Floating Map Controls (Zoom, Layers, Target Follow, Track-Up Arrow) */
+  /* 5. Floating Map Controls (Zoom, Layers, Target Follow, Track-Up Arrow) */
   #mapScreenContainer .map-side-layers-control,
   #mapScreenContainer .map-side-view-control,
   #mapScreenContainer .map-side-track-control,
@@ -5384,7 +5410,7 @@ function promptEditBin(propId, streamKey, binIdx) {
     height: 24px !important;
     display: block !important;
     margin: auto !important;
-    transition: transform 0.2s linear !important;
+    transition: transform 0.25s linear !important;
   }
 
   #mapScreenContainer .map-side-layers-toggle img,
@@ -5400,7 +5426,7 @@ function promptEditBin(propId, streamKey, binIdx) {
     margin: auto !important;
   }
 
-  /* 5. Filter Modal Layout & Compact Buttons */
+  /* 6. Filter Modal Layout & Compact Buttons */
   .map-run-picker-box {
     max-width: 540px !important;
     width: min(94vw, 540px) !important;
@@ -5692,7 +5718,7 @@ function promptEditBin(propId, streamKey, binIdx) {
     if (p) p.open = !p.open;
   };
 
-  // Follow Me Toggle
+  // Follow Me Toggle (Locks vehicle to screen center)
   window.toggleTruckFollow = function(ev) {
     if (ev) ev.stopPropagation();
     isTruckFollowEnabled = !isTruckFollowEnabled;
@@ -5705,10 +5731,11 @@ function promptEditBin(propId, streamKey, binIdx) {
       leafletMap.panTo([userCurrentLocation.lat, userCurrentLocation.lng], { animate: true });
       hasAutoCenteredTruck = true;
     }
+    applyMapHeadingRotation();
   };
   window.toggleMapSideView = window.toggleTruckFollow;
 
-  // Track-Up Navigation Arrow Button Toggle
+  // Track-Up / North-Up Toggle (Switches Map orientation mode)
   window.toggleTrackUpOrientation = function(ev) {
     if (ev) ev.stopPropagation();
     isTrackUpEnabled = !isTrackUpEnabled;
@@ -5716,33 +5743,41 @@ function promptEditBin(propId, streamKey, binIdx) {
     const btn = document.getElementById('btnTrackUpOrientation');
     if (btn) {
       btn.classList.toggle('active', isTrackUpEnabled);
-      btn.setAttribute('title', isTrackUpEnabled ? 'Track-Up (Heading Active)' : 'North-Up');
+      btn.setAttribute('title', isTrackUpEnabled ? 'Track-Up (Driving Ahead)' : 'North-Up');
     }
 
     applyMapHeadingRotation();
   };
 
+  // Rotates the map canvas seamlessly in Track-Up mode, points button arrow North
   function applyMapHeadingRotation() {
+    const mapEl = document.getElementById('mainLeafletMap');
     const arrowBtnSvg = document.querySelector('#btnTrackUpOrientation svg');
-    if (arrowBtnSvg) {
-      const heading = (lastValidHeading !== undefined && Number.isFinite(lastValidHeading)) ? lastValidHeading : 0;
-      arrowBtnSvg.style.transform = `rotate(${heading}deg)`;
-      arrowBtnSvg.style.transformOrigin = 'center center';
+    const heading = (lastValidHeading !== undefined && Number.isFinite(lastValidHeading)) ? lastValidHeading : 0;
+
+    if (isTrackUpEnabled) {
+      if (mapEl) {
+        mapEl.style.transform = `rotate(${-heading}deg)`;
+      }
+      // Arrow points toward true North relative to rotated map
+      if (arrowBtnSvg) {
+        arrowBtnSvg.style.transform = `rotate(${heading}deg)`;
+      }
+    } else {
+      if (mapEl) {
+        mapEl.style.transform = 'none';
+      }
+      if (arrowBtnSvg) {
+        arrowBtnSvg.style.transform = 'none';
+      }
     }
   }
 
-  // Inject Controls onto Leaflet Map
+  // Inject Zoom, Follow, and Compass Arrow Controls onto the Map
   const origInitLeafletMap = window.initLeafletMap;
   window.initLeafletMap = function() {
     if (origInitLeafletMap) origInitLeafletMap.apply(this, arguments);
     if (!leafletMap) return;
-
-    if (!leafletMap.getPane('lukez-house-pane')) leafletMap.createPane('lukez-house-pane');
-    if (!leafletMap.getPane('lukez-bin-pane')) leafletMap.createPane('lukez-bin-pane');
-    leafletMap.getPane('lukez-house-pane').style.zIndex = 620;
-    leafletMap.getPane('lukez-house-pane').style.pointerEvents = 'auto';
-    leafletMap.getPane('lukez-bin-pane').style.zIndex = 660;
-    leafletMap.getPane('lukez-bin-pane').style.pointerEvents = 'auto';
 
     if (userCurrentLocation && Number.isFinite(userCurrentLocation.lat)) {
       leafletMap.setView([userCurrentLocation.lat, userCurrentLocation.lng], leafletMap.getZoom() || 18);
@@ -6175,7 +6210,7 @@ function promptEditBin(propId, streamKey, binIdx) {
     }
   };
 
-  /* Interactive House Triangles (Respects Layer Visibility Toggle & Easy Tap Target) */
+  /* Interactive House Triangles */
   window.drawHouseTriangle = function(site) {
     const id = String(site.propId || site.siteId || '');
     const isSelected = selectedCollectionHouseIds.has(id);
@@ -6286,7 +6321,6 @@ function promptEditBin(propId, streamKey, binIdx) {
       const pts = g.sites.map(x => gps(x.lat, x.lng)).filter(Boolean);
       const hull = typeof buildRunConvexHull === 'function' ? buildRunConvexHull(pts) : pts;
       
-      // non-interactive polygon boundary
       if (hull.length >= 3) {
         L.polygon(hull.map(p => [p.lat, p.lng]), {
           color: runOutlineColor,
@@ -6320,7 +6354,6 @@ function promptEditBin(propId, streamKey, binIdx) {
 
             const key = `${siteId}|${src}|${g.stream}|${idx}|${serial}`;
             
-            // Custom round draggable marker icon
             const binMarkerIcon = L.divIcon({
               className: 'bin-map-marker-icon',
               html: `
@@ -6342,12 +6375,11 @@ function promptEditBin(propId, streamKey, binIdx) {
 
             const m = L.marker([p.lat, p.lng], {
               icon: binMarkerIcon,
-              draggable: (src === 'solo'), // Only solo bins are editable & draggable
+              draggable: (src === 'solo'),
               pane: 'lukez-bin-pane',
               interactive: true
             });
 
-            // Action popup with Property & Edit Bin buttons
             m.bindPopup(`
               <div style="min-width:170px;">
                 <b>${esc(serial || 'Bin')}</b><br>
@@ -6360,7 +6392,6 @@ function promptEditBin(propId, streamKey, binIdx) {
               </div>
             `);
 
-            // Live Drag & Drop Handler: updates coordinates on drop and persists to IndexedDB
             m.on('dragend', async (ev) => {
               const newPos = ev.target.getLatLng();
               const recordsList = getRecordsArray();
