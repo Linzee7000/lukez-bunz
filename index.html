@@ -1805,26 +1805,25 @@
         </div>
         <details class="map-controls-group">
           <summary><span>⚙️ Map tools</span><span class="map-controls-hint">View · KMZ · Colours</span></summary>
-
+          
           <div class="map-control-section map-run-setup-section">
             <div class="map-control-section-title">Run setup</div>
             <div class="map-toolbar-row map-run-setup-primary">
-              <button type="button" class="map-tool-btn" onclick="loadKmzForCurrentRun()">📥 KMZ File</button>
+              <button type="button" class="map-tool-btn" onclick="loadKmzForCurrentRun()">📥 KMZ / KML</button>
+              <button type="button" class="map-tool-btn" onclick="exportSnailTrailKml()">📤 Export KML</button>
               <button type="button" class="map-tool-btn" onclick="openRunStyleModal()">🎨 Customise</button>
-              <button type="button" id="btnRoadSnap" class="map-tool-btn" onclick="toggleRoadSnapEditing()">✂️ Edit Boundary</button>
             </div>
             <div class="map-toolbar-row map-run-setup-actions">
-              <button type="button" id="btnCreateCollectionPoint" class="map-tool-btn" onclick="startCollectionPointMode()">📍 Create collection point</button>
+              <button type="button" id="btnRoadSnap" class="map-tool-btn" onclick="toggleRoadSnapEditing()">✂️ Edit Boundary</button>
+              <button type="button" id="btnSnapToRoads" class="map-tool-btn" onclick="snapActiveBoundaryToRoads()">🧲 Snap to Houses</button>
+              <button type="button" id="btnCreateCollectionPoint" class="map-tool-btn" onclick="startCollectionPointMode()">📍 Collection point</button>
+            </div>
+            <div class="map-toolbar-row map-run-setup-actions" style="margin-top:6px;">
               <button type="button" id="btnRoadInOut" class="map-tool-btn" onclick="startRoadMode('drive-reverse-out')">↩️ Drive in · reverse out</button>
               <button type="button" id="btnRoadReverseIn" class="map-tool-btn" onclick="startRoadMode('reverse-in-drive-out')">↪️ Reverse in · drive out</button>
             </div>
-            <div class="map-toolbar-row map-run-setup-primary">
-              <button type="button" class="map-tool-btn" onclick="loadKmzForCurrentRun()">📥 KMZ File</button>
-              <button type="button" class="map-tool-btn" onclick="openRunStyleModal()">🎨 Customise</button>
-              <button type="button" id="btnRoadSnap" class="map-tool-btn" onclick="toggleRoadSnapEditing()">✂️ Edit Boundary</button>
-              <button type="button" id="btnSnapToRoads" class="map-tool-btn" onclick="snapActiveBoundaryToRoads()">🧲 Snap to Roads</button>
-            </div>
           </div>
+            
         </details>
       </div>
 
@@ -5199,14 +5198,7 @@ function promptEditBin(propId, streamKey, binIdx) {
 
   <input id="kmzFileInput" type="file" accept=".kmz,application/vnd.google-earth.kmz,application/zip" multiple style="display:none">
 <!-- Map Run Picker -->
-<!-- FLOATING BOUNDARY EDITING TOOLBAR -->
-<div id="boundaryEditToolbar" style="display:none; position:absolute; top:74px; left:10px; z-index:2000; background:rgba(15,23,42,0.96); backdrop-filter:blur(6px); padding:8px 12px; border-radius:12px; box-shadow:0 4px 16px rgba(0,0,0,0.3); align-items:center; gap:8px;">
-  <span style="color:#f8fafc; font-size:13px; font-weight:700;">✂️ Edit Boundary:</span>
-  <button type="button" class="stray-fix-btn" style="background:#0284c7; margin:0; padding:6px 12px;" onclick="snapBoundaryToRoads()">🧲 Snap to Roads</button>
-  <button type="button" class="stray-fix-btn" style="background:#16a34a; margin:0; padding:6px 12px;" onclick="saveBoundaryEditing()">💾 Save</button>
-  <button type="button" class="stray-fix-btn" style="background:#475569; margin:0; padding:6px 10px;" onclick="cancelBoundaryEditing()">✖</button>
-</div>
-
+  
 <!-- UNIFIED MODAL, FILTER ENGINE & MAP CONTROLS -->
 <div id="mapRunPickerModal" class="modal-overlay sub-modal-layer">
   <div class="modal-box map-run-picker-box">
@@ -5416,7 +5408,6 @@ function promptEditBin(propId, streamKey, binIdx) {
     gap: 6px !important;
   }
 
-  /* Special warning banner for Drive in/out and Collection Points */
   .street-mode-flag-banner {
     display: flex;
     align-items: center;
@@ -5805,7 +5796,7 @@ function promptEditBin(propId, streamKey, binIdx) {
     if (p) p.open = !p.open;
   };
 
-  // Close Map Tools panel automatically upon clicking any tool or selecting a KMZ
+  // Close Map Tools panel automatically upon clicking any tool or selecting a file
   document.addEventListener('click', e => {
     const btn = e.target.closest('.map-run-setup-section button');
     if (btn) {
@@ -5816,11 +5807,132 @@ function promptEditBin(propId, streamKey, binIdx) {
 
   const kmzInputEl = document.getElementById('kmzFileInput');
   if (kmzInputEl) {
+    kmzInputEl.setAttribute('accept', '.kmz,.kml,application/vnd.google-earth.kmz,application/vnd.google-earth.kml+xml,application/zip,text/xml');
     kmzInputEl.addEventListener('change', () => {
       const p = document.querySelector('.map-controls-group');
       if (p) p.open = false;
     });
   }
+
+  // Export Recorded Snail Trail as a KML file
+  window.exportSnailTrailKml = function() {
+    if (!gpsTrailPoints || gpsTrailPoints.length < 2) {
+      alert("No snail trail recorded yet. Drive or move with GPS active to create a trail before exporting.");
+      return;
+    }
+
+    const runs = Array.from(selectedMapRuns());
+    const runName = runs.length === 1 ? runs[0].toUpperCase() : 'ALL_RUNS';
+    const now = new Date();
+    const dateStr = now.toISOString().replace(/[:.]/g, '-').slice(0, 16);
+    const fileName = `LukezBunz_Trail_${runName}_${dateStr}.kml`;
+
+    const coordsStr = gpsTrailPoints.map(p => `${Number(p[1]).toFixed(7)},${Number(p[0]).toFixed(7)},0`).join(' ');
+
+    const kmlContent = `<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+  <Document>
+    <name>${esc(fileName)}</name>
+    <description>Lukez Bunz Snail Trail for Run ${esc(runName)}</description>
+    <Style id="trailStyle">
+      <LineStyle>
+        <color>ff2563eb</color>
+        <width>4</width>
+      </LineStyle>
+    </Style>
+    <Placemark>
+      <name>Snail Trail Route - ${esc(runName)}</name>
+      <styleUrl>#trailStyle</styleUrl>
+      <LineString>
+        <extrude>1</extrude>
+        <tessellate>1</tessellate>
+        <altitudeMode>clampToGround</altitudeMode>
+        <coordinates>
+          ${coordsStr}
+        </coordinates>
+      </LineString>
+    </Placemark>
+  </Document>
+</kml>`;
+
+    const blob = new Blob([kmlContent], { type: 'application/vnd.google-earth.kml+xml' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = fileName;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  // Support direct KML as well as KMZ file imports
+  window.handleKmzFiles = async function(files, runKey) {
+    if (!files?.length || !runKey) return;
+    const imported = [];
+
+    for (const file of Array.from(files)) {
+      if (file.name.toLowerCase().endsWith('.kml')) {
+        const kmlText = await file.text();
+        imported.push(extractKmzKml(kmlText, file.name));
+      } else {
+        if (typeof JSZip === 'undefined') {
+          alert('KMZ support requires JSZip. Check your internet connection and reload.');
+          return;
+        }
+        const zip = await JSZip.loadAsync(file);
+        const kmlEntry = Object.values(zip.files).find(f => /telemetry\.kml$/i.test(f.name))
+          || Object.values(zip.files).find(f => /\.kml$/i.test(f.name));
+        if (!kmlEntry) throw new Error(`${file.name}: no KML file found inside KMZ`);
+        const kml = await kmlEntry.async('text');
+        imported.push(extractKmzKml(kml, file.name));
+      }
+    }
+
+    const key = mapKey(runKey);
+    const existing = kmzDataByRun.get(key) || { run: runKey, files: [] };
+    existing.files.push(...imported);
+    kmzDataByRun.set(key, existing);
+    renderMapData();
+
+    const totalRoutes = existing.files.reduce((n, f) => n + f.routes.length, 0);
+    const totalLifts = existing.files.reduce((n, f) => n + f.lifts.length, 0);
+    alert(`Imported ${imported.length} file(s) for ${existing.run}: ${totalRoutes} route(s), ${totalLifts} lift(s).`);
+  };
+
+  // Snap Boundary Strictly based on House Coordinates (Ignoring Bins)
+  window.snapActiveBoundaryToRoads = async function() {
+    const runs = Array.from(selectedMapRuns());
+    if (runs.length !== 1) {
+      alert("Please select exactly one run to snap its boundary to houses.");
+      return;
+    }
+    const runKey = runs[0];
+    const records = getRecordsArray();
+    const housePoints = [];
+
+    records.forEach(site => {
+      if (siteMatchesAllActiveFilters(site)) {
+        // STRICTLY use house coordinates (site.lat, site.lng), completely ignoring bins
+        if (site.lat && site.lng && Number(site.lat) !== 0 && Number(site.lng) !== 0) {
+          housePoints.push({ lat: Number(site.lat), lng: Number(site.lng) });
+        }
+      }
+    });
+
+    if (housePoints.length < 3) {
+      alert("Not enough house coordinates found for this run to build a boundary.");
+      return;
+    }
+
+    const snappedHull = typeof buildRunConvexHull === 'function' ? buildRunConvexHull(housePoints) : housePoints;
+    customRunBorders[runKey] = snappedHull.map(p => [p.lat, p.lng]);
+    await saveToDB("customRunBorders", customRunBorders);
+
+    renderMapData();
+    if (isRoadSnapEditing) enableBoundaryVertexHandles();
+    alert(`Boundary successfully snapped to the perimeter of ${housePoints.length} houses on this run.`);
+  };
 
   // Direct Run Navigation from Address Cards
   window.openRunDirectlyOnMap = function(runName, streamKey, dayName, weekLetter, isSummer, propLat, propLng) {
@@ -5950,42 +6062,6 @@ function promptEditBin(propId, streamKey, binIdx) {
     if (mapEditHandlesLayer) mapEditHandlesLayer.clearLayers();
   };
 
-  // Snap Boundary Vertices to Nearest Road/Kerbside Points
-  window.snapActiveBoundaryToRoads = async function() {
-    const runs = Array.from(selectedMapRuns());
-    if (runs.length !== 1) {
-      alert("Please select exactly one run to snap its boundary to roads.");
-      return;
-    }
-    const runKey = runs[0];
-    const records = getRecordsArray();
-    const kerbPoints = [];
-
-    records.forEach(site => {
-      if (siteMatchesAllActiveFilters(site)) {
-        if (site.lat && site.lng) kerbPoints.push({ lat: Number(site.lat), lng: Number(site.lng) });
-        ['Garbage','Recycling','FOGO'].forEach(st => {
-          (site.soloStreams?.[st] || []).forEach(b => {
-            if (b.lat && b.lng) kerbPoints.push({ lat: Number(b.lat), lng: Number(b.lng) });
-          });
-        });
-      }
-    });
-
-    if (kerbPoints.length < 3) {
-      alert("Not enough property coordinates found to snap boundary.");
-      return;
-    }
-
-    const snappedHull = typeof buildRunConvexHull === 'function' ? buildRunConvexHull(kerbPoints) : kerbPoints;
-    customRunBorders[runKey] = snappedHull.map(p => [p.lat, p.lng]);
-    await saveToDB("customRunBorders", customRunBorders);
-
-    renderMapData();
-    if (isRoadSnapEditing) enableBoundaryVertexHandles();
-    alert(`Boundary snapped to ${snappedHull.length} road collection points.`);
-  };
-
   // Unified House Selection for Street Modes (Drive in / Reverse out & Reverse in / Drive out)
   window.startRoadMode = function(type) {
     if (!selectedCollectionHouseIds.size) {
@@ -6058,47 +6134,6 @@ function promptEditBin(propId, streamKey, binIdx) {
       trackControl.addTo(leafletMap);
     }
   };
-
-  /* Unified Site Matching across Search, Drive, and Map */
-  function siteMatchesAllActiveFilters(site) {
-    const item = getSiteRuns(site);
-    const dayFilter = dayKey(activeFilterDay);
-    const weekFilter = clean(activeFilterWeek).toUpperCase();
-    const st = clean(activeFilterStream);
-
-    if (dayFilter && item.day !== dayFilter) return false;
-    if ((st === 'Recycling' || st === 'FOGO') && weekFilter && item.week !== weekFilter) return false;
-
-    if (selectedRunsSet && selectedRunsSet.size > 0) {
-      const matchesRun = (
-        (st === 'Garbage' && selectedRunsSet.has(lower(item.garRun))) ||
-        (st === 'Recycling' && selectedRunsSet.has(lower(item.recRun)) && isValidRecycleRun(item.recRun, item.day, item.week)) ||
-        (st === 'SummerRecycling' && selectedRunsSet.has(lower(item.summerRun))) ||
-        (st === 'FOGO' && selectedRunsSet.has(lower(item.fogRun))) ||
-        (!st && (
-          selectedRunsSet.has(lower(item.garRun)) ||
-          (selectedRunsSet.has(lower(item.recRun)) && isValidRecycleRun(item.recRun, item.day, item.week)) ||
-          selectedRunsSet.has(lower(item.fogRun))
-        ))
-      );
-      if (!matchesRun) return false;
-    } else if (st) {
-      if (st === 'Garbage' && !item.garRun) return false;
-      if (st === 'Recycling' && (!item.recRun || !isValidRecycleRun(item.recRun, item.day, item.week))) return false;
-      if (st === 'SummerRecycling' && !item.summerRun) return false;
-      if (st === 'FOGO' && !item.fogRun) return false;
-    }
-
-    if (activeFilterDataSource === 'solo') {
-      const hasSolo = (site.soloStreams?.Garbage?.length || site.soloStreams?.Recycling?.length || site.soloStreams?.FOGO?.length);
-      if (!hasSolo) return false;
-    } else if (activeFilterDataSource === 'council') {
-      const hasCouncil = (site.councilStreams?.Garbage?.length || site.councilStreams?.Recycling?.length || site.councilStreams?.FOGO?.length);
-      if (!hasCouncil) return false;
-    }
-
-    return true;
-  }
 
   /* Search Page Handler */
   window.handleSearch = function() {
@@ -6305,7 +6340,6 @@ function promptEditBin(propId, streamKey, binIdx) {
     const mapLiveStreet = q('mapLiveStreet');
     if (mapLiveStreet) mapLiveStreet.innerText = liveStreetName;
 
-    // Nearest site for Street & Suburb header
     let nearestSiteOverall = null;
     let nearestDistOverall = Infinity;
     records.forEach(site => {
@@ -6358,7 +6392,6 @@ function promptEditBin(propId, streamKey, binIdx) {
         }).join('');
       }).join('');
 
-      // Check for Street Modes / Collection Point flags
       const houseId = String(site.propId || site.siteId || '');
       const streetMode = houseStreetModes[houseId];
       const cp = collectionPoints[houseId];
@@ -6391,12 +6424,11 @@ function promptEditBin(propId, streamKey, binIdx) {
     }).join('') || '<div style="text-align:center; padding:30px; color:#64748b; font-weight:700;">No upcoming bins ahead matching filter.</div>';
   };
 
-  /* Unified Telemetry Rendering: Compact Drive HUD Design on Map */
+  /* Unified Telemetry Rendering */
   function renderCurrentAddressTelemetry(site) {
     lastTelemetrySite = site || null;
     const address = site ? (cleanStreetAddress(site.addressText)||site.baseStreetLine||'Address unavailable') : 'Scanning Street...';
     
-    // Check for Street Mode / Collection Point flags on current property
     const houseId = site ? String(site.propId || site.siteId || '') : '';
     const streetMode = houseStreetModes[houseId];
     const cp = collectionPoints[houseId];
@@ -6417,7 +6449,6 @@ function promptEditBin(propId, streamKey, binIdx) {
     const mapRunsEl=document.getElementById('mapRunsAtAddress');
     if(mapRunsEl) mapRunsEl.innerHTML=buildRunsAtAddress(site, false);
 
-    // Only output bin rows if property matches the active filtered run
     const mapBinsEl=document.getElementById('mapBinsAtAddress');
     if(mapBinsEl) {
       const isSiteOnFilteredRun = site && siteMatchesAllActiveFilters(site);
@@ -6529,7 +6560,7 @@ function promptEditBin(propId, streamKey, binIdx) {
     }
   };
 
-  /* Interactive House Triangles (Street Modes Coloring & Easy Tap Selection) */
+  /* Interactive House Triangles */
   window.drawHouseTriangle = function(site) {
     const id = String(site.propId || site.siteId || '');
     const isSelected = selectedCollectionHouseIds.has(id);
@@ -6542,7 +6573,6 @@ function promptEditBin(propId, streamKey, binIdx) {
     const cp = collectionPointForSite(site);
     const streetMode = houseStreetModes[id];
     
-    // Dynamic Color Priority: Selected (Blue) > Drive in/out (Orange) > Reverse in/out (Blue) > Collection Point (Amber) > Default (Purple)
     let color = isSelected ? '#2563eb' : (
       streetMode ? (streetMode.type === 'drive-reverse-out' ? '#f97316' : '#2563eb') :
       (cp ? collectionPointHouseColor : (houseDotsColor || '#8b5cf6'))
