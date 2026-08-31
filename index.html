@@ -5330,6 +5330,7 @@ function promptEditBin(propId, streamKey, binIdx) {
     transition: all 0.15s ease !important;
   }
 
+  /* Active states for Follow Me and Track-Up buttons */
   #mapScreenContainer .map-side-view-toggle.active {
     background: #0284c7 !important;
     border-color: #0369a1 !important;
@@ -5348,12 +5349,18 @@ function promptEditBin(propId, streamKey, binIdx) {
     box-shadow: 0 0 0 3px rgba(22,101,52,0.3) !important;
   }
 
+  #mapScreenContainer .map-side-track-toggle svg {
+    width: 24px !important;
+    height: 24px !important;
+    display: block !important;
+    margin: auto !important;
+    transition: transform 0.2s linear !important;
+  }
+
   #mapScreenContainer .map-side-layers-toggle img,
   #mapScreenContainer .map-side-view-toggle img,
-  #mapScreenContainer .map-side-track-toggle img,
   #mapScreenContainer .map-side-layers-toggle svg,
-  #mapScreenContainer .map-side-view-toggle svg,
-  #mapScreenContainer .map-side-track-toggle svg {
+  #mapScreenContainer .map-side-view-toggle svg {
     width: 24px !important;
     height: 24px !important;
     max-width: 24px !important;
@@ -5655,6 +5662,7 @@ function promptEditBin(propId, streamKey, binIdx) {
     if (p) p.open = !p.open;
   };
 
+  // Follow Me Toggle
   window.toggleTruckFollow = function(ev) {
     if (ev) ev.stopPropagation();
     isTruckFollowEnabled = !isTruckFollowEnabled;
@@ -5664,12 +5672,13 @@ function promptEditBin(propId, streamKey, binIdx) {
     if (btn) btn.classList.toggle('active', isTruckFollowEnabled);
 
     if (isTruckFollowEnabled && userCurrentLocation && leafletMap) {
-      leafletMap.setView([userCurrentLocation.lat, userCurrentLocation.lng], Math.max(leafletMap.getZoom(), 18), { animate: true });
+      leafletMap.panTo([userCurrentLocation.lat, userCurrentLocation.lng], { animate: true });
       hasAutoCenteredTruck = true;
     }
   };
   window.toggleMapSideView = window.toggleTruckFollow;
 
+  // Track-Up Navigation Arrow Button Toggle
   window.toggleTrackUpOrientation = function(ev) {
     if (ev) ev.stopPropagation();
     isTrackUpEnabled = !isTrackUpEnabled;
@@ -5677,27 +5686,32 @@ function promptEditBin(propId, streamKey, binIdx) {
     const btn = document.getElementById('btnTrackUpOrientation');
     if (btn) {
       btn.classList.toggle('active', isTrackUpEnabled);
-      btn.setAttribute('title', isTrackUpEnabled ? 'Track-Up (Heading active)' : 'North-Up');
+      btn.setAttribute('title', isTrackUpEnabled ? 'Track-Up (Heading Active)' : 'North-Up');
     }
 
     applyMapHeadingRotation();
   };
 
+  // Dynamic real-time arrow rotation matching truck heading
   function applyMapHeadingRotation() {
-    const mapEl = document.getElementById('mainLeafletMap');
-    if (!mapEl) return;
-    if (isTrackUpEnabled && lastValidHeading !== undefined && isTruckFollowEnabled) {
-      mapEl.style.transform = `rotate(${-lastValidHeading}deg)`;
-      mapEl.style.transformOrigin = 'center center';
-    } else {
-      mapEl.style.transform = 'none';
+    const arrowBtnSvg = document.querySelector('#btnTrackUpOrientation svg');
+    if (arrowBtnSvg) {
+      const heading = (lastValidHeading !== undefined && Number.isFinite(lastValidHeading)) ? lastValidHeading : 0;
+      arrowBtnSvg.style.transform = `rotate(${heading}deg)`;
+      arrowBtnSvg.style.transformOrigin = 'center center';
     }
   }
 
+  // Inject Zoom, Follow, and Arrow Controls onto the Map
   const origInitLeafletMap = window.initLeafletMap;
   window.initLeafletMap = function() {
     if (origInitLeafletMap) origInitLeafletMap.apply(this, arguments);
     if (!leafletMap) return;
+
+    // Focus immediately on driver's current position if known
+    if (userCurrentLocation && Number.isFinite(userCurrentLocation.lat)) {
+      leafletMap.setView([userCurrentLocation.lat, userCurrentLocation.lng], leafletMap.getZoom() || 18);
+    }
 
     if (!document.getElementById('mapSideFollowControl')) {
       const followControl = L.control({ position: 'topright' });
@@ -5717,7 +5731,13 @@ function promptEditBin(propId, streamKey, binIdx) {
       trackControl.onAdd = function() {
         const wrap = L.DomUtil.create('div', 'leaflet-control map-side-track-control');
         wrap.id = 'mapSideTrackControl';
-        wrap.innerHTML = `<button type="button" id="btnTrackUpOrientation" class="map-side-track-toggle ${isTrackUpEnabled ? 'active' : ''}" onclick="toggleTrackUpOrientation(event)" title="Compass / Track-Up">🧭</button>`;
+        wrap.innerHTML = `
+          <button type="button" id="btnTrackUpOrientation" class="map-side-track-toggle ${isTrackUpEnabled ? 'active' : ''}" onclick="toggleTrackUpOrientation(event)" title="Track-Up / Heading Arrow">
+            <svg viewBox="0 0 512 512" fill="none" stroke="currentColor" stroke-width="42" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M472 40L40 224l200 48 48 200L472 40z"/>
+            </svg>
+          </button>
+        `;
         L.DomEvent.disableClickPropagation(wrap);
         L.DomEvent.disableScrollPropagation(wrap);
         return wrap;
@@ -5757,7 +5777,6 @@ function promptEditBin(propId, streamKey, binIdx) {
       if (st === 'FOGO' && !item.fogRun) return false;
     }
 
-    // Data Source Filter
     if (activeFilterDataSource === 'solo') {
       const hasSolo = (site.soloStreams?.Garbage?.length || site.soloStreams?.Recycling?.length || site.soloStreams?.FOGO?.length);
       if (!hasSolo) return false;
@@ -5769,7 +5788,7 @@ function promptEditBin(propId, streamKey, binIdx) {
     return true;
   }
 
-  /* Search Page Handler: connects text query + modal stream/day/week/run filters */
+  /* Search Page Handler */
   window.handleSearch = function() {
     const query = clean(q('searchInput')?.value).toLowerCase();
     const resultsContainer = q('resultsList');
@@ -5817,13 +5836,6 @@ function promptEditBin(propId, streamKey, binIdx) {
     resultsContainer.innerHTML = matches.slice(0, 30).map(({ site, dist }) => {
       const navUrl = `https://www.google.com/maps/dir/?api=1&destination=${site.lat},${site.lng}&travelmode=driving`;
       let hasAnyBins = false;
-
-      const councilBinsList = [
-        ...(site.councilStreams?.Garbage || []),
-        ...(site.councilStreams?.Recycling || []),
-        ...(site.councilStreams?.FOGO || [])
-      ];
-      const councilSerialsSet = new Set(councilBinsList.map(cb => clean(cb.serial).toUpperCase()));
 
       let streamCountPillsHtml = '';
       SOLO_STREAMS.forEach(st => {
@@ -5908,7 +5920,7 @@ function promptEditBin(propId, streamKey, binIdx) {
     }).join('') || '<div style="text-align:center; padding:30px; color:#64748b;">No matching properties found.</div>';
   };
 
-  /* Drive HUD Page Handler: connects search input text + modal stream/day/week/run filters */
+  /* Drive HUD Page Handler */
   window.updateDriverHud = function() {
     const listContainer = q('hudUpcomingList');
     const streetNameEl = q('hudStreetName');
@@ -5932,7 +5944,6 @@ function promptEditBin(propId, streamKey, binIdx) {
     records.forEach(site => {
       if (!siteMatchesAllActiveFilters(site)) return;
 
-      // Text Search Filtering on Drive Page
       if (searchQuery) {
         const addrMatch = clean(site.addressText).toLowerCase().includes(searchQuery) ||
                           clean(site.propId).toLowerCase().includes(searchQuery) ||
@@ -5986,7 +5997,6 @@ function promptEditBin(propId, streamKey, binIdx) {
     renderCurrentAddressTelemetry(currentSite);
 
     listContainer.innerHTML = upcoming.slice(0, 10).map(({ site, dist }) => {
-      const sch = site.soloSchedule || {};
       const cleanStreetOnly = (site.baseStreetLine || cleanStreetAddress(site.addressText)).trim();
       const navUrl = `https://www.google.com/maps/dir/?api=1&destination=${site.lat},${site.lng}&travelmode=driving`;
 
@@ -6042,7 +6052,7 @@ function promptEditBin(propId, streamKey, binIdx) {
     }).join('') || '<div style="text-align:center; padding:30px; color:#64748b; font-weight:700;">No upcoming bins ahead matching filter.</div>';
   };
 
-  /* GPS Position Watcher & Side-of-Street Check */
+  /* GPS Position Watcher: Preserves user manual zoom and updates real-time arrow rotation */
   window.onGpsPositionSuccess = function(pos) {
     const accuracy = Math.round(pos.coords.accuracy);
     const speedKmh = pos.coords.speed !== null && !isNaN(pos.coords.speed) ? Math.round(pos.coords.speed * 3.6) : 0;
@@ -6082,19 +6092,21 @@ function promptEditBin(propId, streamKey, binIdx) {
       mapHeadingEl.innerText = `🛰️ ±${accuracy}m · 🧭 ${cardinal} ${lastValidHeading}°`;
     }
 
+    // Follow Me
     if (isTruckFollowEnabled && leafletMap) {
       if (!hasAutoCenteredTruck) {
-        leafletMap.setView([userCurrentLocation.lat, userCurrentLocation.lng], Math.max(leafletMap.getZoom(), 18), { animate: false });
+        leafletMap.setView([userCurrentLocation.lat, userCurrentLocation.lng], leafletMap.getZoom() || 18, { animate: false });
         hasAutoCenteredTruck = true;
       } else {
         leafletMap.panTo([userCurrentLocation.lat, userCurrentLocation.lng], { animate: false });
       }
-      applyMapHeadingRotation();
     }
 
+    // Real-time navigation arrow rotation
+    applyMapHeadingRotation();
     updateMapTruckPosition();
 
-    // Side of road check
+    // Strict Side-of-Street Check
     activeMapCircleMarkers.forEach((markerObj, markerKey) => {
       const binId = markerObj.serial || markerKey;
       if (servicedBinSerials.has(binId)) return;
@@ -6131,7 +6143,7 @@ function promptEditBin(propId, streamKey, binIdx) {
     }
   };
 
-  /* Render Map Data (Panes, Colors & Boundaries) */
+  /* Render Map Data */
   window.renderMapData = function() {
     if (typeof updateMapLiveRun === 'function') updateMapLiveRun();
     if (!leafletMap && typeof initLeafletMap === 'function') initLeafletMap();
