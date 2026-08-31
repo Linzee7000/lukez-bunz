@@ -6579,16 +6579,20 @@ window.toggleMapToolsPanel=()=>{const p=document.querySelector('.map-controls-gr
     return '';
   };
   const selected=()=>new Set(Array.from(selectedRunsSet||[]).map(lower));
+  const knownSummerRuns=()=>new Set((siteRecords||[])
+    .map(site=>clean(schedule(site).recSummerRun))
+    .filter(Boolean)
+    .map(lower));
 
-  /* The rule requested: a run whose NAME says Summer is never a normal recycle run.
-     Do not use recRun merely because a summer property can also have one. */
+  /* The rule requested: a summer run is never a normal recycle run.
+     Check both the run name and the dedicated recSummerRun assignments. */
   function belongs(site,stream,day=activeFilterDay,week=activeFilterWeek,selectedSet=selected()){
     const s=schedule(site);
     if(day && dayKey(s.day)!==dayKey(day)) return false;
     const run=runFor(site,stream);
     if(!run) return false;
     if(stream==='Recycling'){
-      if(hasSummerWord(run)) return false;
+      if(hasSummerWord(run) || knownSummerRuns().has(lower(run))) return false;
       const w=clean(s.weekLetter).toUpperCase();
       if(w!=='A' && w!=='B') return false;
       if(week && w!==clean(week).toUpperCase()) return false;
@@ -6975,7 +6979,7 @@ window.toggleMapToolsPanel=()=>{const p=document.querySelector('.map-controls-gr
 (function(){
   const DAY_OPTIONS=[['Monday','MON'],['Tuesday','TUE'],['Wednesday','WED'],['Thursday','THU'],['Friday','FRI']];
   const STREAM_OPTIONS=[['','All',''],['Garbage','🗑️','stream-gar'],['Recycling','♻️','stream-rec'],['SummerRecycling','☀️','stream-summer'],['FOGO','🌳','stream-fog']];
-  const SOURCE_OPTIONS=[['all','All Data'],['solo','🚛 Solo'],['council','🏛️ MPSC']];
+  const SOURCE_OPTIONS=[['all','All'],['solo','🚛 Solo'],['council','🏛️ MPSC']];
   function q(id){return document.getElementById(id)}
   function clean(v){return String(v||'').trim()}
   const originalOpenFilter=window.openFilterDrawerModal;
@@ -6992,11 +6996,11 @@ window.toggleMapToolsPanel=()=>{const p=document.querySelector('.map-controls-gr
     const streamUI=document.createElement('div'); streamUI.className='unified-filter-section';
     streamUI.innerHTML='<span class="unified-filter-label">1. SELECT STREAM</span><div id="unifiedStreamButtons" class="unified-filter-grid streams"></div>';
     const sourceUI=document.createElement('div'); sourceUI.className='unified-filter-section';
-    sourceUI.innerHTML='<span class="unified-filter-label">2. SELECT DATA</span><div id="unifiedSourceButtons" class="unified-filter-grid sources"></div>';
+    sourceUI.innerHTML='<div id="unifiedSourceButtons" class="unified-filter-grid sources"></div>';
     const dayUI=document.createElement('div'); dayUI.className='unified-filter-section';
-    dayUI.innerHTML='<span class="unified-filter-label">3. SELECT DAY</span><div id="unifiedDayButtons" class="unified-filter-grid"></div>';
+    dayUI.innerHTML='<span class="unified-filter-label">2. SELECT DAY</span><div id="unifiedDayButtons" class="unified-filter-grid"></div>';
     const weekUI=document.createElement('div'); weekUI.className='unified-filter-section';
-    weekUI.innerHTML='<span class="unified-filter-label">4. SELECT WEEK</span><div id="unifiedWeekButtons" class="unified-filter-grid weeks"></div>';
+    weekUI.innerHTML='<span class="unified-filter-label">3. SELECT WEEK</span><div id="unifiedWeekButtons" class="unified-filter-grid weeks"></div>';
     wrap.append(streamUI,sourceUI,dayUI,weekUI);
     streamGroup.before(wrap);
     function render(){
@@ -7039,195 +7043,61 @@ window.toggleMapToolsPanel=()=>{const p=document.querySelector('.map-controls-gr
 })();
 </script>
 
-<script>
-/* Final filter/map corrections */
-(function () {
-  function q(id){ return document.getElementById(id); }
-  function clean(v){ return String(v || '').trim(); }
+<script id="final-filter-apply-repair">
+(function(){
+  const clean=v=>String(v||'').trim();
 
-  /* A Summer run is identified by its actual run name, not just the field it
-     happens to be stored in. Normal Recycling must never inherit it. */
-  window.isSummerRunName = function (value) {
-    return /\bsummer\b/i.test(clean(value));
-  };
+  function commitFilterState(){
+    const stream=document.getElementById('modalStreamSelect');
+    const source=document.getElementById('modalDataSourceSelect');
+    const day=document.getElementById('modalDaySelect');
+    const week=document.getElementById('modalWeekSelect');
 
-  /* Remove the "SELECT DATA" heading. The three source buttons are self-explanatory. */
-  function removeDataHeading(){
-    const wrap = q('unifiedFilterControls');
-    if(!wrap) return;
-    const sections = wrap.querySelectorAll('.unified-filter-section');
-    sections.forEach(section => {
-      if(section.querySelector('#unifiedSourceButtons')){
-        const label = section.querySelector('.unified-filter-label');
-        if(label) label.remove();
-      }
-    });
-  }
+    activeFilterStream=clean(stream?.value);
+    activeFilterDataSource=clean(source?.value)||'all';
+    activeFilterDay=clean(day?.value);
+    activeFilterWeek=clean(week?.value);
 
-  /* Strict run list: never put a Summer-named run into All or Recycle. */
-  window.populateModalRunsChecklist = function(){
-    const container=q('modalRunsChecklistGrid');
-    if(!container || !Array.isArray(window.siteRecords) || !window.siteRecords.length) return;
-
-    const stream=clean(q('modalStreamSelect')?.value);
-    const day=clean(q('modalDaySelect')?.value).toLowerCase();
-    const runs=new Map();
-
-    window.siteRecords.forEach(site=>{
-      const sch=site?.soloSchedule || {};
-      if(day && clean(sch.day).toLowerCase() !== day) return;
-
-      const add=(name,type)=>{
-        const run=clean(name);
-        if(!run) return;
-        if(type !== 'summer' && window.isSummerRunName(run)) return;
-        runs.set(run,type);
-      };
-
-      if(!stream || stream==='Garbage') add(sch.garRun,'gar');
-      if(!stream || stream==='Recycling') add(sch.recRun,'rec');
-      if(stream==='SummerRecycling') add(sch.recSummerRun,'summer');
-      if(!stream || stream==='FOGO') add(sch.fogRun,'fog');
-    });
-
-    const sorted=[...runs.keys()].filter(Boolean).sort((a,b)=>a.localeCompare(b,undefined,{numeric:true}));
-    container.innerHTML=sorted.map(run=>{
-      const type=runs.get(run);
-      const cls=type==='gar'?'run-chip-gar':type==='rec'?'run-chip-rec':type==='summer'?'run-chip-summer':'run-chip-fog';
-      const checked=window.selectedRunsSet && window.selectedRunsSet.has(run.toLowerCase())?'checked':'';
-      return `<label class="run-select-chip ${cls}">
-        <input type="checkbox" value="${String(run).replace(/"/g,'&quot;')}" ${checked}
-          onchange="toggleModalRunSelection(${JSON.stringify(run.toLowerCase())}, this.checked)">
-        <span class="run-chip-text">${type==='summer'?'☀️ ':''}${run}</span>
-      </label>`;
-    }).join('');
-  };
-
-  /* Exact stream-aware map filtering. */
-  window.visibleStreams = function(){
-    if(window.activeFilterStream==='SummerRecycling') return ['Recycling'];
-    return window.activeFilterStream ? [window.activeFilterStream] : ['Garbage','Recycling','FOGO'];
-  };
-
-  window.streamRunForSite = function(site,stream){
-    const sch=site?.soloSchedule || {};
-    if(stream==='Garbage'){
-      const run=clean(sch.garRun);
-      return window.isSummerRunName(run) ? '' : run;
-    }
-    if(stream==='FOGO'){
-      const run=clean(sch.fogRun);
-      return window.isSummerRunName(run) ? '' : run;
-    }
-    if(stream==='Recycling'){
-      if(window.activeFilterStream==='SummerRecycling') return clean(sch.recSummerRun);
-      const run=clean(sch.recRun);
-      return window.isSummerRunName(run) ? '' : run;
-    }
-    return '';
-  };
-
-  window.getSiteRunEntries = function(site){
-    const sch=site?.soloSchedule || {};
-    const a=[];
-    const add=(key,type)=>{
-      const run=clean(sch[key]);
-      if(!run) return;
-      if(type!=='summer' && window.isSummerRunName(run)) return;
-      a.push({key:run,type});
-    };
-    add('garRun','gar');
-    add('recRun','rec');
-    add('recSummerRun','summer');
-    add('fogRun','fog');
-    return a;
-  };
-
-  window.siteMatchesMapFilters = function(site){
-    const sch=site?.soloSchedule || {};
-    const selected=window.selectedMapRuns ? window.selectedMapRuns() : new Set();
-
-    if(window.activeFilterDay &&
-       clean(sch.day).toLowerCase() !== clean(window.activeFilterDay).toLowerCase()) return false;
-
-    if(window.activeFilterWeek &&
-       clean(sch.weekLetter).toUpperCase() !== clean(window.activeFilterWeek).toUpperCase()) return false;
-
-    const normalGar=window.streamRunForSite(site,'Garbage');
-    const normalRec=(window.activeFilterStream==='SummerRecycling') ? '' : window.streamRunForSite(site,'Recycling');
-    const normalFog=window.streamRunForSite(site,'FOGO');
-    const summer=clean(sch.recSummerRun);
-
-    if(window.activeFilterStream==='Garbage' && !normalGar) return false;
-    if(window.activeFilterStream==='Recycling' && !normalRec) return false;
-    if(window.activeFilterStream==='SummerRecycling' && !summer) return false;
-    if(window.activeFilterStream==='FOGO' && !normalFog) return false;
-
-    /* All means standard streams only. A Summer assignment alone is never enough. */
-    if(!window.activeFilterStream && !selected.size && !(normalGar || normalRec || normalFog)) return false;
-
-    if(selected.size){
-      if(window.activeFilterStream==='SummerRecycling'){
-        if(!summer || !selected.has(window.mapKey(summer))) return false;
-      } else if(window.activeFilterStream){
-        const run=window.streamRunForSite(site,window.activeFilterStream);
-        if(!run || !selected.has(window.mapKey(run))) return false;
-      } else {
-        const standard=[normalGar,normalRec,normalFog].filter(Boolean);
-        if(!standard.some(run=>selected.has(window.mapKey(run)))) return false;
-      }
-    }
-
-    const streams=window.visibleStreams().filter(st=>{
-      if(selected.size && window.streamMatchesSelectedRun) return window.streamMatchesSelectedRun(site,st);
-      return !!window.streamRunForSite(site,st);
-    });
-    if(selected.size && !streams.length) return false;
-
-    if(window.activeFilterDataSource==='solo' &&
-       !streams.some(st=>window.hasBins && window.hasBins(site,'solo',st))) return false;
-    if(window.activeFilterDataSource==='council' &&
-       !streams.some(st=>window.hasBins && window.hasBins(site,'council',st))) return false;
-
-    return true;
-  };
-
-  /* Make Apply Filters commit state first, then redraw whichever page is open,
-     with an explicit map redraw after the modal has closed. */
-  window.applyModalFilters = function(){
-    window.activeFilterStream=clean(q('modalStreamSelect')?.value);
-    window.activeFilterDataSource=clean(q('modalDataSourceSelect')?.value) || 'all';
-    window.activeFilterDay=clean(q('modalDaySelect')?.value);
-    window.activeFilterWeek=clean(q('modalWeekSelect')?.value);
-
-    if(window.activeFilterStream !== 'SummerRecycling' && window.selectedRunsSet){
-      /* Drop any stale selected Summer run that leaked in from a previous filter. */
-      const selected=[...window.selectedRunsSet];
-      selected.forEach(run=>{
-        if(window.isSummerRunName(run)) window.selectedRunsSet.delete(run);
+    /* Summer is opt-in only. It can never survive under All or Recycling. */
+    if(activeFilterStream!=='SummerRecycling'){
+      const summer=new Set((siteRecords||[])
+        .map(site=>clean((site.soloSchedule||{}).recSummerRun))
+        .filter(Boolean)
+        .map(v=>v.toLowerCase()));
+      [...selectedRunsSet].forEach(run=>{
+        const key=clean(run).toLowerCase();
+        if(/\bsummer\b/i.test(key)||summer.has(key)) selectedRunsSet.delete(run);
       });
     }
+  }
 
-    if(typeof window.closeModal==='function') window.closeModal('filterOptionsModal');
-    if(typeof window.renderActiveFilterChips==='function') window.renderActiveFilterChips();
-    if(typeof window.triggerUniversalDataRefresh==='function') window.triggerUniversalDataRefresh();
+  window.applyModalFilters=function(){
+    commitFilterState();
+
+    if(typeof closeModal==='function') closeModal('filterOptionsModal');
+    if(typeof renderActiveFilterChips==='function') renderActiveFilterChips();
+
+    /* Refresh the current page and explicitly redraw the map. */
+    if(typeof triggerUniversalDataRefresh==='function') triggerUniversalDataRefresh();
 
     requestAnimationFrame(()=>{
-      if(window.activeTab==='map' && typeof window.renderMapData==='function'){
-        if(window.leafletMap) window.leafletMap.invalidateSize();
-        window.renderMapData();
+      if(!leafletMap && typeof initLeafletMap==='function') initLeafletMap();
+      if(leafletMap){
+        leafletMap.invalidateSize();
+        if(typeof window.renderMapData==='function') window.renderMapData();
       }
     });
-    setTimeout(()=>{
-      if(window.activeTab==='map' && typeof window.renderMapData==='function') window.renderMapData();
-    },80);
   };
 
-  document.addEventListener('DOMContentLoaded',()=>{
-    removeDataHeading();
-    setTimeout(removeDataHeading,50);
-  });
-  setTimeout(removeDataHeading,0);
+  /* Keep the source choice defaulted to All whenever the filter opens. */
+  const oldOpen=window.openFilterDrawerModal;
+  window.openFilterDrawerModal=function(){
+    if(typeof oldOpen==='function') oldOpen.apply(this,arguments);
+    const source=document.getElementById('modalDataSourceSelect');
+    if(source && !clean(source.value)) source.value='all';
+    if(typeof window.__renderUnifiedFilterControls==='function') window.__renderUnifiedFilterControls();
+    if(typeof window.populateModalRunsChecklist==='function') window.populateModalRunsChecklist();
+  };
 })();
 </script>
 
