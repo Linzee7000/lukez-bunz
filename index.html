@@ -2317,6 +2317,10 @@
     const streamVal = document.getElementById('modalStreamSelect').value.trim();
     const dayVal = document.getElementById('modalDaySelect').value.trim().toLowerCase();
     const runsMap = new Map();
+    const summerRunNames = new Set((siteRecords || [])
+      .map(x => (x.soloSchedule || {}).recSummerRun)
+      .filter(Boolean)
+      .map(x => String(x).trim().toLowerCase()));
 
     siteRecords.forEach(s => {
       const sch = s.soloSchedule;
@@ -2328,7 +2332,7 @@
         }
       }
       if (streamVal === 'Recycling') {
-        if (sch.recRun && !sch.recRun.toLowerCase().includes('summer')) {
+        if (sch.recRun && !sch.recRun.toLowerCase().includes('summer') && !summerRunNames.has(sch.recRun.trim().toLowerCase())) {
           runsMap.set(sch.recRun.trim(), 'rec');
         }
       }
@@ -2343,7 +2347,7 @@
         }
       }
       if (!streamVal) {
-        if (sch.recRun && !sch.recRun.toLowerCase().includes('summer')) {
+        if (sch.recRun && !sch.recRun.toLowerCase().includes('summer') && !summerRunNames.has(sch.recRun.trim().toLowerCase())) {
           runsMap.set(sch.recRun.trim(), 'rec');
         }
       }
@@ -7021,6 +7025,7 @@ window.toggleMapToolsPanel=()=>{const p=document.querySelector('.map-controls-gr
       render(); if(typeof window.populateModalRunsChecklist==='function')window.populateModalRunsChecklist();
     });
     window.__renderUnifiedFilterControls=render;
+    window.__buildUnifiedFilterControls=buildUnifiedFilterControls;
     render();
   }
   function openUnified(){
@@ -7047,6 +7052,34 @@ window.toggleMapToolsPanel=()=>{const p=document.querySelector('.map-controls-gr
 (function(){
   const clean=v=>String(v||'').trim();
 
+  function openFilterReliably(){
+    const stream=document.getElementById('modalStreamSelect');
+    const source=document.getElementById('modalDataSourceSelect');
+    const day=document.getElementById('modalDaySelect');
+    const week=document.getElementById('modalWeekSelect');
+
+    if(stream) stream.value=clean(activeFilterStream);
+    if(source) source.value=clean(activeFilterDataSource)||'all';
+    if(day) day.value=clean(activeFilterDay);
+    if(week) week.value=clean(activeFilterWeek);
+
+    if(typeof window.__buildUnifiedFilterControls==='function'){
+      window.__buildUnifiedFilterControls();
+    }
+    if(typeof window.__renderUnifiedFilterControls==='function'){
+      window.__renderUnifiedFilterControls();
+    }
+    if(typeof window.populateModalRunsChecklist==='function'){
+      window.populateModalRunsChecklist();
+    }
+    if(typeof window.openModal==='function'){
+      window.openModal('filterOptionsModal');
+    } else {
+      const modal=document.getElementById('filterOptionsModal');
+      if(modal) modal.style.display='flex';
+    }
+  }
+
   function commitFilterState(){
     const stream=document.getElementById('modalStreamSelect');
     const source=document.getElementById('modalDataSourceSelect');
@@ -7058,181 +7091,67 @@ window.toggleMapToolsPanel=()=>{const p=document.querySelector('.map-controls-gr
     activeFilterDay=clean(day?.value);
     activeFilterWeek=clean(week?.value);
 
-    /* Summer is opt-in only. It can never survive under All or Recycling. */
     if(activeFilterStream!=='SummerRecycling'){
       const summer=new Set((siteRecords||[])
         .map(site=>clean((site.soloSchedule||{}).recSummerRun))
         .filter(Boolean)
         .map(v=>v.toLowerCase()));
       [...selectedRunsSet].forEach(run=>{
-        const key=clean(run).toLowerCase();
-        if(/\bsummer\b/i.test(key)||summer.has(key)) selectedRunsSet.delete(run);
-      });
-    }
-  }
-
-  window.applyModalFilters=function(){
-    commitFilterState();
-
-    if(typeof closeModal==='function') closeModal('filterOptionsModal');
-    if(typeof renderActiveFilterChips==='function') renderActiveFilterChips();
-
-    /* Refresh the current page and explicitly redraw the map. */
-    if(typeof triggerUniversalDataRefresh==='function') triggerUniversalDataRefresh();
-
-    requestAnimationFrame(()=>{
-      if(!leafletMap && typeof initLeafletMap==='function') initLeafletMap();
-      if(leafletMap){
-        leafletMap.invalidateSize();
-        if(typeof window.renderMapData==='function') window.renderMapData();
-      }
-    });
-  };
-
-  /* Keep the source choice defaulted to All whenever the filter opens. */
-  const oldOpen=window.openFilterDrawerModal;
-  window.openFilterDrawerModal=function(){
-    if(typeof oldOpen==='function') oldOpen.apply(this,arguments);
-    const source=document.getElementById('modalDataSourceSelect');
-    if(source && !clean(source.value)) source.value='all';
-    if(typeof window.__renderUnifiedFilterControls==='function') window.__renderUnifiedFilterControls();
-    if(typeof window.populateModalRunsChecklist==='function') window.populateModalRunsChecklist();
-  };
-})();
-</script>
-
-
-<script id="filter-button-hard-fix">
-(function(){
-  function clean(v){ return String(v == null ? '' : v).trim(); }
-
-  function get(id){ return document.getElementById(id); }
-
-  function syncModalFromActive(){
-    var stream=get('modalStreamSelect');
-    var source=get('modalDataSourceSelect');
-    var day=get('modalDaySelect');
-    var week=get('modalWeekSelect');
-
-    if(stream) stream.value=clean(window.activeFilterStream || activeFilterStream);
-    if(source) source.value=clean(window.activeFilterDataSource || activeFilterDataSource) || 'all';
-    if(day) day.value=clean(window.activeFilterDay || activeFilterDay);
-    if(week) week.value=clean(window.activeFilterWeek || activeFilterWeek);
-  }
-
-  function openFiltersNow(){
-    var modal=get('filterOptionsModal');
-    if(!modal) return;
-
-    syncModalFromActive();
-
-    try {
-      if(typeof window.__renderUnifiedFilterControls==='function') {
-        window.__renderUnifiedFilterControls();
-      }
-      if(typeof window.populateModalRunsChecklist==='function') {
-        window.populateModalRunsChecklist();
-      }
-    } catch(e) {
-      console.error('Filter controls refresh failed', e);
-    }
-
-    modal.classList.add('open');
-  }
-
-  function applyFiltersNow(){
-    var stream=get('modalStreamSelect');
-    var source=get('modalDataSourceSelect');
-    var day=get('modalDaySelect');
-    var week=get('modalWeekSelect');
-
-    activeFilterStream=clean(stream && stream.value);
-    activeFilterDataSource=clean(source && source.value) || 'all';
-    activeFilterDay=clean(day && day.value);
-    activeFilterWeek=clean(week && week.value);
-
-    /* Summer is explicit only. Remove any selected run that belongs to
-       recSummerRun unless the Summer stream itself is selected. */
-    if(activeFilterStream !== 'SummerRecycling' && typeof siteRecords !== 'undefined'){
-      var summerRuns=new Set();
-      (siteRecords || []).forEach(function(site){
-        var sch=site && site.soloSchedule;
-        var r=clean(sch && sch.recSummerRun).toLowerCase();
-        if(r) summerRuns.add(r);
-      });
-      if(typeof selectedRunsSet !== 'undefined' && selectedRunsSet){
-        Array.from(selectedRunsSet).forEach(function(run){
-          var key=clean(run).toLowerCase();
-          if(/\bsummer\b/i.test(key) || summerRuns.has(key)) selectedRunsSet.delete(run);
-        });
-      }
-    }
-
-    var modal=get('filterOptionsModal');
-    if(modal) modal.classList.remove('open');
-
-    try {
-      if(typeof window.renderActiveFilterChips==='function') window.renderActiveFilterChips();
-      if(typeof window.triggerUniversalDataRefresh==='function') window.triggerUniversalDataRefresh();
-    } catch(e) {
-      console.error('Filter refresh failed', e);
-    }
-
-    requestAnimationFrame(function(){
-      try {
-        if(typeof leafletMap !== 'undefined' && leafletMap) leafletMap.invalidateSize();
-        if(typeof window.renderMapData==='function') window.renderMapData();
-      } catch(e) {
-        console.error('Map filter redraw failed', e);
-      }
-    });
-  }
-
-  /* These global functions are used by the existing HTML onclick handlers. */
-  window.openFilterDrawerModal=openFiltersNow;
-  window.openMapRunPicker=openFiltersNow;
-  window.applyModalFilters=applyFiltersNow;
-
-  function wireButtons(){
-    var filter=get('btnFilterMenu');
-    if(filter){
-      filter.onclick=function(ev){
-        ev.preventDefault();
-        ev.stopPropagation();
-        openFiltersNow();
-      };
-    }
-
-    var mapRun=get('mapRunColoredBox');
-    if(mapRun){
-      mapRun.onclick=function(ev){
-        ev.preventDefault();
-        openFiltersNow();
-      };
-    }
-
-    var modal=get('filterOptionsModal');
-    if(modal){
-      var applyButtons=Array.from(modal.querySelectorAll('button'));
-      applyButtons.forEach(function(btn){
-        if(clean(btn.textContent).toLowerCase().indexOf('apply filters')!==-1){
-          btn.onclick=function(ev){
-            ev.preventDefault();
-            ev.stopPropagation();
-            applyFiltersNow();
-          };
+        if(summer.has(clean(run).toLowerCase()) || /\bsummer\b/i.test(clean(run))){
+          selectedRunsSet.delete(run);
         }
       });
     }
   }
 
+  window.openFilterDrawerModal=openFilterReliably;
+  window.openMapRunPicker=openFilterReliably;
+
+  window.applyModalFilters=function(){
+    commitFilterState();
+
+    if(typeof window.closeModal==='function') window.closeModal('filterOptionsModal');
+    if(typeof window.renderActiveFilterChips==='function') window.renderActiveFilterChips();
+    if(typeof window.triggerUniversalDataRefresh==='function') window.triggerUniversalDataRefresh();
+
+    requestAnimationFrame(function(){
+      if(typeof window.leafletMap==='undefined' && typeof window.initLeafletMap==='function'){
+        window.initLeafletMap();
+      }
+      const map=window.leafletMap;
+      if(map && typeof map.invalidateSize==='function') map.invalidateSize();
+      if(typeof window.renderMapData==='function') window.renderMapData();
+    });
+  };
+
+  function wireButtons(){
+    const filterBtn=document.getElementById('btnFilterMenu');
+    if(filterBtn && !filterBtn.dataset.reliableFilterBound){
+      filterBtn.dataset.reliableFilterBound='1';
+      filterBtn.addEventListener('click',function(e){
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        openFilterReliably();
+      },true);
+    }
+
+    document.querySelectorAll('[onclick*="openMapRunPicker"]').forEach(function(btn){
+      if(btn.dataset.reliableMapFilterBound) return;
+      btn.dataset.reliableMapFilterBound='1';
+      btn.addEventListener('click',function(e){
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        openFilterReliably();
+      },true);
+    });
+  }
+
   if(document.readyState==='loading'){
-    document.addEventListener('DOMContentLoaded', wireButtons);
+    document.addEventListener('DOMContentLoaded',wireButtons);
   } else {
     wireButtons();
   }
-  setTimeout(wireButtons, 0);
-  setTimeout(wireButtons, 250);
+  setTimeout(wireButtons,100);
 })();
 </script>
 
