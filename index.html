@@ -5125,9 +5125,7 @@ function promptEditBin(propId, streamKey, binIdx) {
     try {
       let csvText = '';
 
-      // 1. Fetch 8.3 MB compressed file
       const res = await fetch("master_combined.csv.gz");
-      
       if (res.ok) {
         if (typeof DecompressionStream !== 'undefined') {
           const ds = new DecompressionStream('gzip');
@@ -5137,7 +5135,6 @@ function promptEditBin(propId, streamKey, binIdx) {
           throw new Error("DecompressionStream not supported in this browser.");
         }
       } else {
-        // Fallback: fetch uncompressed CSV
         const fallbackRes = await fetch("master_combined_with_metadata.csv");
         if (!fallbackRes.ok) throw new Error("Could not download master dataset.");
         csvText = await fallbackRes.text();
@@ -5220,6 +5217,22 @@ function promptEditBin(propId, streamKey, binIdx) {
 <input id="kmzFileInput" type="file" accept=".kmz,.kml,application/vnd.google-earth.kmz,application/vnd.google-earth.kml+xml,application/zip,text/xml" multiple style="display:none">
 <input type="file" id="masterCsvFileInput" accept=".csv,text/csv" style="display:none;" onchange="handleMasterCsvFileSelect(event)">
 <input type="file" id="changesCsvFileInput" accept=".csv,text/csv" style="display:none;" onchange="handleChangesCsvFileSelect(event)">
+
+<!-- Bin Move Confirmation Dialog -->
+<div id="binMoveConfirmModal" class="modal-overlay" style="display:none; z-index:3000;">
+  <div class="modal-box" style="max-width:420px; width:92vw; padding:18px; border-radius:16px;">
+    <h3 style="margin-top:0; font-size:18px; color:#1e293b; display:flex; align-items:center; gap:8px;">
+      📍 Update Bin GPS Location?
+    </h3>
+    <div id="binMoveConfirmDetails" style="background:#f8fafc; border:1px solid #e2e8f0; border-radius:10px; padding:12px; font-size:14px; color:#334155; margin-bottom:16px; line-height:1.5;">
+      <!-- Populated dynamically -->
+    </div>
+    <div style="display:flex; gap:10px; justify-content:flex-end;">
+      <button type="button" class="btn-cancel" id="btnCancelBinMove" style="flex:1; padding:10px; font-weight:700; border-radius:8px;">Cancel</button>
+      <button type="button" class="btn-save" id="btnConfirmBinMove" style="flex:1; padding:10px; font-weight:700; border-radius:8px; background:#16a34a; color:#fff; border:none;">Save Location</button>
+    </div>
+  </div>
+</div>
 
 <!-- UNIFIED MODAL, FILTER ENGINE & MAP CONTROLS -->
 <div id="mapRunPickerModal" class="modal-overlay sub-modal-layer">
@@ -5411,19 +5424,36 @@ function promptEditBin(propId, streamKey, binIdx) {
     cursor: grabbing !important;
   }
 
+  /* Boundary Handles */
   .poly-edit-handle-dot {
-    width: 16px !important;
-    height: 16px !important;
+    width: 18px !important;
+    height: 18px !important;
     background: #ffffff !important;
     border: 3.5px solid #2563eb !important;
     border-radius: 50% !important;
-    box-shadow: 0 2px 6px rgba(0,0,0,0.5) !important;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.6) !important;
     cursor: grab !important;
     box-sizing: border-box !important;
+    pointer-events: auto !important;
   }
   .poly-edit-handle-dot:active {
     background: #2563eb !important;
     cursor: grabbing !important;
+  }
+
+  .poly-mid-handle-dot {
+    width: 14px !important;
+    height: 14px !important;
+    background: #93c5fd !important;
+    border: 2px dashed #1e40af !important;
+    border-radius: 50% !important;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.4) !important;
+    cursor: pointer !important;
+    box-sizing: border-box !important;
+    pointer-events: auto !important;
+  }
+  .poly-mid-handle-dot:hover {
+    background: #2563eb !important;
   }
 
   .map-address-telemetry {
@@ -5848,7 +5878,7 @@ function promptEditBin(propId, streamKey, binIdx) {
     });
   }
 
-  // Export Recorded Snail Trail as a KML file
+  // Export Recorded Snail Trail as KML
   window.exportSnailTrailKml = function() {
     if (!gpsTrailPoints || gpsTrailPoints.length < 2) {
       alert("No snail trail recorded yet. Drive or move with GPS active to create a trail before exporting.");
@@ -5900,7 +5930,7 @@ function promptEditBin(propId, streamKey, binIdx) {
     URL.revokeObjectURL(url);
   };
 
-  // Support direct KML as well as KMZ file imports
+  // Support direct KML and KMZ file imports
   window.handleKmzFiles = async function(files, runKey) {
     if (!files?.length || !runKey) return;
     const imported = [];
@@ -5934,7 +5964,7 @@ function promptEditBin(propId, streamKey, binIdx) {
     alert(`Imported ${imported.length} file(s) for ${existing.run}: ${totalRoutes} route(s), ${totalLifts} lift(s).`);
   };
 
-  // Snap Boundary Strictly based on House Coordinates (Ignoring Bins)
+  // Snap active boundary directly to houses
   window.snapActiveBoundaryToRoads = async function() {
     const runs = Array.from(selectedMapRuns());
     if (runs.length !== 1) {
@@ -5988,7 +6018,7 @@ function promptEditBin(propId, streamKey, binIdx) {
     }, 150);
   };
 
-  // Follow Me Toggle (Centers on current position and keeps following)
+  // Follow Me Toggle
   window.toggleTruckFollow = function(ev) {
     if (ev) ev.stopPropagation();
     isTruckFollowEnabled = !isTruckFollowEnabled;
@@ -6041,7 +6071,7 @@ function promptEditBin(propId, streamKey, binIdx) {
     }
   }
 
-  // Interactive Boundary Vertex Drag Handles
+  // Multi-Handle Boundary Editing with Edge-Splitting Handles
   window.toggleRoadSnapEditing = async function() {
     isRoadSnapEditing = !isRoadSnapEditing;
     const btn = document.getElementById('btnRoadSnap');
@@ -6065,28 +6095,64 @@ function promptEditBin(propId, streamKey, binIdx) {
     mapHullsLayer.eachLayer(layer => {
       if (layer instanceof L.Polygon && layer._runGroupKey) {
         const groupKey = layer._runGroupKey;
-        const latlngs = layer.getLatLngs()[0] || [];
+        let latlngs = layer.getLatLngs()[0] || [];
 
-        latlngs.forEach((latlng, idx) => {
-          const handleMarker = L.marker(latlng, {
-            draggable: true,
-            pane: 'lukez-handle-pane',
-            icon: L.divIcon({
-              className: 'poly-edit-handle',
-              html: '<div class="poly-edit-handle-dot"></div>',
-              iconSize: [16, 16],
-              iconAnchor: [8, 8]
-            })
+        function refreshHandles() {
+          mapEditHandlesLayer.clearLayers();
+
+          latlngs.forEach((latlng, idx) => {
+            // Main corner vertex drag handle
+            const handleMarker = L.marker(latlng, {
+              draggable: true,
+              pane: 'lukez-handle-pane',
+              icon: L.divIcon({
+                className: 'poly-edit-handle',
+                html: '<div class="poly-edit-handle-dot"></div>',
+                iconSize: [24, 24],
+                iconAnchor: [12, 12]
+              })
+            });
+
+            handleMarker.on('drag', e => {
+              latlngs[idx] = e.target.getLatLng();
+              layer.setLatLngs([latlngs]);
+              customRunBorders[groupKey] = latlngs.map(pt => [pt.lat, pt.lng]);
+            });
+
+            handleMarker.on('dragend', () => {
+              refreshHandles();
+            });
+
+            mapEditHandlesLayer.addLayer(handleMarker);
+
+            // Midpoint click handle (to insert additional points around curves)
+            const nextIdx = (idx + 1) % latlngs.length;
+            const nextLatlng = latlngs[nextIdx];
+            const midLat = (latlng.lat + nextLatlng.lat) / 2;
+            const midLng = (latlng.lng + nextLatlng.lng) / 2;
+
+            const midMarker = L.marker([midLat, midLng], {
+              pane: 'lukez-handle-pane',
+              icon: L.divIcon({
+                className: 'poly-mid-handle',
+                html: '<div class="poly-mid-handle-dot" title="Tap to add boundary handle"></div>',
+                iconSize: [18, 18],
+                iconAnchor: [9, 9]
+              })
+            });
+
+            midMarker.on('click', () => {
+              latlngs.splice(idx + 1, 0, L.latLng(midLat, midLng));
+              layer.setLatLngs([latlngs]);
+              customRunBorders[groupKey] = latlngs.map(pt => [pt.lat, pt.lng]);
+              refreshHandles();
+            });
+
+            mapEditHandlesLayer.addLayer(midMarker);
           });
+        }
 
-          handleMarker.on('drag', e => {
-            latlngs[idx] = e.target.getLatLng();
-            layer.setLatLngs([latlngs]);
-            customRunBorders[groupKey] = latlngs.map(pt => [pt.lat, pt.lng]);
-          });
-
-          mapEditHandlesLayer.addLayer(handleMarker);
-        });
+        refreshHandles();
       }
     });
   };
@@ -6300,7 +6366,7 @@ function promptEditBin(propId, streamKey, binIdx) {
     const st = clean(activeFilterStream);
 
     if (dayFilter && item.day !== dayFilter) return false;
-    if ((st === 'Recycling' || st === 'FOGO') && weekFilter && item.week !== weekFilter) return false;
+    if ((stream === 'Recycling' || stream === 'FOGO') && activeFilterWeek && item.week !== weekFilter) return false;
 
     if (selectedRunsSet && selectedRunsSet.size > 0) {
       const matchesRun = (
@@ -6927,6 +6993,7 @@ function promptEditBin(propId, streamKey, binIdx) {
             if (serial && servicedBinSerials.has(serial)) return;
 
             const key = `${siteId}|${src}|${g.stream}|${idx}|${serial}`;
+            let originalDragPos = null;
             
             const binMarkerIcon = L.divIcon({
               className: 'bin-map-marker-icon',
@@ -6966,36 +7033,74 @@ function promptEditBin(propId, streamKey, binIdx) {
               </div>
             `);
 
-            m.on('dragend', async (ev) => {
+            m.on('dragstart', (ev) => {
+              originalDragPos = ev.target.getLatLng();
+            });
+
+            m.on('dragend', (ev) => {
               const newPos = ev.target.getLatLng();
               const recordsList = getRecordsArray();
               const targetSite = recordsList.find(s => String(s.propId || s.siteId) === siteId);
 
-              if (targetSite && targetSite.soloStreams?.[binStream]?.[idx]) {
-                targetSite.soloStreams[binStream][idx].lat = newPos.lat.toFixed(6);
-                targetSite.soloStreams[binStream][idx].lng = newPos.lng.toFixed(6);
+              if (!targetSite) return;
 
-                masterEditsLog.push({
-                  timestamp: new Date().toISOString(),
-                  editType: "BIN_EDIT",
-                  propId: targetSite.propId,
-                  siteId: targetSite.siteId,
-                  address: targetSite.addressText,
-                  stream: binStream,
-                  serial: serial,
-                  lat: newPos.lat.toFixed(6),
-                  lng: newPos.lng.toFixed(6)
-                });
+              // Display confirmation modal with connected house details
+              const modal = document.getElementById('binMoveConfirmModal');
+              const details = document.getElementById('binMoveConfirmDetails');
+              const btnConfirm = document.getElementById('btnConfirmBinMove');
+              const btnCancel = document.getElementById('btnCancelBinMove');
 
-                await saveToDB("masterRecords", siteRecords);
-                await saveToDB("masterEditsLog", masterEditsLog);
+              const streetClean = (targetSite.baseStreetLine || targetSite.addressText || 'Unknown').split(',')[0].trim();
+              const suburbClean = targetSite.suburbLine || '';
 
-                const activeObj = activeMapCircleMarkers.get(key);
-                if (activeObj) {
-                  activeObj.lat = newPos.lat;
-                  activeObj.lng = newPos.lng;
+              details.innerHTML = `
+                <div><b>🏠 Property:</b> ${esc(streetClean)} ${esc(suburbClean)}</div>
+                <div><b>🆔 Property ID:</b> ${esc(targetSite.propId || targetSite.siteId || '—')}</div>
+                <div><b>🗑️ Stream & Serial:</b> ${esc(binStream)} · <b>${esc(serial || '—')}</b> (${esc(bin.size || '240L')})</div>
+                <div style="margin-top:6px; font-size:12px; color:#64748b;">New GPS: ${newPos.lat.toFixed(6)}, ${newPos.lng.toFixed(6)}</div>
+              `;
+
+              modal.style.display = 'flex';
+
+              const cleanHandlers = () => {
+                modal.style.display = 'none';
+                btnConfirm.onclick = null;
+                btnCancel.onclick = null;
+              };
+
+              btnCancel.onclick = () => {
+                if (originalDragPos) m.setLatLng(originalDragPos);
+                cleanHandlers();
+              };
+
+              btnConfirm.onclick = async () => {
+                if (targetSite.soloStreams?.[binStream]?.[idx]) {
+                  targetSite.soloStreams[binStream][idx].lat = newPos.lat.toFixed(6);
+                  targetSite.soloStreams[binStream][idx].lng = newPos.lng.toFixed(6);
+
+                  masterEditsLog.push({
+                    timestamp: new Date().toISOString(),
+                    editType: "BIN_EDIT",
+                    propId: targetSite.propId,
+                    siteId: targetSite.siteId,
+                    address: targetSite.addressText,
+                    stream: binStream,
+                    serial: serial,
+                    lat: newPos.lat.toFixed(6),
+                    lng: newPos.lng.toFixed(6)
+                  });
+
+                  await saveToDB("masterRecords", siteRecords);
+                  await saveToDB("masterEditsLog", masterEditsLog);
+
+                  const activeObj = activeMapCircleMarkers.get(key);
+                  if (activeObj) {
+                    activeObj.lat = newPos.lat;
+                    activeObj.lng = newPos.lng;
+                  }
                 }
-              }
+                cleanHandlers();
+              };
             });
 
             m.addTo(mapMarkersLayer);
