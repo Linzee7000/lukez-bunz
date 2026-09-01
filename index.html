@@ -4994,7 +4994,6 @@ window.addEventListener('DOMContentLoaded', async () => {
       }
       startLiveLocationWatcher();
 
-      // Load local cache safely
       let cached = null, cachedEdits = null, cachedBorders = null;
       try {
         cached = await loadFromDB("masterRecords");
@@ -5015,31 +5014,33 @@ window.addEventListener('DOMContentLoaded', async () => {
         switchMainTab('search');
       }
 
-      // Background remote sync
+      // Sync latest edits and boundaries from Google Apps Script
       if (SCRIPT_URL) {
-        fetch(SCRIPT_URL).then(res => res.json()).then(remoteData => {
-          if (remoteData.edits && Array.isArray(remoteData.edits)) {
-            masterEditsLog = [...masterEditsLog, ...remoteData.edits];
-            saveToDB("masterEditsLog", masterEditsLog);
-          }
-          if (remoteData.boundaries && typeof remoteData.boundaries === 'object') {
-            customRunBorders = { ...customRunBorders, ...remoteData.boundaries };
-            saveToDB("customRunBorders", customRunBorders);
-          }
-          if (siteRecords.length > 0) {
-            siteRecords = mergeEditsIntoRecords(siteRecords, masterEditsLog);
-            triggerUniversalDataRefresh();
-          }
-        }).catch(err => console.warn("Background sync offline:", err));
+        fetch(SCRIPT_URL)
+          .then(res => res.json())
+          .then(remoteData => {
+            if (remoteData.edits && Array.isArray(remoteData.edits)) {
+              masterEditsLog = [...masterEditsLog, ...remoteData.edits];
+              masterEditsLog = Array.from(new Map(masterEditsLog.map(item => [item.timestamp + '_' + item.propId + '_' + item.editType, item])).values());
+              saveToDB("masterEditsLog", masterEditsLog);
+            }
+            if (remoteData.boundaries && typeof remoteData.boundaries === 'object') {
+              customRunBorders = { ...customRunBorders, ...remoteData.boundaries };
+              saveToDB("customRunBorders", customRunBorders);
+            }
+            if (siteRecords.length > 0) {
+              siteRecords = mergeEditsIntoRecords(siteRecords, masterEditsLog);
+              triggerUniversalDataRefresh();
+            }
+          })
+          .catch(err => console.warn("Sync offline:", err));
       }
 
-      // If no cached records exist, force dataset download immediately
       if (!cached || cached.length === 0) {
         await startUpdateProcess();
       }
     } catch (startupErr) {
-      console.error("Startup crash prevented:", startupErr);
-      // Fallback: force start update process anyway
+      console.error("Startup fallback triggered:", startupErr);
       startUpdateProcess();
     }
   });
@@ -5126,18 +5127,19 @@ window.addEventListener('DOMContentLoaded', async () => {
     pWrap.style.display = 'block';
     statusMsg.style.display = 'block';
     pFill.style.width = '15%';
-    statusMsg.innerText = 'Step 1/3: Uploading live edits & boundaries...';
+    statusMsg.innerText = 'Step 1/3: Uploading live edits...';
 
+    // Form-encoded payload to ensure Google Apps Script receives data across origins
     if ((masterEditsLog.length > 0 || Object.keys(customRunBorders).length > 0) && SCRIPT_URL) {
       try {
         await fetch(SCRIPT_URL, {
           method: 'POST',
           mode: 'no-cors',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ 
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: 'payload=' + encodeURIComponent(JSON.stringify({ 
             edits: masterEditsLog,
             boundaries: customRunBorders 
-          })
+          }))
         });
       } catch(e) {}
     }
@@ -5146,7 +5148,6 @@ window.addEventListener('DOMContentLoaded', async () => {
     statusMsg.innerText = 'Step 2/3: Downloading master dataset from Google Drive...';
 
     try {
-      // Fetch directly from your Google Apps Script Drive stream endpoint
       const res = await fetch(`${SCRIPT_URL}?download=csv`);
       if (!res.ok) throw new Error("Could not download master dataset from Google Drive.");
       
@@ -5168,7 +5169,7 @@ window.addEventListener('DOMContentLoaded', async () => {
 
     } catch(err) {
       console.warn(err);
-      statusMsg.innerHTML = '⚠️ Download failed. <b>Tap here to select master CSV file</b>';
+      statusMsg.innerHTML = '⚠️ Dataset not found online. <b>Tap here to select master CSV file</b>';
       setTimeout(() => {
         pWrap.style.display = 'none';
         statusMsg.style.display = 'none';
@@ -5228,8 +5229,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     if (row.length > 1 || row[0] !== '') lines.push(row);
     return lines;
   }
-</script>
-
+  
 <input id="kmzFileInput" type="file" accept=".kmz,.kml,application/vnd.google-earth.kmz,application/vnd.google-earth.kml+xml,application/zip,text/xml" multiple style="display:none">
 <input type="file" id="masterCsvFileInput" accept=".csv,text/csv" style="display:none;" onchange="handleMasterCsvFileSelect(event)">
 <input type="file" id="changesCsvFileInput" accept=".csv,text/csv" style="display:none;" onchange="handleChangesCsvFileSelect(event)">
