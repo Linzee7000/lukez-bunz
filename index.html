@@ -4979,74 +4979,67 @@ function promptEditBin(propId, streamKey, binIdx) {
     return records;
   }
 
-  window.addEventListener('DOMContentLoaded', async () => {
-    const kmzInput = document.getElementById('kmzFileInput');
-    if (kmzInput) {
-      kmzInput.addEventListener('change', async e => {
-        try {
-          await handleKmzFiles(e.target.files, e.target.dataset.run || selectedSingleMapRun());
-        } catch (err) {
-          console.error(err);
-          alert('KMZ import failed: ' + (err.message || err));
-        }
-      });
-    }
-    startLiveLocationWatcher();
+window.addEventListener('DOMContentLoaded', async () => {
+    try {
+      const kmzInput = document.getElementById('kmzFileInput');
+      if (kmzInput) {
+        kmzInput.addEventListener('change', async e => {
+          try {
+            await handleKmzFiles(e.target.files, e.target.dataset.run || selectedSingleMapRun());
+          } catch (err) {
+            console.error(err);
+            alert('KMZ import failed: ' + (err.message || err));
+          }
+        });
+      }
+      startLiveLocationWatcher();
 
-    const cached = await loadFromDB("masterRecords");
-    const cachedEdits = await loadFromDB("masterEditsLog");
-    const cachedBorders = await loadFromDB("customRunBorders");
-    const cachedRunColors = await loadFromDB("runColorMap");
-    const cachedDotColors = await loadFromDB("runDotColorMap");
-    const cachedHouseDotsColor = await loadFromDB("houseDotsColor");
-    const cachedKmzLiftColors = await loadFromDB("kmzLiftColors");
-
-    if (cachedEdits) masterEditsLog = cachedEdits;
-    if (cachedBorders) customRunBorders = cachedBorders;
-    if (cachedRunColors) runColorMap = cachedRunColors;
-    if (cachedDotColors) runDotColorMap = cachedDotColors;
-    if (cachedHouseDotsColor) houseDotsColor = cachedHouseDotsColor;
-    if (cachedKmzLiftColors) {
-      recyclingLiftColor = cachedKmzLiftColors.recyclingLiftColor || recyclingLiftColor;
-      garbageLiftColor = cachedKmzLiftColors.garbageLiftColor || garbageLiftColor;
-      fogoLiftColor = cachedKmzLiftColors.fogoLiftColor || fogoLiftColor;
-      kmzRouteColor = cachedKmzLiftColors.kmzRouteColor || kmzRouteColor;
-    }
-
-    if (cached && cached.length > 0) {
-      siteRecords = mergeEditsIntoRecords(cached, masterEditsLog);
-      buildFastStreetIndex();
-      renderActiveFilterChips();
-      updateDriverHud();
-      switchMainTab('search');
-    }
-
-    // Fetch remote edits & boundaries from Google Apps Script in the background
-    if (SCRIPT_URL) {
+      // Load local cache safely
+      let cached = null, cachedEdits = null, cachedBorders = null;
       try {
-        const res = await fetch(SCRIPT_URL);
-        if (res.ok) {
-          const remoteData = await res.json();
-          if (remoteData.edits && Array.isArray(remoteData.edits) && remoteData.edits.length > 0) {
+        cached = await loadFromDB("masterRecords");
+        cachedEdits = await loadFromDB("masterEditsLog");
+        cachedBorders = await loadFromDB("customRunBorders");
+      } catch (dbErr) {
+        console.warn("DB load warning:", dbErr);
+      }
+
+      if (cachedEdits) masterEditsLog = cachedEdits;
+      if (cachedBorders) customRunBorders = cachedBorders;
+
+      if (cached && cached.length > 0) {
+        siteRecords = mergeEditsIntoRecords(cached, masterEditsLog);
+        buildFastStreetIndex();
+        renderActiveFilterChips();
+        updateDriverHud();
+        switchMainTab('search');
+      }
+
+      // Background remote sync
+      if (SCRIPT_URL) {
+        fetch(SCRIPT_URL).then(res => res.json()).then(remoteData => {
+          if (remoteData.edits && Array.isArray(remoteData.edits)) {
             masterEditsLog = [...masterEditsLog, ...remoteData.edits];
-            masterEditsLog = Array.from(new Map(masterEditsLog.map(item => [item.timestamp + '_' + item.propId + '_' + item.editType, item])).values());
-            await saveToDB("masterEditsLog", masterEditsLog);
+            saveToDB("masterEditsLog", masterEditsLog);
           }
           if (remoteData.boundaries && typeof remoteData.boundaries === 'object') {
             customRunBorders = { ...customRunBorders, ...remoteData.boundaries };
-            await saveToDB("customRunBorders", customRunBorders);
+            saveToDB("customRunBorders", customRunBorders);
           }
           if (siteRecords.length > 0) {
             siteRecords = mergeEditsIntoRecords(siteRecords, masterEditsLog);
             triggerUniversalDataRefresh();
           }
-        }
-      } catch (err) {
-        console.warn("Offline mode active:", err);
+        }).catch(err => console.warn("Background sync offline:", err));
       }
-    }
 
-    if (!cached || cached.length === 0) {
+      // If no cached records exist, force dataset download immediately
+      if (!cached || cached.length === 0) {
+        await startUpdateProcess();
+      }
+    } catch (startupErr) {
+      console.error("Startup crash prevented:", startupErr);
+      // Fallback: force start update process anyway
       startUpdateProcess();
     }
   });
