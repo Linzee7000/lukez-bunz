@@ -3780,22 +3780,83 @@
     }
   }
 
-  function onGpsPositionSuccess(position) {
-  const { latitude, longitude, accuracy } = position.coords;
-  // Handler logic
-}
+  function onGpsPositionSuccess(pos) {
+    const accuracy = Math.round(pos.coords.accuracy);
+    const speedKmh = (pos.coords.speed !== null && !isNaN(pos.coords.speed)) ? Math.round(pos.coords.speed * 3.6) : 0;
+    
+    currentMapSpeedKmh = speedKmh;
+    userCurrentLocation = {
+      lat: pos.coords.latitude,
+      lng: pos.coords.longitude,
+      speed: speedKmh
+    };
 
-function startLiveLocationWatcher() {
-  if ('geolocation' in navigator) {
-    navigator.geolocation.watchPosition(
-      onGpsPositionSuccess,
-      (err) => console.warn('GPS Error:', err),
-      { enableHighAccuracy: true }
-    );
+    // Locked heading stabilization: only recalculate when moving >= 4 km/h
+    if (speedKmh >= 4) {
+      if (pos.coords.heading !== null && !isNaN(pos.coords.heading) && pos.coords.heading >= 0) {
+        lastValidHeading = Math.round(pos.coords.heading);
+      } else if (lastGpsCoords.lat !== 0) {
+        const deltaDist = getDistanceMeters(lastGpsCoords.lat, lastGpsCoords.lng, userCurrentLocation.lat, userCurrentLocation.lng);
+        if (deltaDist >= 4.0) {
+          const calcHeading = getBearing(lastGpsCoords.lat, lastGpsCoords.lng, userCurrentLocation.lat, userCurrentLocation.lng);
+          if (!isNaN(calcHeading)) {
+            const diff = Math.abs((calcHeading - lastValidHeading + 180) % 360 - 180);
+            if (diff < 140 || lastValidHeading === 0) {
+              lastValidHeading = Math.round(calcHeading);
+            }
+          }
+        }
+      }
+    }
+
+    updateGpsBadgeUI(true, `🟢 ±${accuracy}m`);
+
+    // Background Snail Trail Recording
+    const previous = (typeof gpsTrailPoints !== 'undefined' && gpsTrailPoints.length > 0)
+      ? gpsTrailPoints[gpsTrailPoints.length - 1]
+      : null;
+
+    const moved = previous
+      ? getDistanceMeters(previous[0], previous[1], userCurrentLocation.lat, userCurrentLocation.lng)
+      : Infinity;
+
+    if (moved >= (typeof GPS_TRAIL_MIN_STEP_METERS !== 'undefined' ? GPS_TRAIL_MIN_STEP_METERS : 2)) {
+      if (typeof gpsTrailPoints === 'undefined') window.gpsTrailPoints = [];
+      gpsTrailPoints.push([userCurrentLocation.lat, userCurrentLocation.lng]);
+      if (gpsTrailPoints.length > (typeof GPS_TRAIL_MAX_POINTS !== 'undefined' ? GPS_TRAIL_MAX_POINTS : 600)) {
+        gpsTrailPoints.shift();
+      }
+      if (typeof leafletMap !== 'undefined' && leafletMap) {
+        if (!gpsTrailLine) {
+          gpsTrailLine = L.polyline(gpsTrailPoints, {
+            color: '#22c55e', weight: 4, opacity: 0.8, lineCap: 'round', lineJoin: 'round'
+          }).addTo(leafletMap);
+        } else {
+          gpsTrailLine.setLatLngs(gpsTrailPoints);
+        }
+      }
+    }
+
+    if (isTruckFollowEnabled && leafletMap) {
+      if (!hasAutoCenteredTruck) {
+        leafletMap.setView([userCurrentLocation.lat, userCurrentLocation.lng], leafletMap.getZoom() || 18, { animate: false });
+        hasAutoCenteredTruck = true;
+      } else {
+        leafletMap.panTo([userCurrentLocation.lat, userCurrentLocation.lng], { animate: false });
+      }
+    }
+
+    if (typeof applyMapHeadingRotation === 'function') applyMapHeadingRotation();
+    if (typeof updateMapTruckPosition === 'function') updateMapTruckPosition();
+
+    const movedDist = getDistanceMeters(lastGpsCoords.lat, lastGpsCoords.lng, userCurrentLocation.lat, userCurrentLocation.lng);
+    if (movedDist >= 2.0 || !lastTelemetrySite) {
+      lastGpsCoords = { ...userCurrentLocation };
+      if (activeTab === 'search') handleSearch();
+      if (typeof updateDriverHud === 'function') updateDriverHud();
+    }
   }
-}
 
-  
   function updateGpsBadgeUI(isActive, text) {
     const badge = document.getElementById('gpsStatusBadge');
     if (!badge) return;
@@ -3865,7 +3926,6 @@ function startLiveLocationWatcher() {
 
     return { isUpcoming: true, side: 'ahead' };
   }
-
   function getAddressSuburb(site) {
     if (!site) return 'Scanning suburb...';
     if (site.suburb) return String(site.suburb).trim();
