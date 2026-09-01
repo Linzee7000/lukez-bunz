@@ -4140,204 +4140,6 @@
     return eligible.some(({binStream})=>sources.some(src=>(src[binStream]||[]).length>0));
   }
 
-  function updateDriverHud() {
-  const listContainer = document.getElementById('hudUpcomingList');
-  const streetNameEl = document.getElementById('hudStreetName');
-  const runSummaryEl = document.getElementById('hudRunSummary');
-  const houseCountEl = document.getElementById('hudHouseCount');
-  const binCountEl = document.getElementById('hudBinCount');
-  if (!listContainer) return;
-
-  if (!userCurrentLocation) {
-    listContainer.innerHTML = '<div style="text-align:center; padding:30px; color:#64748b;">Acquiring live GPS...</div>';
-    return;
-  }
-
-  const streamFilter = activeFilterStream;
-  const upcoming = [];
-  const countedHouseIds = new Set();
-  let activeRunHouses = 0;
-  let activeRunBins = 0;
-
-  siteRecords.forEach(site => {
-    if (!siteMatchesDriveFilters(site)) return;
-
-    const eligibleStreams = getDriveEligibleStreams(site);
-    const sources = activeFilterDataSource === 'solo'
-      ? [site.soloStreams || {}]
-      : activeFilterDataSource === 'council'
-        ? [site.councilStreams || {}]
-        : [site.soloStreams || {}, site.councilStreams || {}];
-
-    const houseId = String(site.propId || site.siteId || site.addressText || '');
-    if (!countedHouseIds.has(houseId)) {
-      countedHouseIds.add(houseId);
-      activeRunHouses++;
-    }
-
-    eligibleStreams.forEach(({ binStream }) => {
-      sources.forEach(src => {
-        activeRunBins += (src[binStream] || []).length;
-      });
-    });
-
-    if (site.lat && site.lng && Number(site.lat) !== 0) {
-      const d = getDistanceMeters(userCurrentLocation.lat, userCurrentLocation.lng, Number(site.lat), Number(site.lng));
-      const travelEval = evaluateTravelDirection(userCurrentLocation.lat, userCurrentLocation.lng, lastValidHeading, Number(site.lat), Number(site.lng), site.baseStreetLine);
-
-      if (travelMode === 'left' && travelEval.side !== 'left') return;
-      if (travelMode === 'right' && travelEval.side !== 'right') return;
-
-      if (d <= 150 && travelEval.isUpcoming) {
-        upcoming.push({ site, dist: d, travelEval });
-      }
-    }
-  });
-
-  houseCountEl.innerText = activeRunHouses.toLocaleString();
-  binCountEl.innerText = activeRunBins.toLocaleString();
-  runSummaryEl.innerText = selectedRunsSet.size > 0 ? `Run: ${Array.from(selectedRunsSet).map(r => r.toUpperCase()).join(', ')}` : 'Run: All';
-
-  upcoming.sort((a, b) => a.dist - b.dist);
-  const liveStreetName = (upcoming.length > 0) ? (upcoming[0].site.baseStreetLine || upcoming[0].site.addressText.split(',')[0]).trim() : 'Scanning Street...';
-  if (streetNameEl) streetNameEl.innerText = liveStreetName;
-
-  const mapLiveStreet = document.getElementById('mapLiveStreet');
-  if (mapLiveStreet) mapLiveStreet.innerText = liveStreetName;
-
-  const currentSite = upcoming.length ? upcoming[0].site : null;
-  renderCurrentAddressTelemetry(currentSite);
-
-  // Trigger site proximity reminder if active for the nearest property
-  if (currentSite && typeof checkNearbyReminders === 'function') {
-    checkNearbyReminders(currentSite);
-  }
-
-  listContainer.innerHTML = upcoming.slice(0, 10).map(({ site, dist }) => {
-    const sch = site.soloSchedule;
-    const week = (sch.weekLetter || '').trim().toUpperCase();
-    const dayShort = (sch.day || '').slice(0, 3);
-    const runLabel = (run, withWeek = false) => `${run}${withWeek && week ? ` ${week}` : ''}`;
-
-    let runBadgeHtml = '';
-    if (sch.garRun) {
-      runBadgeHtml += `<span class="hdr-run-badge hdr-run-gar" onclick="event.stopPropagation(); openRunDirectlyOnMap('${sch.garRun}', 'Garbage', '${sch.day}', '${week}', false)">🗑️ ${runLabel(sch.garRun)}</span> `;
-    }
-    if (sch.recRun) {
-      runBadgeHtml += `<span class="hdr-run-badge hdr-run-rec" onclick="event.stopPropagation(); openRunDirectlyOnMap('${sch.recRun}', 'Recycling', '${sch.day}', '${week}', false)">♻️ ${runLabel(sch.recRun, true)}</span> `;
-    }
-    if (sch.recSummerRun) {
-      runBadgeHtml += `<span class="hdr-run-badge hdr-run-summer" onclick="event.stopPropagation(); openRunDirectlyOnMap('${sch.recSummerRun}', 'SummerRecycling', '${sch.day}', '', true)">☀️ ${runLabel(sch.recSummerRun, false)}</span> `;
-    }
-    if (sch.fogRun) {
-      runBadgeHtml += `<span class="hdr-run-badge hdr-run-fog" onclick="event.stopPropagation(); openRunDirectlyOnMap('${sch.fogRun}', 'FOGO', '${sch.day}', '${week}', false)">🌳 ${runLabel(sch.fogRun, true)}</span>`;
-    }
-
-    const navUrl = `https://www.google.com/maps/dir/?api=1&destination=${site.lat},${site.lng}&travelmode=driving`;
-    const cleanStreetOnly = (site.baseStreetLine || cleanStreetAddress(site.addressText)).trim();
-
-    let ratingBannerHtml = '';
-    if (site.ratingStars) {
-      ratingBannerHtml = `
-        <div class="rating-banner">
-          <span class="rating-stars-val">${'★'.repeat(site.ratingStars)}${'☆'.repeat(5 - site.ratingStars)}</span>
-          ${site.ratingComment ? `<div class="rating-comment-text">"${site.ratingComment}"</div>` : ''}
-        </div>
-      `;
-    }
-
-    // Active Reminder Pill
-    let reminderBannerHtml = '';
-    const activeRem = (typeof siteReminders !== 'undefined') ? siteReminders[site.propId || site.siteId] : null;
-    if (activeRem) {
-      reminderBannerHtml = `
-        <div style="background:#fef3c7; border:1px solid #f59e0b; border-radius:8px; padding:6px 10px; margin-bottom:8px; font-size:13px; color:#92400e; display:flex; align-items:center; justify-content:space-between;">
-          <div><b>⏰ Reminder:</b> ${activeRem.message} ${activeRem.triggerDate ? `<i>(${activeRem.triggerDate})</i>` : ''}</div>
-          <button onclick="event.stopPropagation(); dismissReminder('${site.propId || site.siteId}')" style="background:none; border:none; color:#b45309; font-weight:bold; cursor:pointer; font-size:14px;">✕</button>
-        </div>
-      `;
-    }
-
-    // Compact Grouped Stream Cards
-    let hasAnyBins = false;
-    const eligibleDriveStreams = new Set(getDriveEligibleStreams(site).map(x => x.binStream));
-    const displaySources = activeFilterDataSource === 'council'
-      ? (site.councilStreams || {})
-      : (site.soloStreams || {});
-
-    const streamThemeMap = {
-      'Garbage': { icon: '🗑️', bg: '#dc2626', label: 'Garbage' },
-      'Recycling': { icon: '♻️', bg: '#eab308', label: 'Recycling' },
-      'FOGO': { icon: '🌳', bg: '#16a34a', label: 'FOGO' }
-    };
-
-    const binPills = SOLO_STREAMS.map(st => {
-      if (!eligibleDriveStreams.has(st.key)) return '';
-      const bins = displaySources[st.key] || [];
-      if (bins.length === 0) return '';
-      hasAnyBins = true;
-
-      const theme = streamThemeMap[st.key] || { icon: st.icon || '🗑️', bg: '#475569', label: st.key };
-
-      return `
-        <div style="display:flex; background:#fff; border-radius:10px; margin-bottom:6px; overflow:hidden; border:1px solid #e2e8f0; box-shadow:0 1px 3px rgba(0,0,0,0.06);">
-          <!-- Left Stream Badge -->
-          <div style="background:${theme.bg}; color:#fff; width:75px; min-width:75px; display:flex; flex-direction:column; align-items:center; justify-content:center; padding:6px; font-weight:800; font-size:14px; text-shadow:0 1px 2px rgba(0,0,0,0.2);">
-            <span>${theme.icon} ${bins[0].size || '240L'}</span>
-            ${bins.length > 1 ? `<span style="font-size:11px; opacity:0.95; font-weight:600;">(${bins.length})</span>` : ''}
-          </div>
-
-          <!-- Stacked Serials List -->
-          <div style="flex:1; display:flex; flex-direction:column; justify-content:center; padding:2px 10px;">
-            ${bins.map((b, binIndex) => {
-              const menuId = `binIssue_${site.propId || site.siteId}_${st.key}_${binIndex}`.replace(/[^a-zA-Z0-9_]/g, '_');
-              return `
-                <div style="display:flex; align-items:center; justify-content:space-between; ${binIndex < bins.length - 1 ? 'border-bottom:1px solid #f1f5f9;' : ''} padding:3px 0; position:relative;">
-                  <span style="font-size:17px; font-weight:800; color:#0f172a; font-family:monospace; letter-spacing:0.5px;">${b.serial || '—'}</span>
-                  <div style="display:flex; align-items:center; gap:4px;">
-                    <button class="bin-face-btn" title="Bin options" onclick="event.stopPropagation(); toggleBinIssueMenu(event, '${menuId}')" style="background:none; border:none; font-size:16px; cursor:pointer;">🙂</button>
-                  </div>
-                  <div class="bin-issue-menu" id="${menuId}" style="position:absolute; right:0; top:24px; z-index:20;">
-                    ${['Contaminated','Heavy','Overfull','Prior spill','Jammed'].map(issue =>
-                      `<button data-issue="${issue}" onclick="setBinIssue(event, '${menuId}', '${issue}')">${issue}</button>`
-                    ).join('')}
-                  </div>
-                </div>`;
-            }).join('')}
-          </div>
-        </div>
-      `;
-    }).join('');
-
-    const isPurpleFlagged = Boolean(site.runFlags);
-    const cardClass = isPurpleFlagged ? 'address-card flagged-purple' : 'address-card';
-
-    return `
-      <div class="${cardClass}" onclick="openPropertyInspectModal('${site.propId || site.siteId}')">
-        <div class="address-header-row">
-          <div>
-            <div class="address-line1">${cleanStreetOnly}</div>
-          </div>
-          <div class="prop-header-actions" style="display:flex; align-items:center; gap:6px;">
-            <button onclick="event.stopPropagation(); openReminderModal('${site.propId || site.siteId}')" style="background:#f1f5f9; border:1px solid #cbd5e1; border-radius:6px; padding:4px 8px; font-size:14px; cursor:pointer;" title="Add Reminder">⏰</button>
-            <a href="${navUrl}" target="_blank" class="single-nav-btn" onclick="event.stopPropagation()" aria-label="Navigate">📍</a>
-            <span class="distance-pill">${Math.round(dist)}m</span>
-          </div>
-        </div>
-        ${reminderBannerHtml}
-        ${isPurpleFlagged ? `<div class="flag-banner-purple">🚩 ${site.runFlags}</div>` : ''}
-        ${ratingBannerHtml}
-        <div style="display:flex; gap:6px; font-size:13px; margin-bottom:6px; align-items:center; flex-wrap:wrap;">
-          <span style="color:#64748b;">📅 ${dayShort}</span>
-          ${runBadgeHtml}
-        </div>
-        <div class="hud-bin-container">
-          ${hasAnyBins ? binPills : '<span style="color:#94a3b8; font-style:italic; font-size:13px;">no bins</span>'}
-        </div>
-      </div>
-    `;
-  }).join('') || '<div style="text-align:center; padding:30px; color:#64748b; font-weight:700;">No upcoming bins ahead on route.</div>';
-}
   function handleSearch() {
     const query = document.getElementById('searchInput').value.trim().toLowerCase();
     const streamFilter = activeFilterStream;
@@ -7365,6 +7167,25 @@ window.addEventListener('DOMContentLoaded', async () => {
     }
   };
 })();
+
+  // Trigger alert when approaching a reminded site
+  window.checkNearbyReminders = function(site) {
+    if (!site) return;
+    const propId = String(site.propId || site.siteId || '');
+    const reminder = siteReminders[propId];
+    if (!reminder) return;
+
+    if (reminder.triggerDate) {
+      const today = new Date().toISOString().slice(0, 10);
+      if (reminder.triggerDate !== today) return;
+    }
+
+    const banner = document.getElementById('hudAddressMeta');
+    if (banner && !banner.innerHTML.includes('⏰ REMINDER:')) {
+      banner.innerHTML = `<span style="color:#ef4444; font-weight:700;">⏰ REMINDER: ${esc(reminder.message)}</span>`;
+    }
+  };
+  
 /* --- BIN REMINDER MODAL HANDLERS --- */
   let activeReminderKey = null;
 
@@ -7420,18 +7241,6 @@ window.addEventListener('DOMContentLoaded', async () => {
   
   
 </script>
-<input type="file" id="masterCsvFileInput" accept=".csv,text/csv" style="display:none;" onchange="handleMasterCsvFileSelect(event)">
-<input type="file" id="changesCsvFileInput" accept=".csv,text/csv" style="display:none;" onchange="handleChangesCsvFileSelect(event)">
-<style>
-  /* Lock map telemetry flush against navigation bar */
-  .map-address-telemetry,
-  .map-telemetry-container,
-  div[class*="map-address-telemetry"] {
-    bottom: 56px !important; /* Locks directly above the 56px bottom bar */
-    margin-bottom: 0 !important;
-    position: absolute !important;
-  }
-</style>
 <style>
   /* Dynamic Zoom Scaling for Map Markers */
   .bin-dot-inner,
@@ -7457,3 +7266,4 @@ window.addEventListener('DOMContentLoaded', async () => {
 </style>
 </body>
 </html>
+
