@@ -1726,18 +1726,7 @@
 <style id="map-follow-zoom-final-fix">
 /* Keep Leaflet controls visible above the map but below app overlays. */
 #mapScreenContainer .leaflet-control-zoom{display:block!important;visibility:visible!important;opacity:1!important;}
-/* Lock side buttons in fixed position so they never rotate during Track-Up */
-#mapScreenContainer .leaflet-top.leaflet-right {
-    position: fixed !important;
-    top: 74px !important;
-    right: 10px !important;
-    display: flex !important;
-    flex-direction: column !important;
-    gap: 8px !important;
-    pointer-events: auto !important;
-    transform: none !important;
-    z-index: 1500 !important;
-  }
+#mapScreenContainer .leaflet-top.leaflet-right{top:180px!important;right:8px!important;z-index:1100!important;}
 #mapScreenContainer .leaflet-control-zoom a{width:40px!important;height:40px!important;line-height:40px!important;font-size:28px!important;font-weight:700!important;}
 /* Never show Leaflet's grey background while the map is rotated for heading-up follow. */
 #mainLeafletMap{background:#dbeafe!important;}
@@ -3780,83 +3769,6 @@
     }
   }
 
-  function onGpsPositionSuccess(pos) {
-    const accuracy = Math.round(pos.coords.accuracy);
-    const speedKmh = (pos.coords.speed !== null && !isNaN(pos.coords.speed)) ? Math.round(pos.coords.speed * 3.6) : 0;
-    
-    currentMapSpeedKmh = speedKmh;
-    userCurrentLocation = {
-      lat: pos.coords.latitude,
-      lng: pos.coords.longitude,
-      speed: speedKmh
-    };
-
-    // Locked heading stabilization: only recalculate when moving >= 4 km/h
-    if (speedKmh >= 4) {
-      if (pos.coords.heading !== null && !isNaN(pos.coords.heading) && pos.coords.heading >= 0) {
-        lastValidHeading = Math.round(pos.coords.heading);
-      } else if (lastGpsCoords.lat !== 0) {
-        const deltaDist = getDistanceMeters(lastGpsCoords.lat, lastGpsCoords.lng, userCurrentLocation.lat, userCurrentLocation.lng);
-        if (deltaDist >= 4.0) {
-          const calcHeading = getBearing(lastGpsCoords.lat, lastGpsCoords.lng, userCurrentLocation.lat, userCurrentLocation.lng);
-          if (!isNaN(calcHeading)) {
-            const diff = Math.abs((calcHeading - lastValidHeading + 180) % 360 - 180);
-            if (diff < 140 || lastValidHeading === 0) {
-              lastValidHeading = Math.round(calcHeading);
-            }
-          }
-        }
-      }
-    }
-
-    updateGpsBadgeUI(true, `🟢 ±${accuracy}m`);
-
-    // Background Snail Trail Recording
-    const previous = (typeof gpsTrailPoints !== 'undefined' && gpsTrailPoints.length > 0)
-      ? gpsTrailPoints[gpsTrailPoints.length - 1]
-      : null;
-
-    const moved = previous
-      ? getDistanceMeters(previous[0], previous[1], userCurrentLocation.lat, userCurrentLocation.lng)
-      : Infinity;
-
-    if (moved >= (typeof GPS_TRAIL_MIN_STEP_METERS !== 'undefined' ? GPS_TRAIL_MIN_STEP_METERS : 2)) {
-      if (typeof gpsTrailPoints === 'undefined') window.gpsTrailPoints = [];
-      gpsTrailPoints.push([userCurrentLocation.lat, userCurrentLocation.lng]);
-      if (gpsTrailPoints.length > (typeof GPS_TRAIL_MAX_POINTS !== 'undefined' ? GPS_TRAIL_MAX_POINTS : 600)) {
-        gpsTrailPoints.shift();
-      }
-      if (typeof leafletMap !== 'undefined' && leafletMap) {
-        if (!gpsTrailLine) {
-          gpsTrailLine = L.polyline(gpsTrailPoints, {
-            color: '#22c55e', weight: 4, opacity: 0.8, lineCap: 'round', lineJoin: 'round'
-          }).addTo(leafletMap);
-        } else {
-          gpsTrailLine.setLatLngs(gpsTrailPoints);
-        }
-      }
-    }
-
-    if (isTruckFollowEnabled && leafletMap) {
-      if (!hasAutoCenteredTruck) {
-        leafletMap.setView([userCurrentLocation.lat, userCurrentLocation.lng], leafletMap.getZoom() || 18, { animate: false });
-        hasAutoCenteredTruck = true;
-      } else {
-        leafletMap.panTo([userCurrentLocation.lat, userCurrentLocation.lng], { animate: false });
-      }
-    }
-
-    if (typeof applyMapHeadingRotation === 'function') applyMapHeadingRotation();
-    if (typeof updateMapTruckPosition === 'function') updateMapTruckPosition();
-
-    const movedDist = getDistanceMeters(lastGpsCoords.lat, lastGpsCoords.lng, userCurrentLocation.lat, userCurrentLocation.lng);
-    if (movedDist >= 2.0 || !lastTelemetrySite) {
-      lastGpsCoords = { ...userCurrentLocation };
-      if (activeTab === 'search') handleSearch();
-      if (typeof updateDriverHud === 'function') updateDriverHud();
-    }
-  }
-
   function updateGpsBadgeUI(isActive, text) {
     const badge = document.getElementById('gpsStatusBadge');
     if (!badge) return;
@@ -3926,6 +3838,7 @@
 
     return { isUpcoming: true, side: 'ahead' };
   }
+
   function getAddressSuburb(site) {
     if (!site) return 'Scanning suburb...';
     if (site.suburb) return String(site.suburb).trim();
@@ -4866,47 +4779,23 @@ let siteReminders = JSON.parse(localStorage.getItem('siteReminders') || '{}');
   };
 
   // Toggle Bin Issue Dropdown
-  let activeIssueBinData = null;
-
   window.toggleBinIssueMenu = function(event, menuId) {
     if (event) event.stopPropagation();
-
-    // Parse propId, stream, and index from menuId
-    const parts = menuId.split('_');
-    const propId = parts[1] || '';
-    const stream = parts[2] || '';
-    const records = typeof getRecordsArray === 'function' ? getRecordsArray() : siteRecords;
-    const site = records.find(s => String(s.propId || s.siteId) === String(propId)) || lastTelemetrySite;
-
-    const address = site ? (site.baseStreetLine || site.addressText || 'Unknown Address') : 'Current Address';
-    activeIssueBinData = { propId, stream, address };
-
-    const ctx = document.getElementById('binIssueContext');
-    if (ctx) {
-      ctx.innerHTML = `<b>🏠 Address:</b> ${esc(address)}<br><b>🗑️ Stream:</b> ${esc(stream)} (PID: ${esc(propId)})`;
+    document.querySelectorAll('.bin-issue-menu').forEach(el => {
+      if (el.id !== menuId) el.style.display = 'none';
+    });
+    const menu = document.getElementById(menuId);
+    if (menu) {
+      menu.style.display = (menu.style.display === 'block') ? 'none' : 'block';
     }
-
-    const sub = document.getElementById('damagedSubOptions');
-    if (sub) sub.style.display = 'none';
-
-    const modal = document.getElementById('binIssueModal');
-    if (modal) modal.style.display = 'flex';
   };
 
-  window.showDamagedOptions = function() {
-    const sub = document.getElementById('damagedSubOptions');
-    if (sub) sub.style.display = 'block';
-  };
-
-  window.selectBinIssueType = function(issue) {
-    const modal = document.getElementById('binIssueModal');
-    if (modal) modal.style.display = 'none';
-
-    if (activeIssueBinData) {
-      alert(`Flagged ${activeIssueBinData.address} (${activeIssueBinData.stream}): ${issue}`);
-    } else {
-      alert(`Flagged: ${issue}`);
-    }
+  // Select Issue
+  window.setBinIssue = function(event, menuId, issue) {
+    if (event) event.stopPropagation();
+    alert(`Flagged as: ${issue}`);
+    const menu = document.getElementById(menuId);
+    if (menu) menu.style.display = 'none';
   };
 
   // Close menus when clicking anywhere else
@@ -5254,6 +5143,394 @@ window.addEventListener('DOMContentLoaded', async () => {
   </div>
 </div>
 
+<style id="unified-clean-styles">
+  #mapScreenContainer {
+    position: absolute !important;
+    top: 0 !important;
+    left: 0 !important;
+    right: 0 !important;
+    bottom: 58px !important;
+    width: 100% !important;
+    height: calc(100vh - 58px) !important;
+    overflow: hidden !important;
+    background: #dbeafe !important;
+  }
+
+  #mainLeafletMap {
+    position: absolute !important;
+    top: 0 !important;
+    left: 0 !important;
+    width: 100% !important;
+    height: 100% !important;
+    margin: 0 !important;
+    transform-origin: 50% 50% !important;
+    transition: transform 0.25s linear !important;
+    z-index: 1 !important;
+  }
+
+  #mapScreenContainer .leaflet-control-container {
+    position: absolute !important;
+    top: 0 !important;
+    left: 0 !important;
+    right: 0 !important;
+    bottom: 0 !important;
+    pointer-events: none !important;
+    z-index: 1000 !important;
+  }
+  #mapScreenContainer .leaflet-top.leaflet-right {
+    position: fixed !important;
+    top: 74px !important;
+    right: 10px !important;
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 8px !important;
+    pointer-events: auto !important;
+    transform: none !important;
+    z-index: 1500 !important;
+  }
+
+  #mapSideViewControl {
+    display: none !important;
+  }
+
+  #mapScreenContainer .leaflet-control-zoom,
+  #mapScreenContainer .map-side-layers-control,
+  #mapScreenContainer .map-side-follow-control,
+  #mapScreenContainer .map-side-track-control,
+  #mapScreenContainer .leaflet-bar {
+    border: none !important;
+    box-shadow: none !important;
+    margin: 0 !important;
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 6px !important;
+  }
+
+  #mapScreenContainer .map-side-layers-toggle,
+  #mapScreenContainer .map-side-follow-toggle,
+  #mapScreenContainer .map-side-track-toggle,
+  #mapScreenContainer .leaflet-control-zoom a {
+    width: 44px !important;
+    height: 44px !important;
+    min-width: 44px !important;
+    min-height: 44px !important;
+    max-width: 44px !important;
+    max-height: 44px !important;
+    border-radius: 12px !important;
+    border: 1px solid #cbd5e1 !important;
+    background: #ffffff !important;
+    box-shadow: 0 2px 8px rgba(15,23,42,0.18) !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    cursor: pointer !important;
+    overflow: hidden !important;
+    font-size: 22px !important;
+    line-height: 1 !important;
+    color: #1e293b !important;
+    text-decoration: none !important;
+    transition: all 0.15s ease !important;
+  }
+
+  #mapScreenContainer .map-side-follow-toggle.active {
+    background: #0284c7 !important;
+    border-color: #0369a1 !important;
+    color: #ffffff !important;
+    box-shadow: 0 0 0 3px rgba(2,132,199,0.3) !important;
+  }
+
+  #mapScreenContainer .map-side-track-toggle.active {
+    background: #166534 !important;
+    border-color: #14532d !important;
+    color: #ffffff !important;
+    box-shadow: 0 0 0 3px rgba(22,101,52,0.3) !important;
+  }
+
+  #mapScreenContainer .map-side-track-toggle svg {
+    width: 22px !important;
+    height: 22px !important;
+    display: block !important;
+    margin: auto !important;
+    transition: transform 0.25s linear !important;
+  }
+
+  #mapScreenContainer .map-side-layers-toggle img,
+  #mapScreenContainer .map-side-layers-toggle svg {
+    width: 22px !important;
+    height: 22px !important;
+    max-width: 22px !important;
+    max-height: 22px !important;
+    object-fit: contain !important;
+    display: block !important;
+    margin: auto !important;
+  }
+
+  .leaflet-pane.lukez-house-pane,
+  .leaflet-pane.lukez-bin-pane,
+  .leaflet-pane.lukez-handle-pane {
+    pointer-events: auto !important;
+  }
+  .leaflet-pane.lukez-house-pane .leaflet-marker-icon,
+  .leaflet-pane.lukez-bin-pane .leaflet-marker-icon,
+  .leaflet-pane.lukez-handle-pane .leaflet-marker-icon {
+    pointer-events: auto !important;
+    cursor: pointer !important;
+  }
+
+  .house-map-marker-icon {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    background: transparent !important;
+    border: none !important;
+  }
+
+  .bin-map-marker-icon {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    background: transparent !important;
+    border: none !important;
+    cursor: grab !important;
+  }
+  .bin-map-marker-icon:active {
+    cursor: grabbing !important;
+  }
+
+  /* Boundary Handles */
+  .poly-edit-handle-dot {
+    width: 18px !important;
+    height: 18px !important;
+    background: #ffffff !important;
+    border: 3.5px solid #2563eb !important;
+    border-radius: 50% !important;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.6) !important;
+    cursor: grab !important;
+    box-sizing: border-box !important;
+    pointer-events: auto !important;
+  }
+  .poly-edit-handle-dot:active {
+    background: #2563eb !important;
+    cursor: grabbing !important;
+  }
+
+  .poly-mid-handle-dot {
+    width: 14px !important;
+    height: 14px !important;
+    background: #93c5fd !important;
+    border: 2px dashed #1e40af !important;
+    border-radius: 50% !important;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.4) !important;
+    cursor: pointer !important;
+    box-sizing: border-box !important;
+    pointer-events: auto !important;
+  }
+  .poly-mid-handle-dot:hover {
+    background: #2563eb !important;
+  }
+
+  .map-address-telemetry {
+    position: absolute !important;
+    left: 10px !important;
+    right: 10px !important;
+    bottom: 70px !important;
+    z-index: 1000 !important;
+    margin: 0 !important;
+    pointer-events: auto !important;
+    background: rgba(30,41,59,0.97) !important;
+    padding: 12px 14px !important;
+    border-radius: 16px !important;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.3) !important;
+  }
+  .map-address-telemetry .hud-bin-container {
+    margin-top: 8px !important;
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 6px !important;
+  }
+
+  .street-mode-flag-banner {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    border-radius: 8px;
+    font-size: 13.5px;
+    font-weight: 700;
+    margin-top: 6px;
+    margin-bottom: 6px;
+    letter-spacing: 0.02em;
+  }
+  .mode-flag-drive-out {
+    background: #ffedd5;
+    border: 1.5px solid #f97316;
+    color: #9a3412;
+  }
+  .mode-flag-reverse-in {
+    background: #dbeafe;
+    border: 1.5px solid #2563eb;
+    color: #1e40af;
+  }
+  .mode-flag-cp {
+    background: #fef3c7;
+    border: 1.5px solid #f59e0b;
+    color: #92400e;
+  }
+
+  .map-controls-group > summary {
+    display: none !important;
+  }
+  .map-controls-group {
+    margin-top: 0 !important;
+    border: none !important;
+    background: transparent !important;
+    box-shadow: none !important;
+  }
+
+  .map-summary-bar {
+    display: grid !important;
+    grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr) minmax(0, 1fr) 52px !important;
+    gap: 8px !important;
+    align-items: stretch !important;
+    width: 100% !important;
+  }
+  .map-run-colored-box,
+  .map-stat-pill,
+  .map-settings-top-btn {
+    height: 52px !important;
+    min-height: 52px !important;
+    max-height: 52px !important;
+    border-radius: 12px !important;
+    border: 1px solid #cbd5e1 !important;
+    box-shadow: 0 2px 6px rgba(15,23,42,0.12) !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    box-sizing: border-box !important;
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+  .map-settings-top-btn {
+    width: 52px !important;
+    font-size: 24px !important;
+    line-height: 1 !important;
+    cursor: pointer !important;
+    background: #f8fafc !important;
+  }
+  .map-run-colored-box {
+    padding: 0 10px !important;
+    font-size: 16px !important;
+    font-weight: 700 !important;
+    white-space: nowrap !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+    cursor: pointer !important;
+  }
+  .map-run-colored-box.stream-gar { background: #dc2626 !important; border-color: #b91c1c !important; color: #ffffff !important; }
+  .map-run-colored-box.stream-rec { background: #facc15 !important; border-color: #eab308 !important; color: #1e293b !important; }
+  .map-run-colored-box.stream-summer { background: #f59e0b !important; border-color: #d97706 !important; color: #ffffff !important; }
+  .map-run-colored-box.stream-fog { background: #16a34a !important; border-color: #15803d !important; color: #ffffff !important; }
+
+  .map-stat-pill {
+    background: #ffffff !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    gap: 6px !important;
+  }
+  .map-stat-pill .map-stat-icon { font-size: 18px !important; }
+  .map-stat-pill b { font-size: 20px !important; line-height: 1 !important; color: #166534 !important; }
+  .map-stat-pill small { display: none !important; }
+
+  .map-run-picker-box {
+    max-width: 540px !important;
+    width: min(94vw, 540px) !important;
+    padding: 14px !important;
+    border-radius: 16px !important;
+  }
+  .map-run-picker-step {
+    padding: 8px 0 !important;
+    border-top: 1px solid #e2e8f0 !important;
+  }
+  .map-run-picker-step:first-of-type {
+    border-top: none !important;
+    padding-top: 0 !important;
+  }
+  .map-run-picker-label {
+    font-size: 13px !important;
+    font-weight: 700 !important;
+    color: #475569 !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.05em !important;
+    margin-bottom: 6px !important;
+  }
+
+  .unified-filter-grid {
+    display: grid !important;
+    gap: 6px !important;
+    width: 100% !important;
+    box-sizing: border-box !important;
+  }
+  .unified-filter-grid.streams { grid-template-columns: repeat(5, minmax(0, 1fr)) !important; }
+  .unified-filter-grid.sources { grid-template-columns: repeat(3, minmax(0, 1fr)) !important; }
+  .unified-filter-grid.days { grid-template-columns: repeat(5, minmax(0, 1fr)) !important; }
+  .unified-filter-grid.weeks { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+  .unified-filter-grid.runs-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+    max-height: 180px !important;
+    overflow-y: auto !important;
+    padding: 6px !important;
+    border: 1px solid #cbd5e1 !important;
+    border-radius: 10px !important;
+    background: #f8fafc !important;
+  }
+
+  .unified-filter-btn {
+    min-height: 48px !important;
+    height: 48px !important;
+    padding: 0 !important;
+    border: 1.5px solid #cbd5e1 !important;
+    border-radius: 10px !important;
+    background: #f8fafc !important;
+    color: #1e293b !important;
+    font-size: 14px !important;
+    font-weight: 700 !important;
+    cursor: pointer !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.04) !important;
+    line-height: 1 !important;
+    box-sizing: border-box !important;
+  }
+  .unified-filter-btn span.stream-icon {
+    font-size: 24px !important;
+    line-height: 1 !important;
+    display: inline-flex !important;
+  }
+  .unified-filter-btn.active {
+    border: 2.5px solid #0284c7 !important;
+    background: #e0f2fe !important;
+    color: #0369a1 !important;
+    box-shadow: 0 0 0 2px rgba(2,132,199,0.2) !important;
+  }
+  .unified-filter-btn.stream-gar { background: #fee2e2 !important; border-color: #fca5a5 !important; color: #991b1b !important; }
+  .unified-filter-btn.stream-rec { background: #fef08a !important; border-color: #facc15 !important; color: #854d0e !important; }
+  .unified-filter-btn.stream-summer { background: #ffedd5 !important; border-color: #fed7aa !important; color: #c2410c !important; }
+  .unified-filter-btn.stream-fog { background: #dcfce7 !important; border-color: #86efac !important; color: #166534 !important; }
+
+  .unified-run-btn {
+    min-height: 40px !important;
+    height: 40px !important;
+    font-size: 13px !important;
+    border-radius: 8px !important;
+    white-space: nowrap !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+  }
+</style>
 
 <script id="unified-clean-script">
 (function(){
@@ -5478,54 +5755,15 @@ window.addEventListener('DOMContentLoaded', async () => {
 
   // Export Recorded Snail Trail as KML
   window.exportSnailTrailKml = function() {
-    let trailHistoryStack = [];
-
-  window.trimTrailPoints = function(count = 10) {
-    if (!gpsTrailPoints || gpsTrailPoints.length === 0) return;
-    trailHistoryStack.push([...gpsTrailPoints]);
-    gpsTrailPoints.splice(-count, count);
-    if (gpsTrailLine) gpsTrailLine.setLatLngs(gpsTrailPoints);
-    alert(`Trimmed last ${count} points. Remaining points: ${gpsTrailPoints.length}`);
-  };
-
-  window.undoTrailTrim = function() {
-    if (!trailHistoryStack || trailHistoryStack.length === 0) {
-      alert("Nothing to undo.");
-      return;
-    }
-    gpsTrailPoints = trailHistoryStack.pop();
-    if (gpsTrailLine) gpsTrailLine.setLatLngs(gpsTrailPoints);
-    alert(`Restored trail. Total points: ${gpsTrailPoints.length}`);
-  };
-
-  window.exportSnailTrailKml = function() {
     if (!gpsTrailPoints || gpsTrailPoints.length < 2) {
-      alert("No snail trail recorded yet. Move with GPS active to create points before exporting.");
+      alert("No snail trail recorded yet. Drive or move with GPS active to create a trail before exporting.");
       return;
     }
 
-    const confirmAction = confirm(
-      `Snail trail has ${gpsTrailPoints.length} points recorded.\n\n` +
-      `Click OK to Export KML now.\n` +
-      `Click CANCEL to trim/edit recent points first.`
-    );
-
-    if (!confirmAction) {
-      const trimChoice = prompt(
-        "Enter number of points to delete from end of trail (or type 'undo' to restore):",
-        "20"
-      );
-      if (trimChoice && trimChoice.toLowerCase() === 'undo') {
-        window.undoTrailTrim();
-      } else if (trimChoice && !isNaN(parseInt(trimChoice, 10))) {
-        window.trimTrailPoints(parseInt(trimChoice, 10));
-      }
-      return;
-    }
-
-    const runs = typeof selectedMapRuns === 'function' ? Array.from(selectedMapRuns()) : [];
+    const runs = Array.from(selectedMapRuns());
     const runName = runs.length === 1 ? runs[0].toUpperCase() : 'ALL_RUNS';
-    const dateStr = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 16);
+    const now = new Date();
+    const dateStr = now.toISOString().replace(/[:.]/g, '-').slice(0, 16);
     const fileName = `LukezBunz_Trail_${runName}_${dateStr}.kml`;
 
     const coordsStr = gpsTrailPoints.map(p => `${Number(p[1]).toFixed(7)},${Number(p[0]).toFixed(7)},0`).join(' ');
@@ -5534,10 +5772,23 @@ window.addEventListener('DOMContentLoaded', async () => {
 <kml xmlns="http://www.opengis.net/kml/2.2">
   <Document>
     <name>${esc(fileName)}</name>
+    <description>Lukez Bunz Snail Trail for Run ${esc(runName)}</description>
+    <Style id="trailStyle">
+      <LineStyle>
+        <color>ff2563eb</color>
+        <width>4</width>
+      </LineStyle>
+    </Style>
     <Placemark>
-      <name>Snail Trail - ${esc(runName)}</name>
+      <name>Snail Trail Route - ${esc(runName)}</name>
+      <styleUrl>#trailStyle</styleUrl>
       <LineString>
-        <coordinates>${coordsStr}</coordinates>
+        <extrude>1</extrude>
+        <tessellate>1</tessellate>
+        <altitudeMode>clampToGround</altitudeMode>
+        <coordinates>
+          ${coordsStr}
+        </coordinates>
       </LineString>
     </Placemark>
   </Document>
@@ -5590,18 +5841,17 @@ window.addEventListener('DOMContentLoaded', async () => {
 
   // Snap active boundary directly to houses
   window.snapActiveBoundaryToRoads = async function() {
-    window.snapActiveBoundaryToRoads = async function() {
-    const runs = typeof selectedMapRuns === 'function' ? Array.from(selectedMapRuns()) : [];
+    const runs = Array.from(selectedMapRuns());
     if (runs.length !== 1) {
-      alert("Please select exactly one run to snap its boundary to roads/houses.");
+      alert("Please select exactly one run to snap its boundary to houses.");
       return;
     }
     const runKey = runs[0];
-    const records = typeof getRecordsArray === 'function' ? getRecordsArray() : siteRecords;
+    const records = getRecordsArray();
     const housePoints = [];
 
     records.forEach(site => {
-      if (typeof siteMatchesAllActiveFilters === 'function' ? siteMatchesAllActiveFilters(site) : true) {
+      if (siteMatchesAllActiveFilters(site)) {
         if (site.lat && site.lng && Number(site.lat) !== 0 && Number(site.lng) !== 0) {
           housePoints.push({ lat: Number(site.lat), lng: Number(site.lng) });
         }
@@ -5613,37 +5863,13 @@ window.addEventListener('DOMContentLoaded', async () => {
       return;
     }
 
-    // Generate convex hull with interpolations along long segments
     const snappedHull = typeof buildRunConvexHull === 'function' ? buildRunConvexHull(housePoints) : housePoints;
-    const densePoints = [];
-
-    for (let i = 0; i < snappedHull.length; i++) {
-      const p1 = snappedHull[i];
-      const p2 = snappedHull[(i + 1) % snappedHull.length];
-      densePoints.push([p1.lat, p1.lng]);
-
-      // If distance between corners is > 80m, place intermediate points
-      const d = getDistanceMeters(p1.lat, p1.lng, p2.lat, p2.lng);
-      if (d > 80) {
-        const steps = Math.floor(d / 60);
-        for (let s = 1; s < steps; s++) {
-          densePoints.push([
-            p1.lat + (p2.lat - p1.lat) * (s / steps),
-            p1.lng + (p2.lng - p1.lng) * (s / steps)
-          ]);
-        }
-      }
-    }
-
-    if (typeof customRunBorders === 'undefined') window.customRunBorders = {};
-    customRunBorders[runKey] = densePoints;
-    if (typeof saveToDB === 'function') await saveToDB("customRunBorders", customRunBorders);
+    customRunBorders[runKey] = snappedHull.map(p => [p.lat, p.lng]);
+    await saveToDB("customRunBorders", customRunBorders);
 
     renderMapData();
-    if (isRoadSnapEditing && typeof enableBoundaryVertexHandles === 'function') {
-      enableBoundaryVertexHandles();
-    }
-    alert(`Boundary snapped with ${densePoints.length} adjustable perimeter points along roads.`);
+    if (isRoadSnapEditing) enableBoundaryVertexHandles();
+    alert(`Boundary successfully snapped to the perimeter of ${housePoints.length} houses on this run.`);
   };
 
   // Direct Run Navigation from Address Cards
@@ -6347,76 +6573,48 @@ window.addEventListener('DOMContentLoaded', async () => {
   /**
  * Helper to build and format bin counts/types for the current address HUD
  */
-window.buildBinsAtAddress = function(site, filterByActiveStream = true, isMapTelemetry = false) {
-  if (!site) return '';
+function buildBinsAtAddress(addressObj, separator = ' | ') {
+  if (!addressObj) return '';
+  
+  // Return directly if already a string
+  if (typeof addressObj === 'string') return addressObj;
+  
+  // Handle array of strings or bin objects
+  if (Array.isArray(addressObj.bins)) {
+    return addressObj.bins
+      .map(bin => typeof bin === 'object' ? `${bin.type || bin.name}: ${bin.date || bin.schedule || ''}`.trim() : bin)
+      .filter(Boolean)
+      .join(separator);
+  }
 
-  const streamConfigs = [
-    { key: 'Garbage', icon: '🗑️', bg: '#dc2626', label: '240L' },
-    { key: 'Recycling', icon: '♻️', bg: '#eab308', label: '240L' },
-    { key: 'FOGO', icon: '🌳', bg: '#16a34a', label: '240L' }
+  // Standard bin mapping: [Label, possible property keys]
+  const binMap = [
+    { label: 'Waste', keys: ['waste', 'general', 'rubbish', 'landfill'] },
+    { label: 'Recycle', keys: ['recycle', 'recycling', 'yellow'] },
+    { label: 'FOGO', keys: ['fogo', 'organics', 'green', 'food_organics'] },
+    { label: 'Glass', keys: ['glass', 'purple'] }
   ];
 
-  const currentStreamFilter = (typeof activeFilterStream !== 'undefined' && activeFilterStream ? activeFilterStream : '').toLowerCase().trim();
-  const displaySources = (typeof activeFilterDataSource !== 'undefined' && activeFilterDataSource === 'council')
-    ? (site.councilStreams || {}) 
-    : (site.soloStreams || {});
+  const bins = [];
 
-  let html = '';
-
-  streamConfigs.forEach(st => {
-    // Only show bins for the filtered stream (e.g. Recycling) when a filter is active
-    if (filterByActiveStream && currentStreamFilter && currentStreamFilter !== 'all') {
-      const targetKey = (currentStreamFilter === 'summerrecycling') ? 'recycling' : currentStreamFilter;
-      if (st.key.toLowerCase() !== targetKey) return;
+  for (const { label, keys } of binMap) {
+    for (const key of keys) {
+      const val = addressObj[key];
+      if (val) {
+        // Support either a direct string/date or a nested object property
+        const text = typeof val === 'object' ? (val.date || val.day || val.frequency || JSON.stringify(val)) : val;
+        bins.push(`${label}: ${text}`);
+        break; // Match first found key for this bin type
+      }
     }
+  }
 
-    const bins = displaySources[st.key] || [];
-    if (bins.length === 0) return;
+  if (bins.length > 0) return bins.join(separator);
 
-    html += `
-      <div style="display:flex; background:#fff; border-radius:10px; margin-bottom:5px; overflow:visible; box-shadow:0 1px 3px rgba(0,0,0,0.2); border:1px solid #cbd5e1; position:relative;">
-        <div style="background:${st.bg}; color:#fff; width:74px; min-width:74px; border-radius:10px 0 0 10px; display:flex; flex-direction:column; align-items:center; justify-content:center; padding:4px; font-weight:400; font-size:13px; line-height:1.1;">
-          <span>${st.icon} ${bins[0].size || st.label}</span>
-          ${bins.length > 1 ? `<span style="font-size:10px; opacity:0.95; margin-top:2px;">(${bins.length} bins)</span>` : ''}
-        </div>
-
-        <div style="flex:1; display:flex; flex-direction:column; justify-content:center; padding:2px 10px;">
-          ${bins.map((b, idx) => {
-            const propId = site.propId || site.siteId || '';
-            const binKey = `${propId}_${b.serial || idx}`;
-            const rem = (typeof siteReminders !== 'undefined') ? siteReminders[binKey] : null;
-            const hasRem = Boolean(rem);
-            const menuId = `binMenu_${propId}_${st.key}_${idx}`.replace(/[^a-zA-Z0-9_]/g, '_');
-
-            return `
-              <div style="display:flex; align-items:center; justify-content:space-between; ${idx < bins.length - 1 ? 'border-bottom:1px solid #f1f5f9;' : ''} padding:3px 0; position:relative;">
-                <span style="font-size:17px; font-weight:400; color:${hasRem ? '#dc2626' : '#0f172a'}; font-family:monospace; letter-spacing:0.5px;">
-                  ${b.serial || '—'}
-                </span>
-                
-                <div style="display:flex; align-items:center; gap:6px;">
-                  <button type="button" onclick="event.stopPropagation(); ${hasRem ? `dismissBinReminder('${binKey}')` : `openBinReminderModal('${binKey}', '${escape(site.addressText || '')}', '${b.serial || ''}')`}" style="background:none; border:none; font-size:16px; cursor:pointer; padding:0 2px;" title="${hasRem ? 'Cancel reminder' : 'Set reminder'}">
-                    ${hasRem ? '❌' : '⏰'}
-                  </button>
-                  <button type="button" onclick="event.stopPropagation(); window.toggleBinIssueMenu(event, '${menuId}')" style="background:none; border:none; font-size:17px; cursor:pointer; padding:0 2px;">🙂</button>
-                </div>
-                
-                <div class="bin-issue-menu" id="${menuId}" style="display:none; position:absolute; right:0; top:26px; z-index:9999; background:#fff; border:1px solid #94a3b8; border-radius:6px; box-shadow:0 4px 12px rgba(0,0,0,0.3); padding:4px; min-width:130px;">
-                  ${['Contaminated','Heavy','Overfull','Prior spill','Jammed'].map(issue =>
-                    `<button type="button" onclick="event.stopPropagation(); window.setBinIssue(event, '${menuId}', '${issue}')" style="display:block; width:100%; text-align:left; background:none; border:none; padding:5px 8px; font-size:13px; font-weight:400; color:#1e293b; cursor:pointer; border-radius:4px;">${issue}</button>`
-                  ).join('')}
-                </div>
-              </div>
-            `;
-          }).join('')}
-        </div>
-      </div>
-    `;
-  });
-
-  return html;
-};
-function buildBinsAtAddress(s, f, m) { return window.buildBinsAtAddress(s, f, m); }
+  // Fallback if no mapped keys matched
+  const fallback = addressObj.binInfo || addressObj.bins || addressObj.description || '';
+  return typeof fallback === 'object' ? JSON.stringify(fallback) : String(fallback);
+}
   /* Unified Telemetry Rendering */
   window.renderCurrentAddressTelemetry = function(site) {
   lastTelemetrySite = site || null;
@@ -6462,15 +6660,14 @@ function buildBinsAtAddress(s, f, m) { return window.buildBinsAtAddress(s, f, m)
   }
 
   const speedEl = document.getElementById('mapLiveSpeed') || document.getElementById('hudSpeed');
-    if (speedEl) {
-      speedEl.innerText = `${Math.round(currentMapSpeedKmh || 0)}`;
-      speedEl.style.fontSize = '42px';
-      speedEl.style.fontWeight = '400';
-    }
+  if (speedEl) {
+    speedEl.innerText = `${Math.round(currentMapSpeedKmh || 0)}`;
+    speedEl.style.fontSize = '42px';
+    speedEl.style.fontWeight = '400';
+  }
 
-    // Hide KM/H text label beside speed
-    document.querySelectorAll('.address-telemetry-speed small, .map-telemetry-speed-unit').forEach(el => el.style.display = 'none');
-    
+  document.querySelectorAll('.address-telemetry-speed small, .map-telemetry-speed-unit').forEach(el => el.style.display = 'none');
+
   const hudRunsEl = document.getElementById('hudRunsAtAddress');
   if (hudRunsEl) hudRunsEl.innerHTML = buildRunsAtAddress(site, false);
 
@@ -6507,30 +6704,6 @@ function buildBinsAtAddress(s, f, m) { return window.buildBinsAtAddress(s, f, m)
     const accuracy = Math.round(pos.coords.accuracy);
     const speedKmh = pos.coords.speed !== null && !isNaN(pos.coords.speed) ? Math.round(pos.coords.speed * 3.6) : 0;
     
-    // --- BACKGROUND SNAIL TRAIL RECORDING ---
-    const previous = (typeof gpsTrailPoints !== 'undefined' && gpsTrailPoints.length > 0)
-      ? gpsTrailPoints[gpsTrailPoints.length - 1]
-      : null;
-
-    const moved = previous
-      ? getDistanceMeters(previous[0], previous[1], userCurrentLocation.lat, userCurrentLocation.lng)
-      : Infinity;
-
-    if (moved >= (typeof GPS_TRAIL_MIN_STEP_METERS !== 'undefined' ? GPS_TRAIL_MIN_STEP_METERS : 2)) {
-      if (typeof gpsTrailPoints === 'undefined') window.gpsTrailPoints = [];
-      gpsTrailPoints.push([userCurrentLocation.lat, userCurrentLocation.lng]);
-
-      // Draw trail line if leaflet map is initialized
-      if (typeof leafletMap !== 'undefined' && leafletMap) {
-        if (!gpsTrailLine) {
-          gpsTrailLine = L.polyline(gpsTrailPoints, {
-            color: '#22c55e', weight: 4, opacity: 0.8, lineCap: 'round', lineJoin: 'round'
-          }).addTo(leafletMap);
-        } else {
-          gpsTrailLine.setLatLngs(gpsTrailPoints);
-        }
-      }
-    }
     currentMapSpeedKmh = speedKmh;
     userCurrentLocation = {
       lat: pos.coords.latitude,
@@ -6956,7 +7129,7 @@ function buildBinsAtAddress(s, f, m) { return window.buildBinsAtAddress(s, f, m)
       window.renderMapData();
     }
   };
-//})();
+})();
 
   // Trigger alert when approaching a reminded site
   window.checkNearbyReminders = function(site) {
@@ -7025,25 +7198,14 @@ function buildBinsAtAddress(s, f, m) { return window.buildBinsAtAddress(s, f, m)
       localStorage.setItem('siteReminders', JSON.stringify(siteReminders));
     }
     if (typeof lastTelemetrySite !== 'undefined' && lastTelemetrySite) {
-      if (typeof window.renderCurrentAddressTelemetry === 'function') {
-        window.renderCurrentAddressTelemetry(lastTelemetrySite);
-      }
+      renderCurrentAddressTelemetry(lastTelemetrySite);
     }
-    if (typeof window.updateDriverHud === 'function') window.updateDriverHud();
   };
+  
+  
 </script>
-
 <style>
-  /* 1. Lock map telemetry flush against the bottom 56px navigation bar */
-  .map-address-telemetry,
-  .map-telemetry-container,
-  div[class*="map-address-telemetry"] {
-    bottom: 56px !important;
-    margin-bottom: 0 !important;
-    position: absolute !important;
-  }
-
-  /* 2. Dynamic Zoom Scaling */
+  /* Dynamic Zoom Scaling for Map Markers */
   .bin-dot-inner,
   .house-map-marker-icon > div > div {
     transition: transform 0.15s ease-out;
@@ -7055,38 +7217,15 @@ function buildBinsAtAddress(s, f, m) { return window.buildBinsAtAddress(s, f, m)
   .leaflet-zoom-15 .bin-dot-inner, .leaflet-zoom-15 .house-map-marker-icon > div > div { transform: scale(0.5); }
   .leaflet-zoom-14 .bin-dot-inner, .leaflet-zoom-14 .house-map-marker-icon > div > div { transform: scale(0.35); }
   .leaflet-zoom-13 .bin-dot-inner, .leaflet-zoom-13 .house-map-marker-icon > div > div { transform: scale(0.2); }
+
+  /* Lock Map Telemetry Flush to Bottom Nav */
+  .map-address-telemetry,
+  .map-telemetry-container,
+  div[class*="map-address-telemetry"] {
+    bottom: 56px !important;
+    margin-bottom: 0 !important;
+    position: absolute !important;
+  }
 </style>
-
-<!-- Enhanced Bin Issue Modal -->
-<div id="binIssueModal" class="modal-overlay" style="display:none; z-index:99999; position:fixed; top:0; left:0; width:100vw; height:100vh; background:rgba(0,0,0,0.6); align-items:center; justify-content:center;">
-  <div class="modal-box" style="max-width:390px; width:92vw; padding:18px; border-radius:14px; background:#fff;">
-    <h3 style="margin-top:0; font-size:18px; color:#1e293b;">🙂 Report Bin Issue</h3>
-    <div id="binIssueContext" style="background:#f8fafc; border:1px solid #cbd5e1; border-radius:8px; padding:10px; margin-bottom:12px; font-size:13.5px; color:#334155;"></div>
-
-    <label style="font-size:13px; color:#475569; display:block; margin-bottom:6px;">Select Issue:</label>
-    <div style="display:grid; grid-template-columns:1fr 1fr; gap:6px; margin-bottom:12px;">
-      <button type="button" class="btn-cancel" onclick="selectBinIssueType('Contaminated')">☣️ Contaminated</button>
-      <button type="button" class="btn-cancel" onclick="selectBinIssueType('Heavy')">⚖️ Heavy</button>
-      <button type="button" class="btn-cancel" onclick="selectBinIssueType('Overfull')">📦 Overfull</button>
-      <button type="button" class="btn-cancel" onclick="selectBinIssueType('Prior spill')">⚠️ Prior spill</button>
-      <button type="button" class="btn-cancel" onclick="selectBinIssueType('Jammed')">🚫 Jammed</button>
-      <button type="button" class="btn-cancel" style="background:#fee2e2; border-color:#fca5a5; color:#991b1b;" onclick="showDamagedOptions()">🔨 Damaged...</button>
-    </div>
-
-    <!-- Sub-options for Damaged -->
-    <div id="damagedSubOptions" style="display:none; border-top:1px dashed #cbd5e1; padding-top:10px; margin-top:10px;">
-      <label style="font-size:13px; color:#b91c1c; display:block; margin-bottom:6px;">Damaged Part:</label>
-      <div style="display:flex; gap:6px;">
-        <button type="button" class="btn-cancel" style="flex:1;" onclick="selectBinIssueType('Damaged - Lid')">🔴 Lid</button>
-        <button type="button" class="btn-cancel" style="flex:1;" onclick="selectBinIssueType('Damaged - Body')">🗑️ Body</button>
-        <button type="button" class="btn-cancel" style="flex:1;" onclick="selectBinIssueType('Damaged - Wheels')">⚙️ Wheels</button>
-      </div>
-    </div>
-
-    <div style="display:flex; justify-content:flex-end; margin-top:14px;">
-      <button type="button" class="btn-cancel" onclick="document.getElementById('binIssueModal').style.display='none'">Close</button>
-    </div>
-  </div>
-</div>
 </body>
 </html>
