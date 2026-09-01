@@ -3962,7 +3962,6 @@
   const streamConfigs = [
     { key: 'Garbage', icon: '🗑️', bg: '#dc2626', label: '240L' },
     { key: 'Recycling', icon: '♻️', bg: '#eab308', label: '240L' },
-    { key: 'SummerRecycling', icon: '☀️', bg: '#f59e0b', label: '240L' },
     { key: 'FOGO', icon: '🌳', bg: '#16a34a', label: '240L' }
   ];
 
@@ -3974,28 +3973,39 @@
   let html = '';
 
   streamConfigs.forEach(st => {
-    const streamKey = st.key === 'SummerRecycling' ? 'Recycling' : st.key;
-    if (filterByActiveStream && !eligibleStreams.has(streamKey)) return;
+    if (filterByActiveStream && !eligibleStreams.has(st.key)) return;
 
-    const bins = displaySources[streamKey] || [];
+    const bins = displaySources[st.key] || [];
     if (bins.length === 0) return;
 
     html += `
-      <div style="display:flex; background:#fff; border-radius:12px; margin-bottom:8px; overflow:hidden; box-shadow:0 2px 6px rgba(0,0,0,0.25); border:1px solid #e2e8f0;">
+      <div style="display:flex; background:#fff; border-radius:12px; margin-bottom:8px; overflow:visible; box-shadow:0 2px 6px rgba(0,0,0,0.25); border:1px solid #e2e8f0; position:relative;">
         <!-- Left Stream Badge -->
-        <div style="background:${st.bg}; color:#fff; width:82px; min-width:82px; display:flex; flex-direction:column; align-items:center; justify-content:center; padding:6px; font-weight:800; font-size:14px; text-shadow:0 1px 2px rgba(0,0,0,0.3);">
+        <div style="background:${st.bg}; color:#fff; width:82px; min-width:82px; border-radius:12px 0 0 12px; display:flex; flex-direction:column; align-items:center; justify-content:center; padding:6px; font-weight:600; font-size:14px;">
           <span>${st.icon} ${bins[0].size || st.label}</span>
-          ${bins.length > 1 ? `<span style="font-size:11px; opacity:0.95; font-weight:700; margin-top:2px;">(${bins.length} bins)</span>` : ''}
+          ${bins.length > 1 ? `<span style="font-size:11px; opacity:0.95; margin-top:2px;">(${bins.length} bins)</span>` : ''}
         </div>
 
         <!-- Stacked Serial List -->
         <div style="flex:1; display:flex; flex-direction:column; justify-content:center; padding:4px 12px; gap:2px;">
-          ${bins.map((b, idx) => `
-            <div style="display:flex; align-items:center; justify-content:space-between; ${idx < bins.length - 1 ? 'border-bottom:1px solid #f1f5f9;' : ''} padding:3px 0;">
-              <span style="font-size:18px; font-weight:800; color:#0f172a; font-family:monospace; letter-spacing:0.5px;">${b.serial || '—'}</span>
-              <span style="font-size:16px;">🙂</span>
-            </div>
-          `).join('')}
+          ${bins.map((b, idx) => {
+            const menuId = `binIssue_${site.propId || site.siteId}_${st.key}_${idx}`.replace(/[^a-zA-Z0-9_]/g, '_');
+            return `
+              <div style="display:flex; align-items:center; justify-content:space-between; ${idx < bins.length - 1 ? 'border-bottom:1px solid #f1f5f9;' : ''} padding:3px 0; position:relative;">
+                <span style="font-size:18px; font-weight:400; color:#0f172a; font-family:monospace; letter-spacing:0.5px;">${b.serial || '—'}</span>
+                
+                <!-- Active Smiley Button -->
+                <button type="button" class="bin-face-btn" title="Bin options" onclick="event.stopPropagation(); toggleBinIssueMenu(event, '${menuId}')" style="background:none; border:none; font-size:16px; cursor:pointer; padding:2px 4px;">🙂</button>
+                
+                <!-- Popup Issue Menu -->
+                <div class="bin-issue-menu" id="${menuId}" style="display:none; position:absolute; right:0; top:28px; z-index:3000; background:#fff; border:1px solid #cbd5e1; border-radius:8px; box-shadow:0 4px 12px rgba(0,0,0,0.15); padding:4px; min-width:140px;">
+                  ${['Contaminated','Heavy','Overfull','Prior spill','Jammed'].map(issue =>
+                    `<button type="button" data-issue="${issue}" onclick="event.stopPropagation(); setBinIssue(event, '${menuId}', '${issue}')" style="display:block; width:100%; text-align:left; background:none; border:none; padding:6px 10px; font-size:13px; font-weight:600; color:#1e293b; cursor:pointer; border-radius:4px;">${issue}</button>`
+                  ).join('')}
+                </div>
+              </div>
+            `;
+          }).join('')}
         </div>
       </div>
     `;
@@ -4003,7 +4013,7 @@
 
   return html;
 }
-
+  
   function hasActiveMapTelemetryFilter() {
     const source = String(activeFilterDataSource || 'all').trim().toLowerCase();
     return !!(
@@ -6769,13 +6779,16 @@ window.addEventListener('DOMContentLoaded', async () => {
       meta = `🚩 📍 COLLECTION POINT · ` + meta;
     }
 
-    // Check for active site reminder
+    // Check & trigger proximity reminder alert
     if (site && typeof checkNearbyReminders === 'function') {
       checkNearbyReminders(site);
     }
     
     ['hudStreetName','mapLiveStreet'].forEach(id=>{const el=document.getElementById(id); if(el) el.innerText=address;});
-    ['hudAddressMeta','mapAddressMeta'].forEach(id=>{const el=document.getElementById(id); if(el) el.innerHTML=meta;});
+    
+    // Add Meta with ⏰ Reminder Button
+    const reminderBtnHtml = site ? `<button type="button" onclick="event.stopPropagation(); openReminderModal('${site.propId || site.siteId}')" style="background:#334155; border:1px solid #475569; color:#f8fafc; border-radius:6px; padding:2px 8px; font-size:12px; margin-left:8px; cursor:pointer;" title="Add Reminder">⏰ Remind</button>` : '';
+    ['hudAddressMeta','mapAddressMeta'].forEach(id=>{const el=document.getElementById(id); if(el) el.innerHTML=meta + reminderBtnHtml;});
 
     const hudRunsEl=document.getElementById('hudRunsAtAddress');
     if(hudRunsEl) hudRunsEl.innerHTML=buildRunsAtAddress(site, false);
