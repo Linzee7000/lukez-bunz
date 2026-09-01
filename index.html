@@ -1726,7 +1726,18 @@
 <style id="map-follow-zoom-final-fix">
 /* Keep Leaflet controls visible above the map but below app overlays. */
 #mapScreenContainer .leaflet-control-zoom{display:block!important;visibility:visible!important;opacity:1!important;}
-#mapScreenContainer .leaflet-top.leaflet-right{top:180px!important;right:8px!important;z-index:1100!important;}
+/* Lock side buttons in fixed position so they never rotate during Track-Up */
+#mapScreenContainer .leaflet-top.leaflet-right {
+    position: fixed !important;
+    top: 74px !important;
+    right: 10px !important;
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 8px !important;
+    pointer-events: auto !important;
+    transform: none !important;
+    z-index: 1500 !important;
+  }
 #mapScreenContainer .leaflet-control-zoom a{width:40px!important;height:40px!important;line-height:40px!important;font-size:28px!important;font-weight:700!important;}
 /* Never show Leaflet's grey background while the map is rotated for heading-up follow. */
 #mainLeafletMap{background:#dbeafe!important;}
@@ -4779,23 +4790,47 @@ let siteReminders = JSON.parse(localStorage.getItem('siteReminders') || '{}');
   };
 
   // Toggle Bin Issue Dropdown
+  let activeIssueBinData = null;
+
   window.toggleBinIssueMenu = function(event, menuId) {
     if (event) event.stopPropagation();
-    document.querySelectorAll('.bin-issue-menu').forEach(el => {
-      if (el.id !== menuId) el.style.display = 'none';
-    });
-    const menu = document.getElementById(menuId);
-    if (menu) {
-      menu.style.display = (menu.style.display === 'block') ? 'none' : 'block';
+
+    // Parse propId, stream, and index from menuId
+    const parts = menuId.split('_');
+    const propId = parts[1] || '';
+    const stream = parts[2] || '';
+    const records = typeof getRecordsArray === 'function' ? getRecordsArray() : siteRecords;
+    const site = records.find(s => String(s.propId || s.siteId) === String(propId)) || lastTelemetrySite;
+
+    const address = site ? (site.baseStreetLine || site.addressText || 'Unknown Address') : 'Current Address';
+    activeIssueBinData = { propId, stream, address };
+
+    const ctx = document.getElementById('binIssueContext');
+    if (ctx) {
+      ctx.innerHTML = `<b>🏠 Address:</b> ${esc(address)}<br><b>🗑️ Stream:</b> ${esc(stream)} (PID: ${esc(propId)})`;
     }
+
+    const sub = document.getElementById('damagedSubOptions');
+    if (sub) sub.style.display = 'none';
+
+    const modal = document.getElementById('binIssueModal');
+    if (modal) modal.style.display = 'flex';
   };
 
-  // Select Issue
-  window.setBinIssue = function(event, menuId, issue) {
-    if (event) event.stopPropagation();
-    alert(`Flagged as: ${issue}`);
-    const menu = document.getElementById(menuId);
-    if (menu) menu.style.display = 'none';
+  window.showDamagedOptions = function() {
+    const sub = document.getElementById('damagedSubOptions');
+    if (sub) sub.style.display = 'block';
+  };
+
+  window.selectBinIssueType = function(issue) {
+    const modal = document.getElementById('binIssueModal');
+    if (modal) modal.style.display = 'none';
+
+    if (activeIssueBinData) {
+      alert(`Flagged ${activeIssueBinData.address} (${activeIssueBinData.stream}): ${issue}`);
+    } else {
+      alert(`Flagged: ${issue}`);
+    }
   };
 
   // Close menus when clicking anywhere else
@@ -5755,15 +5790,54 @@ window.addEventListener('DOMContentLoaded', async () => {
 
   // Export Recorded Snail Trail as KML
   window.exportSnailTrailKml = function() {
+    let trailHistoryStack = [];
+
+  window.trimTrailPoints = function(count = 10) {
+    if (!gpsTrailPoints || gpsTrailPoints.length === 0) return;
+    trailHistoryStack.push([...gpsTrailPoints]);
+    gpsTrailPoints.splice(-count, count);
+    if (gpsTrailLine) gpsTrailLine.setLatLngs(gpsTrailPoints);
+    alert(`Trimmed last ${count} points. Remaining points: ${gpsTrailPoints.length}`);
+  };
+
+  window.undoTrailTrim = function() {
+    if (!trailHistoryStack || trailHistoryStack.length === 0) {
+      alert("Nothing to undo.");
+      return;
+    }
+    gpsTrailPoints = trailHistoryStack.pop();
+    if (gpsTrailLine) gpsTrailLine.setLatLngs(gpsTrailPoints);
+    alert(`Restored trail. Total points: ${gpsTrailPoints.length}`);
+  };
+
+  window.exportSnailTrailKml = function() {
     if (!gpsTrailPoints || gpsTrailPoints.length < 2) {
-      alert("No snail trail recorded yet. Drive or move with GPS active to create a trail before exporting.");
+      alert("No snail trail recorded yet. Move with GPS active to create points before exporting.");
       return;
     }
 
-    const runs = Array.from(selectedMapRuns());
+    const confirmAction = confirm(
+      `Snail trail has ${gpsTrailPoints.length} points recorded.\n\n` +
+      `Click OK to Export KML now.\n` +
+      `Click CANCEL to trim/edit recent points first.`
+    );
+
+    if (!confirmAction) {
+      const trimChoice = prompt(
+        "Enter number of points to delete from end of trail (or type 'undo' to restore):",
+        "20"
+      );
+      if (trimChoice && trimChoice.toLowerCase() === 'undo') {
+        window.undoTrailTrim();
+      } else if (trimChoice && !isNaN(parseInt(trimChoice, 10))) {
+        window.trimTrailPoints(parseInt(trimChoice, 10));
+      }
+      return;
+    }
+
+    const runs = typeof selectedMapRuns === 'function' ? Array.from(selectedMapRuns()) : [];
     const runName = runs.length === 1 ? runs[0].toUpperCase() : 'ALL_RUNS';
-    const now = new Date();
-    const dateStr = now.toISOString().replace(/[:.]/g, '-').slice(0, 16);
+    const dateStr = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 16);
     const fileName = `LukezBunz_Trail_${runName}_${dateStr}.kml`;
 
     const coordsStr = gpsTrailPoints.map(p => `${Number(p[1]).toFixed(7)},${Number(p[0]).toFixed(7)},0`).join(' ');
@@ -5772,23 +5846,10 @@ window.addEventListener('DOMContentLoaded', async () => {
 <kml xmlns="http://www.opengis.net/kml/2.2">
   <Document>
     <name>${esc(fileName)}</name>
-    <description>Lukez Bunz Snail Trail for Run ${esc(runName)}</description>
-    <Style id="trailStyle">
-      <LineStyle>
-        <color>ff2563eb</color>
-        <width>4</width>
-      </LineStyle>
-    </Style>
     <Placemark>
-      <name>Snail Trail Route - ${esc(runName)}</name>
-      <styleUrl>#trailStyle</styleUrl>
+      <name>Snail Trail - ${esc(runName)}</name>
       <LineString>
-        <extrude>1</extrude>
-        <tessellate>1</tessellate>
-        <altitudeMode>clampToGround</altitudeMode>
-        <coordinates>
-          ${coordsStr}
-        </coordinates>
+        <coordinates>${coordsStr}</coordinates>
       </LineString>
     </Placemark>
   </Document>
@@ -5841,17 +5902,18 @@ window.addEventListener('DOMContentLoaded', async () => {
 
   // Snap active boundary directly to houses
   window.snapActiveBoundaryToRoads = async function() {
-    const runs = Array.from(selectedMapRuns());
+    window.snapActiveBoundaryToRoads = async function() {
+    const runs = typeof selectedMapRuns === 'function' ? Array.from(selectedMapRuns()) : [];
     if (runs.length !== 1) {
-      alert("Please select exactly one run to snap its boundary to houses.");
+      alert("Please select exactly one run to snap its boundary to roads/houses.");
       return;
     }
     const runKey = runs[0];
-    const records = getRecordsArray();
+    const records = typeof getRecordsArray === 'function' ? getRecordsArray() : siteRecords;
     const housePoints = [];
 
     records.forEach(site => {
-      if (siteMatchesAllActiveFilters(site)) {
+      if (typeof siteMatchesAllActiveFilters === 'function' ? siteMatchesAllActiveFilters(site) : true) {
         if (site.lat && site.lng && Number(site.lat) !== 0 && Number(site.lng) !== 0) {
           housePoints.push({ lat: Number(site.lat), lng: Number(site.lng) });
         }
@@ -5863,13 +5925,37 @@ window.addEventListener('DOMContentLoaded', async () => {
       return;
     }
 
+    // Generate convex hull with interpolations along long segments
     const snappedHull = typeof buildRunConvexHull === 'function' ? buildRunConvexHull(housePoints) : housePoints;
-    customRunBorders[runKey] = snappedHull.map(p => [p.lat, p.lng]);
-    await saveToDB("customRunBorders", customRunBorders);
+    const densePoints = [];
+
+    for (let i = 0; i < snappedHull.length; i++) {
+      const p1 = snappedHull[i];
+      const p2 = snappedHull[(i + 1) % snappedHull.length];
+      densePoints.push([p1.lat, p1.lng]);
+
+      // If distance between corners is > 80m, place intermediate points
+      const d = getDistanceMeters(p1.lat, p1.lng, p2.lat, p2.lng);
+      if (d > 80) {
+        const steps = Math.floor(d / 60);
+        for (let s = 1; s < steps; s++) {
+          densePoints.push([
+            p1.lat + (p2.lat - p1.lat) * (s / steps),
+            p1.lng + (p2.lng - p1.lng) * (s / steps)
+          ]);
+        }
+      }
+    }
+
+    if (typeof customRunBorders === 'undefined') window.customRunBorders = {};
+    customRunBorders[runKey] = densePoints;
+    if (typeof saveToDB === 'function') await saveToDB("customRunBorders", customRunBorders);
 
     renderMapData();
-    if (isRoadSnapEditing) enableBoundaryVertexHandles();
-    alert(`Boundary successfully snapped to the perimeter of ${housePoints.length} houses on this run.`);
+    if (isRoadSnapEditing && typeof enableBoundaryVertexHandles === 'function') {
+      enableBoundaryVertexHandles();
+    }
+    alert(`Boundary snapped with ${densePoints.length} adjustable perimeter points along roads.`);
   };
 
   // Direct Run Navigation from Address Cards
@@ -6704,6 +6790,30 @@ function buildBinsAtAddress(addressObj, separator = ' | ') {
     const accuracy = Math.round(pos.coords.accuracy);
     const speedKmh = pos.coords.speed !== null && !isNaN(pos.coords.speed) ? Math.round(pos.coords.speed * 3.6) : 0;
     
+    // --- BACKGROUND SNAIL TRAIL RECORDING ---
+    const previous = (typeof gpsTrailPoints !== 'undefined' && gpsTrailPoints.length > 0)
+      ? gpsTrailPoints[gpsTrailPoints.length - 1]
+      : null;
+
+    const moved = previous
+      ? getDistanceMeters(previous[0], previous[1], userCurrentLocation.lat, userCurrentLocation.lng)
+      : Infinity;
+
+    if (moved >= (typeof GPS_TRAIL_MIN_STEP_METERS !== 'undefined' ? GPS_TRAIL_MIN_STEP_METERS : 2)) {
+      if (typeof gpsTrailPoints === 'undefined') window.gpsTrailPoints = [];
+      gpsTrailPoints.push([userCurrentLocation.lat, userCurrentLocation.lng]);
+
+      // Draw trail line if leaflet map is initialized
+      if (typeof leafletMap !== 'undefined' && leafletMap) {
+        if (!gpsTrailLine) {
+          gpsTrailLine = L.polyline(gpsTrailPoints, {
+            color: '#22c55e', weight: 4, opacity: 0.8, lineCap: 'round', lineJoin: 'round'
+          }).addTo(leafletMap);
+        } else {
+          gpsTrailLine.setLatLngs(gpsTrailPoints);
+        }
+      }
+    }
     currentMapSpeedKmh = speedKmh;
     userCurrentLocation = {
       lat: pos.coords.latitude,
@@ -7227,6 +7337,37 @@ function buildBinsAtAddress(addressObj, separator = ' | ') {
     position: absolute !important;
   }
 </style>
+  <!-- Enhanced Bin Issue Modal -->
+<div id="binIssueModal" class="modal-overlay" style="display:none; z-index:99999; position:fixed; top:0; left:0; width:100vw; height:100vh; background:rgba(0,0,0,0.6); align-items:center; justify-content:center;">
+  <div class="modal-box" style="max-width:390px; width:92vw; padding:18px; border-radius:14px; background:#fff;">
+    <h3 style="margin-top:0; font-size:18px; color:#1e293b;">🙂 Report Bin Issue</h3>
+    <div id="binIssueContext" style="background:#f8fafc; border:1px solid #cbd5e1; border-radius:8px; padding:10px; margin-bottom:12px; font-size:13.5px; color:#334155;"></div>
+
+    <label style="font-size:13px; color:#475569; display:block; margin-bottom:6px;">Select Issue:</label>
+    <div style="display:grid; grid-template-columns:1fr 1fr; gap:6px; margin-bottom:12px;">
+      <button type="button" class="btn-cancel" onclick="selectBinIssueType('Contaminated')">☣️ Contaminated</button>
+      <button type="button" class="btn-cancel" onclick="selectBinIssueType('Heavy')">⚖️ Heavy</button>
+      <button type="button" class="btn-cancel" onclick="selectBinIssueType('Overfull')">📦 Overfull</button>
+      <button type="button" class="btn-cancel" onclick="selectBinIssueType('Prior spill')">⚠️ Prior spill</button>
+      <button type="button" class="btn-cancel" onclick="selectBinIssueType('Jammed')">🚫 Jammed</button>
+      <button type="button" class="btn-cancel" style="background:#fee2e2; border-color:#fca5a5; color:#991b1b;" onclick="showDamagedOptions()">🔨 Damaged...</button>
+    </div>
+
+    <!-- Sub-options for Damaged -->
+    <div id="damagedSubOptions" style="display:none; border-top:1px dashed #cbd5e1; padding-top:10px; margin-top:10px;">
+      <label style="font-size:13px; color:#b91c1c; display:block; margin-bottom:6px;">Damaged Part:</label>
+      <div style="display:flex; gap:6px;">
+        <button type="button" class="btn-cancel" style="flex:1;" onclick="selectBinIssueType('Damaged - Lid')">🔴 Lid</button>
+        <button type="button" class="btn-cancel" style="flex:1;" onclick="selectBinIssueType('Damaged - Body')">🗑️ Body</button>
+        <button type="button" class="btn-cancel" style="flex:1;" onclick="selectBinIssueType('Damaged - Wheels')">⚙️ Wheels</button>
+      </div>
+    </div>
+
+    <div style="display:flex; justify-content:flex-end; margin-top:14px;">
+      <button type="button" class="btn-cancel" onclick="document.getElementById('binIssueModal').style.display='none'">Close</button>
+    </div>
+  </div>
+</div>v
 </body>
 </html>
 
