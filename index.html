@@ -4993,13 +4993,25 @@ function promptEditBin(propId, streamKey, binIdx) {
     }
     startLiveLocationWatcher();
 
-    // 1. Load local cache first for instant load
     const cached = await loadFromDB("masterRecords");
     const cachedEdits = await loadFromDB("masterEditsLog");
     const cachedBorders = await loadFromDB("customRunBorders");
+    const cachedRunColors = await loadFromDB("runColorMap");
+    const cachedDotColors = await loadFromDB("runDotColorMap");
+    const cachedHouseDotsColor = await loadFromDB("houseDotsColor");
+    const cachedKmzLiftColors = await loadFromDB("kmzLiftColors");
 
     if (cachedEdits) masterEditsLog = cachedEdits;
     if (cachedBorders) customRunBorders = cachedBorders;
+    if (cachedRunColors) runColorMap = cachedRunColors;
+    if (cachedDotColors) runDotColorMap = cachedDotColors;
+    if (cachedHouseDotsColor) houseDotsColor = cachedHouseDotsColor;
+    if (cachedKmzLiftColors) {
+      recyclingLiftColor = cachedKmzLiftColors.recyclingLiftColor || recyclingLiftColor;
+      garbageLiftColor = cachedKmzLiftColors.garbageLiftColor || garbageLiftColor;
+      fogoLiftColor = cachedKmzLiftColors.fogoLiftColor || fogoLiftColor;
+      kmzRouteColor = cachedKmzLiftColors.kmzRouteColor || kmzRouteColor;
+    }
 
     if (cached && cached.length > 0) {
       siteRecords = mergeEditsIntoRecords(cached, masterEditsLog);
@@ -5009,16 +5021,14 @@ function promptEditBin(propId, streamKey, binIdx) {
       switchMainTab('search');
     }
 
-    // 2. Fetch latest remote edits & boundaries from Google Apps Script in the background
+    // Fetch remote edits & boundaries from Google Apps Script in the background
     if (SCRIPT_URL) {
       try {
         const res = await fetch(SCRIPT_URL);
         if (res.ok) {
           const remoteData = await res.json();
           if (remoteData.edits && Array.isArray(remoteData.edits) && remoteData.edits.length > 0) {
-            // Merge remote edits
             masterEditsLog = [...masterEditsLog, ...remoteData.edits];
-            // Deduplicate edits by timestamp/propId
             masterEditsLog = Array.from(new Map(masterEditsLog.map(item => [item.timestamp + '_' + item.propId + '_' + item.editType, item])).values());
             await saveToDB("masterEditsLog", masterEditsLog);
           }
@@ -5032,7 +5042,7 @@ function promptEditBin(propId, streamKey, binIdx) {
           }
         }
       } catch (err) {
-        console.warn("Could not fetch remote edits (offline mode):", err);
+        console.warn("Offline mode active:", err);
       }
     }
 
@@ -5105,6 +5115,86 @@ function promptEditBin(propId, streamKey, binIdx) {
         else leafletMap.invalidateSize();
         renderMapData();
       });
+    }
+  }
+
+  async function startUpdateProcess() {
+    const btn = document.getElementById('syncBtn');
+    if (btn) {
+      btn.disabled = true;
+      btn.classList.add('spinning');
+    }
+    startLiveLocationWatcher();
+
+    const pWrap = document.getElementById('pBarWrap');
+    const pFill = document.getElementById('pBarFill');
+    const statusMsg = document.getElementById('syncStatusMsg');
+
+    pWrap.style.display = 'block';
+    statusMsg.style.display = 'block';
+    pFill.style.width = '15%';
+    statusMsg.innerText = 'Step 1/3: Uploading live edits & boundaries...';
+
+    if ((masterEditsLog.length > 0 || Object.keys(customRunBorders).length > 0) && SCRIPT_URL) {
+      try {
+        await fetch(SCRIPT_URL, {
+          method: 'POST',
+          mode: 'no-cors',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ 
+            edits: masterEditsLog,
+            boundaries: customRunBorders 
+          })
+        });
+      } catch(e) {}
+    }
+
+    pFill.style.width = '45%';
+    statusMsg.innerText = 'Step 2/3: Downloading compressed master dataset (8.3 MB)...';
+
+    try {
+      let csvText = '';
+      const res = await fetch("master_combined.csv.gz");
+      
+      if (res.ok) {
+        if (typeof DecompressionStream !== 'undefined') {
+          const ds = new DecompressionStream('gzip');
+          const decompressedStream = res.body.pipeThrough(ds);
+          csvText = await new Response(decompressedStream).text();
+        } else {
+          throw new Error("DecompressionStream not supported in this browser.");
+        }
+      } else {
+        const fallbackRes = await fetch("master_combined_with_metadata.csv");
+        if (!fallbackRes.ok) throw new Error("Could not download master dataset.");
+        csvText = await fallbackRes.text();
+      }
+
+      pFill.style.width = '75%';
+      statusMsg.innerText = 'Step 3/3: Re-indexing & caching runs...';
+
+      await processMasterCsvText(csvText);
+
+      pFill.style.width = '100%';
+      statusMsg.innerText = '✅ Sync Complete!';
+      setTimeout(() => {
+        pWrap.style.display = 'none';
+        statusMsg.style.display = 'none';
+        pFill.style.width = '0%';
+      }, 1500);
+
+    } catch(err) {
+      console.warn(err);
+      statusMsg.innerHTML = '⚠️ Dataset not found online. <b>Tap here to select master CSV file</b>';
+      setTimeout(() => {
+        pWrap.style.display = 'none';
+        statusMsg.style.display = 'none';
+      }, 3000);
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.classList.remove('spinning');
+      }
     }
   }
 
