@@ -3984,7 +3984,8 @@
     { key: 'FOGO', icon: '🌳', bg: '#16a34a', label: '240L' }
   ];
 
-  const eligibleStreams = new Set(getDriveEligibleStreams(site).map(x => x.binStream));
+  // Map stream filtering: Respect selected active filter (e.g. Recycling only)
+  const currentStreamFilter = clean(activeFilterStream);
   const displaySources = activeFilterDataSource === 'council' 
     ? (site.councilStreams || {}) 
     : (site.soloStreams || {});
@@ -3992,7 +3993,11 @@
   let html = '';
 
   streamConfigs.forEach(st => {
-    if (filterByActiveStream && !eligibleStreams.has(st.key)) return;
+    // If filtering is on, only show this stream if it matches the active filter or if no filter is chosen
+    if (filterByActiveStream && currentStreamFilter && currentStreamFilter !== 'all') {
+      const targetKey = (currentStreamFilter === 'SummerRecycling') ? 'Recycling' : currentStreamFilter;
+      if (st.key !== targetKey) return;
+    }
 
     const bins = displaySources[st.key] || [];
     if (bins.length === 0) return;
@@ -4000,7 +4005,7 @@
     html += `
       <div style="display:flex; background:#fff; border-radius:10px; margin-bottom:5px; overflow:visible; box-shadow:0 1px 3px rgba(0,0,0,0.2); border:1px solid #cbd5e1; position:relative;">
         <!-- Stream Badge -->
-        <div style="background:${st.bg}; color:#fff; width:74px; min-width:74px; border-radius:10px 0 0 10px; display:flex; flex-direction:column; align-items:center; justify-content:center; padding:4px; font-weight:600; font-size:13px; line-height:1.1;">
+        <div style="background:${st.bg}; color:#fff; width:74px; min-width:74px; border-radius:10px 0 0 10px; display:flex; flex-direction:column; align-items:center; justify-content:center; padding:4px; font-weight:400; font-size:13px; line-height:1.1;">
           <span>${st.icon} ${bins[0].size || st.label}</span>
           ${bins.length > 1 ? `<span style="font-size:10px; opacity:0.95; margin-top:2px;">(${bins.length} bins)</span>` : ''}
         </div>
@@ -4022,7 +4027,7 @@
                 
                 <div style="display:flex; align-items:center; gap:6px;">
                   <!-- Remind Button -->
-                  <button type="button" onclick="event.stopPropagation(); ${hasRem ? `dismissBinReminder('${binKey}')` : `openBinReminderModal('${binKey}', '${site.addressText || ''}', '${b.serial || ''}')`}" style="background:none; border:none; font-size:16px; cursor:pointer; padding:0 2px;" title="${hasRem ? 'Cancel reminder' : 'Set reminder'}">
+                  <button type="button" onclick="event.stopPropagation(); ${hasRem ? `dismissBinReminder('${binKey}')` : `openBinReminderModal('${binKey}', '${escape(site.addressText || '')}', '${b.serial || ''}')`}" style="background:none; border:none; font-size:16px; cursor:pointer; padding:0 2px;" title="${hasRem ? 'Cancel reminder' : 'Set reminder'}">
                     ${hasRem ? '❌' : '⏰'}
                   </button>
 
@@ -4033,7 +4038,7 @@
                 <!-- Popup Issue Menu -->
                 <div class="bin-issue-menu" id="${menuId}" style="display:none; position:absolute; right:0; top:26px; z-index:9999; background:#fff; border:1px solid #94a3b8; border-radius:6px; box-shadow:0 4px 12px rgba(0,0,0,0.3); padding:4px; min-width:130px;">
                   ${['Contaminated','Heavy','Overfull','Prior spill','Jammed'].map(issue =>
-                    `<button type="button" onclick="event.stopPropagation(); window.setBinIssue(event, '${menuId}', '${issue}')" style="display:block; width:100%; text-align:left; background:none; border:none; padding:5px 8px; font-size:13px; font-weight:600; color:#1e293b; cursor:pointer; border-radius:4px;">${issue}</button>`
+                    `<button type="button" onclick="event.stopPropagation(); window.setBinIssue(event, '${menuId}', '${issue}')" style="display:block; width:100%; text-align:left; background:none; border:none; padding:5px 8px; font-size:13px; font-weight:400; color:#1e293b; cursor:pointer; border-radius:4px;">${issue}</button>`
                   ).join('')}
                 </div>
               </div>
@@ -6851,6 +6856,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   };
 
   /* Unified Telemetry Rendering */
+  /* Unified Telemetry Rendering */
   function renderCurrentAddressTelemetry(site) {
     lastTelemetrySite = site || null;
     const address = site ? (cleanStreetAddress(site.addressText)||site.baseStreetLine||'Address unavailable') : 'Scanning Street...';
@@ -6874,7 +6880,7 @@ window.addEventListener('DOMContentLoaded', async () => {
       const el=document.getElementById(id); 
       if(el) {
         el.innerText=address;
-        el.style.fontWeight = '400'; // Remove bold address
+        el.style.fontWeight = '400';
       }
     });
 
@@ -6883,21 +6889,41 @@ window.addEventListener('DOMContentLoaded', async () => {
       if(el) el.innerHTML=meta;
     });
 
+    // Calculate Distance to Property
+    let distToProp = 0;
+    if (site && site.lat && site.lng && userCurrentLocation) {
+      distToProp = Math.round(getDistanceMeters(userCurrentLocation.lat, userCurrentLocation.lng, Number(site.lat), Number(site.lng)));
+    }
+
+    // Update Top Right Metrics (Distance & Large Clean Speed)
+    const gpsDistanceEl = document.getElementById('mapGpsDirection') || document.getElementById('hudGpsDirection');
+    if (gpsDistanceEl) {
+      gpsDistanceEl.innerText = site ? `📍 ${distToProp}m` : '📍 —';
+      gpsDistanceEl.style.fontWeight = '400';
+    }
+
+    const speedEl = document.getElementById('mapLiveSpeed') || document.getElementById('hudSpeed');
+    if (speedEl) {
+      speedEl.innerText = `${Math.round(currentMapSpeedKmh || 0)}`;
+      speedEl.style.fontSize = '40px';
+      speedEl.style.fontWeight = '400';
+    }
+
     const hudRunsEl=document.getElementById('hudRunsAtAddress');
     if(hudRunsEl) hudRunsEl.innerHTML=buildRunsAtAddress(site, false);
 
     const mapRunsEl=document.getElementById('mapRunsAtAddress');
     if(mapRunsEl) mapRunsEl.innerHTML=buildRunsAtAddress(site, false);
 
-    const mapBinsEl = document.getElementById('mapBinsAtAddress');
-    if (mapBinsEl) {
+    const mapBinsEl=document.getElementById('mapBinsAtAddress');
+    if(mapBinsEl) {
       const isSiteOnFilteredRun = site && siteMatchesAllActiveFilters(site);
       const mapBins = isSiteOnFilteredRun ? buildBinsAtAddress(site, true, true) : '';
       const showSerials = !isMapSerialManuallyHidden;
 
       const toolbar = `
-        <div style="display:flex; justify-content:flex-end; width:100%; margin-top:2px;">
-          <button type="button" id="mapSerialToggle" onclick="event.stopPropagation(); window.toggleMapSerialNumbers()" style="background:#334155; color:#f8fafc; border:none; border-radius:6px; padding:3px 10px; font-size:12px; cursor:pointer; font-weight:600;">
+        <div style="display:flex; justify-content:flex-end; width:100%; margin-top:3px;">
+          <button type="button" id="mapSerialToggle" onclick="event.stopPropagation(); window.toggleMapSerialNumbers()" style="background:#334155; color:#f8fafc; border:none; border-radius:6px; padding:3px 10px; font-size:12px; cursor:pointer; font-weight:400;">
             ${showSerials ? '🙈 Hide serials' : '👁️ Show serials'}
           </button>
         </div>
@@ -6915,7 +6941,6 @@ window.addEventListener('DOMContentLoaded', async () => {
   }
   
   /* GPS Position Watcher */
-  w/* GPS Position Watcher */
   window.onGpsPositionSuccess = function(pos) {
     const accuracy = Math.round(pos.coords.accuracy);
     const speedKmh = pos.coords.speed !== null && !isNaN(pos.coords.speed) ? Math.round(pos.coords.speed * 3.6) : 0;
@@ -7347,8 +7372,72 @@ window.addEventListener('DOMContentLoaded', async () => {
     }
   };
 })();
+/* --- BIN REMINDER MODAL HANDLERS --- */
+  let activeReminderKey = null;
+
+  window.openBinReminderModal = function(binKey, address, serial) {
+    activeReminderKey = binKey;
+    const existing = (typeof siteReminders !== 'undefined' && siteReminders[binKey]) ? siteReminders[binKey] : {};
+    
+    const propInput = document.getElementById('remTargetPropId');
+    const msgInput = document.getElementById('remMessageInput');
+    const dateInput = document.getElementById('remDateInput');
+    const modal = document.getElementById('reminderModal');
+
+    if (propInput) propInput.value = binKey;
+    if (msgInput) msgInput.value = existing.message || '';
+    if (dateInput) dateInput.value = existing.triggerDate || '';
+    if (modal) modal.style.display = 'flex';
+  };
+
+  window.confirmReminderSave = function() {
+    if (!activeReminderKey) return;
+    const msgInput = document.getElementById('remMessageInput');
+    const dateInput = document.getElementById('remDateInput');
+    const msg = msgInput ? msgInput.value.trim() : '';
+    const date = dateInput ? dateInput.value : '';
+
+    if (typeof siteReminders === 'undefined') siteReminders = {};
+
+    if (msg) {
+      siteReminders[activeReminderKey] = {
+        message: msg,
+        triggerDate: date || null,
+        created: Date.now()
+      };
+    } else {
+      delete siteReminders[activeReminderKey];
+    }
+    localStorage.setItem('siteReminders', JSON.stringify(siteReminders));
+    if (typeof closeReminderModal === 'function') closeReminderModal();
+    if (typeof lastTelemetrySite !== 'undefined' && lastTelemetrySite) {
+      renderCurrentAddressTelemetry(lastTelemetrySite);
+    }
+  };
+
+  window.dismissBinReminder = function(binKey) {
+    if (typeof siteReminders !== 'undefined') {
+      delete siteReminders[binKey];
+      localStorage.setItem('siteReminders', JSON.stringify(siteReminders));
+    }
+    if (typeof lastTelemetrySite !== 'undefined' && lastTelemetrySite) {
+      renderCurrentAddressTelemetry(lastTelemetrySite);
+    }
+  };
+  
+  
 </script>
 <input type="file" id="masterCsvFileInput" accept=".csv,text/csv" style="display:none;" onchange="handleMasterCsvFileSelect(event)">
 <input type="file" id="changesCsvFileInput" accept=".csv,text/csv" style="display:none;" onchange="handleChangesCsvFileSelect(event)">
+<style>
+  /* Lock map telemetry flush against navigation bar */
+  .map-address-telemetry,
+  .map-telemetry-container,
+  div[class*="map-address-telemetry"] {
+    bottom: 56px !important; /* Locks directly above the 56px bottom bar */
+    margin-bottom: 0 !important;
+    position: absolute !important;
+  }
+</style>
 </body>
 </html>
