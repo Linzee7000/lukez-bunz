@@ -6502,26 +6502,50 @@ window.addEventListener('DOMContentLoaded', async () => {
   /**
  * Helper to build and format bin counts/types for the current address HUD
  */
-function buildBinsAtAddress(addressObj) {
+function buildBinsAtAddress(addressObj, separator = ' | ') {
   if (!addressObj) return '';
   
-  // If it's already an array of bins or string
+  // Return directly if already a string
   if (typeof addressObj === 'string') return addressObj;
+  
+  // Handle array of strings or bin objects
   if (Array.isArray(addressObj.bins)) {
-    return addressObj.bins.join(', ');
+    return addressObj.bins
+      .map(bin => typeof bin === 'object' ? `${bin.type || bin.name}: ${bin.date || bin.schedule || ''}`.trim() : bin)
+      .filter(Boolean)
+      .join(separator);
   }
-  
-  // Extract standard bin fields if present
+
+  // Standard bin mapping: [Label, possible property keys]
+  const binMap = [
+    { label: 'Waste', keys: ['waste', 'general', 'rubbish', 'landfill'] },
+    { label: 'Recycle', keys: ['recycle', 'recycling', 'yellow'] },
+    { label: 'FOGO', keys: ['fogo', 'organics', 'green', 'food_organics'] },
+    { label: 'Glass', keys: ['glass', 'purple'] }
+  ];
+
   const bins = [];
-  if (addressObj.waste || addressObj.general) bins.push(`Waste: ${addressObj.waste || addressObj.general}`);
-  if (addressObj.recycle || addressObj.recycling) bins.push(`Recycle: ${addressObj.recycle || addressObj.recycling}`);
-  if (addressObj.organics || addressObj.fogo || addressObj.green) bins.push(`FOGO: ${addressObj.organics || addressObj.fogo || addressObj.green}`);
-  if (addressObj.glass) bins.push(`Glass: ${addressObj.glass}`);
-  
-  return bins.length > 0 ? bins.join(' | ') : (addressObj.binInfo || addressObj.bins || '');
+
+  for (const { label, keys } of binMap) {
+    for (const key of keys) {
+      const val = addressObj[key];
+      if (val) {
+        // Support either a direct string/date or a nested object property
+        const text = typeof val === 'object' ? (val.date || val.day || val.frequency || JSON.stringify(val)) : val;
+        bins.push(`${label}: ${text}`);
+        break; // Match first found key for this bin type
+      }
+    }
+  }
+
+  if (bins.length > 0) return bins.join(separator);
+
+  // Fallback if no mapped keys matched
+  const fallback = addressObj.binInfo || addressObj.bins || addressObj.description || '';
+  return typeof fallback === 'object' ? JSON.stringify(fallback) : String(fallback);
 }
   /* Unified Telemetry Rendering */
-  function renderCurrentAddressTelemetry(site) {
+  window.renderCurrentAddressTelemetry = function(site) {
     lastTelemetrySite = site || null;
     const address = site ? (cleanStreetAddress(site.addressText) || site.baseStreetLine || 'Address unavailable') : 'Scanning Street...';
     
