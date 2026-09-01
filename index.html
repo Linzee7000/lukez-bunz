@@ -6735,48 +6735,76 @@ window.addEventListener('DOMContentLoaded', async () => {
   /**
  * Helper to build and format bin counts/types for the current address HUD
  */
-function buildBinsAtAddress(addressObj, separator = ' | ') {
-  if (!addressObj) return '';
-  
-  // Return directly if already a string
-  if (typeof addressObj === 'string') return addressObj;
-  
-  // Handle array of strings or bin objects
-  if (Array.isArray(addressObj.bins)) {
-    return addressObj.bins
-      .map(bin => typeof bin === 'object' ? `${bin.type || bin.name}: ${bin.date || bin.schedule || ''}`.trim() : bin)
-      .filter(Boolean)
-      .join(separator);
-  }
+window.buildBinsAtAddress = function(site, filterByActiveStream = true, isMapTelemetry = false) {
+  if (!site) return '';
 
-  // Standard bin mapping: [Label, possible property keys]
-  const binMap = [
-    { label: 'Waste', keys: ['waste', 'general', 'rubbish', 'landfill'] },
-    { label: 'Recycle', keys: ['recycle', 'recycling', 'yellow'] },
-    { label: 'FOGO', keys: ['fogo', 'organics', 'green', 'food_organics'] },
-    { label: 'Glass', keys: ['glass', 'purple'] }
+  const streamConfigs = [
+    { key: 'Garbage', icon: '🗑️', bg: '#dc2626', label: '240L' },
+    { key: 'Recycling', icon: '♻️', bg: '#eab308', label: '240L' },
+    { key: 'FOGO', icon: '🌳', bg: '#16a34a', label: '240L' }
   ];
 
-  const bins = [];
+  const currentStreamFilter = (typeof activeFilterStream !== 'undefined' && activeFilterStream ? activeFilterStream : '').toLowerCase().trim();
+  const displaySources = (typeof activeFilterDataSource !== 'undefined' && activeFilterDataSource === 'council')
+    ? (site.councilStreams || {}) 
+    : (site.soloStreams || {});
 
-  for (const { label, keys } of binMap) {
-    for (const key of keys) {
-      const val = addressObj[key];
-      if (val) {
-        // Support either a direct string/date or a nested object property
-        const text = typeof val === 'object' ? (val.date || val.day || val.frequency || JSON.stringify(val)) : val;
-        bins.push(`${label}: ${text}`);
-        break; // Match first found key for this bin type
-      }
+  let html = '';
+
+  streamConfigs.forEach(st => {
+    // Only show bins for the filtered stream (e.g. Recycling) when a filter is active
+    if (filterByActiveStream && currentStreamFilter && currentStreamFilter !== 'all') {
+      const targetKey = (currentStreamFilter === 'summerrecycling') ? 'recycling' : currentStreamFilter;
+      if (st.key.toLowerCase() !== targetKey) return;
     }
-  }
 
-  if (bins.length > 0) return bins.join(separator);
+    const bins = displaySources[st.key] || [];
+    if (bins.length === 0) return;
 
-  // Fallback if no mapped keys matched
-  const fallback = addressObj.binInfo || addressObj.bins || addressObj.description || '';
-  return typeof fallback === 'object' ? JSON.stringify(fallback) : String(fallback);
-}
+    html += `
+      <div style="display:flex; background:#fff; border-radius:10px; margin-bottom:5px; overflow:visible; box-shadow:0 1px 3px rgba(0,0,0,0.2); border:1px solid #cbd5e1; position:relative;">
+        <div style="background:${st.bg}; color:#fff; width:74px; min-width:74px; border-radius:10px 0 0 10px; display:flex; flex-direction:column; align-items:center; justify-content:center; padding:4px; font-weight:400; font-size:13px; line-height:1.1;">
+          <span>${st.icon} ${bins[0].size || st.label}</span>
+          ${bins.length > 1 ? `<span style="font-size:10px; opacity:0.95; margin-top:2px;">(${bins.length} bins)</span>` : ''}
+        </div>
+
+        <div style="flex:1; display:flex; flex-direction:column; justify-content:center; padding:2px 10px;">
+          ${bins.map((b, idx) => {
+            const propId = site.propId || site.siteId || '';
+            const binKey = `${propId}_${b.serial || idx}`;
+            const rem = (typeof siteReminders !== 'undefined') ? siteReminders[binKey] : null;
+            const hasRem = Boolean(rem);
+            const menuId = `binMenu_${propId}_${st.key}_${idx}`.replace(/[^a-zA-Z0-9_]/g, '_');
+
+            return `
+              <div style="display:flex; align-items:center; justify-content:space-between; ${idx < bins.length - 1 ? 'border-bottom:1px solid #f1f5f9;' : ''} padding:3px 0; position:relative;">
+                <span style="font-size:17px; font-weight:400; color:${hasRem ? '#dc2626' : '#0f172a'}; font-family:monospace; letter-spacing:0.5px;">
+                  ${b.serial || '—'}
+                </span>
+                
+                <div style="display:flex; align-items:center; gap:6px;">
+                  <button type="button" onclick="event.stopPropagation(); ${hasRem ? `dismissBinReminder('${binKey}')` : `openBinReminderModal('${binKey}', '${escape(site.addressText || '')}', '${b.serial || ''}')`}" style="background:none; border:none; font-size:16px; cursor:pointer; padding:0 2px;" title="${hasRem ? 'Cancel reminder' : 'Set reminder'}">
+                    ${hasRem ? '❌' : '⏰'}
+                  </button>
+                  <button type="button" onclick="event.stopPropagation(); window.toggleBinIssueMenu(event, '${menuId}')" style="background:none; border:none; font-size:17px; cursor:pointer; padding:0 2px;">🙂</button>
+                </div>
+                
+                <div class="bin-issue-menu" id="${menuId}" style="display:none; position:absolute; right:0; top:26px; z-index:9999; background:#fff; border:1px solid #94a3b8; border-radius:6px; box-shadow:0 4px 12px rgba(0,0,0,0.3); padding:4px; min-width:130px;">
+                  ${['Contaminated','Heavy','Overfull','Prior spill','Jammed'].map(issue =>
+                    `<button type="button" onclick="event.stopPropagation(); window.setBinIssue(event, '${menuId}', '${issue}')" style="display:block; width:100%; text-align:left; background:none; border:none; padding:5px 8px; font-size:13px; font-weight:400; color:#1e293b; cursor:pointer; border-radius:4px;">${issue}</button>`
+                  ).join('')}
+                </div>
+              </div>
+            `;
+          }).join('')}
+        </div>
+      </div>
+    `;
+  });
+
+  return html;
+};
+function buildBinsAtAddress(s, f, m) { return window.buildBinsAtAddress(s, f, m); }
   /* Unified Telemetry Rendering */
   window.renderCurrentAddressTelemetry = function(site) {
   lastTelemetrySite = site || null;
@@ -6822,14 +6850,15 @@ function buildBinsAtAddress(addressObj, separator = ' | ') {
   }
 
   const speedEl = document.getElementById('mapLiveSpeed') || document.getElementById('hudSpeed');
-  if (speedEl) {
-    speedEl.innerText = `${Math.round(currentMapSpeedKmh || 0)}`;
-    speedEl.style.fontSize = '42px';
-    speedEl.style.fontWeight = '400';
-  }
+    if (speedEl) {
+      speedEl.innerText = `${Math.round(currentMapSpeedKmh || 0)}`;
+      speedEl.style.fontSize = '42px';
+      speedEl.style.fontWeight = '400';
+    }
 
-  document.querySelectorAll('.address-telemetry-speed small, .map-telemetry-speed-unit').forEach(el => el.style.display = 'none');
-
+    // Hide KM/H text label beside speed
+    document.querySelectorAll('.address-telemetry-speed small, .map-telemetry-speed-unit').forEach(el => el.style.display = 'none');
+    
   const hudRunsEl = document.getElementById('hudRunsAtAddress');
   if (hudRunsEl) hudRunsEl.innerHTML = buildRunsAtAddress(site, false);
 
