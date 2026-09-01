@@ -3956,30 +3956,53 @@
     else updateMapSerialToggleUI();
   }
 
-  function buildBinsAtAddress(site, showSerial = true, includeIssueButton = false) {
-    if (!site || !site.soloStreams) return '';
-    const out=[];
-    const allowedStreams = getSelectedStreamsAtAddress(site);
+  function buildBinsAtAddress(site, filterByActiveStream = true, isMapTelemetry = false) {
+  if (!site) return '';
 
-    SOLO_STREAMS.forEach(st=>{
-      // Hard stop: a filtered card may only contain bins from its filtered stream.
-      if (!allowedStreams.has(st.key)) return;
-      if (!streamIsCurrentFilteredStream(site, st.key)) return;
+  const streamConfigs = [
+    { key: 'Garbage', icon: '🗑️', bg: '#dc2626', label: '240L' },
+    { key: 'Recycling', icon: '♻️', bg: '#eab308', label: '240L' },
+    { key: 'SummerRecycling', icon: '☀️', bg: '#f59e0b', label: '240L' },
+    { key: 'FOGO', icon: '🌳', bg: '#16a34a', label: '240L' }
+  ];
 
-      const cls=st.key==='Garbage'?'address-bin-gar':(st.key==='Recycling'?'address-bin-rec':'address-bin-fog');
-      (site.soloStreams[st.key]||[]).forEach((bin, binIndex)=>{
-        const showThisSerial = showSerial && shouldShowMapSerialNumbers();
-        const serialHtml = showThisSerial ? `<div class="address-bin-serial">${esc(String(bin.serial||'—'))}</div>` : '';
-        let issueHtml = '';
-        if (includeIssueButton) {
-          const menuId = `mapBinIssue_${site.propId || site.siteId}_${st.key}_${binIndex}`.replace(/[^a-zA-Z0-9_]/g, '_');
-          issueHtml = `<div class="address-bin-actions"><button class="bin-face-btn" title="Note a bin problem" onclick="toggleBinIssueMenu(event, '${menuId}')">🙂</button><div class="bin-issue-menu" id="${menuId}">${['Contaminated','Heavy','Overfull','Prior spill','Jammed'].map(issue => `<button data-issue="${issue}" onclick="setBinIssue(event, '${menuId}', '${issue}')">${issue}</button>`).join('')}</div></div>`;
-        }
-        out.push(`<div class="address-bin-mini ${cls}${showThisSerial ? '' : ' serials-hidden'}"><div class="address-bin-stream"><span>${st.icon}</span><span>${esc(String(bin.size||'—'))}</span></div>${serialHtml}${issueHtml}</div>`);
-      });
-    });
-    return out.join('');
-  }
+  const eligibleStreams = new Set(getDriveEligibleStreams(site).map(x => x.binStream));
+  const displaySources = activeFilterDataSource === 'council' 
+    ? (site.councilStreams || {}) 
+    : (site.soloStreams || {});
+
+  let html = '';
+
+  streamConfigs.forEach(st => {
+    const streamKey = st.key === 'SummerRecycling' ? 'Recycling' : st.key;
+    if (filterByActiveStream && !eligibleStreams.has(streamKey)) return;
+
+    const bins = displaySources[streamKey] || [];
+    if (bins.length === 0) return;
+
+    html += `
+      <div style="display:flex; background:#fff; border-radius:12px; margin-bottom:8px; overflow:hidden; box-shadow:0 2px 6px rgba(0,0,0,0.25); border:1px solid #e2e8f0;">
+        <!-- Left Stream Badge -->
+        <div style="background:${st.bg}; color:#fff; width:82px; min-width:82px; display:flex; flex-direction:column; align-items:center; justify-content:center; padding:6px; font-weight:800; font-size:14px; text-shadow:0 1px 2px rgba(0,0,0,0.3);">
+          <span>${st.icon} ${bins[0].size || st.label}</span>
+          ${bins.length > 1 ? `<span style="font-size:11px; opacity:0.95; font-weight:700; margin-top:2px;">(${bins.length} bins)</span>` : ''}
+        </div>
+
+        <!-- Stacked Serial List -->
+        <div style="flex:1; display:flex; flex-direction:column; justify-content:center; padding:4px 12px; gap:2px;">
+          ${bins.map((b, idx) => `
+            <div style="display:flex; align-items:center; justify-content:space-between; ${idx < bins.length - 1 ? 'border-bottom:1px solid #f1f5f9;' : ''} padding:3px 0;">
+              <span style="font-size:18px; font-weight:800; color:#0f172a; font-family:monospace; letter-spacing:0.5px;">${b.serial || '—'}</span>
+              <span style="font-size:16px;">🙂</span>
+            </div>
+          `).join('')}
+        </div>
+      </div>
+    `;
+  });
+
+  return html;
+}
 
   function hasActiveMapTelemetryFilter() {
     const source = String(activeFilterDataSource || 'all').trim().toLowerCase();
@@ -4012,44 +4035,7 @@
   function closeMapSideLayers(){const c=document.getElementById('mapSideLayersControl');if(c)c.classList.remove('open');}
   function toggleMapSideLayers(event){if(event)event.stopPropagation();const c=document.getElementById('mapSideLayersControl');if(c)c.classList.toggle('open');}
 
-  function renderCurrentAddressTelemetry(site) {
-    lastTelemetrySite = site || null;
-    const address = site ? (cleanStreetAddress(site.addressText)||site.baseStreetLine||'Address unavailable') : 'Scanning Street...';
-    const meta = site ? (String(site.runFlags||'').trim() ? `🚩 ${esc(String(site.runFlags).trim())}` : getAddressSuburb(site)) : 'Scanning suburb...';
-    const driveRuns = buildRunsAtAddress(site, false);
-    // Map: show every run serviced at this same stop, but only show bin rows for the
-    // currently filtered/selected stream. Other runs remain visible as run badges.
-    const mapRuns = buildRunsAtAddress(site, false);
-    const mapBins = buildBinsAtAddress(site, true, true);
-    const showMapBinRows = shouldShowMapSerialNumbers();
-
-    ['hudStreetName','mapLiveStreet'].forEach(id=>{const el=document.getElementById(id); if(el) el.innerText=address;});
-    ['hudAddressMeta','mapAddressMeta'].forEach(id=>{const el=document.getElementById(id); if(el) el.innerHTML=meta;});
-
-    const hudRunsEl=document.getElementById('hudRunsAtAddress');
-    if(hudRunsEl) hudRunsEl.innerHTML=driveRuns || mapRuns;
-
-    const mapRunsEl=document.getElementById('mapRunsAtAddress');
-    if(mapRunsEl) mapRunsEl.innerHTML=mapRuns;
-
-    const mapBinsEl=document.getElementById('mapBinsAtAddress');
-    if(mapBinsEl) {
-      const toolbar = mapBins
-        ? `<div class="map-bins-toolbar ${showMapBinRows ? '' : 'map-bins-toolbar-bottom'}"><span id="mapSerialAutoNote" class="map-serial-auto-note"></span><button type="button" id="mapSerialToggle" class="map-serial-toggle" onclick="toggleMapSerialNumbers()">🙈 Hide serials</button></div>`
-        : '';
-
-      // Hide means hide the entire bin/serial area, not merely the serial text.
-      // When hidden (manually or above 5 km/h), keep only the compact toggle at
-      // the bottom of the card so the map stays as visible as possible.
-      mapBinsEl.innerHTML = showMapBinRows ? (mapBins + toolbar) : toolbar;
-      mapBinsEl.classList.toggle('map-bins-collapsed', !showMapBinRows);
-      mapBinsEl.style.display = mapBins ? 'flex' : 'none';
-      updateMapSerialToggleUI();
-    }
-
-    updateMapTelemetryVisibility();
-  }
-
+  
   /* Driver HUD Screen Engine */
   function toggleBinIssueMenu(event, menuId) {
     event.stopPropagation();
@@ -6767,6 +6753,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   };
 
   /* Unified Telemetry Rendering */
+  /* Unified Telemetry Rendering */
   function renderCurrentAddressTelemetry(site) {
     lastTelemetrySite = site || null;
     const address = site ? (cleanStreetAddress(site.addressText)||site.baseStreetLine||'Address unavailable') : 'Scanning Street...';
@@ -6780,6 +6767,11 @@ window.addEventListener('DOMContentLoaded', async () => {
       meta = `🚩 ${streetMode.label.toUpperCase()} · ` + meta;
     } else if (cp) {
       meta = `🚩 📍 COLLECTION POINT · ` + meta;
+    }
+
+    // Check for active site reminder
+    if (site && typeof checkNearbyReminders === 'function') {
+      checkNearbyReminders(site);
     }
     
     ['hudStreetName','mapLiveStreet'].forEach(id=>{const el=document.getElementById(id); if(el) el.innerText=address;});
@@ -6812,7 +6804,7 @@ window.addEventListener('DOMContentLoaded', async () => {
       box.classList.toggle('map-telemetry-hidden', !isNextBinBoxVisible);
     }
   }
-
+  
   /* GPS Position Watcher */
   window.onGpsPositionSuccess = function(pos) {
     const accuracy = Math.round(pos.coords.accuracy);
