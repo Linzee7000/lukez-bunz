@@ -4321,7 +4321,22 @@ body.dark-mode .form-section-divider {
     if(pinSourceMode==='property') return prop; return flip;
   }
   function saveCollectionPoints(){ localStorage.setItem('lukezBunzCollectionPoints',JSON.stringify(collectionPoints)); }
-  function toggleCollectionHouse(siteId){ const id=String(siteId); if(selectedCollectionHouseIds.has(id)) selectedCollectionHouseIds.delete(id); else selectedCollectionHouseIds.add(id); collectionSelectionActive=selectedCollectionHouseIds.size>0; renderMapData(); }
+  function toggleCollectionHouse(siteId) {
+  const id = String(siteId);
+  if (selectedCollectionHouseIds.has(id)) {
+    selectedCollectionHouseIds.delete(id);
+  } else {
+    selectedCollectionHouseIds.add(id);
+  }
+  
+  // As long as at least one house is selected, suppress popups on future taps
+  collectionSelectionActive = selectedCollectionHouseIds.size > 0;
+  
+  // Close any open popup immediately so the map stays clean
+  if (leafletMap) leafletMap.closePopup();
+  
+  renderMapData();
+}
   function startCollectionPointMode(){ if(!selectedCollectionHouseIds.size){ alert('Select the first house using Select house, then tap any additional houses directly to select or unselect them.'); return; } collectionPointMode=true; const b=document.getElementById('btnCreateCollectionPoint'); if(b)b.classList.add('active'); alert('Tap the map to place the collection point. You can drag the pin before saving.'); }
   function placeCollectionPointDraft(latlng){
     if(!leafletMap)return;
@@ -5903,7 +5918,7 @@ window.buildUnifiedBinPopup = function(site, stream, bin, binIdx) {
       <div class="unified-popup-actions">
         <button type="button" class="unified-popup-btn" onclick="promptEditProperty('${propId}')">Edit House</button>
         <button type="button" class="unified-popup-btn" onclick="promptEditBin('${propId}', '${stream}', ${binIdx})">Edit Bin</button>
-        <button type="button" class="unified-popup-btn" onclick="toggleMapBinSelection('${propId}|solo|${stream}|${binIdx}|${bin.serial}')">Select</button>
+        <button type="button" class="unified-popup-btn" onclick="mapSelectMode = true; toggleMapBinSelection('${propId}|solo|${stream}|${binIdx}|${bin.serial}'); if(leafletMap) leafletMap.closePopup();">Select</button>
       </div>
     </div>
   `;
@@ -8278,8 +8293,10 @@ window.addEventListener('DOMContentLoaded', async () => {
       ]
     }));
 
-    marker.on('click', () => {
-      if (collectionSelectionActive || collectionPointMode) {
+    // If any house is already selected, click toggles selection directly without opening the popup
+    marker.on('click', (e) => {
+      if (collectionSelectionActive || collectionPointMode || selectedCollectionHouseIds.size > 0) {
+        L.DomEvent.stop(e);
         toggleCollectionHouse(id);
         marker.closePopup();
       }
@@ -8438,6 +8455,15 @@ window.addEventListener('DOMContentLoaded', async () => {
             if (src === 'solo') binActions.push({ label: 'Edit Bin', onclick: `promptEditBin('${esc(siteId)}', '${esc(binStream)}', ${idx})`, primary: true });
             m.bindPopup(window.buildUnifiedBinPopup(site, binStream, bin, idx));
 
+            // If bin selection mode is active or any bin is selected, tap to toggle without showing the popup
+            m.on('click', (e) => {
+              if (mapSelectMode || mapSelectedBinKeys.size > 0) {
+                L.DomEvent.stop(e);
+                toggleMapBinSelection(key);
+                m.closePopup();
+              }
+            });
+            
             m.on('dragstart', (ev) => {
               originalDragPos = ev.target.getLatLng();
             });
