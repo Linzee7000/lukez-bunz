@@ -1881,6 +1881,45 @@
   .focus-tool-btn.active { background: var(--blue-600); border-color: var(--blue-600); color: #fff; }
   .focus-tool-danger { background: var(--red-100); border-color: var(--red-300); color: var(--red-800); }
 
+  /* ===== Unified map popup design =====
+     One consistent card style for every Leaflet popup on the map: bins,
+     houses, collection points, KMZ routes/lifts, and road-mode drafts. */
+  .leaflet-popup-content-wrapper {
+    border-radius: 14px !important;
+    box-shadow: 0 8px 24px rgba(15,23,42,.18) !important;
+  }
+  .leaflet-popup-content { margin: 12px 14px !important; line-height: 1.4 !important; }
+  .leaflet-popup-tip-container { width: 26px !important; height: 13px !important; }
+
+  .map-popup { min-width: 190px; }
+  .map-popup-title { font-size: 15px; font-weight: 800; color: var(--slate-800); display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .map-popup-badge { font-size: 11px; font-weight: 800; padding: 2px 7px; border-radius: 5px; text-transform: uppercase; letter-spacing: .03em; }
+  .map-popup-meta { font-size: 12.5px; color: var(--slate-500); margin-top: 4px; }
+  .map-popup-meta b { color: var(--slate-700); }
+  .map-popup-actions { display: flex; gap: 6px; margin-top: 10px; }
+  .map-popup-btn {
+    flex: 1;
+    padding: 7px 8px;
+    font-size: 12.5px;
+    font-weight: 700;
+    border-radius: 8px;
+    border: 1px solid var(--slate-300);
+    background: var(--slate-100);
+    color: var(--slate-800);
+    cursor: pointer;
+    text-align: center;
+    white-space: nowrap;
+  }
+  .map-popup-btn:active { transform: scale(.97); }
+  .map-popup-btn-primary { background: var(--brand); border-color: var(--brand-dark); color: #fff; }
+
+  body.dark-mode .leaflet-popup-content-wrapper,
+  body.dark-mode .leaflet-popup-tip { background: var(--dark-surface) !important; color: var(--slate-100) !important; }
+  body.dark-mode .map-popup-title { color: var(--slate-100) !important; }
+  body.dark-mode .map-popup-meta { color: var(--dark-text-muted) !important; }
+  body.dark-mode .map-popup-btn { background: #29354a !important; border-color: #3a4a63 !important; color: var(--slate-200-b) !important; }
+  body.dark-mode .map-popup-btn-primary { background: var(--brand) !important; color: #fff !important; }
+
   /* Fixed side buttons overlay (stays upright regardless of map rotation) */
   /* Fixed side buttons overlay (stays upright regardless of map rotation) */
   .map-fixed-side-overlay {
@@ -3111,6 +3150,29 @@
   function clean(v) { return (v === null || v === undefined) ? '' : String(v).trim(); }
   function lower(v) { return clean(v).toLowerCase(); }
   function esc(v) { return String(v ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c])); }
+
+  // One consistent popup builder for every marker/polyline on the map
+  // (bins, houses, collection points, KMZ evidence, road-mode drafts).
+  // opts: { badge, badgeClass, title, lines:[html,...], actions:[{label,onclick,primary}] }
+  function mapPopupHTML(opts) {
+    opts = opts || {};
+    const badge = opts.badge ? `<span class="map-popup-badge ${esc(opts.badgeClass || '')}">${esc(opts.badge)}</span>` : '';
+    const lines = (opts.lines || []).filter(Boolean).map(l => `<div class="map-popup-meta">${l}</div>`).join('');
+    const actions = (opts.actions || []).length
+      ? `<div class="map-popup-actions">${opts.actions.map(a => `<button type="button" class="map-popup-btn${a.primary ? ' map-popup-btn-primary' : ''}" onclick="${a.onclick}">${esc(a.label)}</button>`).join('')}</div>`
+      : '';
+    return `<div class="map-popup"><div class="map-popup-title">${badge}${esc(opts.title || '')}</div>${lines}${actions}</div>`;
+  }
+  function mapStreamBadgeClass(stream) {
+    const s = String(stream || '').toLowerCase();
+    if (s.startsWith('gar')) return 'hdr-run-gar';
+    if (s.startsWith('summer')) return 'hdr-run-summer';
+    if (s.startsWith('rec')) return 'hdr-run-rec';
+    if (s.startsWith('fog')) return 'hdr-run-fog';
+    return 'hdr-run-gar';
+  }
+  window.mapPopupHTML = mapPopupHTML;
+  window.mapStreamBadgeClass = mapStreamBadgeClass;
   
   let siteRecords = [];
   let masterEditsLog = [];
@@ -3963,7 +4025,17 @@
   function saveCollectionPoints(){ localStorage.setItem('lukezBunzCollectionPoints',JSON.stringify(collectionPoints)); }
   function toggleCollectionHouse(siteId){ const id=String(siteId); if(selectedCollectionHouseIds.has(id)) selectedCollectionHouseIds.delete(id); else selectedCollectionHouseIds.add(id); collectionSelectionActive=selectedCollectionHouseIds.size>0; renderMapData(); }
   function startCollectionPointMode(){ if(!selectedCollectionHouseIds.size){ alert('Select the first house using Select house, then tap any additional houses directly to select or unselect them.'); return; } collectionPointMode=true; const b=document.getElementById('btnCreateCollectionPoint'); if(b)b.classList.add('active'); alert('Tap the map to place the collection point. You can drag the pin before saving.'); }
-  function placeCollectionPointDraft(latlng){ if(!leafletMap)return; if(collectionPointDraftMarker) leafletMap.removeLayer(collectionPointDraftMarker); collectionPointDraftMarker=L.marker(latlng,{draggable:true}).addTo(leafletMap).bindPopup('Collection point — drag to adjust, then Save').openPopup(); collectionPointDraftMarker.bindPopup(`<div><b>Collection point</b><br>${selectedCollectionHouseIds.size} house${selectedCollectionHouseIds.size===1?'':'s'} selected<br><button onclick="saveCollectionPointDraft()">Save collection point</button></div>`).openPopup(); }
+  function placeCollectionPointDraft(latlng){
+    if(!leafletMap)return;
+    if(collectionPointDraftMarker) leafletMap.removeLayer(collectionPointDraftMarker);
+    const n = selectedCollectionHouseIds.size;
+    collectionPointDraftMarker = L.marker(latlng,{draggable:true}).addTo(leafletMap);
+    collectionPointDraftMarker.bindPopup(mapPopupHTML({
+      badge: '📍', title: 'Collection point',
+      lines: [`${n} house${n===1?'':'s'} selected — drag to adjust, then save`],
+      actions: [{ label:'Save collection point', onclick:'saveCollectionPointDraft()', primary:true }]
+    })).openPopup();
+  }
   function saveCollectionPointDraft(){ if(!collectionPointDraftMarker)return; const p=collectionPointDraftMarker.getLatLng(); const groupId='cp_'+Date.now(); selectedCollectionHouseIds.forEach(id=>collectionPoints[id]={id:groupId,lat:p.lat,lng:p.lng}); saveCollectionPoints(); selectedCollectionHouseIds.clear(); collectionSelectionActive=false; collectionPointMode=false; leafletMap.removeLayer(collectionPointDraftMarker); collectionPointDraftMarker=null; const b=document.getElementById('btnCreateCollectionPoint');if(b)b.classList.remove('active'); renderMapData(); }
   function updateMapSideViewUI(){
     const btn=document.getElementById('btnTruckFollow');
@@ -4050,7 +4122,10 @@
     pts.push(latlng);
     if(roadModeDraft) leafletMap.removeLayer(roadModeDraft);
     roadModeDraft=L.polyline(pts,{color:roadModeColors[roadModeDrawing.type],weight:7,opacity:.9}).addTo(leafletMap);
-    if(pts.length>=2) roadModeDraft.bindPopup('<button onclick="finishRoadMode()">Save road</button>').openPopup();
+    if(pts.length>=2) roadModeDraft.bindPopup(mapPopupHTML({
+      title:'Road path', lines:['Drag points to adjust'],
+      actions:[{label:'Save road', onclick:'finishRoadMode()', primary:true}]
+    })).openPopup();
   }
   function finishRoadMode(){
     if(!roadModeDrawing||roadModeDrawing.points.length<2){ roadModeDrawing=null; if(roadModeDraft){leafletMap.removeLayer(roadModeDraft);roadModeDraft=null;} return; }
@@ -4059,7 +4134,7 @@
     document.getElementById('btnRoadInOut')?.classList.remove('active'); document.getElementById('btnRoadReverseIn')?.classList.remove('active'); renderMapData();
   }
   function drawRoadModes(){
-    roadModes.forEach(r=>{ if(!Array.isArray(r.points)||r.points.length<2)return; const label=r.type==='drive-reverse-out'?'Drive in · reverse out':'Reverse in · drive out'; L.polyline(r.points.map(p=>[p.lat,p.lng]),{color:roadModeColors[r.type]||'#f97316',weight:7,opacity:.9}).bindPopup(`<b>${label}</b>`).addTo(mapSeqLayer); });
+    roadModes.forEach(r=>{ if(!Array.isArray(r.points)||r.points.length<2)return; const label=r.type==='drive-reverse-out'?'Drive in · reverse out':'Reverse in · drive out'; L.polyline(r.points.map(p=>[p.lat,p.lng]),{color:roadModeColors[r.type]||'#f97316',weight:7,opacity:.9}).bindPopup(mapPopupHTML({title:label})).addTo(mapSeqLayer); });
   }
 
   function propertyPopup(site){const id=String(site.propId||site.siteId||'');return `<div><b>${esc(cleanStreetAddress(site.addressText)||site.baseStreetLine||'Property')}</b><br><small>${esc(site.suburbLine||'')}</small><br><button type="button" onclick="openPropertyInspectModal('${esc(id)}')">Inspect</button> <button type="button" onclick="promptEditProperty('${esc(id)}')">Edit</button></div>`;}
@@ -4198,7 +4273,7 @@
   }
   function drawCollectionPointMarkers(){
     const groups={}; Object.entries(collectionPoints).forEach(([houseId,cp])=>{ if(!groups[cp.id])groups[cp.id]={cp,houses:[]}; groups[cp.id].houses.push(houseId); });
-    Object.values(groups).forEach(g=>{ L.marker([g.cp.lat,g.cp.lng],{icon:L.divIcon({className:'collection-point-pin',html:'<div style="font-size:24px;filter:drop-shadow(0 1px 2px #0006)">📍</div>',iconSize:[28,32],iconAnchor:[14,32]})}).bindPopup(`<div><b>Collection point</b><br>${g.houses.length} house${g.houses.length===1?'':'s'}<br>Bins collected here</div>`).addTo(mapMarkersLayer); });
+    Object.values(groups).forEach(g=>{ L.marker([g.cp.lat,g.cp.lng],{icon:L.divIcon({className:'collection-point-pin',html:'<div style="font-size:24px;filter:drop-shadow(0 1px 2px #0006)">📍</div>',iconSize:[28,32],iconAnchor:[14,32]})}).bindPopup(mapPopupHTML({badge:'📍', title:'Collection point', lines:[`${g.houses.length} house${g.houses.length===1?'':'s'} · bins collected here`]})).addTo(mapMarkersLayer); });
   }
 
   function drawSite(site,key,i){
@@ -4441,8 +4516,10 @@
       file.routes.forEach(route=>{
         L.polyline(route.coordinates.map(p=>[p.lat,p.lng]),{
           color:kmzRouteColor, weight:3, opacity:.7, dashArray:'6 6'
-        }).bindPopup(`<b>Truck route</b><br>${esc(file.fileName)}<br>${esc(route.name)}`)
-          .addTo(mapKmzRouteLayer);
+        }).bindPopup(mapPopupHTML({
+          badge:'🚛', title:'Truck route',
+          lines:[esc(file.fileName), esc(route.name)]
+        })).addTo(mapKmzRouteLayer);
       });
 
       file.lifts.forEach(lift=>{
@@ -4462,15 +4539,16 @@
           ? `${Math.round(lift.bearingFromPrevious)}° ${getCardinalDirection(lift.bearingFromPrevious)}`
           : '—';
 
-        marker.bindPopup(`
-          <div style="min-width:190px">
-            <b>${esc(activeFilterStream||'Bin')} lift #${esc(lift.name)}</b><br>
-            <b>Time:</b> ${esc(lift.timestampRaw||'Not supplied')}<br>
-            <b>Direction:</b> ${esc(headingText)}<br>
-            <b>Sequence:</b> ${esc(previousText)}<br>
-            <button type="button" onclick="inspectKmzLift(${lift.lat},${lift.lng},'${esc(mapKey(runs[0]))}',${Number(lift.sequence)||0})">Find nearby houses</button>
-          </div>
-        `).addTo(mapKmzLiftLayer);
+        marker.bindPopup(mapPopupHTML({
+          badge: activeFilterStream || 'Bin', badgeClass: mapStreamBadgeClass(activeFilterStream),
+          title: `Lift #${lift.name}`,
+          lines: [
+            `<b>Time:</b> ${esc(lift.timestampRaw||'Not supplied')}`,
+            `<b>Direction:</b> ${esc(headingText)}`,
+            `<b>Sequence:</b> ${esc(previousText)}`
+          ],
+          actions: [{ label:'Find nearby houses', onclick:`inspectKmzLift(${lift.lat},${lift.lng},'${esc(mapKey(runs[0]))}',${Number(lift.sequence)||0})`, primary:true }]
+        })).addTo(mapKmzLiftLayer);
       });
     });
   }
@@ -7816,16 +7894,14 @@ window.addEventListener('DOMContentLoaded', async () => {
       interactive: true
     });
     
-    marker.bindPopup(`
-      <div style="min-width:180px;">
-        <b>${esc(label)}</b><br>
-        <span style="font-size:13px; color:#475569;">${esc(site.addressText || '')}</span><br>
-        <div style="display:flex; gap:6px; margin-top:8px;">
-          <button type="button" style="flex:1; padding:4px 8px; font-size:12px; font-weight:700; border-radius:5px; border:1px solid #cbd5e1; background:#f1f5f9; cursor:pointer;" onclick="toggleCollectionHouse('${esc(id)}')">${isSelected ? 'Remove' : 'Select house'}</button>
-          <button type="button" style="flex:1; padding:4px 8px; font-size:12px; font-weight:700; border-radius:5px; border:none; background:#2d6a4f; color:white; cursor:pointer;" onclick="openPropertyInspectModal('${esc(id)}')">Inspect</button>
-        </div>
-      </div>
-    `);
+    marker.bindPopup(mapPopupHTML({
+      badge: '🏠', title: label,
+      lines: [esc(site.addressText || '')],
+      actions: [
+        { label: isSelected ? 'Remove' : 'Select house', onclick: `toggleCollectionHouse('${esc(id)}')` },
+        { label: 'Property', onclick: `openPropertyInspectModal('${esc(id)}')`, primary: true }
+      ]
+    }));
 
     marker.on('click', () => {
       if (collectionSelectionActive || collectionPointMode) {
@@ -7982,17 +8058,15 @@ window.addEventListener('DOMContentLoaded', async () => {
               interactive: true
             });
 
-            m.bindPopup(`
-              <div style="min-width:170px;">
-                <b>${esc(serial || 'Bin')}</b><br>
-                <span>${esc(g.stream === 'SummerRecycling' ? 'Summer Recycle' : binStream)} · ${esc(bin.size || '240L')}</span><br>
-                <small style="color:#64748b;">Run: ${esc(g.run)}</small>
-                <div style="display:flex; gap:6px; margin-top:8px;">
-                  <button type="button" style="flex:1; padding:4px 6px; font-size:12px; font-weight:700; border-radius:4px; border:1px solid #cbd5e1; background:#f8fafc; cursor:pointer;" onclick="openPropertyInspectModal('${esc(siteId)}')">Property</button>
-                  ${src === 'solo' ? `<button type="button" style="flex:1; padding:4px 6px; font-size:12px; font-weight:700; border-radius:4px; border:none; background:#2d6a4f; color:white; cursor:pointer;" onclick="promptEditBin('${esc(siteId)}', '${esc(binStream)}', ${idx})">Edit Bin</button>` : ''}
-                </div>
-              </div>
-            `);
+            const binStreamLabel = g.stream === 'SummerRecycling' ? 'Summer Recycle' : binStream;
+            const binActions = [{ label: 'Property', onclick: `openPropertyInspectModal('${esc(siteId)}')` }];
+            if (src === 'solo') binActions.push({ label: 'Edit Bin', onclick: `promptEditBin('${esc(siteId)}', '${esc(binStream)}', ${idx})`, primary: true });
+            m.bindPopup(mapPopupHTML({
+              badge: binStreamLabel, badgeClass: mapStreamBadgeClass(binStream),
+              title: serial || 'Bin',
+              lines: [`${esc(bin.size || '240L')} · Run: ${esc(g.run)}`],
+              actions: binActions
+            }));
 
             m.on('dragstart', (ev) => {
               originalDragPos = ev.target.getLatLng();
