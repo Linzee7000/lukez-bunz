@@ -2202,24 +2202,27 @@
       <!-- FIXED SIDE CONTROLS OVERLAY -->
       <div id="mapFixedSideControls" class="map-fixed-side-overlay"></div>
 
-      <!-- PROPERTY FOCUS MODE TOOLBAR (shown via "Show on Map" from search) -->
+      <!-- MAP BIN TOOLS: one consistent panel for selecting/moving/deleting
+           bins, whether opened globally (checkbox icon in the side
+           controls) or narrowed to one address (Show on Map). -->
       <div id="propertyFocusToolbar" class="property-focus-toolbar" style="display:none;">
         <div class="property-focus-header">
-          <b id="propertyFocusAddress">Property</b>
-          <button type="button" class="modal-close-btn" onclick="exitPropertyFocusMode()" title="Exit">&times;</button>
+          <b id="propertyFocusAddress">Bin Tools</b>
+          <button type="button" class="modal-close-btn" onclick="exitPropertyFocusMode()" title="Close">&times;</button>
         </div>
-        <div class="property-focus-hint" id="focusSelectionCount">Tap bins to select</div>
+        <div class="property-focus-hint" id="focusSelectionCount">Tap bins to select, or drag a box around several</div>
         <div class="property-focus-actions">
-          <button type="button" class="focus-tool-btn" onclick="focusAddBin()">➕ Add Bin</button>
-          <button type="button" class="focus-tool-btn" onclick="focusConsolidateBins()">🧲 Consolidate Bins</button>
+          <button type="button" id="focusBtnAdd" class="focus-tool-btn" onclick="focusAddBin()">➕ Add Bin</button>
+          <button type="button" id="focusBtnConsolidate" class="focus-tool-btn" onclick="focusConsolidateBins()">🧲 Consolidate</button>
           <button type="button" id="focusBtnBoxSelect" class="focus-tool-btn" onclick="focusToggleBoxSelect()">▭ Box Select</button>
         </div>
         <div class="property-focus-actions">
           <button type="button" id="focusBtnMove" class="focus-tool-btn" onclick="focusArmGroupMove()" disabled>↔️ Move Selected</button>
           <button type="button" id="focusBtnDelete" class="focus-tool-btn focus-tool-danger" onclick="focusDeleteSelected()" disabled>🗑️ Delete Selected</button>
-          <button type="button" class="focus-tool-btn" onclick="focusClearSelection()">✕ Clear</button>
+          <button type="button" class="focus-tool-btn" onclick="mapToolsClearSelection()">✕ Clear</button>
         </div>
       </div>
+
       
       <!-- CURRENT ADDRESS TELEMETRY -->
       <div class="map-telemetry-banner address-telemetry-card map-address-telemetry">
@@ -5449,256 +5452,175 @@ window.addEventListener('DOMContentLoaded', async () => {
   }
 
   /* ============================================================
-     PROPERTY FOCUS MODE
+     MAP BIN TOOLS (global selection + single-property focus)
      ------------------------------------------------------------
-     Jumping to a single property on the map to fix up its bins:
-     move the house pin, add/move/delete bins, snap scattered bins
-     back to one spot, and select several bins at once (tap each
-     one, or drag a box around them) to move or delete together.
-     This renders its own markers directly onto the existing
-     Leaflet layers rather than reusing the run-grouped renderer,
-     since it needs to show one property's bins regardless of
-     whatever stream/run/day filters are currently active.
+     One consistent floating panel drives all bin-editing on the
+     map: tap-to-select, drag-a-box-to-select, then move or delete
+     whatever's selected - available at any time via the checkbox
+     button in the side controls, or opened automatically (and
+     narrowed to one address) via "Show on Map" from a search
+     result. It reuses the exact same markers renderMapData()
+     already draws (so dragging/behaviour is identical everywhere)
+     rather than drawing a second, separate set of markers.
      ============================================================ */
-  let focusedPropertyId = null;
-  let focusSelectedBins = new Set();   // keys: "<stream>|<idx>"
-  let focusBinMarkers = new Map();     // key -> {marker, stream, idx}
-  let focusHouseMarker = null;
-  let focusGroupMoveArmed = false;
-  let focusBoxSelectArmed = false;
-  let focusBoxSelectRect = null;
-  let focusBoxSelectStartPt = null;
+  let mapFocusPropId = null;      // set = only this property's bins are shown
+  let mapSelectMode = false;      // tap-to-select armed
+  let mapBoxSelectArmed = false;
+  let mapSelectedBinKeys = new Set();   // activeMapCircleMarkers keys
+  let mapSelectionLayer = null;
+  let mapBoxSelectRect = null;
+  let mapBoxSelectStartPt = null;
 
-  function focusStreamColor(streamKey) {
-    if (streamKey === 'Garbage') return '#dc2626';
-    if (streamKey === 'Recycling') return '#facc15';
-    if (streamKey === 'SummerRecycling') return '#f59e0b';
-    if (streamKey === 'FOGO') return '#16a34a';
-    return '#64748b';
+  function ensureMapSelectionLayer() {
+    if (!mapSelectionLayer && leafletMap) mapSelectionLayer = L.layerGroup().addTo(leafletMap);
+    return mapSelectionLayer;
   }
 
-  function focusSite() {
-    return siteRecords.find(s => String(s.propId || s.siteId) === String(focusedPropertyId));
+  function parseBinKey(key) {
+    const parts = key.split('|');
+    return { siteId: parts[0], src: parts[1], stream: parts[2], idx: Number(parts[3]), serial: parts.slice(4).join('|') };
   }
 
-  function showPropertyOnMap(propId) {
-    closeModal('propInspectModal');
-    switchMainTab('map');
-    requestAnimationFrame(() => requestAnimationFrame(() => enterPropertyFocusMode(propId)));
-  }
-
-  function enterPropertyFocusMode(propId) {
-    const site = siteRecords.find(s => String(s.propId || s.siteId) === String(propId));
-    if (!site) { alert('Property not found.'); return; }
-    if (!leafletMap) initLeafletMap();
-
-    focusedPropertyId = propId;
-    focusSelectedBins.clear();
-    focusGroupMoveArmed = false;
-    focusBoxSelectArmed = false;
-
-    // Focus mode shows exactly one property's own pin + bins, regardless
-    // of whatever run/stream/day filters are active elsewhere in the app -
-    // clear whatever the normal map view just drew so the two don't mix.
-    if (mapMarkersLayer) mapMarkersLayer.clearLayers();
-    if (mapHullsLayer) mapHullsLayer.clearLayers();
-    activeMapCircleMarkers.clear();
-
-    document.getElementById('propertyFocusToolbar').style.display = 'flex';
-    document.getElementById('propertyFocusAddress').textContent =
-      (site.baseStreetLine || site.addressText || 'Property').split(',')[0];
-
-    renderPropertyFocusMarkers();
-
-    const p = gps(site.lat, site.lng);
-    if (p) leafletMap.setView([p.lat, p.lng], 20);
-    updateFocusToolbarState();
-  }
-
-  function exitPropertyFocusMode() {
-    focusedPropertyId = null;
-    focusSelectedBins.clear();
-    focusGroupMoveArmed = false;
-    setFocusBoxSelect(false);
-    if (focusHouseMarker) { mapMarkersLayer.removeLayer(focusHouseMarker); focusHouseMarker = null; }
-    focusBinMarkers.forEach(o => mapMarkersLayer.removeLayer(o.marker));
-    focusBinMarkers.clear();
-    document.getElementById('propertyFocusToolbar').style.display = 'none';
-    renderMapData();
-  }
-
-  function allFocusBinEntries(site) {
-    // Every bin on the property, across every stream, as a flat list.
-    const out = [];
-    Object.keys(site.soloStreams || {}).forEach(stream => {
-      (site.soloStreams[stream] || []).forEach((bin, idx) => out.push({ stream, idx, bin }));
+  // Called once at the end of every renderMapData() pass (see the
+  // window.renderMapData patch) so every marker currently on the map -
+  // whichever code path drew it - responds to selection mode.
+  function wireBinSelectionClicks() {
+    activeMapCircleMarkers.forEach((obj, key) => {
+      if (obj.layer._binSelectWired) return;
+      obj.layer._binSelectWired = true;
+      obj.layer.on('click', () => {
+        if (!mapSelectMode) return;
+        toggleMapBinSelection(key);
+      });
     });
-    return out;
+    // Re-draw selection rings for anything still selected after a re-render
+    // (markers get recreated on every renderMapData() call).
+    redrawMapSelectionRings();
   }
 
-  function renderPropertyFocusMarkers() {
-    const site = focusSite();
-    if (!site) return;
+  function redrawMapSelectionRings() {
+    const layer = ensureMapSelectionLayer();
+    if (!layer) return;
+    layer.clearLayers();
+    mapSelectedBinKeys.forEach(key => {
+      const obj = activeMapCircleMarkers.get(key);
+      if (!obj) { mapSelectedBinKeys.delete(key); return; }
+      L.circleMarker([obj.lat, obj.lng], {
+        radius: 13, color: '#2563eb', weight: 3, fill: false, interactive: false
+      }).addTo(layer);
+    });
+  }
 
-    if (focusHouseMarker) { mapMarkersLayer.removeLayer(focusHouseMarker); focusHouseMarker = null; }
-    focusBinMarkers.forEach(o => mapMarkersLayer.removeLayer(o.marker));
-    focusBinMarkers.clear();
-
-    const hp = gps(site.lat, site.lng);
-    if (hp) {
-      const houseIcon = L.divIcon({
-        className: 'focus-house-icon',
-        html: `<div style="width:22px;height:22px;background:#2563eb;border:3px solid #fff;border-radius:50%;box-shadow:0 2px 6px rgba(0,0,0,.5); display:flex; align-items:center; justify-content:center; font-size:12px;">🏠</div>`,
-        iconSize: [26, 26], iconAnchor: [13, 13]
-      });
-      focusHouseMarker = L.marker([hp.lat, hp.lng], { icon: houseIcon, draggable: true, pane: 'lukez-bin-pane', zIndexOffset: 1000 });
-      focusHouseMarker.bindTooltip('Drag to move the property pin', { permanent: false });
-      let houseStart = null;
-      focusHouseMarker.on('dragstart', ev => { houseStart = ev.target.getLatLng(); });
-      focusHouseMarker.on('dragend', async ev => {
-        const np = ev.target.getLatLng();
-        if (!confirm(`Move this property's pin to the new location?\n\n${np.lat.toFixed(6)}, ${np.lng.toFixed(6)}`)) {
-          focusHouseMarker.setLatLng(houseStart);
-          return;
-        }
-        site.lat = np.lat.toFixed(6);
-        site.lng = np.lng.toFixed(6);
-        masterEditsLog.push({
-          timestamp: new Date().toISOString(), editType: 'PROPERTY_MOVED',
-          propId: site.propId, siteId: site.siteId, address: site.addressText,
-          lat: site.lat, lng: site.lng
-        });
-        hasUnsyncedChanges = true; updateSyncButtonIcon();
-        await saveToDB('masterRecords', siteRecords);
-        await saveToDB('masterEditsLog', masterEditsLog);
-      });
-      focusHouseMarker.addTo(mapMarkersLayer);
+  function toggleMapBinSelection(key) {
+    const obj = activeMapCircleMarkers.get(key);
+    if (!obj) return;
+    const parsed = parseBinKey(key);
+    if (parsed.src !== 'solo') {
+      alert("Council-sourced bins aren't editable here - only Solo Resource Recovery bins can be moved/deleted from the map.");
+      return;
     }
-
-    allFocusBinEntries(site).forEach(({ stream, idx, bin }) => {
-      const p = gps(bin.lat, bin.lng) || hp;
-      if (!p) return;
-      const key = `${stream}|${idx}`;
-      const selected = focusSelectedBins.has(key);
-      const fillColor = focusStreamColor(stream);
-
-      const icon = L.divIcon({
-        className: 'focus-bin-icon',
-        html: `<div style="width:26px;height:26px;display:flex;align-items:center;justify-content:center;">
-                 <div style="width:16px;height:16px;border-radius:50%;background:${fillColor};
-                   border:3px solid ${selected ? '#2563eb' : '#fff'};
-                   box-shadow:0 1px 4px rgba(0,0,0,.5)${selected ? ', 0 0 0 4px rgba(37,99,235,.35)' : ''};"></div>
-               </div>`,
-        iconSize: [26, 26], iconAnchor: [13, 13]
-      });
-
-      const marker = L.marker([p.lat, p.lng], { icon, draggable: !focusBoxSelectArmed, pane: 'lukez-bin-pane' });
-      marker.bindTooltip(`${esc(bin.serial || stream)}${selected ? ' (selected)' : ''}`);
-
-      marker.on('click', () => {
-        if (focusBoxSelectArmed) return;
-        toggleFocusBinSelection(key);
-      });
-
-      let dragStart = null;
-      marker.on('dragstart', ev => { dragStart = ev.target.getLatLng(); });
-      marker.on('drag', ev => {
-        // Group move: every other selected bin follows the same offset live.
-        if (!focusGroupMoveArmed || !selected) return;
-        const cur = ev.target.getLatLng();
-        const dLat = cur.lat - dragStart.lat, dLng = cur.lng - dragStart.lng;
-        focusBinMarkers.forEach((o, k) => {
-          if (k === key || !focusSelectedBins.has(k)) return;
-          const base = o._basePos || o.marker.getLatLng();
-          o._basePos = o._basePos || base;
-          o.marker.setLatLng([base.lat + dLat, base.lng + dLng]);
-        });
-      });
-      marker.on('dragend', async ev => {
-        const newPos = ev.target.getLatLng();
-        const movingKeys = (focusGroupMoveArmed && selected) ? Array.from(focusSelectedBins) : [key];
-        const count = movingKeys.length;
-        if (!confirm(`Move ${count} bin${count === 1 ? '' : 's'} to the new location?`)) {
-          renderPropertyFocusMarkers();
-          return;
-        }
-        const dLat = newPos.lat - dragStart.lat, dLng = newPos.lng - dragStart.lng;
-        movingKeys.forEach(k => {
-          const [kStream, kIdx] = k.split('|');
-          const b = site.soloStreams[kStream]?.[kIdx];
-          if (!b) return;
-          let nLat, nLng;
-          if (k === key) { nLat = newPos.lat; nLng = newPos.lng; }
-          else {
-            const oldP = gps(b.lat, b.lng) || hp;
-            nLat = oldP.lat + dLat; nLng = oldP.lng + dLng;
-          }
-          b.lat = nLat.toFixed(6); b.lng = nLng.toFixed(6);
-          masterEditsLog.push({
-            timestamp: new Date().toISOString(), editType: 'BIN_EDIT',
-            propId: site.propId, siteId: site.siteId, address: site.addressText,
-            stream: kStream, serial: b.serial, lat: b.lat, lng: b.lng
-          });
-        });
-        hasUnsyncedChanges = true; updateSyncButtonIcon();
-        await saveToDB('masterRecords', siteRecords);
-        await saveToDB('masterEditsLog', masterEditsLog);
-        focusGroupMoveArmed = false;
-        focusBinMarkers.forEach(o => { o._basePos = null; });
-        renderPropertyFocusMarkers();
-        updateFocusToolbarState();
-      });
-
-      marker.addTo(mapMarkersLayer);
-      focusBinMarkers.set(key, { marker, stream, idx });
-    });
+    if (mapSelectedBinKeys.has(key)) mapSelectedBinKeys.delete(key);
+    else mapSelectedBinKeys.add(key);
+    redrawMapSelectionRings();
+    updateMapToolsToolbar();
   }
 
-  function toggleFocusBinSelection(key) {
-    if (focusSelectedBins.has(key)) focusSelectedBins.delete(key);
-    else focusSelectedBins.add(key);
-    renderPropertyFocusMarkers();
-    updateFocusToolbarState();
+  function mapToolsClearSelection() {
+    mapSelectedBinKeys.clear();
+    redrawMapSelectionRings();
+    updateMapToolsToolbar();
   }
 
-  function updateFocusToolbarState() {
-    const n = focusSelectedBins.size;
-    const label = document.getElementById('focusSelectionCount');
-    if (label) label.textContent = n ? `${n} bin${n === 1 ? '' : 's'} selected` : 'Tap bins to select';
+  function updateMapToolsToolbar() {
+    const n = mapSelectedBinKeys.size;
+    const countEl = document.getElementById('focusSelectionCount');
+    if (countEl) countEl.textContent = n ? `${n} bin${n === 1 ? '' : 's'} selected` : 'Tap bins to select, or drag a box around several';
     ['focusBtnMove', 'focusBtnDelete'].forEach(id => {
       const el = document.getElementById(id);
       if (el) el.disabled = n === 0;
     });
     const boxBtn = document.getElementById('focusBtnBoxSelect');
-    if (boxBtn) boxBtn.classList.toggle('active', focusBoxSelectArmed);
+    if (boxBtn) boxBtn.classList.toggle('active', mapBoxSelectArmed);
+    const consolidateBtn = document.getElementById('focusBtnConsolidate');
+    const addBtn = document.getElementById('focusBtnAdd');
+    if (consolidateBtn) consolidateBtn.style.display = mapFocusPropId ? '' : 'none';
+    if (addBtn) addBtn.style.display = mapFocusPropId ? '' : 'none';
   }
 
-  function focusClearSelection() {
-    focusSelectedBins.clear();
-    renderPropertyFocusMarkers();
-    updateFocusToolbarState();
+  // Entry point from a search result / property inspect modal: narrows the
+  // map to just this address (all its streams, ignoring the current
+  // stream/day/run filters) and opens the tools panel already in select
+  // mode, ready to tap bins.
+  function showPropertyOnMap(propId) {
+    closeModal('propInspectModal');
+    mapFocusPropId = String(propId);
+    switchMainTab('map');
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      openMapToolsPanel();
+      const site = siteRecords.find(s => String(s.propId || s.siteId) === mapFocusPropId);
+      const p = site && gps(site.lat, site.lng);
+      if (p && leafletMap) leafletMap.setView([p.lat, p.lng], 20);
+      renderMapData();
+    }));
   }
 
-  function focusArmGroupMove() {
-    if (focusSelectedBins.size === 0) return;
-    focusGroupMoveArmed = true;
-    alert(`Drag any one of the ${focusSelectedBins.size} highlighted bins - the rest will follow together.`);
+  // Entry point from the map's own side controls: works on whatever is
+  // currently visible on the map, across every property.
+  function toggleGlobalBinSelectMode() {
+    if (document.getElementById('propertyFocusToolbar').style.display === 'flex' && !mapFocusPropId) {
+      closeMapToolsPanel();
+    } else {
+      mapFocusPropId = null;
+      openMapToolsPanel();
+    }
   }
+
+  function openMapToolsPanel() {
+    mapSelectMode = true;
+    document.getElementById('propertyFocusToolbar').style.display = 'flex';
+    document.querySelector('.map-telemetry-banner').style.display = 'none';
+    document.getElementById('propertyFocusAddress').textContent = mapFocusPropId
+      ? (() => { const s = siteRecords.find(x => String(x.propId || x.siteId) === mapFocusPropId); return s ? (s.baseStreetLine || s.addressText || 'Property').split(',')[0] : 'Property'; })()
+      : 'Select bins on the map';
+    const selBtn = document.getElementById('btnMapBinSelect');
+    if (selBtn) selBtn.classList.add('active');
+    updateMapToolsToolbar();
+  }
+
+  function closeMapToolsPanel() {
+    mapSelectMode = false;
+    mapFocusPropId = null;
+    setMapBoxSelect(false);
+    mapSelectedBinKeys.clear();
+    if (mapSelectionLayer) mapSelectionLayer.clearLayers();
+    document.getElementById('propertyFocusToolbar').style.display = 'none';
+    document.querySelector('.map-telemetry-banner').style.display = '';
+    const selBtn = document.getElementById('btnMapBinSelect');
+    if (selBtn) selBtn.classList.remove('active');
+    renderMapData();
+  }
+  // Kept for compatibility with the exit (x) button already in the toolbar.
+  function exitPropertyFocusMode() { closeMapToolsPanel(); }
 
   async function focusDeleteSelected() {
-    const site = focusSite();
-    if (!site || focusSelectedBins.size === 0) return;
-    const n = focusSelectedBins.size;
+    if (mapSelectedBinKeys.size === 0) return;
+    const n = mapSelectedBinKeys.size;
     if (!confirm(`Delete ${n} selected bin${n === 1 ? '' : 's'}? This can't be undone here (it will still sync as a deletion).`)) return;
 
-    // Delete by index from the end first so earlier indices don't shift.
-    const byStream = {};
-    focusSelectedBins.forEach(k => {
-      const [stream, idx] = k.split('|');
-      (byStream[stream] = byStream[stream] || []).push(Number(idx));
+    // Group by site+stream, delete highest index first so earlier indices
+    // in the same array don't shift underneath us.
+    const bySiteStream = new Map();
+    mapSelectedBinKeys.forEach(key => {
+      const { siteId, stream, idx } = parseBinKey(key);
+      const gKey = siteId + '|' + stream;
+      if (!bySiteStream.has(gKey)) bySiteStream.set(gKey, []);
+      bySiteStream.get(gKey).push(idx);
     });
-    Object.keys(byStream).forEach(stream => {
-      byStream[stream].sort((a, b) => b - a).forEach(idx => {
+    bySiteStream.forEach((idxList, gKey) => {
+      const [siteId, stream] = gKey.split('|');
+      const site = siteRecords.find(s => String(s.propId || s.siteId) === siteId);
+      if (!site || !site.soloStreams[stream]) return;
+      idxList.sort((a, b) => b - a).forEach(idx => {
         const b = site.soloStreams[stream][idx];
         if (!b) return;
         masterEditsLog.push({
@@ -5712,21 +5634,89 @@ window.addEventListener('DOMContentLoaded', async () => {
     hasUnsyncedChanges = true; updateSyncButtonIcon();
     await saveToDB('masterRecords', siteRecords);
     await saveToDB('masterEditsLog', masterEditsLog);
-    focusSelectedBins.clear();
-    renderPropertyFocusMarkers();
-    updateFocusToolbarState();
+    mapSelectedBinKeys.clear();
+    renderMapData();
+    updateMapToolsToolbar();
+  }
+
+  // Group move: the user drags any ONE of the selected bins; every other
+  // selected bin follows by the same lat/lng offset, then everything is
+  // committed together on drop.
+  function focusArmGroupMove() {
+    if (mapSelectedBinKeys.size === 0) return;
+    const anchorKey = Array.from(mapSelectedBinKeys)[0];
+    const anchorObj = activeMapCircleMarkers.get(anchorKey);
+    if (!anchorObj) return;
+    alert(`Drag the ring-highlighted bin at "${anchorObj.serial || anchorObj.stream}" - the other ${mapSelectedBinKeys.size - 1} selected bin(s) will follow together. Drop it to confirm.`);
+
+    const startPositions = new Map();
+    mapSelectedBinKeys.forEach(key => {
+      const obj = activeMapCircleMarkers.get(key);
+      if (obj) startPositions.set(key, { lat: obj.lat, lng: obj.lng });
+    });
+    const anchorStart = startPositions.get(anchorKey);
+
+    const onDrag = (ev) => {
+      const cur = ev.target.getLatLng();
+      const dLat = cur.lat - anchorStart.lat, dLng = cur.lng - anchorStart.lng;
+      mapSelectedBinKeys.forEach(key => {
+        if (key === anchorKey) return;
+        const obj = activeMapCircleMarkers.get(key);
+        const start = startPositions.get(key);
+        if (obj && start) obj.layer.setLatLng([start.lat + dLat, start.lng + dLng]);
+      });
+      redrawMapSelectionRings();
+    };
+
+    const onDragEnd = async (ev) => {
+      anchorObj.layer.off('drag', onDrag);
+      anchorObj.layer.off('dragend', onDragEnd);
+      const newAnchorPos = ev.target.getLatLng();
+      if (!confirm(`Move ${mapSelectedBinKeys.size} bin(s) to the new location?`)) {
+        renderMapData();
+        return;
+      }
+      const dLat = newAnchorPos.lat - anchorStart.lat, dLng = newAnchorPos.lng - anchorStart.lng;
+      mapSelectedBinKeys.forEach(key => {
+        const { siteId, stream, idx } = parseBinKey(key);
+        const site = siteRecords.find(s => String(s.propId || s.siteId) === siteId);
+        const b = site && site.soloStreams[stream] && site.soloStreams[stream][idx];
+        if (!site || !b) return;
+        const start = startPositions.get(key);
+        const nLat = key === anchorKey ? newAnchorPos.lat : start.lat + dLat;
+        const nLng = key === anchorKey ? newAnchorPos.lng : start.lng + dLng;
+        b.lat = nLat.toFixed(6); b.lng = nLng.toFixed(6);
+        masterEditsLog.push({
+          timestamp: new Date().toISOString(), editType: 'BIN_EDIT',
+          propId: site.propId, siteId: site.siteId, address: site.addressText,
+          stream, serial: b.serial, lat: b.lat, lng: b.lng
+        });
+      });
+      hasUnsyncedChanges = true; updateSyncButtonIcon();
+      await saveToDB('masterRecords', siteRecords);
+      await saveToDB('masterEditsLog', masterEditsLog);
+      renderMapData();
+      updateMapToolsToolbar();
+    };
+
+    anchorObj.layer.on('drag', onDrag);
+    anchorObj.layer.on('dragend', onDragEnd);
   }
 
   async function focusConsolidateBins() {
-    const site = focusSite();
+    if (!mapFocusPropId) return;
+    const site = siteRecords.find(s => String(s.propId || s.siteId) === mapFocusPropId);
     if (!site) return;
     const hp = gps(site.lat, site.lng);
-    if (!hp) { alert('This property has no GPS location set yet - set that first (drag the blue house pin), then consolidate.'); return; }
-    const entries = allFocusBinEntries(site);
+    if (!hp) { alert('This property has no GPS location set yet - set that via Edit Property first, then consolidate.'); return; }
+    const entries = [];
+    Object.keys(site.soloStreams || {}).forEach(stream => {
+      (site.soloStreams[stream] || []).forEach((bin, idx) => entries.push({ stream, idx, bin }));
+    });
     if (!entries.length) { alert('No bins on this property.'); return; }
     if (!confirm(`Move all ${entries.length} bins on this property to the property's pin location?`)) return;
 
-    entries.forEach(({ stream, idx, bin }) => {
+    entries.forEach(({ stream, bin }) => {
       bin.lat = hp.lat.toFixed(6); bin.lng = hp.lng.toFixed(6);
       masterEditsLog.push({
         timestamp: new Date().toISOString(), editType: 'BIN_EDIT',
@@ -5737,91 +5727,94 @@ window.addEventListener('DOMContentLoaded', async () => {
     hasUnsyncedChanges = true; updateSyncButtonIcon();
     await saveToDB('masterRecords', siteRecords);
     await saveToDB('masterEditsLog', masterEditsLog);
-    renderPropertyFocusMarkers();
+    renderMapData();
   }
 
   function focusAddBin() {
-    const site = focusSite();
-    if (!site) return;
-    promptAddCouncilBin(site.propId || site.siteId, 'Garbage', '', '');
+    if (!mapFocusPropId) return;
+    promptAddCouncilBin(mapFocusPropId, 'Garbage', '', '');
   }
 
   /* Drag-a-box selection: hold the map still, draw a rectangle with the
-     mouse/finger, and every focus-mode bin whose marker falls inside it
+     mouse/finger, and every bin marker whose position falls inside it
      gets selected. Implemented directly on Leaflet's container since no
      drawing plugin is loaded. */
-  function setFocusBoxSelect(on) {
-    focusBoxSelectArmed = !!on;
+  function setMapBoxSelect(on) {
+    mapBoxSelectArmed = !!on;
     if (!leafletMap) return;
     const container = leafletMap.getContainer();
-    if (focusBoxSelectArmed) {
+    if (mapBoxSelectArmed) {
       leafletMap.dragging.disable();
       leafletMap.doubleClickZoom.disable();
       container.style.cursor = 'crosshair';
-      container.addEventListener('mousedown', focusBoxSelectStart);
-      container.addEventListener('touchstart', focusBoxSelectStart, { passive: true });
+      container.addEventListener('mousedown', mapBoxSelectStart);
+      container.addEventListener('touchstart', mapBoxSelectStart, { passive: true });
     } else {
       leafletMap.dragging.enable();
       leafletMap.doubleClickZoom.enable();
       container.style.cursor = '';
-      container.removeEventListener('mousedown', focusBoxSelectStart);
-      container.removeEventListener('touchstart', focusBoxSelectStart);
+      container.removeEventListener('mousedown', mapBoxSelectStart);
+      container.removeEventListener('touchstart', mapBoxSelectStart);
     }
-    renderPropertyFocusMarkers();
-    updateFocusToolbarState();
+    updateMapToolsToolbar();
   }
 
-  function focusBoxSelectPoint(ev) {
+  function mapBoxSelectPoint(ev) {
     const rect = leafletMap.getContainer().getBoundingClientRect();
     const t = ev.touches && ev.touches[0] ? ev.touches[0] : ev;
     return { x: t.clientX - rect.left, y: t.clientY - rect.top };
   }
 
-  function focusBoxSelectStart(ev) {
-    focusBoxSelectStartPt = focusBoxSelectPoint(ev);
-    focusBoxSelectRect = document.createElement('div');
-    Object.assign(focusBoxSelectRect.style, {
+  function mapBoxSelectStart(ev) {
+    mapBoxSelectStartPt = mapBoxSelectPoint(ev);
+    mapBoxSelectRect = document.createElement('div');
+    Object.assign(mapBoxSelectRect.style, {
       position: 'absolute', border: '2px dashed #2563eb', background: 'rgba(37,99,235,.15)',
       zIndex: 1000, pointerEvents: 'none'
     });
-    leafletMap.getContainer().appendChild(focusBoxSelectRect);
-    document.addEventListener('mousemove', focusBoxSelectMove);
-    document.addEventListener('touchmove', focusBoxSelectMove, { passive: true });
-    document.addEventListener('mouseup', focusBoxSelectEnd);
-    document.addEventListener('touchend', focusBoxSelectEnd);
+    leafletMap.getContainer().appendChild(mapBoxSelectRect);
+    document.addEventListener('mousemove', mapBoxSelectMove);
+    document.addEventListener('touchmove', mapBoxSelectMove, { passive: true });
+    document.addEventListener('mouseup', mapBoxSelectEnd);
+    document.addEventListener('touchend', mapBoxSelectEnd);
   }
 
-  function focusBoxSelectMove(ev) {
-    if (!focusBoxSelectRect || !focusBoxSelectStartPt) return;
-    const p = focusBoxSelectPoint(ev);
-    const x = Math.min(p.x, focusBoxSelectStartPt.x), y = Math.min(p.y, focusBoxSelectStartPt.y);
-    const w = Math.abs(p.x - focusBoxSelectStartPt.x), h = Math.abs(p.y - focusBoxSelectStartPt.y);
-    Object.assign(focusBoxSelectRect.style, { left: x + 'px', top: y + 'px', width: w + 'px', height: h + 'px' });
+  function mapBoxSelectMove(ev) {
+    if (!mapBoxSelectRect || !mapBoxSelectStartPt) return;
+    const p = mapBoxSelectPoint(ev);
+    const x = Math.min(p.x, mapBoxSelectStartPt.x), y = Math.min(p.y, mapBoxSelectStartPt.y);
+    const w = Math.abs(p.x - mapBoxSelectStartPt.x), h = Math.abs(p.y - mapBoxSelectStartPt.y);
+    Object.assign(mapBoxSelectRect.style, { left: x + 'px', top: y + 'px', width: w + 'px', height: h + 'px' });
   }
 
-  function focusBoxSelectEnd(ev) {
-    if (focusBoxSelectRect && focusBoxSelectStartPt) {
-      const p = focusBoxSelectPoint(ev.changedTouches ? { touches: ev.changedTouches } : ev);
-      const x0 = Math.min(p.x, focusBoxSelectStartPt.x), x1 = Math.max(p.x, focusBoxSelectStartPt.x);
-      const y0 = Math.min(p.y, focusBoxSelectStartPt.y), y1 = Math.max(p.y, focusBoxSelectStartPt.y);
-      focusBinMarkers.forEach((o, key) => {
-        const pt = leafletMap.latLngToContainerPoint(o.marker.getLatLng());
-        if (pt.x >= x0 && pt.x <= x1 && pt.y >= y0 && pt.y <= y1) focusSelectedBins.add(key);
+  function mapBoxSelectEnd(ev) {
+    if (mapBoxSelectRect && mapBoxSelectStartPt) {
+      const p = mapBoxSelectPoint(ev.changedTouches ? { touches: ev.changedTouches } : ev);
+      const x0 = Math.min(p.x, mapBoxSelectStartPt.x), x1 = Math.max(p.x, mapBoxSelectStartPt.x);
+      const y0 = Math.min(p.y, mapBoxSelectStartPt.y), y1 = Math.max(p.y, mapBoxSelectStartPt.y);
+      activeMapCircleMarkers.forEach((obj, key) => {
+        const parsed = parseBinKey(key);
+        if (parsed.src !== 'solo') return;
+        const pt = leafletMap.latLngToContainerPoint([obj.lat, obj.lng]);
+        if (pt.x >= x0 && pt.x <= x1 && pt.y >= y0 && pt.y <= y1) mapSelectedBinKeys.add(key);
       });
-      focusBoxSelectRect.remove();
+      mapBoxSelectRect.remove();
+      redrawMapSelectionRings();
     }
-    focusBoxSelectRect = null;
-    focusBoxSelectStartPt = null;
-    document.removeEventListener('mousemove', focusBoxSelectMove);
-    document.removeEventListener('touchmove', focusBoxSelectMove);
-    document.removeEventListener('mouseup', focusBoxSelectEnd);
-    document.removeEventListener('touchend', focusBoxSelectEnd);
-    setFocusBoxSelect(false);
+    mapBoxSelectRect = null;
+    mapBoxSelectStartPt = null;
+    document.removeEventListener('mousemove', mapBoxSelectMove);
+    document.removeEventListener('touchmove', mapBoxSelectMove);
+    document.removeEventListener('mouseup', mapBoxSelectEnd);
+    document.removeEventListener('touchend', mapBoxSelectEnd);
+    setMapBoxSelect(false);
+    updateMapToolsToolbar();
   }
 
   function focusToggleBoxSelect() {
-    setFocusBoxSelect(!focusBoxSelectArmed);
+    setMapBoxSelect(!mapBoxSelectArmed);
   }
+</script>
 </script>
   
 <input id="kmzFileInput" type="file" accept=".kmz,.kml,application/vnd.google-earth.kmz,application/vnd.google-earth.kml+xml,application/zip,text/xml" multiple style="display:none">
@@ -7032,6 +7025,9 @@ window.addEventListener('DOMContentLoaded', async () => {
         <button type="button" onclick="if(leafletMap) leafletMap.zoomIn()" title="Zoom In">＋</button>
         <button type="button" onclick="if(leafletMap) leafletMap.zoomOut()" title="Zoom Out">－</button>
 
+        <!-- Select/move/delete bins on the map, without needing a property first -->
+        <button type="button" id="btnMapBinSelect" class="map-side-follow-toggle" onclick="toggleGlobalBinSelectMode()" title="Select bins">☑️</button>
+
         <!-- Layers Toggle -->
         <div class="map-side-layers-control" id="mapSideLayersControl" style="position:relative;">
           <button type="button" class="map-side-layers-toggle" onclick="toggleMapSideLayers(event)" title="Layers" aria-label="Layers">
@@ -7670,28 +7666,34 @@ window.addEventListener('DOMContentLoaded', async () => {
 
     const st = clean(activeFilterStream);
     const selected = selectedMapRuns();
-    const types = st ? [st] : ['Garbage', 'Recycling', 'FOGO'];
+    const types = mapFocusPropId ? ['Garbage', 'Recycling', 'SummerRecycling', 'FOGO'] : (st ? [st] : ['Garbage', 'Recycling', 'FOGO']);
     const groups = new Map();
     const records = getRecordsArray();
 
     records.forEach(site => {
+      const isFocusedSite = mapFocusPropId && String(site.propId || site.siteId) === mapFocusPropId;
+      // Focus mode ("Show on Map" for one address) shows only that address,
+      // with every stream it has, regardless of whatever stream/day/run
+      // filters are currently set elsewhere in the app.
+      if (mapFocusPropId && !isFocusedSite) return;
+
       types.forEach(stream => {
         const item = getSiteRuns(site);
-        if (activeFilterDay && dayKey(item.day) !== dayKey(activeFilterDay)) return;
-        if ((stream === 'Recycling' || stream === 'FOGO') && activeFilterWeek && item.week !== clean(activeFilterWeek).toUpperCase()) return;
+        if (!isFocusedSite && activeFilterDay && dayKey(item.day) !== dayKey(activeFilterDay)) return;
+        if (!isFocusedSite && (stream === 'Recycling' || stream === 'FOGO') && activeFilterWeek && item.week !== clean(activeFilterWeek).toUpperCase()) return;
 
         let runVal = '';
         if (stream === 'Garbage') runVal = item.garRun;
         else if (stream === 'Recycling') {
           if (isValidRecycleRun(item.recRun, item.day, item.week)) runVal = item.recRun;
         } else if (stream === 'SummerRecycling') {
-          if (st === 'SummerRecycling') runVal = item.summerRun;
+          if (st === 'SummerRecycling' || isFocusedSite) runVal = item.summerRun;
         } else if (stream === 'FOGO') {
           runVal = item.fogRun;
         }
 
         if (!runVal) return;
-        if (selected.size && !selected.has(lower(runVal))) return;
+        if (!isFocusedSite && selected.size && !selected.has(lower(runVal))) return;
 
         const key = stream + '|' + lower(runVal);
         if (!groups.has(key)) groups.set(key, { stream, run: runVal, sites: [] });
@@ -7882,6 +7884,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     if (typeof updateMapHeaderInfo === 'function') updateMapHeaderInfo(allVisible, groups);
     if (userCurrentLocation && typeof updateMapTruckPosition === 'function') updateMapTruckPosition();
     requestAnimationFrame(() => leafletMap && leafletMap.invalidateSize());
+    if (typeof wireBinSelectionClicks === 'function') wireBinSelectionClicks();
   };
 
   window.updateMapHeaderInfo = function(sites, groups) {
