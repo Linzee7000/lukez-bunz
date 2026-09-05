@@ -6602,18 +6602,34 @@ window.addEventListener('DOMContentLoaded', async () => {
   }
 
   function toggleMapBinSelection(key) {
-    const obj = activeMapCircleMarkers.get(key);
-    if (!obj) return;
-    const parsed = parseBinKey(key);
-    if (parsed.src !== 'solo') {
-      alert("Council-sourced bins aren't editable here - only Solo Resource Recovery bins can be moved/deleted from the map.");
-      return;
-    }
-    if (mapSelectedBinKeys.has(key)) mapSelectedBinKeys.delete(key);
-    else mapSelectedBinKeys.add(key);
-    redrawMapSelectionRings();
-    updateMapToolsToolbar();
+  const obj = activeMapCircleMarkers.get(key);
+  if (!obj) return;
+  const parsed = parseBinKey(key);
+  if (parsed.src !== 'solo') {
+    alert("Council-sourced bins aren't editable here - only Solo Resource Recovery bins can be moved/deleted.");
+    return;
   }
+
+  if (mapSelectedBinKeys.has(key)) {
+    mapSelectedBinKeys.delete(key);
+  } else {
+    mapSelectedBinKeys.add(key);
+  }
+
+  // Keep select mode active while at least 1 bin is selected
+  mapSelectMode = mapSelectedBinKeys.size > 0;
+
+  if (leafletMap) leafletMap.closePopup();
+
+  // Show the bin tools floating bar so move/delete actions appear
+  const toolbar = document.getElementById('propertyFocusToolbar');
+  if (toolbar) {
+    toolbar.style.display = mapSelectMode ? 'flex' : 'none';
+  }
+
+  redrawMapSelectionRings();
+  updateMapToolsToolbar();
+}
 
   function mapToolsClearSelection() {
     mapSelectedBinKeys.clear();
@@ -8244,66 +8260,80 @@ window.addEventListener('DOMContentLoaded', async () => {
   };
 
   /* Interactive House Triangles */
-  window.drawHouseTriangle = function(site) {
-    const id = String(site.propId || site.siteId || '');
-    const isSelected = selectedCollectionHouseIds.has(id);
-    
-    if (!showHouseGpsDots && !collectionSelectionActive && !isSelected) return;
+window.drawHouseTriangle = function(site) {
+  const id = String(site.propId || site.siteId || '');
+  const isSelected = selectedCollectionHouseIds.has(id);
+  
+  if (!showHouseGpsDots && !collectionSelectionActive && !isSelected) return;
 
-    const p = gps(site.lat, site.lng);
-    if (!p) return;
-    
-    const cp = collectionPointForSite(site);
-    const streetMode = houseStreetModes[id];
-    
-    let color = isSelected ? '#2563eb' : (
-      streetMode ? (streetMode.type === 'drive-reverse-out' ? '#f97316' : '#2563eb') :
-      (cp ? collectionPointHouseColor : (houseDotsColor || '#8b5cf6'))
-    );
-    
-    const icon = L.divIcon({
-      className: 'house-map-marker-icon',
-      html: `
-        <div style="width:34px; height:34px; display:flex; align-items:center; justify-content:center; cursor:pointer;">
-          <div style="width:16px; height:16px; background:${esc(color)}; clip-path:polygon(50% 0%, 0% 100%, 100% 100%); border:2px solid #fff; filter:drop-shadow(0 1px 3px rgba(0,0,0,0.5)); pointer-events:auto;"></div>
-        </div>
-      `,
-      iconSize: [34, 34],
-      iconAnchor: [17, 17]
-    });
+  const p = gps(site.lat, site.lng);
+  if (!p) return;
+  
+  const cp = collectionPointForSite(site);
+  const streetMode = houseStreetModes[id];
+  
+  let color = isSelected ? '#2563eb' : (
+    streetMode ? (streetMode.type === 'drive-reverse-out' ? '#f97316' : '#2563eb') :
+    (cp ? collectionPointHouseColor : (houseDotsColor || '#8b5cf6'))
+  );
+  
+  const icon = L.divIcon({
+    className: 'house-map-marker-icon',
+    html: `
+      <div style="width:34px; height:34px; display:flex; align-items:center; justify-content:center; cursor:pointer;">
+        <div style="width:16px; height:16px; background:${esc(color)}; clip-path:polygon(50% 0%, 0% 100%, 100% 100%); border:2px solid #fff; filter:drop-shadow(0 1px 3px rgba(0,0,0,0.5)); pointer-events:auto;"></div>
+      </div>
+    `,
+    iconSize: [34, 34],
+    iconAnchor: [17, 17]
+  });
 
-    const label = isSelected ? 'Selected house' : (
-      streetMode ? streetMode.label :
-      (cp ? 'Collection point house' : 'House')
-    );
+  const marker = L.marker([p.lat, p.lng], {
+    icon,
+    keyboard: false,
+    pane: 'lukez-house-pane',
+    interactive: true
+  });
 
-    const marker = L.marker([p.lat, p.lng], {
-      icon,
-      keyboard: false,
-      pane: 'lukez-house-pane',
-      interactive: true
-    });
-    
-    marker.bindPopup(mapPopupHTML({
-      badge: '🏠', title: label,
-      lines: [esc(site.addressText || '')],
-      actions: [
-        { label: isSelected ? 'Remove' : 'Select house', onclick: `toggleCollectionHouse('${esc(id)}')` },
-        { label: 'Property', onclick: `openPropertyInspectModal('${esc(id)}')`, primary: true }
-      ]
-    }));
+  // Unified HTML for House Popup
+  const stars = site.ratingStars ? '★'.repeat(site.ratingStars) : '☆☆☆☆☆';
+  const flagHtml = site.runFlags ? `<div class="unified-popup-flag">🚩 ${esc(site.runFlags)}</div>` : '';
+  const cleanStreet = (site.baseStreetLine || site.addressText || '').split(',')[0].trim();
+  const cleanSuburb = site.suburbLine || 'Rosebud';
 
-    // If any house is already selected, click toggles selection directly without opening the popup
-    marker.on('click', (e) => {
-      if (collectionSelectionActive || collectionPointMode || selectedCollectionHouseIds.size > 0) {
-        L.DomEvent.stop(e);
-        toggleCollectionHouse(id);
-        marker.closePopup();
-      }
-    });
+  const housePopupHtml = `
+    <div class="unified-popup-card">
+      <div class="unified-popup-top">
+        <span class="unified-popup-rating">${stars}</span>
+        <span class="unified-popup-stream-chip" style="background:var(--slate-200); color:var(--slate-800);">🏠 HOUSE</span>
+      </div>
+      ${flagHtml}
+      <div class="unified-popup-serial" style="font-size:15px; font-family:inherit;">${esc(cleanStreet)}</div>
+      <div class="unified-popup-meta">📍 ${esc(cleanSuburb)} · PID: ${site.propId || '—'}</div>
+      <div class="unified-popup-meta">Collection: 📅 ${site.soloSchedule?.day || ''} ${site.soloSchedule?.weekFormatted || ''}</div>
+      
+      <div class="unified-popup-actions">
+        <button type="button" class="unified-popup-btn" onclick="promptEditProperty('${id}')">Edit House</button>
+        <button type="button" class="unified-popup-btn" onclick="openPropertyInspectModal('${id}')">Inspect</button>
+        <button type="button" class="unified-popup-btn" onclick="toggleCollectionHouse('${id}')">Select</button>
+      </div>
+    </div>
+  `;
 
-    marker.addTo(mapMarkersLayer);
-  };
+  marker.bindPopup(housePopupHtml);
+
+  // Click Interceptor: If selection mode is active, prevent popup and toggle directly
+  marker.on('click', (e) => {
+    if (collectionSelectionActive || collectionPointMode || selectedCollectionHouseIds.size > 0) {
+      L.DomEvent.stopPropagation(e);
+      L.DomEvent.preventDefault(e);
+      marker.closePopup();
+      toggleCollectionHouse(id);
+    }
+  });
+
+  marker.addTo(mapMarkersLayer);
+};
 
   /* Render Map Data (Zero Crash Scaling) */
   window.renderMapData = function() {
@@ -8450,20 +8480,18 @@ window.addEventListener('DOMContentLoaded', async () => {
               interactive: true
             });
 
-            const binStreamLabel = g.stream === 'SummerRecycling' ? 'Summer Recycle' : binStream;
-            const binActions = [{ label: 'Property', onclick: `openPropertyInspectModal('${esc(siteId)}')` }];
-            if (src === 'solo') binActions.push({ label: 'Edit Bin', onclick: `promptEditBin('${esc(siteId)}', '${esc(binStream)}', ${idx})`, primary: true });
             m.bindPopup(window.buildUnifiedBinPopup(site, binStream, bin, idx));
 
-            // If bin selection mode is active or any bin is selected, tap to toggle without showing the popup
+            // Direct Click Handler that bypasses the popup if in select mode
             m.on('click', (e) => {
               if (mapSelectMode || mapSelectedBinKeys.size > 0) {
-                L.DomEvent.stop(e);
-                toggleMapBinSelection(key);
+                L.DomEvent.stopPropagation(e);
+                L.DomEvent.preventDefault(e);
                 m.closePopup();
+                toggleMapBinSelection(key);
               }
             });
-            
+
             m.on('dragstart', (ev) => {
               originalDragPos = ev.target.getLatLng();
             });
@@ -8475,7 +8503,6 @@ window.addEventListener('DOMContentLoaded', async () => {
 
               if (!targetSite) return;
 
-              // Display confirmation modal with connected house details
               const modal = document.getElementById('binMoveConfirmModal');
               const details = document.getElementById('binMoveConfirmDetails');
               const btnConfirm = document.getElementById('btnConfirmBinMove');
@@ -8520,7 +8547,8 @@ window.addEventListener('DOMContentLoaded', async () => {
                     lat: newPos.lat.toFixed(6),
                     lng: newPos.lng.toFixed(6)
                   });
-                  hasUnsyncedChanges = true; updateSyncButtonIcon();
+                  hasUnsyncedChanges = true; 
+                  updateSyncButtonIcon();
 
                   await saveToDB("masterRecords", siteRecords);
                   await saveToDB("masterEditsLog", masterEditsLog);
