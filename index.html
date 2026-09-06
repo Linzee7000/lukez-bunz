@@ -19,6 +19,7 @@
   --white:#ffffff; --slate-50:#f8fafc; --slate-100:#f1f5f9; --slate-200:#e2e8f0; --slate-200-b:#e5e9f0;
   --slate-300:#cbd5e1; --slate-400:#94a3b8; --slate-500:#64748b; --slate-600:#475569; --slate-700:#334155;
   --slate-800:#1e293b; --slate-900:#0f172a; --near-black:#111111;
+
   /* Brand green */
   --brand-dark:#1b4332; --brand:#2d6a4f; --brand-light:#52b788;
   --green-800:#166534; --green-700:#15803d; --green-600:#16a34a; --green-300:#86efac; --green-100:#dcfce7;
@@ -2601,7 +2602,7 @@
         <div class="map-top-bar map-summary-bar map-context-bar" id="mapContextBar" style="display:none;">
           <div class="map-run-colored-box map-context-box" id="mapContextBox">
             <span id="mapContextTitle" class="map-run-title">Mode</span>
-            <span class="map-run-divider" aria-hidden="true"></span>
+            <span class="map-run-divider" id="mapContextDivider" aria-hidden="true"></span>
             <span class="map-context-buttons" id="mapContextButtons"></span>
           </div>
           <button type="button" class="map-settings-top-btn" id="mapContextCloseBtn" onclick="mapTopBarContextCloseClicked()" title="Close">&times;</button>
@@ -3425,8 +3426,6 @@
   let collectionPointDraftMarker = null;
   let collectionSelectionActive = false;
   let roadModes = JSON.parse(localStorage.getItem('lukezBunzRoadModes')||'[]');
-  let roadModeDrawing = null;
-  let roadModeDraft = null;
   let roadModeColors = { 'drive-reverse-out':'#f97316', 'reverse-in-drive-out':'#2563eb' };
 
   /*
@@ -3850,21 +3849,6 @@
   }
 
 
-  async function toggleRoadSnapEditing() {
-    isRoadSnapEditing = !isRoadSnapEditing;
-    const btn = document.getElementById('btnRoadSnap');
-    btn.classList.toggle('active', isRoadSnapEditing);
-
-    if (isRoadSnapEditing) {
-      enableBoundaryVertexHandles();
-    } else {
-      disableBoundaryVertexHandles();
-      await saveToDB("customRunBorders", customRunBorders);
-    }
-  }
-
-
-
   function toggleBinMetaDrawer(btn, drawerId) {
     const drawer = document.getElementById(drawerId);
     if (!drawer) return;
@@ -4147,7 +4131,24 @@
   }
   function saveCollectionPoints(){ localStorage.setItem('lukezBunzCollectionPoints',JSON.stringify(collectionPoints)); }
   function toggleCollectionHouse(siteId){ const id=String(siteId); if(selectedCollectionHouseIds.has(id)) selectedCollectionHouseIds.delete(id); else selectedCollectionHouseIds.add(id); collectionSelectionActive=selectedCollectionHouseIds.size>0; renderMapData(); }
-  function startCollectionPointMode(){ if(!selectedCollectionHouseIds.size){ alert('Select the first house using Select house, then tap any additional houses directly to select or unselect them.'); return; } collectionPointMode=true; const b=document.getElementById('btnCreateCollectionPoint'); if(b)b.classList.add('active'); alert('Tap the map to place the collection point. You can drag the pin before saving.'); }
+  function startCollectionPointMode(){
+    if(!selectedCollectionHouseIds.size){ alert('Select the first house using Select house, then tap any additional houses directly to select or unselect them.'); return; }
+    collectionPointMode=true;
+    const b=document.getElementById('btnCreateCollectionPoint'); if(b)b.classList.add('active');
+    closeMapSettingsModal();
+    const n = selectedCollectionHouseIds.size;
+    window.setMapTopBarContext(
+      `Place collection point · ${n} house${n===1?'':'s'}`,
+      [{label:'Cancel', icon:'✕', onClick:()=>window.cancelCollectionPointMode()}],
+      ()=>window.cancelCollectionPointMode()
+    );
+  }
+  window.cancelCollectionPointMode = function(){
+    collectionPointMode=false;
+    const b=document.getElementById('btnCreateCollectionPoint'); if(b)b.classList.remove('active');
+    if(collectionPointDraftMarker && leafletMap){ leafletMap.removeLayer(collectionPointDraftMarker); collectionPointDraftMarker=null; }
+    window.clearMapTopBarContext();
+  };
   function placeCollectionPointDraft(latlng){
     if(!leafletMap)return;
     if(collectionPointDraftMarker) leafletMap.removeLayer(collectionPointDraftMarker);
@@ -4174,6 +4175,7 @@
     leafletMap.removeLayer(collectionPointDraftMarker);
     collectionPointDraftMarker = null;
     const b = document.getElementById('btnCreateCollectionPoint'); if (b) b.classList.remove('active');
+    window.clearMapTopBarContext();
     renderMapData();
   }
   function updateMapSideViewUI(){
@@ -4205,7 +4207,6 @@
     applyHeadingUpMap();
     leafletMap.on('click', e=>{
       if(collectionPointMode) { placeCollectionPointDraft(e.latlng); return; }
-      if(roadModeDrawing) { addRoadModePoint(e.latlng); return; }
       if(geofenceDrawActive) { addGeofenceDrawPoint(e.latlng); return; }
     });
     setTimeout(()=>leafletMap&&leafletMap.invalidateSize(),100);
@@ -4228,32 +4229,6 @@
 
 
 
-  function saveRoadModes(){ localStorage.setItem('lukezBunzRoadModes',JSON.stringify(roadModes)); }
-  function startRoadMode(type){
-    if(roadModeDraft&&leafletMap) leafletMap.removeLayer(roadModeDraft);
-    roadModeDrawing={type,points:[]};
-    document.getElementById('btnRoadInOut')?.classList.toggle('active',type==='drive-reverse-out');
-    document.getElementById('btnRoadReverseIn')?.classList.toggle('active',type==='reverse-in-drive-out');
-    alert('Tap along the road to draw the highlighted line. Tap the last point again, then choose Save road.');
-  }
-  function addRoadModePoint(latlng){
-    if(!roadModeDrawing)return;
-    const pts=roadModeDrawing.points;
-    if(pts.length>=2){ const last=pts[pts.length-1]; const d=leafletMap.distance(last,latlng); if(d<8){ finishRoadMode(); return; } }
-    pts.push(latlng);
-    if(roadModeDraft) leafletMap.removeLayer(roadModeDraft);
-    roadModeDraft=L.polyline(pts,{color:roadModeColors[roadModeDrawing.type],weight:7,opacity:.9}).addTo(leafletMap);
-    if(pts.length>=2) roadModeDraft.bindPopup(mapPopupHTML({
-      title:'Road path', lines:['Drag points to adjust'],
-      actions:[{label:'Save road', onclick:'finishRoadMode()', primary:true}]
-    })).openPopup();
-  }
-  function finishRoadMode(){
-    if(!roadModeDrawing||roadModeDrawing.points.length<2){ roadModeDrawing=null; if(roadModeDraft){leafletMap.removeLayer(roadModeDraft);roadModeDraft=null;} return; }
-    roadModes.push({id:'road_'+Date.now(),type:roadModeDrawing.type,points:roadModeDrawing.points.map(p=>({lat:p.lat,lng:p.lng}))});
-    saveRoadModes(); roadModeDrawing=null; roadModeDraft=null;
-    document.getElementById('btnRoadInOut')?.classList.remove('active'); document.getElementById('btnRoadReverseIn')?.classList.remove('active'); renderMapData();
-  }
   function drawRoadModes(){
     roadModes.forEach(r=>{ if(!Array.isArray(r.points)||r.points.length<2)return; const label=r.type==='drive-reverse-out'?'Drive in · reverse out':'Reverse in · drive out'; L.polyline(r.points.map(p=>[p.lat,p.lng]),{color:roadModeColors[r.type]||'#f97316',weight:7,opacity:.9}).bindPopup(mapPopupHTML({title:label})).addTo(mapSeqLayer); });
   }
@@ -4578,34 +4553,6 @@
     return {fileName, routes, lifts, importedAt:new Date().toISOString()};
   }
 
-  async function handleKmzFiles(files, runKey){
-    if(!files?.length || !runKey) return;
-    if(typeof JSZip==='undefined'){
-      alert('KMZ support could not start because JSZip failed to load. Check your internet connection and reload the page.');
-      return;
-    }
-
-    const imported=[];
-    for(const file of Array.from(files)){
-      const zip=await JSZip.loadAsync(file);
-      const kmlEntry=Object.values(zip.files).find(f=>/telemetry\.kml$/i.test(f.name))
-        || Object.values(zip.files).find(f=>/\.kml$/i.test(f.name));
-      if(!kmlEntry) throw new Error(`${file.name}: no KML file found`);
-      const kml=await kmlEntry.async('text');
-      imported.push(extractKmzKml(kml,file.name));
-    }
-
-    const key=mapKey(runKey);
-    const existing=kmzDataByRun.get(key)||{run:runKey,files:[]};
-    existing.files.push(...imported);
-    kmzDataByRun.set(key,existing);
-    await persistKmzDataByRun();
-    renderMapData();
-
-    const totalLifts=existing.files.reduce((n,f)=>n+f.lifts.length,0);
-    alert(`KMZ loaded for ${existing.run}: ${imported.length} file(s), ${totalLifts} bin lift point(s).`);
-  }
-
   function kmzColorForActiveStream(){
     if(activeFilterStream==='Garbage') return garbageLiftColor;
     if(activeFilterStream==='FOGO') return fogoLiftColor;
@@ -4797,10 +4744,12 @@
     const normalBar = document.getElementById('mapNormalTopBar');
     const contextBar = document.getElementById('mapContextBar');
     const titleEl = document.getElementById('mapContextTitle');
+    const dividerEl = document.getElementById('mapContextDivider');
     const btnsEl = document.getElementById('mapContextButtons');
     if(!normalBar || !contextBar) return;
 
     if(titleEl) titleEl.textContent = title || '';
+    if(dividerEl) dividerEl.style.display = (buttons && buttons.length) ? '' : 'none';
     if(btnsEl){
       window.__mapContextActions = (buttons||[]).map(b=>b.onClick);
       btnsEl.innerHTML = (buttons||[]).map((b,i)=>
@@ -4893,13 +4842,26 @@
     });
     if(geofenceDrawPoints.length){
       const color = geofenceEditId ? (geofences.find(f=>f.id===geofenceEditId)?.color || geofenceDrawColor) : geofenceDrawColor;
+      let shape;
       if(geofenceDrawPoints.length>=3){
-        L.polygon(geofenceDrawPoints,{color,weight:2,dashArray:'5 5',fillColor:color,fillOpacity:.12}).addTo(mapGeofenceLayer);
+        shape=L.polygon(geofenceDrawPoints,{color,weight:2,dashArray:'5 5',fillColor:color,fillOpacity:.12}).addTo(mapGeofenceLayer);
       } else {
-        L.polyline(geofenceDrawPoints,{color,weight:2,dashArray:'5 5'}).addTo(mapGeofenceLayer);
+        shape=L.polyline(geofenceDrawPoints,{color,weight:2,dashArray:'5 5'}).addTo(mapGeofenceLayer);
       }
-      geofenceDrawPoints.forEach(pt=>{
-        L.circleMarker(pt,{radius:5,color:'#fff',weight:1.5,fillColor:color,fillOpacity:1}).addTo(mapGeofenceLayer);
+      // Draggable handles, not plain circle markers — a circleMarker's click
+      // bubbles up to the map by default, so tapping an existing point was
+      // being read as "tap the map to add a new point" instead of letting
+      // you grab and move it. A draggable L.marker doesn't bubble, so it can
+      // absorb the tap and be repositioned instead.
+      geofenceDrawPoints.forEach((pt,idx)=>{
+        const handle=L.marker(pt,{
+          draggable:true,
+          icon:L.divIcon({className:'poly-edit-handle', html:'<div class="poly-edit-handle-dot"></div>', iconSize:[24,24], iconAnchor:[12,12]})
+        }).addTo(mapGeofenceLayer);
+        handle.on('drag', e=>{
+          geofenceDrawPoints[idx]=e.target.getLatLng();
+          shape.setLatLngs(geofenceDrawPoints);
+        });
       });
     }
   }
@@ -6814,12 +6776,17 @@ window.addEventListener('DOMContentLoaded', async () => {
     mapEditingActive = true;
     updateMapTelemetryVisibility();
     document.getElementById('propertyFocusToolbar').style.display = 'flex';
-    document.getElementById('propertyFocusAddress').textContent = mapFocusPropId
+    const title = mapFocusPropId
       ? (() => { const s = siteRecords.find(x => String(x.propId || x.siteId) === mapFocusPropId); return s ? (s.baseStreetLine || s.addressText || 'Property').split(',')[0] : 'Property'; })()
       : 'Select bins on the map';
+    document.getElementById('propertyFocusAddress').textContent = title;
     const selBtn = document.getElementById('btnMapBinSelect');
     if (selBtn) selBtn.classList.add('active');
     updateMapToolsToolbar();
+    // The detailed Add/Consolidate/Select/Delete buttons stay in the bottom
+    // panel above (too many to fit in the compact bar) — the top bar just
+    // mirrors the mode name and gives a matching Close control.
+    window.setMapTopBarContext(title, [], ()=>closeMapToolsPanel());
   }
 
   function closeMapToolsPanel() {
@@ -6833,6 +6800,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('propertyFocusToolbar').style.display = 'none';
     const selBtn = document.getElementById('btnMapBinSelect');
     if (selBtn) selBtn.classList.remove('active');
+    window.clearMapTopBarContext();
     renderMapData();
   }
   // Kept for compatibility with the exit (x) button already in the toolbar.
@@ -7859,10 +7827,17 @@ window.addEventListener('DOMContentLoaded', async () => {
     if (btn) btn.classList.toggle('active', isRoadSnapEditing);
 
     if (isRoadSnapEditing) {
+      closeMapSettingsModal();
       enableBoundaryVertexHandles();
+      window.setMapTopBarContext(
+        'Editing run boundary',
+        [{label:'Done', icon:'✔️', onClick:()=>window.toggleRoadSnapEditing(), variant:'primary'}],
+        ()=>window.toggleRoadSnapEditing()
+      );
     } else {
       disableBoundaryVertexHandles();
       await saveToDB("customRunBorders", customRunBorders);
+      window.clearMapTopBarContext();
     }
   };
 
@@ -9225,7 +9200,9 @@ window.addEventListener('DOMContentLoaded', async () => {
   }
 
   .map-summary-bar {
-    display: flex !important;
+    display: flex; /* not !important — JS toggles this per-bar to switch
+      between the normal run/houses/bins bar and the contextual mode bar;
+      an !important rule here would always win over that inline style. */
     flex-direction: row !important;
     align-items: center !important;
     gap: 6px !important;
