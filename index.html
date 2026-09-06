@@ -19,7 +19,6 @@
   --white:#ffffff; --slate-50:#f8fafc; --slate-100:#f1f5f9; --slate-200:#e2e8f0; --slate-200-b:#e5e9f0;
   --slate-300:#cbd5e1; --slate-400:#94a3b8; --slate-500:#64748b; --slate-600:#475569; --slate-700:#334155;
   --slate-800:#1e293b; --slate-900:#0f172a; --near-black:#111111;
-
   /* Brand green */
   --brand-dark:#1b4332; --brand:#2d6a4f; --brand-light:#52b788;
   --green-800:#166534; --green-700:#15803d; --green-600:#16a34a; --green-300:#86efac; --green-100:#dcfce7;
@@ -1051,6 +1050,16 @@
       font-size: 13px;
       margin-top: 6px;
       cursor: pointer;
+    }
+    .special-access-box {
+      background: #fef2f2;
+      border: 1px solid #fecaca;
+      border-left: 4px solid #dc2626;
+      border-radius: 6px;
+      padding: 8px 10px;
+      margin-bottom: 8px;
+      font-size: 13px;
+      color: #7f1d1d;
     }
 
     /* 3-Column Tight Run Grid */
@@ -2431,6 +2440,11 @@
     border: 1.5px solid var(--amber-500);
     color: #92400e;
   }
+  .mode-flag-one-side {
+    background: #f3e8ff;
+    border: 1.5px solid #a855f7;
+    color: #6b21a8;
+  }
 
   .map-controls-group > summary {
     display: none !important;
@@ -3120,7 +3134,11 @@
             <button type="button" id="btnRoadReverseIn" class="map-tool-btn map-settings-action" onclick="startRoadMode('reverse-in-drive-out')">↪️ Reverse in · drive out</button>
           </div>
           <div class="map-toolbar-row map-run-setup-actions">
+            <button type="button" id="btnOneSideCollection" class="map-tool-btn map-settings-action" onclick="startRoadMode('one-side-collection')">◧ One side collection</button>
             <button type="button" id="btnCreateCollectionPoint" class="map-tool-btn map-settings-action" onclick="startCollectionPointMode()">📍 Collection point</button>
+          </div>
+          <div class="map-toolbar-row map-run-setup-actions">
+            <button type="button" class="map-tool-btn map-settings-action" onclick="openAccessNotesModal()">🏷️ Access notes</button>
           </div>
         </div>
       </details>
@@ -3200,6 +3218,42 @@
     <div class="kml-edit-footer">
       <button type="button" class="map-tool-btn" onclick="closeGeofenceModal()" style="flex:1;">Close</button>
       <button type="button" class="map-tool-btn" style="flex:1;background:#0f5132;border-color:#0f5132;color:#fff;" onclick="saveGeofencesFromSettings()">💾 Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Generic "which run(s)?" picker used by Geofences, street driving
+     modes, and Collection Points. -->
+<div id="runPickerModal" class="modal-overlay sub-modal-layer">
+  <div class="modal-box run-style-modal-box">
+    <div class="modal-header">
+      <h3 id="runPickerTitle">Which run(s)?</h3>
+      <button type="button" class="modal-close-btn" onclick="closeRunPickerModal(true)">&times;</button>
+    </div>
+    <label class="geofence-row" style="cursor:pointer;">
+      <input type="checkbox" id="runPickerAllCheckbox" onchange="onRunPickerAllToggle(this.checked)">
+      <span class="geofence-row-name" style="cursor:default;font-weight:800;">All runs</span>
+    </label>
+    <div id="runPickerList" style="max-height:280px;overflow-y:auto;"></div>
+    <div class="kml-edit-footer">
+      <button type="button" class="map-tool-btn" style="flex:1;" onclick="closeRunPickerModal(true)">Cancel</button>
+      <button type="button" class="map-tool-btn" style="flex:1;background:#0f5132;border-color:#0f5132;color:#fff;" onclick="closeRunPickerModal(false)">✔️ Apply</button>
+    </div>
+  </div>
+</div>
+
+<!-- Access notes manager: retag/clear street driving modes and
+     collection points (Geofences have their own manager modal above). -->
+<div id="accessNotesModal" class="modal-overlay sub-modal-layer">
+  <div class="modal-box run-style-modal-box">
+    <div class="modal-header">
+      <h3>🏷️ Access notes</h3>
+      <button type="button" class="modal-close-btn" onclick="closeAccessNotesModal()">&times;</button>
+    </div>
+    <div class="map-settings-category-hint">Select houses on the map first, then use Drive in/Reverse in/One side to tag them.</div>
+    <div id="accessNotesList"></div>
+    <div class="kml-edit-footer">
+      <button type="button" class="map-tool-btn" style="flex:1;" onclick="closeAccessNotesModal()">Close</button>
     </div>
   </div>
 </div>
@@ -3358,6 +3412,136 @@
   let activeFilterDay = '';
   let activeFilterWeek = '';
   let selectedRunsSet = new Set();
+
+  // ---- Shared "which run(s) does this apply to" helper -------------
+  // Used by Geofences, street-driving modes (drive-in/reverse-out,
+  // reverse-in/drive-out, one-side collection) and Collection Points so
+  // each can be scoped to All runs or a specific set of runs.
+  function allKnownRunKeys(){
+    const seen = new Map();
+    (siteRecords||[]).forEach(s=>{
+      const sch=s.soloSchedule||{};
+      [sch.garRun,sch.recRun,sch.fogRun,sch.recSummerRun].forEach(r=>{
+        if(r && r.trim()) seen.set(mapKey(r), r.trim());
+      });
+    });
+    return Array.from(seen.entries()).map(([key,label])=>({key,label})).sort((a,b)=>a.label.localeCompare(b.label));
+  }
+  function formatRunsBadge(runs){
+    if(!runs || !runs.length || runs.includes('ALL')) return 'All runs';
+    return runs.map(r=>r.toUpperCase()).join(', ');
+  }
+  function runsApplyToSelection(taggedRuns){
+    if(!taggedRuns || !taggedRuns.length || taggedRuns.includes('ALL')) return true;
+    const sel = selectedMapRuns();
+    if(sel.size===0) return true; // "All Runs" view shows everything
+    return taggedRuns.some(r=>sel.has(mapKey(r)));
+  }
+  function siteRunKeys(site){
+    const sch=(site&&site.soloSchedule)||{};
+    return [sch.garRun,sch.recRun,sch.fogRun,sch.recSummerRun].filter(Boolean).map(mapKey);
+  }
+  function runsApplyToSite(taggedRuns, site){
+    if(!taggedRuns || !taggedRuns.length || taggedRuns.includes('ALL')) return true;
+    const siteRuns = siteRunKeys(site);
+    return taggedRuns.some(r=>siteRuns.includes(mapKey(r)));
+  }
+
+  // Promise-based run picker modal. Resolves with an array of run keys
+  // (or ['ALL']), or null if the user cancelled.
+  let runPickerResolve = null;
+  let runPickerSelected = [];
+  function openRunPickerModal(title, currentRuns){
+    return new Promise(resolve=>{
+      runPickerResolve = resolve;
+      runPickerSelected = (currentRuns && currentRuns.length) ? currentRuns.slice() : ['ALL'];
+      document.getElementById('runPickerTitle').textContent = title || 'Which run(s)?';
+      renderRunPickerList();
+      openModal('runPickerModal');
+    });
+  }
+  function renderRunPickerList(){
+    const isAll = runPickerSelected.includes('ALL');
+    const allBox = document.getElementById('runPickerAllCheckbox');
+    if(allBox) allBox.checked = isAll;
+    const runs = allKnownRunKeys();
+    const list = document.getElementById('runPickerList');
+    if(!list) return;
+    list.innerHTML = runs.length ? runs.map(r => `
+      <label class="geofence-row" style="cursor:pointer;">
+        <input type="checkbox" ${isAll?'disabled':''} ${(!isAll && runPickerSelected.includes(r.key))?'checked':''} onchange="onRunPickerRunToggle('${r.key}', this.checked)">
+        <span class="geofence-row-name" style="cursor:default;">${esc(r.label)}</span>
+      </label>`).join('') : '<div class="kml-edit-empty">No runs found in loaded data.</div>';
+  }
+  window.onRunPickerAllToggle = function(checked){
+    runPickerSelected = checked ? ['ALL'] : [];
+    renderRunPickerList();
+  };
+  window.onRunPickerRunToggle = function(key, checked){
+    runPickerSelected = runPickerSelected.filter(r=>r!=='ALL');
+    if(checked) runPickerSelected.push(key);
+    else runPickerSelected = runPickerSelected.filter(r=>r!==key);
+    renderRunPickerList();
+  };
+  window.closeRunPickerModal = function(cancelled){
+    closeModal('runPickerModal');
+    const resolve = runPickerResolve;
+    runPickerResolve = null;
+    if(!resolve) return;
+    resolve(cancelled ? null : (runPickerSelected.length ? runPickerSelected.slice() : ['ALL']));
+  };
+
+  // ---- Property-level special access notes --------------------------
+  // Surfaces street-driving modes, collection-point membership, and
+  // geofence membership on a property so a different truck doing a late
+  // or missed bin knows before it arrives.
+  function turfPointForSite(site){
+    if(typeof turf==='undefined') return null;
+    const lat=Number(site&&site.lat), lng=Number(site&&site.lng);
+    if(!Number.isFinite(lat)||!Number.isFinite(lng)||(!lat&&!lng)) return null;
+    return turf.point([lng,lat]);
+  }
+
+  function getPropertySpecialNotes(site){
+    const notes=[];
+    if(!site) return notes;
+    const id=String(site.propId||site.siteId||'');
+
+    const mode = (typeof houseStreetModes!=='undefined') ? houseStreetModes[id] : null;
+    if(mode){
+      notes.push({icon:'🚚', text:`${mode.label} — ${formatRunsBadge(mode.runs)}`});
+    }
+
+    const cp = (typeof collectionPoints!=='undefined') ? collectionPoints[id] : null;
+    if(cp){
+      notes.push({icon:'📍', text:`Collection point — bin is moved to a shared spot, not collected at the house — ${formatRunsBadge(cp.runs)}`});
+    }
+
+    const pt = turfPointForSite(site);
+    if(pt && typeof geofences!=='undefined' && geofences.length){
+      geofences.forEach(fence=>{
+        if(!Array.isArray(fence.points) || fence.points.length<3) return;
+        try{
+          const ring=fence.points.map(p=>[p[1],p[0]]);
+          const first=ring[0], last=ring[ring.length-1];
+          if(first[0]!==last[0]||first[1]!==last[1]) ring.push(first);
+          const poly=turf.polygon([ring]);
+          if(turf.booleanPointInPolygon(pt,poly)){
+            notes.push({icon:'🚧', text:`Inside geofence "${fence.name}" — ${formatRunsBadge(fence.runs)}`});
+          }
+        }catch(e){ /* malformed shape, skip */ }
+      });
+    }
+
+    return notes;
+  }
+
+  function specialAccessNoticeHtml(site){
+    const notes = getPropertySpecialNotes(site);
+    if(!notes.length) return '';
+    return `<div class="special-access-box"><b>⚠️ Special access — check before a late/return visit:</b><ul style="margin:4px 0 0 18px;padding:0;">${notes.map(n=>`<li>${n.icon} ${esc(n.text)}</li>`).join('')}</ul></div>`;
+  }
+
   let isRunLocked = false;
 
   let travelMode = 'all';
@@ -3449,6 +3633,7 @@
   let geofenceDrawPoints = [];
   let geofenceDrawName = '';
   let geofenceDrawColor = '#f97316';
+  let geofenceDrawRuns = ['ALL'];
   let geofenceEditId = null;
   const GEOFENCE_PALETTE = ['#f97316','#0ea5e9','#a855f7','#16a34a','#e11d48','#ca8a04'];
   function nextGeofenceColor(){ return GEOFENCE_PALETTE[geofences.length % GEOFENCE_PALETTE.length]; }
@@ -4205,7 +4390,23 @@
       actions: [{ label:'Save collection point', onclick:'saveCollectionPointDraft()', primary:true }]
     })).openPopup();
   }
-  function saveCollectionPointDraft(){ if(!collectionPointDraftMarker)return; const p=collectionPointDraftMarker.getLatLng(); const groupId='cp_'+Date.now(); selectedCollectionHouseIds.forEach(id=>collectionPoints[id]={id:groupId,lat:p.lat,lng:p.lng}); saveCollectionPoints(); selectedCollectionHouseIds.clear(); collectionSelectionActive=false; collectionPointMode=false; leafletMap.removeLayer(collectionPointDraftMarker); collectionPointDraftMarker=null; const b=document.getElementById('btnCreateCollectionPoint');if(b)b.classList.remove('active'); renderMapData(); }
+  async function saveCollectionPointDraft(){
+    if(!collectionPointDraftMarker) return;
+    const p = collectionPointDraftMarker.getLatLng();
+    const defaultRuns = Array.from(selectedMapRuns()).length ? Array.from(selectedMapRuns()) : ['ALL'];
+    const runs = await openRunPickerModal('Which run(s) use this collection point?', defaultRuns);
+    if (runs === null) return; // cancelled — keep the draft marker so they can retry
+    const groupId = 'cp_' + Date.now();
+    selectedCollectionHouseIds.forEach(id => collectionPoints[id] = { id: groupId, lat: p.lat, lng: p.lng, runs });
+    saveCollectionPoints();
+    selectedCollectionHouseIds.clear();
+    collectionSelectionActive = false;
+    collectionPointMode = false;
+    leafletMap.removeLayer(collectionPointDraftMarker);
+    collectionPointDraftMarker = null;
+    const b = document.getElementById('btnCreateCollectionPoint'); if (b) b.classList.remove('active');
+    renderMapData();
+  }
   function updateMapSideViewUI(){
     const btn=document.getElementById('btnTruckFollow');
     if(btn){
@@ -4446,8 +4647,12 @@
     const houseMarker=L.marker([p.lat,p.lng],{icon,keyboard:false}); houseMarker.bindPopup(`<div><b>${esc(label)}</b><br>${esc(site.addressText||'')}<br><button onclick="toggleCollectionHouse('${esc(id)}')">${selected?'Remove selection':'Select house'}</button></div>`); houseMarker.on('click',()=>{ if(collectionSelectionActive){ toggleCollectionHouse(id); houseMarker.closePopup(); } }); houseMarker.addTo(mapMarkersLayer);
   }
   function drawCollectionPointMarkers(){
-    const groups={}; Object.entries(collectionPoints).forEach(([houseId,cp])=>{ if(!groups[cp.id])groups[cp.id]={cp,houses:[]}; groups[cp.id].houses.push(houseId); });
-    Object.values(groups).forEach(g=>{ L.marker([g.cp.lat,g.cp.lng],{icon:L.divIcon({className:'collection-point-pin',html:'<div style="font-size:24px;filter:drop-shadow(0 1px 2px #0006)">📍</div>',iconSize:[28,32],iconAnchor:[14,32]})}).bindPopup(mapPopupHTML({badge:'📍', title:'Collection point', lines:[`${g.houses.length} house${g.houses.length===1?'':'s'} · bins collected here`]})).addTo(mapMarkersLayer); });
+    const groups={};
+    Object.entries(collectionPoints).forEach(([houseId,cp])=>{
+      if(!runsApplyToSelection(cp.runs)) return;
+      if(!groups[cp.id])groups[cp.id]={cp,houses:[]}; groups[cp.id].houses.push(houseId);
+    });
+    Object.values(groups).forEach(g=>{ L.marker([g.cp.lat,g.cp.lng],{icon:L.divIcon({className:'collection-point-pin',html:'<div style="font-size:24px;filter:drop-shadow(0 1px 2px #0006)">📍</div>',iconSize:[28,32],iconAnchor:[14,32]})}).bindPopup(mapPopupHTML({badge:'📍', title:'Collection point', lines:[`${g.houses.length} house${g.houses.length===1?'':'s'} · bins collected here`, formatRunsBadge(g.cp.runs)]})).addTo(mapMarkersLayer); });
   }
 
   function drawSite(site,key,i){
@@ -4831,8 +5036,9 @@
     if(!geofencesVisible) return;
     geofences.forEach(fence=>{
       if(geofenceEditId===fence.id) return; // shown via edit handles instead
+      if(!runsApplyToSelection(fence.runs)) return;
       const poly=L.polygon(fence.points,{color:fence.color,weight:2,fillColor:fence.color,fillOpacity:.12});
-      poly.bindPopup(mapPopupHTML({badge:'🚧', title:esc(fence.name), lines:[`${fence.points.length} point(s)`]}));
+      poly.bindPopup(mapPopupHTML({badge:'🚧', title:esc(fence.name), lines:[`${fence.points.length} point(s)`, formatRunsBadge(fence.runs)]}));
       poly.addTo(mapGeofenceLayer);
     });
   }
@@ -4849,15 +5055,19 @@
   }
 
   // -- Create (tap-to-draw) --
-  window.startGeofenceCreate = function(){
+  window.startGeofenceCreate = async function(){
     const name = prompt('Name this geofence:', `Geofence ${geofences.length+1}`);
     if(name===null) return;
+    const defaultRuns = Array.from(selectedMapRuns()).length ? Array.from(selectedMapRuns()) : ['ALL'];
+    const runs = await openRunPickerModal(`Which run(s) is "${name.trim()||'this geofence'}" for?`, defaultRuns);
+    if(runs===null) return;
     closeGeofenceModal();
     closeMapSettingsModal();
     geofenceDrawActive=true;
     geofenceDrawPoints=[];
     geofenceDrawName=name.trim()||`Geofence ${geofences.length+1}`;
     geofenceDrawColor=nextGeofenceColor();
+    geofenceDrawRuns=runs;
     setGeofenceEditingState(true);
     document.getElementById('geofenceDrawTitle').textContent=geofenceDrawName;
     document.getElementById('geofenceDrawHint').textContent='Tap the map to add points (need at least 3)';
@@ -4914,6 +5124,7 @@
       id: genGeofenceId(),
       name: geofenceDrawName,
       color: geofenceDrawColor,
+      runs: geofenceDrawRuns,
       points: geofenceDrawPoints.map(p=>[p.lat,p.lng]),
       createdAt: new Date().toISOString()
     });
@@ -5014,15 +5225,28 @@
         <input type="color" class="geofence-swatch" value="${fence.color}" onchange="recolorGeofence('${fence.id}', this.value)" title="Colour">
         <div style="flex:1;min-width:0;">
           <button type="button" class="geofence-row-name" onclick="renameGeofence('${fence.id}')" title="Tap to rename">${esc(fence.name)}</button>
-          <div class="geofence-row-meta">${fence.points.length} point(s)</div>
+          <div class="geofence-row-meta">${fence.points.length} point(s) · ${esc(formatRunsBadge(fence.runs))}</div>
         </div>
         <div class="geofence-row-actions">
+          <button type="button" class="geofence-icon-btn" title="Change runs" onclick="retagGeofence('${fence.id}')">🏷️</button>
           <button type="button" class="geofence-icon-btn" title="Edit shape" onclick="startGeofenceEditShape('${fence.id}')">✏️</button>
           <button type="button" class="geofence-icon-btn" title="Export" onclick="exportGeofenceKml('${fence.id}')">📤</button>
           <button type="button" class="geofence-icon-btn danger" title="Delete" onclick="deleteGeofence('${fence.id}')">🗑️</button>
         </div>
       </div>`).join('');
   }
+
+  window.retagGeofence = async function(id){
+    const fence=geofences.find(f=>f.id===id);
+    if(!fence) return;
+    const runs=await openRunPickerModal(`Which run(s) is "${fence.name}" for?`, fence.runs);
+    if(runs===null) return;
+    fence.runs=runs;
+    await persistGeofences();
+    renderGeofenceList();
+    renderGeofences();
+  };
+
 
   window.renameGeofence = async function(id){
     const fence=geofences.find(f=>f.id===id);
@@ -5109,6 +5333,10 @@
 
   async function handleGeofenceImportFile(file){
     try{
+      const defaultRuns = Array.from(selectedMapRuns()).length ? Array.from(selectedMapRuns()) : ['ALL'];
+      const runs = await openRunPickerModal('Which run(s) are these imported geofences for?', defaultRuns);
+      if(runs===null) return;
+
       let kmlText;
       if(/\.kmz$/i.test(file.name)){
         if(typeof JSZip==='undefined'){
@@ -5150,6 +5378,7 @@
           id: genGeofenceId(),
           name,
           color: nextGeofenceColor(),
+          runs,
           points: pts.map(p=>[p.lat,p.lng]),
           createdAt: new Date().toISOString()
         });
@@ -5172,6 +5401,119 @@
   window.saveGeofencesFromSettings = async function(){
     await persistGeofences();
     alert('Geofences saved.');
+  };
+
+  // ---- Access notes manager ------------------------------------------
+  // View/retag/clear existing street-driving mode tags and collection
+  // points (grouped so many houses tagged together show as one row).
+  function groupHouseStreetModes(){
+    const groups=new Map();
+    Object.entries(houseStreetModes).forEach(([houseId,mode])=>{
+      if(!mode) return;
+      const key = mode.type+'|'+(mode.runs&&mode.runs.length?mode.runs.join(','):'ALL');
+      if(!groups.has(key)) groups.set(key,{type:mode.type,label:mode.label,runs:mode.runs||['ALL'],houseIds:[]});
+      groups.get(key).houseIds.push(houseId);
+    });
+    return Array.from(groups.values());
+  }
+  function groupCollectionPoints(){
+    const groups=new Map();
+    Object.entries(collectionPoints).forEach(([houseId,cp])=>{
+      if(!cp) return;
+      if(!groups.has(cp.id)) groups.set(cp.id,{id:cp.id,runs:cp.runs||['ALL'],houseIds:[]});
+      groups.get(cp.id).houseIds.push(houseId);
+    });
+    return Array.from(groups.values());
+  }
+
+  window.openAccessNotesModal = function(){
+    renderAccessNotesList();
+    openModal('accessNotesModal');
+  };
+  window.closeAccessNotesModal = function(){
+    closeModal('accessNotesModal');
+  };
+
+  function renderAccessNotesList(){
+    const list = document.getElementById('accessNotesList');
+    if(!list) return;
+    const modeGroups = groupHouseStreetModes();
+    const cpGroups = groupCollectionPoints();
+
+    if(!modeGroups.length && !cpGroups.length){
+      list.innerHTML = '<div class="kml-edit-empty">No street driving modes or collection points yet.</div>';
+      return;
+    }
+
+    const modeRows = modeGroups.map((g,idx) => `
+      <div class="geofence-row">
+        <div style="width:14px;height:14px;border-radius:4px;flex:0 0 auto;background:${g.type==='drive-reverse-out'?'#f97316':g.type==='one-side-collection'?'#a855f7':'#2563eb'};"></div>
+        <div style="flex:1;min-width:0;">
+          <div class="geofence-row-name" style="cursor:default;">${esc(g.label)}</div>
+          <div class="geofence-row-meta">${g.houseIds.length} house${g.houseIds.length===1?'':'s'} · ${esc(formatRunsBadge(g.runs))}</div>
+        </div>
+        <div class="geofence-row-actions">
+          <button type="button" class="geofence-icon-btn" title="Change runs" onclick="retagStreetModeGroup(${idx})">🏷️</button>
+          <button type="button" class="geofence-icon-btn danger" title="Clear tag" onclick="deleteStreetModeGroup(${idx})">🗑️</button>
+        </div>
+      </div>`).join('');
+
+    const cpRows = cpGroups.map((g,idx) => `
+      <div class="geofence-row">
+        <div style="width:14px;height:14px;border-radius:4px;flex:0 0 auto;background:${collectionPointHouseColor||'#f59e0b'};"></div>
+        <div style="flex:1;min-width:0;">
+          <div class="geofence-row-name" style="cursor:default;">📍 Collection point</div>
+          <div class="geofence-row-meta">${g.houseIds.length} house${g.houseIds.length===1?'':'s'} · ${esc(formatRunsBadge(g.runs))}</div>
+        </div>
+        <div class="geofence-row-actions">
+          <button type="button" class="geofence-icon-btn" title="Change runs" onclick="retagCollectionGroup(${idx})">🏷️</button>
+          <button type="button" class="geofence-icon-btn danger" title="Delete" onclick="deleteCollectionGroup(${idx})">🗑️</button>
+        </div>
+      </div>`).join('');
+
+    list.innerHTML = modeRows + cpRows;
+  }
+
+  window.retagStreetModeGroup = async function(idx){
+    const g = groupHouseStreetModes()[idx];
+    if(!g) return;
+    const runs = await openRunPickerModal(`Which run(s) is "${g.label}" for?`, g.runs);
+    if(runs===null) return;
+    g.houseIds.forEach(id => { if(houseStreetModes[id]) houseStreetModes[id].runs = runs; });
+    localStorage.setItem('lukezBunzHouseStreetModes', JSON.stringify(houseStreetModes));
+    renderAccessNotesList();
+    renderMapData();
+  };
+
+  window.deleteStreetModeGroup = function(idx){
+    const g = groupHouseStreetModes()[idx];
+    if(!g) return;
+    if(!confirm(`Clear "${g.label}" from ${g.houseIds.length} house(s)?`)) return;
+    g.houseIds.forEach(id => { delete houseStreetModes[id]; });
+    localStorage.setItem('lukezBunzHouseStreetModes', JSON.stringify(houseStreetModes));
+    renderAccessNotesList();
+    renderMapData();
+  };
+
+  window.retagCollectionGroup = async function(idx){
+    const g = groupCollectionPoints()[idx];
+    if(!g) return;
+    const runs = await openRunPickerModal('Which run(s) use this collection point?', g.runs);
+    if(runs===null) return;
+    g.houseIds.forEach(id => { if(collectionPoints[id]) collectionPoints[id].runs = runs; });
+    saveCollectionPoints();
+    renderAccessNotesList();
+    renderMapData();
+  };
+
+  window.deleteCollectionGroup = function(idx){
+    const g = groupCollectionPoints()[idx];
+    if(!g) return;
+    if(!confirm(`Delete this collection point? ${g.houseIds.length} house(s) will be collected individually again.`)) return;
+    g.houseIds.forEach(id => { delete collectionPoints[id]; });
+    saveCollectionPoints();
+    renderAccessNotesList();
+    renderMapData();
   };
 
   function inspectKmzLift(lat,lng,runKey,sequence){
@@ -6337,6 +6679,7 @@ function promptEditBin(propId, streamKey, binIdx) {
         <button type="button" class="single-nav-btn" style="background:#fef9c3; color:#854d0e; border:1px solid #fde047;" onclick="promptRateProperty('${site.propId || site.siteId}')">⭐ Rate Property</button>
       </div>
       ${ratingBannerHtml}
+      ${specialAccessNoticeHtml(site)}
       ${strayAlertHtml}
       ${hasAnyBins ? streamBoxesHtml : '<div style="color:#94a3b8; font-style:italic; font-size:13px; padding:6px 0;">no bins registered</div>'}
     `;
@@ -7970,15 +8313,25 @@ window.addEventListener('DOMContentLoaded', async () => {
   };
 
   // Unified House Selection for Street Modes
-  window.startRoadMode = function(type) {
+  const STREET_MODE_LABELS = {
+    'drive-reverse-out': 'Drive in · reverse out',
+    'reverse-in-drive-out': 'Reverse in · drive out',
+    'one-side-collection': 'One side collection'
+  };
+  window.startRoadMode = async function(type) {
     if (!selectedCollectionHouseIds.size) {
       alert('Select the houses on the street first by tapping on them, then click this button to apply.');
       return;
     }
 
-    const label = type === 'drive-reverse-out' ? 'Drive in · reverse out' : 'Reverse in · drive out';
-    selectedCollectionHouseIds.forEach(id => {
-      houseStreetModes[id] = { type, label };
+    const label = STREET_MODE_LABELS[type] || type;
+    const houseIds = Array.from(selectedCollectionHouseIds);
+    const defaultRuns = Array.from(selectedMapRuns()).length ? Array.from(selectedMapRuns()) : ['ALL'];
+    const runs = await openRunPickerModal(`Which run(s) is "${label}" for?`, defaultRuns);
+    if (runs === null) return; // cancelled — leave selection as-is so they can retry
+
+    houseIds.forEach(id => {
+      houseStreetModes[id] = { type, label, runs };
     });
 
     localStorage.setItem('lukezBunzHouseStreetModes', JSON.stringify(houseStreetModes));
@@ -7986,8 +8339,9 @@ window.addEventListener('DOMContentLoaded', async () => {
     collectionSelectionActive = false;
 
     renderMapData();
-    alert(`Marked ${Object.keys(houseStreetModes).length} house(s) as ${label}.`);
+    alert(`Marked ${houseIds.length} house(s) as ${label} (${formatRunsBadge(runs)}).`);
   };
+
 
   // 1. Export all edits to a dedicated changes CSV file
   window.exportEditsCsv = function() {
@@ -8482,12 +8836,12 @@ window.addEventListener('DOMContentLoaded', async () => {
       }).join('');
 
       const houseId = String(site.propId || site.siteId || '');
-      const streetMode = houseStreetModes[houseId];
-      const cp = collectionPoints[houseId];
+      const streetMode = activeStreetModeForSite(site);
+      const cp = activeCollectionPointForSite(site);
       let flagBannerHtml = '';
 
       if (streetMode) {
-        const cls = streetMode.type === 'drive-reverse-out' ? 'mode-flag-drive-out' : 'mode-flag-reverse-in';
+        const cls = streetMode.type === 'drive-reverse-out' ? 'mode-flag-drive-out' : streetMode.type === 'one-side-collection' ? 'mode-flag-one-side' : 'mode-flag-reverse-in';
         flagBannerHtml = `<div class="street-mode-flag-banner ${cls}">🚩 ${streetMode.label.toUpperCase()}</div>`;
       } else if (cp) {
         flagBannerHtml = `<div class="street-mode-flag-banner mode-flag-cp">🚩 📍 COLLECTION POINT HOUSE</div>`;
@@ -8519,8 +8873,8 @@ window.addEventListener('DOMContentLoaded', async () => {
     const address = site ? (site.addressText ? site.addressText.split(',')[0].replace(/\bVIC\b|\b\d{4}\b/gi, '').trim() : (site.baseStreetLine || 'Address unavailable')) : 'Scanning Street...';
     
   const houseId = site ? String(site.propId || site.siteId || '') : '';
-  const streetMode = (typeof houseStreetModes !== 'undefined') ? houseStreetModes[houseId] : null;
-  const cp = (typeof collectionPoints !== 'undefined') ? collectionPoints[houseId] : null;
+  const streetMode = site ? activeStreetModeForSite(site) : null;
+  const cp = site ? activeCollectionPointForSite(site) : null;
   
   let meta = site ? (String(site.runFlags || '').trim() ? `🚩 ${esc(String(site.runFlags).trim())}` : getAddressSuburb(site)) : 'Scanning suburb...';
   if (streetMode) {
@@ -8700,6 +9054,18 @@ window.addEventListener('DOMContentLoaded', async () => {
   };
 
   /* Interactive House Triangles */
+  function activeStreetModeForSite(site){
+    const id = String(site.propId||site.siteId||'');
+    const mode = houseStreetModes[id];
+    if(!mode) return null;
+    return runsApplyToSelection(mode.runs) ? mode : null;
+  }
+  function activeCollectionPointForSite(site){
+    const cp = collectionPointForSite(site);
+    if(!cp) return null;
+    return runsApplyToSelection(cp.runs) ? cp : null;
+  }
+
   window.drawHouseTriangle = function(site) {
     const id = String(site.propId || site.siteId || '');
     const isSelected = selectedCollectionHouseIds.has(id);
@@ -8709,11 +9075,11 @@ window.addEventListener('DOMContentLoaded', async () => {
     const p = gps(site.lat, site.lng);
     if (!p) return;
     
-    const cp = collectionPointForSite(site);
-    const streetMode = houseStreetModes[id];
+    const cp = activeCollectionPointForSite(site);
+    const streetMode = activeStreetModeForSite(site);
     
     let color = isSelected ? '#2563eb' : (
-      streetMode ? (streetMode.type === 'drive-reverse-out' ? '#f97316' : '#2563eb') :
+      streetMode ? (streetMode.type === 'drive-reverse-out' ? '#f97316' : streetMode.type === 'one-side-collection' ? '#a855f7' : '#2563eb') :
       (cp ? collectionPointHouseColor : (houseDotsColor || '#8b5cf6'))
     );
     
@@ -8733,6 +9099,10 @@ window.addEventListener('DOMContentLoaded', async () => {
       (cp ? 'Collection point house' : 'House')
     );
 
+    const specialNotes = getPropertySpecialNotes(site);
+    const popupLines = [esc(site.addressText || '')];
+    if(specialNotes.length) popupLines.push(`⚠️ ${specialNotes.map(n=>esc(n.text)).join(' · ')}`);
+
     const marker = L.marker([p.lat, p.lng], {
       icon,
       keyboard: false,
@@ -8742,7 +9112,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     
     marker.bindPopup(mapPopupHTML({
       badge: '🏠', title: label,
-      lines: [esc(site.addressText || '')],
+      lines: popupLines,
       actions: [
         { label: isSelected ? 'Remove' : 'Select house', onclick: `toggleCollectionHouse('${esc(id)}')` },
         { label: 'Property', onclick: `openPropertyInspectModal('${esc(id)}')`, primary: true }
