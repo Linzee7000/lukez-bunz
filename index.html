@@ -2157,6 +2157,26 @@
   .map-side-layer-option .icon-img { width: 16px; height: 16px; margin-right: 4px; }
   .hdr-run-badge .icon-img, .hud-bin-icon.icon-img, .address-bin-stream .icon-img, .stream-group-header .icon-img { width: 15px; height: 15px; margin-right: 3px; }
 
+  /* These icons are plain black line art, so they nearly disappear on dark
+     or saturated backgrounds. Invert to white in those specific spots;
+     light backgrounds (settings gear button, yellow Recycling header)
+     keep the default black. */
+  .app-header .icon-img,
+  .sync-btn .icon-img,
+  .hud-run-pill .icon-img,
+  .map-context-box .icon-img,
+  .map-context-btn .icon-img,
+  .map-settings-category > summary .icon-img,
+  .map-run-colored-box.stream-gar .icon-img,
+  .map-run-colored-box.stream-summer .icon-img,
+  .map-run-colored-box.stream-fog .icon-img,
+  body.dark-mode .icon-img {
+    filter: brightness(0) invert(1);
+  }
+  body.dark-mode .map-settings-top-btn .icon-img {
+    filter: none;
+  }
+
 /* ===== unified-clean-styles (Drive/Map filter bar) ===== */
   #mapScreenContainer {
     position: absolute !important;
@@ -4778,7 +4798,10 @@
 
   window.mapTopBarContextCloseClicked = function(){
     if(typeof window.__mapContextOnClose === 'function') window.__mapContextOnClose();
-    else window.clearMapTopBarContext();
+    // Always restore the normal run/houses/bins bar afterwards, regardless
+    // of what the mode's own close callback did — closing should never be
+    // able to leave the top bar stuck on a contextual mode.
+    window.clearMapTopBarContext();
   };
 
   let geofenceResumeFollow = false;
@@ -5336,7 +5359,7 @@
     if(!list)return;
     const selected=Array.from(selectedMapRuns());
     const runs=selected.length ? selected : currentlyShowingRunKeys;
-    if(subtitle) subtitle.textContent=runs.length===1?`Editing ${mapRunLabel()}.`:'Select one run to customise that run only.';
+    if(subtitle) subtitle.innerHTML=runs.length===1?`Editing ${mapRunLabel()}.`:'Select one run to customise that run only.';
 
     const runSection=runs.length===1 ? runs.map((k,i)=>{
       const border=mapColor(k,i);
@@ -6781,12 +6804,15 @@ window.addEventListener('DOMContentLoaded', async () => {
       : 'Select bins on the map';
     document.getElementById('propertyFocusAddress').textContent = title;
     const selBtn = document.getElementById('btnMapBinSelect');
-    if (selBtn) selBtn.classList.add('active');
+    if (selBtn) { selBtn.classList.add('active'); selBtn.style.display = ''; }
     updateMapToolsToolbar();
     // The detailed Add/Consolidate/Select/Delete buttons stay in the bottom
     // panel above (too many to fit in the compact bar) — the top bar just
     // mirrors the mode name and gives a matching Close control.
     window.setMapTopBarContext(title, [], ()=>closeMapToolsPanel());
+    // Bin markers are only made draggable while this mode is active (see
+    // renderMapData) — re-render so already-drawn markers pick that up.
+    if (typeof renderMapData === 'function') renderMapData();
   }
 
   function closeMapToolsPanel() {
@@ -6799,7 +6825,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     if (mapSelectionLayer) mapSelectionLayer.clearLayers();
     document.getElementById('propertyFocusToolbar').style.display = 'none';
     const selBtn = document.getElementById('btnMapBinSelect');
-    if (selBtn) selBtn.classList.remove('active');
+    if (selBtn) { selBtn.classList.remove('active'); selBtn.style.display = 'none'; }
     window.clearMapTopBarContext();
     renderMapData();
   }
@@ -7831,7 +7857,11 @@ window.addEventListener('DOMContentLoaded', async () => {
       enableBoundaryVertexHandles();
       window.setMapTopBarContext(
         'Editing run boundary',
-        [{label:'Done', icon:'✔️', onClick:()=>window.toggleRoadSnapEditing(), variant:'primary'}],
+        [
+          {label:'Snap Houses', icon:'🧲', onClick:()=>window.snapActiveBoundaryToRoads()},
+          {label:'Snap Roads', icon:'🛣️', onClick:()=>window.snapBoundaryToRoads()},
+          {label:'Done', icon:'✔️', onClick:()=>window.toggleRoadSnapEditing(), variant:'primary'}
+        ],
         ()=>window.toggleRoadSnapEditing()
       );
     } else {
@@ -8100,7 +8130,7 @@ window.addEventListener('DOMContentLoaded', async () => {
         <button type="button" onclick="if(leafletMap) leafletMap.zoomOut()" title="Zoom Out">－</button>
 
         <!-- Select/move/delete bins on the map, without needing a property first -->
-        <button type="button" id="btnMapBinSelect" class="map-side-follow-toggle" onclick="toggleGlobalBinSelectMode()" title="Select bins">☑️</button>
+        <button type="button" id="btnMapBinSelect" class="map-side-follow-toggle" onclick="toggleGlobalBinSelectMode()" title="Select bins" style="display:none;">☑️</button>
 
         <!-- Layers Toggle -->
         <div class="map-side-layers-control" id="mapSideLayersControl" style="position:relative;">
@@ -8874,7 +8904,10 @@ window.addEventListener('DOMContentLoaded', async () => {
 
             const m = L.marker([p.lat, p.lng], {
               icon: binMarkerIcon,
-              draggable: (src === 'solo'),
+              // Only draggable in bin/house moving mode — on the plain run
+              // screen this was catching accidental press-and-hold drags
+              // while scrolling the map.
+              draggable: (src === 'solo' && mapSelectMode),
               pane: 'lukez-bin-pane',
               interactive: true
             });
@@ -8989,7 +9022,7 @@ window.addEventListener('DOMContentLoaded', async () => {
       else if (st === 'FOGO') box.classList.add('stream-fog');
       else box.classList.add('stream-rec');
     }
-    if (title) title.textContent = mapRunLabel();
+    if (title) title.innerHTML = mapRunLabel();
 
     const h = document.getElementById('mapTotalHouses');
     const b = document.getElementById('mapTotalBins');
@@ -9140,7 +9173,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     position: absolute !important;
     left: 8px !important;
     right: auto !important;
-    bottom: 56px !important;
+    bottom: 68px !important;
     width: calc(100vw - 16px) !important;
     max-width: 440px !important;
     margin-bottom: 0 !important;
@@ -9179,7 +9212,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     }
     .map-address-telemetry,
     div[class*="map-address-telemetry"] {
-      bottom: 44px !important;
+      bottom: 50px !important;
     }
   }
 
