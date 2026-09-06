@@ -1854,13 +1854,6 @@
     flex-direction: column;
     gap: 6px;
   }
-  /* While drawing/editing a geofence, its toolbar moves to the TOP of the
-     screen instead of the bottom, so its buttons are never hidden behind
-     the bottom navigation bar (Search/Drive/Map). */
-  .property-focus-toolbar.geofence-toolbar-top {
-    bottom: auto;
-    top: 8px;
-  }
   .property-focus-header {
     display: flex;
     align-items: center;
@@ -2591,7 +2584,7 @@
     <div id="mapScreenContainer">
       <div class="map-header-panel">
         <!-- COMPACT MAP SUMMARY -->
-        <div class="map-top-bar map-summary-bar">
+        <div class="map-top-bar map-summary-bar" id="mapNormalTopBar">
           <button type="button" id="mapRunColoredBox" class="map-run-colored-box hdr-run-gar" onclick="openFilterDrawerModal()" title="Select run">
             <span id="mapRunTitleText" class="map-run-title">Select run</span>
             <span class="map-run-divider" aria-hidden="true"></span>
@@ -2599,6 +2592,20 @@
             <span class="map-run-stat"><img class="icon-img map-stat-icon" src="bin.png" alt=""><b id="mapTotalBins">0</b></span>
           </button>
           <button type="button" id="btnMapSettingsTop" class="map-settings-top-btn" onclick="openMapSettingsModal()" title="Map settings"><img class="icon-img" src="settings.png" alt=""></button>
+        </div>
+
+        <!-- CONTEXTUAL FUNCTION BAR: swapped in whenever a settings function
+             (Geofence draw/edit, etc.) takes over the map. Same visual
+             language as the bar above — one long fading box + a matching
+             square close button — just shows that function's name and its
+             own buttons instead of run/houses/bins. -->
+        <div class="map-top-bar map-summary-bar map-context-bar" id="mapContextBar" style="display:none;">
+          <div class="map-run-colored-box map-context-box" id="mapContextBox">
+            <span id="mapContextTitle" class="map-run-title">Mode</span>
+            <span class="map-run-divider" aria-hidden="true"></span>
+            <span class="map-context-buttons" id="mapContextButtons"></span>
+          </div>
+          <button type="button" class="map-settings-top-btn" id="mapContextCloseBtn" onclick="mapTopBarContextCloseClicked()" title="Close">&times;</button>
         </div>
       </div>
 
@@ -2626,20 +2633,8 @@
         </div>
       </div>
 
-      <!-- GEOFENCE DRAW / EDIT TOOLBAR -->
-      <div id="geofenceDrawToolbar" class="property-focus-toolbar" style="display:none;">
-        <div class="property-focus-header">
-          <b id="geofenceDrawTitle">New geofence</b>
-          <button type="button" class="modal-close-btn" onclick="cancelGeofenceDraw()" title="Cancel">&times;</button>
-        </div>
-        <div class="property-focus-hint" id="geofenceDrawHint">Tap the map to add points (need at least 3)</div>
-        <div class="property-focus-actions">
-          <button type="button" id="geofenceUndoBtn" class="focus-tool-btn" onclick="undoGeofenceDrawPoint()">↩️ Undo point</button>
-          <button type="button" class="focus-tool-btn" style="background:#0f5132;border-color:#0f5132;color:#fff;" onclick="finishGeofenceDraw()">✔️ Finish</button>
-        </div>
       </div>
 
-      
       <!-- CURRENT ADDRESS TELEMETRY -->
       <div class="map-telemetry-banner address-telemetry-card map-address-telemetry">
         <div class="address-telemetry-grid">
@@ -4791,18 +4786,62 @@
     renderGeofences();
   }
 
+  // ---- Map top-bar contextual mode ----------------------------------
+  // Generic mechanism so any settings function (Geofence draw/edit today,
+  // others later) can take over the main top bar: it shows that function's
+  // name plus its own buttons in place of run/houses/bins, and reverts to
+  // the normal bar the moment the function is closed.
+  window.__mapContextOnClose = null;
+  window.__mapContextActions = [];
+
+  window.setMapTopBarContext = function(title, buttons, onClose){
+    const normalBar = document.getElementById('mapNormalTopBar');
+    const contextBar = document.getElementById('mapContextBar');
+    const titleEl = document.getElementById('mapContextTitle');
+    const btnsEl = document.getElementById('mapContextButtons');
+    if(!normalBar || !contextBar) return;
+
+    if(titleEl) titleEl.textContent = title || '';
+    if(btnsEl){
+      window.__mapContextActions = (buttons||[]).map(b=>b.onClick);
+      btnsEl.innerHTML = (buttons||[]).map((b,i)=>
+        `<button type="button" class="map-context-btn ${b.variant||''}" onclick="event.stopPropagation(); window.__mapContextActions[${i}]()">${b.icon?b.icon+' ':''}${esc(b.label||'')}</button>`
+      ).join('');
+    }
+    window.__mapContextOnClose = typeof onClose==='function' ? onClose : null;
+
+    normalBar.style.display = 'none';
+    contextBar.style.display = 'flex';
+  };
+
+  window.updateMapTopBarContextTitle = function(title){
+    const titleEl = document.getElementById('mapContextTitle');
+    if(titleEl) titleEl.textContent = title || '';
+  };
+
+  window.clearMapTopBarContext = function(){
+    const normalBar = document.getElementById('mapNormalTopBar');
+    const contextBar = document.getElementById('mapContextBar');
+    if(normalBar) normalBar.style.display = '';
+    if(contextBar) contextBar.style.display = 'none';
+    window.__mapContextOnClose = null;
+    window.__mapContextActions = [];
+  };
+
+  window.mapTopBarContextCloseClicked = function(){
+    if(typeof window.__mapContextOnClose === 'function') window.__mapContextOnClose();
+    else window.clearMapTopBarContext();
+  };
+
   let geofenceResumeFollow = false;
   function setGeofenceEditingState(on){
     mapEditingActive = on;
     updateMapTelemetryVisibility();
 
-    // Hide the top run/houses/bins/settings bar and show the geofence
-    // toolbar in its place instead, so the toolbar's buttons are never
-    // hidden behind the bottom navigation bar.
-    const summaryBar = document.querySelector('.map-summary-bar');
-    const toolbar = document.getElementById('geofenceDrawToolbar');
-    if(summaryBar) summaryBar.style.display = on ? 'none' : '';
-    if(toolbar) toolbar.classList.toggle('geofence-toolbar-top', on);
+    // The geofence draw/edit toolbar now lives IN the top bar itself (see
+    // setMapTopBarContext calls in startGeofenceCreate/startGeofenceEditShape).
+    // Closing just means handing the bar back to the normal run/houses/bins view.
+    if(!on) window.clearMapTopBarContext();
 
     // Suppress GPS auto-centering while placing/dragging points — it was
     // yanking the map out from under the user's tap.
@@ -4835,10 +4874,14 @@
     geofenceDrawColor=nextGeofenceColor();
     geofenceDrawRuns=runs;
     setGeofenceEditingState(true);
-    document.getElementById('geofenceDrawTitle').textContent=geofenceDrawName;
-    document.getElementById('geofenceDrawHint').textContent='Tap the map to add points (need at least 3)';
-    document.getElementById('geofenceDrawToolbar').style.display='flex';
-    const undoBtn=document.getElementById('geofenceUndoBtn'); if(undoBtn) undoBtn.style.display='';
+    window.setMapTopBarContext(
+      `${geofenceDrawName} · 0 pts`,
+      [
+        {label:'Undo', icon:'↩️', onClick:()=>window.undoGeofenceDrawPoint()},
+        {label:'Finish', icon:'✔️', onClick:()=>window.finishGeofenceDraw(), variant:'primary'}
+      ],
+      ()=>window.cancelGeofenceDraw()
+    );
     redrawGeofenceDraftLayer();
   };
 
@@ -4862,22 +4905,27 @@
     }
   }
 
+  // Keeps the top bar's title in sync with point count while drawing/editing.
+  function updateGeofenceContextTitle(){
+    const n = geofenceDrawPoints.length;
+    const label = geofenceEditId
+      ? `Editing: ${geofences.find(f=>f.id===geofenceEditId)?.name || ''}`
+      : geofenceDrawName;
+    window.updateMapTopBarContextTitle(
+      n<3 ? `${label} · ${n} pt${n===1?'':'s'}` : `${label} · ${n} pts · ready`
+    );
+  }
+
   window.addGeofenceDrawPoint = function(latlng){
     geofenceDrawPoints.push(latlng);
-    const hint=document.getElementById('geofenceDrawHint');
-    if(hint) hint.textContent = geofenceDrawPoints.length<3
-      ? `${geofenceDrawPoints.length} point(s) — need at least 3`
-      : `${geofenceDrawPoints.length} point(s) — tap Finish when done`;
+    updateGeofenceContextTitle();
     redrawGeofenceDraftLayer();
   };
 
   window.undoGeofenceDrawPoint = function(){
     geofenceDrawPoints.pop();
     redrawGeofenceDraftLayer();
-    const hint=document.getElementById('geofenceDrawHint');
-    if(hint) hint.textContent = geofenceDrawPoints.length<3
-      ? `${geofenceDrawPoints.length} point(s) — need at least 3`
-      : `${geofenceDrawPoints.length} point(s) — tap Finish when done`;
+    updateGeofenceContextTitle();
   };
 
   window.finishGeofenceDraw = async function(){
@@ -4916,7 +4964,6 @@
     geofenceDrawActive=false;
     geofenceDrawPoints=[];
     geofenceEditId=null;
-    document.getElementById('geofenceDrawToolbar').style.display='none';
     setGeofenceEditingState(false);
   }
 
@@ -4930,10 +4977,13 @@
     geofenceDrawActive=false;
     geofenceDrawPoints=fence.points.map(p=>({lat:p[0],lng:p[1]}));
     setGeofenceEditingState(true);
-    document.getElementById('geofenceDrawTitle').textContent=`Editing: ${fence.name}`;
-    document.getElementById('geofenceDrawHint').textContent='Drag points to reshape. Tap Finish to save.';
-    document.getElementById('geofenceDrawToolbar').style.display='flex';
-    const undoBtn=document.getElementById('geofenceUndoBtn'); if(undoBtn) undoBtn.style.display='none';
+    window.setMapTopBarContext(
+      `Editing: ${fence.name} · ${geofenceDrawPoints.length} pts`,
+      [
+        {label:'Finish', icon:'✔️', onClick:()=>window.finishGeofenceDraw(), variant:'primary'}
+      ],
+      ()=>window.cancelGeofenceDraw()
+    );
     renderGeofenceEditHandles();
   }
 
@@ -9271,6 +9321,93 @@ window.addEventListener('DOMContentLoaded', async () => {
     align-items: center !important;
     justify-content: center !important;
     padding: 0 !important;
+  }
+
+  /* --- CONTEXTUAL FUNCTION BAR ---
+     Reuses .map-run-colored-box wholesale (same shape, height, radius,
+     fade-out mask) so it reads as literally the same component, just
+     recoloured neutral (brand-dark) since it isn't tied to a stream. */
+  .map-context-bar {
+    display: none;
+  }
+  .map-context-box {
+    background: var(--brand-dark) !important;
+    border-color: var(--brand-dark) !important;
+    color: var(--white) !important;
+    cursor: default !important;
+  }
+  .map-context-buttons {
+    display: flex !important;
+    align-items: center !important;
+    gap: 6px !important;
+    flex-shrink: 0 !important;
+  }
+  .map-context-btn {
+    flex-shrink: 0 !important;
+    border: 1px solid rgba(255,255,255,0.5) !important;
+    background: rgba(255,255,255,0.14) !important;
+    color: var(--white) !important;
+    font-weight: 700 !important;
+    font-size: 13px !important;
+    padding: 5px 10px !important;
+    border-radius: 7px !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    gap: 4px !important;
+    cursor: pointer !important;
+    white-space: nowrap !important;
+    line-height: 1 !important;
+  }
+  .map-context-btn.primary {
+    background: var(--white) !important;
+    color: var(--brand-dark) !important;
+    border-color: var(--white) !important;
+  }
+  .map-context-btn.danger {
+    background: rgba(220,38,38,0.9) !important;
+    border-color: rgba(220,38,38,0.95) !important;
+  }
+
+  /* --- SETTINGS MENU: same rounded, bold, boxed look as the top bar --- */
+  .map-settings-category {
+    border: none !important;
+    background: var(--white);
+    border-radius: 12px;
+    margin-bottom: 8px;
+    box-shadow: 0 2px 8px rgba(15,23,42,0.08);
+    overflow: hidden;
+  }
+  .map-settings-category:first-of-type {
+    border-top: none;
+  }
+  .map-settings-category > summary {
+    list-style: none;
+    cursor: pointer;
+    padding: 12px 14px;
+    font-size: 14px;
+    font-weight: 800;
+    color: var(--white);
+    background: var(--brand-dark);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .map-settings-category > summary::-webkit-details-marker {
+    display: none;
+  }
+  .map-settings-category-chevron {
+    color: var(--white);
+    opacity: 0.85;
+  }
+  .map-settings-category-body {
+    padding: 12px !important;
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+  }
+  .map-settings-category .map-tool-btn {
+    border-radius: 10px;
   }
 
 </style>
