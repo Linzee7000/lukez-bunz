@@ -19,6 +19,7 @@
   --white:#ffffff; --slate-50:#f8fafc; --slate-100:#f1f5f9; --slate-200:#e2e8f0; --slate-200-b:#e5e9f0;
   --slate-300:#cbd5e1; --slate-400:#94a3b8; --slate-500:#64748b; --slate-600:#475569; --slate-700:#334155;
   --slate-800:#1e293b; --slate-900:#0f172a; --near-black:#111111;
+
   /* Brand green */
   --brand-dark:#1b4332; --brand:#2d6a4f; --brand-light:#52b788;
   --green-800:#166534; --green-700:#15803d; --green-600:#16a34a; --green-300:#86efac; --green-100:#dcfce7;
@@ -1900,6 +1901,13 @@
     flex-direction: column;
     gap: 6px;
   }
+  /* While drawing/editing a geofence, its toolbar moves to the TOP of the
+     screen instead of the bottom, so its buttons are never hidden behind
+     the bottom navigation bar (Search/Drive/Map). */
+  .property-focus-toolbar.geofence-toolbar-top {
+    bottom: auto;
+    top: 8px;
+  }
   .property-focus-header {
     display: flex;
     align-items: center;
@@ -3126,7 +3134,7 @@
             <button type="button" id="btnSnapToRoads" class="map-tool-btn map-settings-action" onclick="snapActiveBoundaryToRoads()">🧲 Snap to Houses</button>
           </div>
           <div class="map-toolbar-row map-run-setup-actions">
-            <button type="button" class="map-tool-btn map-tool-btn-soon" onclick="mapSettingsComingSoon('Snap the boundary to road centrelines')">🛣️ Snap to Roads<span class="map-tool-btn-soon-tag">Soon</span></button>
+            <button type="button" class="map-tool-btn map-settings-action" onclick="snapBoundaryToRoads()">🛣️ Snap to Roads</button>
             <button type="button" class="map-tool-btn map-tool-btn-soon" onclick="mapSettingsComingSoon('Save run boundary edits')">💾 Save<span class="map-tool-btn-soon-tag">Soon</span></button>
           </div>
           <div class="map-toolbar-row map-run-setup-actions" style="margin-top:2px;">
@@ -5049,9 +5057,33 @@
     renderGeofences();
   }
 
+  let geofenceResumeFollow = false;
   function setGeofenceEditingState(on){
     mapEditingActive = on;
     updateMapTelemetryVisibility();
+
+    // Hide the top run/houses/bins/settings bar and show the geofence
+    // toolbar in its place instead, so the toolbar's buttons are never
+    // hidden behind the bottom navigation bar.
+    const summaryBar = document.querySelector('.map-summary-bar');
+    const toolbar = document.getElementById('geofenceDrawToolbar');
+    if(summaryBar) summaryBar.style.display = on ? 'none' : '';
+    if(toolbar) toolbar.classList.toggle('geofence-toolbar-top', on);
+
+    // Suppress GPS auto-centering while placing/dragging points — it was
+    // yanking the map out from under the user's tap.
+    if(on){
+      geofenceResumeFollow = !!isTruckFollowEnabled;
+      isTruckFollowEnabled = false;
+    } else if(geofenceResumeFollow){
+      isTruckFollowEnabled = true;
+    }
+    const followBtn = document.getElementById('btnTruckFollowTarget');
+    if(followBtn){
+      followBtn.classList.toggle('active', isTruckFollowEnabled);
+      const icon = followBtn.querySelector('img');
+      if(icon) icon.src = isTruckFollowEnabled ? 'navigation.png' : 'target.png';
+    }
   }
 
   // -- Create (tap-to-draw) --
@@ -7961,6 +7993,111 @@ window.addEventListener('DOMContentLoaded', async () => {
     renderMapData();
     if (isRoadSnapEditing) enableBoundaryVertexHandles();
     alert(`Boundary successfully snapped to the perimeter of ${housePoints.length} houses on this run.`);
+  };
+
+  // Run Boundary > Snap to Roads: pull nearby road geometry from
+  // OpenStreetMap (Overpass API) and snap each boundary vertex onto the
+  // closest road centreline, so the boundary hugs actual streets instead
+  // of a straight-line hull between houses.
+  async function fetchNearbyRoadLines(bounds){
+    const query = `[out:json][timeout:25];way["highway"](${bounds.south},${bounds.west},${bounds.north},${bounds.east});out geom;`;
+    const url = 'https://overpass-api.de/api/interpreter?data=' + encodeURIComponent(query);
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 20000);
+    let resp;
+    try {
+      resp = await fetch(url, { signal: controller.signal });
+    } finally {
+      clearTimeout(timeoutId);
+    }
+    if (!resp.ok) throw new Error(`Overpass request failed (${resp.status})`);
+    const data = await resp.json();
+    return (data.elements || [])
+      .filter(el => el.type === 'way' && Array.isArray(el.geometry) && el.geometry.length >= 2)
+      .map(el => el.geometry.map(g => [g.lon, g.lat]));
+  }
+
+  window.snapBoundaryToRoads = async function() {
+    const runs = Array.from(selectedMapRuns());
+    if (runs.length !== 1) {
+      alert('Please select exactly one run to snap its boundary to roads.');
+      return;
+    }
+    const runKey = runs[0];
+
+    let points = null;
+    if (customRunBorders[runKey]?.length >= 3) {
+      points = customRunBorders[runKey].map(p => Array.isArray(p)
+        ? { lat: Number(p[0]), lng: Number(p[1]) }
+        : { lat: Number(p.lat), lng: Number(p.lng) });
+    } else if (mapHullsLayer) {
+      let found = null;
+      mapHullsLayer.eachLayer(layer => {
+        if (!found && layer instanceof L.Polygon && layer._runGroupKey === runKey) {
+          found = (layer.getLatLngs()[0] || []).map(ll => ({ lat: ll.lat, lng: ll.lng }));
+        }
+      });
+      points = found;
+    }
+
+    if (!points || points.length < 3) {
+      alert('No boundary is currently drawn for this run. Use "Snap to Houses" or edit one first, then snap to roads.');
+      return;
+    }
+
+    if (typeof turf === 'undefined') {
+      alert('Snap to Roads needs the mapping library (Turf) which failed to load. Check your internet connection and reload the page.');
+      return;
+    }
+
+    const lats = points.map(p => p.lat), lngs = points.map(p => p.lng);
+    const pad = 0.006; // roughly 600m buffer around the boundary
+    const bounds = {
+      south: Math.min(...lats) - pad, west: Math.min(...lngs) - pad,
+      north: Math.max(...lats) + pad, east: Math.max(...lngs) + pad
+    };
+
+    let roadLines;
+    try {
+      roadLines = await fetchNearbyRoadLines(bounds);
+    } catch (err) {
+      alert(`Could not fetch road data from OpenStreetMap: ${err.message || err}. Check your internet connection and try again.`);
+      return;
+    }
+
+    if (!roadLines.length) {
+      alert('No road data was found near this run. Try again in a moment, or use "Edit Boundary" to adjust it by hand.');
+      return;
+    }
+
+    const MAX_SNAP_METERS = 35;
+    let movedCount = 0;
+    const snapped = points.map(pt => {
+      const turfPt = turf.point([pt.lng, pt.lat]);
+      let best = null;
+      roadLines.forEach(coords => {
+        if (coords.length < 2) return;
+        try {
+          const line = turf.lineString(coords);
+          const res = turf.nearestPointOnLine(line, turfPt, { units: 'meters' });
+          if (res && (!best || res.properties.dist < best.dist)) {
+            best = { dist: res.properties.dist, coord: res.geometry.coordinates };
+          }
+        } catch (e) { /* skip malformed way geometry */ }
+      });
+      if (best && best.dist <= MAX_SNAP_METERS) {
+        movedCount++;
+        return { lat: best.coord[1], lng: best.coord[0] };
+      }
+      return pt;
+    });
+
+    customRunBorders[runKey] = snapped.map(p => [p.lat, p.lng]);
+    await saveToDB('customRunBorders', customRunBorders);
+
+    renderMapData();
+    if (isRoadSnapEditing) enableBoundaryVertexHandles();
+    alert(`Snapped ${movedCount} of ${points.length} boundary point(s) to nearby roads.`);
   };
 
   // Run Boundary > Export: write the run's current boundary (whichever is
