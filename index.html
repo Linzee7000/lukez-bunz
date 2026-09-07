@@ -7298,6 +7298,9 @@ window.addEventListener('DOMContentLoaded', async () => {
   ];
 
   let isTrackUpEnabled = false;
+  // The zoom level Leaflet was at just before Track-Up turned on, so it can
+  // be restored exactly when Track-Up turns back off.
+  let trackUpOriginalZoom = null;
   let houseStreetModes = JSON.parse(localStorage.getItem('lukezBunzHouseStreetModes') || '{}');
 
   const q = id => document.getElementById(id);
@@ -7979,6 +7982,24 @@ window.addEventListener('DOMContentLoaded', async () => {
         scale = Math.max(1.5, (diagonal / Math.min(w, h)) + 0.1);
       }
 
+      // Covering that extra ground purely by CSS-stretching the already
+      // rendered tiles is what made the map look "zoomed in" and blurry -
+      // a 1.5x+ CSS scale is a crude upscale of the same pixels. Instead,
+      // do the bulk of the enlargement with a real Leaflet zoom step first
+      // (that pulls in properly rendered, sharp tiles at the higher zoom),
+      // then only apply whatever small leftover scale is needed on top -
+      // usually well under 1x, i.e. no visible blur at all.
+      if (leafletMap) {
+        if (trackUpOriginalZoom === null) {
+          trackUpOriginalZoom = leafletMap.getZoom();
+        }
+        const zoomBoost = Math.max(0, Math.ceil(Math.log2(scale)));
+        const maxZoom = (typeof leafletMap.getMaxZoom === 'function') ? leafletMap.getMaxZoom() : trackUpOriginalZoom + zoomBoost;
+        const targetZoom = Math.min(trackUpOriginalZoom + zoomBoost, maxZoom);
+        leafletMap.setZoom(targetZoom);
+        scale = scale / Math.pow(2, targetZoom - trackUpOriginalZoom);
+      }
+
       if (mapEl) {
         mapEl.style.transform = `scale(${scale}) rotate(${-heading}deg)`;
       }
@@ -7993,6 +8014,12 @@ window.addEventListener('DOMContentLoaded', async () => {
         controlContainer.style.transformOrigin = 'top right';
       }
     } else {
+      // Restore the real zoom level Track-Up borrowed, so North-Up hands
+      // back a map at the same zoom the driver had it at before.
+      if (leafletMap && trackUpOriginalZoom !== null) {
+        leafletMap.setZoom(trackUpOriginalZoom);
+        trackUpOriginalZoom = null;
+      }
       if (mapEl) {
         mapEl.style.transform = 'none';
       }
@@ -9473,15 +9500,19 @@ window.addEventListener('DOMContentLoaded', async () => {
     box-shadow: 0 2px 8px rgba(15,23,42,0.18) !important;
   }
 
-  /* Colored (stream) bars dissolve into solid black by 90% of their own
-     width, flowing straight into the black gear button next to them
-     rather than fading to transparent. The already-black context bar
-     (.map-context-box, below) keeps its own solid black background and
-     needs no fade. */
-  .map-run-colored-box.stream-gar { background: linear-gradient(90deg, var(--red-600) 0%, var(--red-600) 55%, #000 90%, #000 100%) !important; border-color: var(--red-700) !important; color: var(--white) !important; }
-  .map-run-colored-box.stream-rec { background: linear-gradient(90deg, var(--yellow-400) 0%, var(--yellow-400) 55%, #000 90%, #000 100%) !important; border-color: var(--yellow-500) !important; color: var(--slate-800) !important; }
-  .map-run-colored-box.stream-summer { background: linear-gradient(90deg, var(--amber-500) 0%, var(--amber-500) 55%, #000 90%, #000 100%) !important; border-color: var(--amber-600) !important; color: var(--white) !important; }
-  .map-run-colored-box.stream-fog { background: linear-gradient(90deg, var(--green-600) 0%, var(--green-600) 55%, #000 90%, #000 100%) !important; border-color: var(--green-700) !important; color: var(--white) !important; }
+  /* Colored (stream) bars stay fully coloured until 85% of their own
+     width, then dissolve into solid black by 95% - flowing straight into
+     the black gear button next to them (0 gap, see square-top-bar-
+     integrated-settings below) rather than fading to transparent. That
+     keeps almost the whole bar reading as the stream colour, with just
+     enough of a black lead-in right at the end to blend into the gear
+     button, instead of colour bleeding away a third of the way across.
+     The already-black context bar (.map-context-box, below) keeps its
+     own solid black background and needs no fade. */
+  .map-run-colored-box.stream-gar { background: linear-gradient(90deg, var(--red-600) 0%, var(--red-600) 85%, #000 95%, #000 100%) !important; border-color: var(--red-700) !important; color: var(--white) !important; }
+  .map-run-colored-box.stream-rec { background: linear-gradient(90deg, var(--yellow-400) 0%, var(--yellow-400) 85%, #000 95%, #000 100%) !important; border-color: var(--yellow-500) !important; color: var(--slate-800) !important; }
+  .map-run-colored-box.stream-summer { background: linear-gradient(90deg, var(--amber-500) 0%, var(--amber-500) 85%, #000 95%, #000 100%) !important; border-color: var(--amber-600) !important; color: var(--white) !important; }
+  .map-run-colored-box.stream-fog { background: linear-gradient(90deg, var(--green-600) 0%, var(--green-600) 85%, #000 95%, #000 100%) !important; border-color: var(--green-700) !important; color: var(--white) !important; }
 
   .map-run-title {
     overflow: hidden !important;
@@ -9765,20 +9796,38 @@ window.addEventListener('DOMContentLoaded', async () => {
     width: 100% !important;
     max-width: none !important;
   }
-  /* No vertical gap between the run numbers and the first bin row, and no
-     gap between the bin rows themselves — both used to be reintroduced by
-     an earlier, more specific rule (.map-address-telemetry #mapBinsAtAddress)
-     that this plain #mapBinsAtAddress selector couldn't out-rank no matter
-     where it sat in the file. Matching that selector's specificity here
-     instead of a bare ID makes this the one that actually wins. */
+  /* A little breathing room between the run-number row above and the
+     first serial row, but still no gap between the bin rows themselves —
+     both used to be reintroduced by an earlier, more specific rule
+     (.map-address-telemetry #mapBinsAtAddress) that this plain
+     #mapBinsAtAddress selector couldn't out-rank no matter where it sat
+     in the file. Matching that selector's specificity here instead of a
+     bare ID makes this the one that actually wins. */
   .map-address-telemetry #mapBinsAtAddress {
-    margin-top: 0 !important;
+    margin-top: 8px !important;
     padding-top: 0 !important;
     border-top: none !important;
     gap: 0 !important;
   }
   .map-address-telemetry #mapBinsAtAddress .next-bin-row {
     margin: 0 !important;
+  }
+
+  /* Bin serial rows: the stream-colour chip on the left of each row should
+     sit hard against the true left edge of the box, in both orientations -
+     not inset by the card's own left padding. Bleed #mapBinsAtAddress out
+     past that padding on the left only (extending its width to match, so
+     the right edge doesn't move) rather than touching the padding value
+     itself, since that's shared with the rest of the card's content. */
+  .map-address-telemetry #mapBinsAtAddress {
+    margin-left: -12px !important;
+    width: calc(100% + 12px) !important;
+  }
+  @media (max-width:560px), (orientation: landscape) and (max-height:500px) {
+    .map-address-telemetry #mapBinsAtAddress {
+      margin-left: -10px !important;
+      width: calc(100% + 10px) !important;
+    }
   }
 
   /* ===== search-and-drive-landscape-columns ===== */
@@ -9877,6 +9926,21 @@ window.addEventListener('DOMContentLoaded', async () => {
     right: 0 !important;
     margin-left: auto !important;
     margin-right: auto !important;
+  }
+
+  /* ===== next-bin-box-landscape-hard-left =====
+     Centering the (narrower-than-screen) box in landscape just leaves
+     dead, wasted space down both sides of it. Pin it hard against the
+     left edge instead - same width/fade/everything it already has in
+     portrait, just anchored left rather than centred - and let any
+     leftover room sit to its right, which reads as more map rather than
+     wasted space since the box already fades to fully transparent at its
+     own right edge anyway. */
+  @media (orientation: landscape) {
+    div.map-address-telemetry {
+      margin-left: 0 !important;
+      margin-right: auto !important;
+    }
   }
 
 </style>
