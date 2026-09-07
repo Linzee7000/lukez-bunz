@@ -2044,6 +2044,14 @@
     flex-direction: column !important;
     gap: 6px !important;
     pointer-events: auto !important;
+    transition: top 0.2s ease !important;
+  }
+  /* The settings bar (plus its options row underneath, once a category is
+     picked) grows taller than the normal top bar and was overlapping the
+     first couple of these side buttons. Push them down clear of it while
+     settings is open instead of letting the bar paint over them. */
+  body.map-settings-open .map-fixed-side-overlay {
+    top: 168px !important;
   }
   /* Only style the floating map buttons (+, -, follow, arrow, layer toggle), NOT menu items */
   .map-fixed-side-overlay > button,
@@ -2543,13 +2551,28 @@
   .map-address-telemetry.addr-stream-fog .address-telemetry-address {
     color: var(--bright-green) !important;
   }
-  .map-address-telemetry .address-telemetry-speed span {
+  /* Speed and suburb now follow the same per-stream colour as the street
+     name above, instead of always being green regardless of the active
+     run's colour. */
+  .map-address-telemetry .address-telemetry-speed span,
+  .map-address-telemetry .address-telemetry-meta {
+    color: var(--bright-green) !important;
+  }
+  .map-address-telemetry.addr-stream-gar .address-telemetry-speed span,
+  .map-address-telemetry.addr-stream-gar .address-telemetry-meta {
+    color: var(--bright-red) !important;
+  }
+  .map-address-telemetry.addr-stream-rec .address-telemetry-speed span,
+  .map-address-telemetry.addr-stream-rec .address-telemetry-meta,
+  .map-address-telemetry.addr-stream-summer .address-telemetry-speed span,
+  .map-address-telemetry.addr-stream-summer .address-telemetry-meta {
+    color: var(--bright-yellow) !important;
+  }
+  .map-address-telemetry.addr-stream-fog .address-telemetry-speed span,
+  .map-address-telemetry.addr-stream-fog .address-telemetry-meta {
     color: var(--bright-green) !important;
   }
   .map-address-telemetry .address-telemetry-gps {
-    color: var(--bright-green-dim) !important;
-  }
-  .map-address-telemetry .address-telemetry-meta {
     color: var(--bright-green-dim) !important;
   }
   .map-address-telemetry .address-telemetry-speed small {
@@ -3661,7 +3684,19 @@
   // 20m between recorded points x 20,000 points = up to 400km of trail
   // before the oldest points start rolling off.
   let gpsTrailPoints = [];
-  let gpsTrailLine = null;
+  // Parallel boolean array: gpsTrailBreaks[i] === true means point i starts
+  // a brand-new segment rather than continuing the line from point i-1.
+  // A break is recorded whenever the tab/screen was hidden (or the app was
+  // fully closed and just restarted) since the previous fix, so the trail
+  // never draws a line jumping from wherever the truck was before the gap
+  // to wherever it is now - it just starts fresh from the current
+  // position, leaving the earlier segment exactly as it was.
+  let gpsTrailBreaks = [];
+  let gpsTrailLines = []; // one Leaflet polyline per continuous segment
+  let gpsTrailPendingBreak = false;
+  let gpsTrailLastFixAt = 0;
+  const GPS_TRAIL_BREAK_GAP_MS = 90 * 1000; // also break on a silent GPS gap this long, even without a visibility event
+  const GPS_TRAIL_MAX_SEGMENTS = 200;
   const GPS_TRAIL_MAX_POINTS = 20000;
   const GPS_TRAIL_MIN_STEP_METERS = 20;
   const GPS_TRAIL_SAVE_EVERY_N_POINTS = 25; // throttle IndexedDB writes
@@ -4074,16 +4109,36 @@
     const moved = previous ? getDistanceMeters(previous[0], previous[1], lat, lng) : Infinity;
     if (moved < GPS_TRAIL_MIN_STEP_METERS) return;
 
+    // Break the line (start a new segment) instead of connecting to the
+    // previous point when: this is the very first point ever, the tab/
+    // screen was hidden since the last fix (see visibilitychange below),
+    // the trail was just restored after the app was fully closed, or GPS
+    // fixes silently stopped for a while even without a visibility event.
+    const now = Date.now();
+    const gapTooLong = gpsTrailLastFixAt > 0 && (now - gpsTrailLastFixAt) > GPS_TRAIL_BREAK_GAP_MS;
+    const isBreak = gpsTrailPoints.length === 0 || gpsTrailPendingBreak || gapTooLong;
+    gpsTrailPendingBreak = false;
+    gpsTrailLastFixAt = now;
+
     gpsTrailPoints.push(pos);
-    if (gpsTrailPoints.length > GPS_TRAIL_MAX_POINTS) gpsTrailPoints.shift();
+    gpsTrailBreaks.push(isBreak);
+    if (gpsTrailPoints.length > GPS_TRAIL_MAX_POINTS) {
+      gpsTrailPoints.shift();
+      gpsTrailBreaks.shift();
+    }
 
     if (leafletMap) {
-      if (!gpsTrailLine) {
-        gpsTrailLine = L.polyline(gpsTrailPoints, {
+      if (isBreak || gpsTrailLines.length === 0) {
+        const seg = L.polyline([pos], {
           color: '#22c55e', weight: 4, opacity: 0.8, lineCap: 'round', lineJoin: 'round'
         }).addTo(leafletMap);
+        gpsTrailLines.push(seg);
+        if (gpsTrailLines.length > GPS_TRAIL_MAX_SEGMENTS) {
+          const old = gpsTrailLines.shift();
+          if (old) leafletMap.removeLayer(old);
+        }
       } else {
-        gpsTrailLine.setLatLngs(gpsTrailPoints);
+        gpsTrailLines[gpsTrailLines.length - 1].addLatLng(pos);
       }
     }
 
@@ -4093,7 +4148,31 @@
     if (gpsTrailPointsSinceSave >= GPS_TRAIL_SAVE_EVERY_N_POINTS) {
       gpsTrailPointsSinceSave = 0;
       saveToDB('gpsTrailPoints', gpsTrailPoints).catch(() => {});
+      saveToDB('gpsTrailBreaks', gpsTrailBreaks).catch(() => {});
     }
+  }
+
+  // Rebuilds every trail segment as its own Leaflet polyline, honouring
+  // gpsTrailBreaks so segments never get a connecting line drawn between
+  // them. Used when the map is (re)initialised with a trail that was
+  // already recorded (in the background, or restored from a previous
+  // session) before Leaflet existed to draw it.
+  function renderStoredGpsTrail() {
+    if (!leafletMap) return;
+    gpsTrailLines.forEach(seg => leafletMap.removeLayer(seg));
+    gpsTrailLines = [];
+    let currentSeg = null;
+    gpsTrailPoints.forEach((pt, i) => {
+      const isBreak = gpsTrailBreaks[i] || !currentSeg;
+      if (isBreak) {
+        currentSeg = L.polyline([pt], {
+          color: '#22c55e', weight: 4, opacity: 0.8, lineCap: 'round', lineJoin: 'round'
+        }).addTo(leafletMap);
+        gpsTrailLines.push(currentSeg);
+      } else {
+        currentSeg.addLatLng(pt);
+      }
+    });
   }
 
   function updateMapTruckPosition() {
@@ -4131,13 +4210,11 @@
 
     // Trail point recording happens in recordSnailTrailPoint() (called
     // directly from onGpsPositionSuccess) so it isn't gated on the map
-    // being open; if gpsTrailLine already exists it's kept in sync there.
-    // Make sure a trail drawn before this map instance existed still shows
-    // up the first time the map opens.
-    if (gpsTrailPoints.length > 1 && !gpsTrailLine) {
-      gpsTrailLine = L.polyline(gpsTrailPoints, {
-        color: '#22c55e', weight: 4, opacity: 0.8, lineCap: 'round', lineJoin: 'round'
-      }).addTo(leafletMap);
+    // being open. Make sure a trail recorded before this map instance
+    // existed still shows up (as its proper broken-up segments) the first
+    // time the map opens.
+    if (gpsTrailPoints.length > 1 && gpsTrailLines.length === 0) {
+      renderStoredGpsTrail();
     }
 
     applyHeadingUpMap();
@@ -5726,6 +5803,11 @@
     if (document.visibilityState === 'visible') {
       acquireGpsWakeLock();
       startLiveLocationWatcher();
+    } else {
+      // Screen off / app backgrounded: don't draw a line connecting
+      // wherever the truck was to wherever it ends up once GPS resumes -
+      // start a fresh trail segment on the next fix instead.
+      gpsTrailPendingBreak = true;
     }
   });
 
@@ -6678,12 +6760,13 @@ window.addEventListener('DOMContentLoaded', async () => {
       }
       startLiveLocationWatcher();
 
-      let cached = null, cachedEdits = null, cachedBorders = null, cachedTrail = null, cachedSyncCount = null, cachedKmzData = null, cachedGeofences = null;
+      let cached = null, cachedEdits = null, cachedBorders = null, cachedTrail = null, cachedTrailBreaks = null, cachedSyncCount = null, cachedKmzData = null, cachedGeofences = null;
       try {
         cached = await loadFromDB("masterRecords");
         cachedEdits = await loadFromDB("masterEditsLog");
         cachedBorders = await loadFromDB("customRunBorders");
         cachedTrail = await loadFromDB("gpsTrailPoints");
+        cachedTrailBreaks = await loadFromDB("gpsTrailBreaks");
         cachedSyncCount = await loadFromDB("lastSyncedEditCount");
         cachedKmzData = await loadFromDB("kmzDataByRun");
         cachedGeofences = await loadFromDB("geofences");
@@ -6702,10 +6785,18 @@ window.addEventListener('DOMContentLoaded', async () => {
       // Resume the snail trail from where it left off, so a page reload,
       // app restart, or the OS killing a backgrounded tab doesn't reset it
       // to empty - the trail keeps building across restarts, up to the
-      // same 400km cap.
+      // same 400km cap. The restored trail is marked with a pending break
+      // so the next fix this session starts a new segment from wherever
+      // the truck actually is now, instead of drawing a line back to
+      // wherever it was when the app was last closed.
       if (Array.isArray(cachedTrail) && cachedTrail.length > 0) {
         gpsTrailPoints = cachedTrail.slice(-GPS_TRAIL_MAX_POINTS);
+        gpsTrailBreaks = Array.isArray(cachedTrailBreaks)
+          ? cachedTrailBreaks.slice(-GPS_TRAIL_MAX_POINTS)
+          : gpsTrailPoints.map((_, i) => i === 0); // older saves had no break data - treat as one continuous segment
+        while (gpsTrailBreaks.length < gpsTrailPoints.length) gpsTrailBreaks.unshift(false);
         gpsTrailRestoredFromDB = true;
+        gpsTrailPendingBreak = true;
       }
 
       if (cachedEdits) masterEditsLog = cachedEdits;
@@ -9996,7 +10087,14 @@ window.addEventListener('DOMContentLoaded', async () => {
     max-height: 0 !important;
     opacity: 0 !important;
     transform: translateY(-6px) !important;
-    margin-top: 0 !important;
+    /* Cancels the 6px flex gap the parent .map-header-panel puts between
+       every direct child. Without this, the row sat a visible 6px below
+       the settings bar even while "closed" (max-height:0 has no width,
+       but the gap doesn't care), reading as a stray gap/second bar
+       floating just outside the settings bar instead of being part of
+       it. Kept negative in both states so the row stays flush whether
+       it's open or closed. */
+    margin-top: -6px !important;
     padding: 0 6px !important;
     background: linear-gradient(180deg, var(--bar-black-hi) 0%, var(--bar-black) 100%) !important;
     border-radius: 0 !important;
@@ -10008,7 +10106,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     max-height: 64px !important;
     opacity: 1 !important;
     transform: translateY(0) !important;
-    margin-top: 0 !important;
+    margin-top: -6px !important;
     padding: 6px !important;
     box-shadow:
       inset 0 1px 0 rgba(255,255,255,0.14),
