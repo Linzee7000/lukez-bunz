@@ -2576,6 +2576,22 @@
   .map-address-telemetry .address-telemetry-gps {
     color: var(--bright-green-dim) !important;
   }
+  /* Distance-to-next-bin + direction readout (top-right of the box):
+     matches whichever stream is currently active, same as the street name
+     and speed digits above/below it, instead of always being dim green. */
+  .map-address-telemetry .map-next-bin-meta {
+    color: var(--bright-green) !important;
+  }
+  .map-address-telemetry.addr-stream-gar .map-next-bin-meta {
+    color: var(--bright-red) !important;
+  }
+  .map-address-telemetry.addr-stream-rec .map-next-bin-meta,
+  .map-address-telemetry.addr-stream-summer .map-next-bin-meta {
+    color: var(--bright-yellow) !important;
+  }
+  .map-address-telemetry.addr-stream-fog .map-next-bin-meta {
+    color: var(--bright-green) !important;
+  }
   .map-address-telemetry .address-telemetry-speed small {
     color: var(--bright-green-dim) !important;
   }
@@ -2933,15 +2949,15 @@
 
       <!-- CURRENT ADDRESS TELEMETRY -->
       <div class="map-telemetry-banner address-telemetry-card map-address-telemetry">
-        <!-- These two float ABOVE the box itself (see .map-telemetry-float),
-             clear of its shaded/faded background, instead of living inside
-             the card's own grid. -->
-        <div id="mapNextBinDistance" class="map-telemetry-float map-telemetry-float-left">📍 —</div>
-        <div id="mapGpsSignal" class="map-telemetry-float map-telemetry-float-right">🛰️ —</div>
         <div class="address-telemetry-grid">
           <div id="mapLiveStreet" class="address-telemetry-address">check filter</div>
+          <!-- Distance to next bin + travel direction: lives in the grid's
+               top-right cell (col 2 / row 1 - see .address-telemetry-gps
+               positioning) instead of floating above the box, and picks up
+               the active stream's colour via .map-next-bin-meta (see CSS). -->
+          <div id="mapSpeedMeta" class="address-telemetry-gps map-next-bin-meta">📍 — · 🧭 —</div>
           <div id="mapAddressMeta" class="address-telemetry-meta">...</div>
-          <div class="address-telemetry-speed"><div id="mapSpeedMeta" class="address-telemetry-speed-meta">📍 — · 🧭 —</div><span id="mapLiveSpeed">0</span></div>
+          <div class="address-telemetry-speed"><span id="mapLiveSpeed">0</span></div>
           <div id="mapRunsAtAddress" class="address-telemetry-runs"></div>
           <div></div>
         </div>
@@ -5877,11 +5893,13 @@
     return sectors[Math.round(deg / 45) % 8];
   }
 
-  // Small line shown directly above the big speed digits: distance to the
-  // next bin (kept in sync with lastDistToNextBinM, set whenever
-  // renderCurrentAddressTelemetry runs) plus the current travel direction
-  // (kept in sync with lastValidHeading, set on every GPS fix). Called from
-  // both places so whichever one changes first, the line updates.
+  // Distance to the next bin (kept in sync with lastDistToNextBinM, set
+  // whenever renderCurrentAddressTelemetry runs) plus the current travel
+  // direction (kept in sync with lastValidHeading, set on every GPS fix).
+  // On the Map screen this renders top-right of the next-bin box
+  // (#mapSpeedMeta, class .map-next-bin-meta); on Drive it still sits
+  // above the speed digits (#hudSpeedMeta). Called from both places so
+  // whichever one changes first, the line updates.
   function updateSpeedMetaLine() {
     const distPart = (lastDistToNextBinM !== null && Number.isFinite(lastDistToNextBinM))
       ? `📍 ${lastDistToNextBinM}m`
@@ -6136,7 +6154,7 @@
     const row = document.getElementById('mapSettingsOptionsRow');
     if (normalBar) normalBar.style.display = '';
     if (settingsBar) settingsBar.style.display = 'none';
-    if (settingsBox) settingsBox.classList.remove('stream-gar', 'stream-rec', 'stream-summer', 'stream-fog');
+    if (settingsBox) settingsBox.classList.remove('stream-gar', 'stream-rec', 'stream-summer', 'stream-fog', 'has-options');
     if (row) row.classList.remove('has-row2');
     document.querySelectorAll('.map-settings-cat-btn').forEach(b => b.classList.remove('active'));
     document.querySelectorAll('.map-settings-option-group').forEach(g => g.classList.remove('active-group'));
@@ -6150,6 +6168,8 @@
     document.querySelectorAll('.map-settings-option-group').forEach(g => g.classList.toggle('active-group', g.dataset.group === cat));
     const row = document.getElementById('mapSettingsOptionsRow');
     if (row) row.classList.add('has-row2');
+    const settingsBox = document.getElementById('mapSettingsBarBox');
+    if (settingsBox) settingsBox.classList.add('has-options');
   };
   // Placeholder for Settings menu items that are UI-only for now.
   function mapSettingsComingSoon(what){
@@ -9099,9 +9119,6 @@ window.addEventListener('DOMContentLoaded', async () => {
   lastDistToNextBinM = site ? distToProp : null;
   updateSpeedMetaLine();
 
-  const mapDistanceEl = document.getElementById('mapNextBinDistance');
-  if (mapDistanceEl) mapDistanceEl.innerText = distText;
-
   const hudDistanceEl = document.getElementById('hudGpsDirection');
     if (hudDistanceEl) {
       hudDistanceEl.innerText = distText;
@@ -9194,16 +9211,11 @@ window.addEventListener('DOMContentLoaded', async () => {
     }
 
     const mapSpeedEl = document.getElementById('mapLiveSpeed');
-    const mapHeadingEl = document.getElementById('mapGpsSignal');
     if (mapSpeedEl) mapSpeedEl.innerText = `${speedKmh}`;
-    if (mapHeadingEl) {
-      const cardinal = getCardinalDirection(lastValidHeading);
-      mapHeadingEl.innerText = `🛰️ ±${accuracy}m · 🧭 ${cardinal} ${lastValidHeading}°`;
-    }
 
     // Travel direction changes with every fix even when the distance to
-    // the next bin hasn't (e.g. sitting at an address) - keep the meta
-    // line above the speed digits current too.
+    // the next bin hasn't (e.g. sitting at an address) - keep the
+    // top-right distance/direction readout current too.
     updateSpeedMetaLine();
 
     if (isTruckFollowEnabled && leafletMap) {
@@ -9218,6 +9230,32 @@ window.addEventListener('DOMContentLoaded', async () => {
     applyMapHeadingRotation();
     updateMapTruckPosition();
 
+    // Which side of the road a bin is on, relative to the direction of
+    // travel (not a fixed compass side - "left" always means the driver's
+    // left as they currently face, so it stays correct around bends and
+    // U-turns): relAngle is the bin's bearing minus the truck's heading,
+    // so 0deg=dead ahead, 90deg=right, 180deg=behind, 270deg=left. Each
+    // side gets a symmetric +/-70deg window (isLeft centred on 270,
+    // isRight centred on 90), leaving a 40deg cone dead-ahead and
+    // dead-behind that counts as neither - a bin square in front of or
+    // behind the truck isn't clearly on one side yet/anymore. isLeft and
+    // isRight can never both be true (200-340 and 20-160 don't overlap),
+    // so a bin is never double-counted. Only bins within 12m (see the `d
+    // > 12` guard above) are evaluated at all, and that range comfortably
+    // covers a bin from "approaching" through "level with" to "just
+    // passed" before the truck has driven far enough away to exit it -
+    // so a bin only changes once the truck has actually reached and gone
+    // past it, never from a distance.
+    //   - travelMode 'left'  -> only isLeft bins are touched; isRight
+    //     (and dead-ahead/behind) bins hit the `return` below and are
+    //     left completely alone, whichever side of the truck they're on.
+    //   - travelMode 'right' -> mirror image: only isRight bins change.
+    //   - travelMode 'all'   -> both sides are collected in this pass
+    //     (e.g. a rear-loader working both kerbs at once), so both change.
+    // If the driver only ever collects the left kerb, leave the map's
+    // side selector on "Left side" (setHudSide) and the right kerb's bins
+    // will never be recoloured or removed, regardless of how close the
+    // truck gets to them.
     activeMapCircleMarkers.forEach((markerObj, markerKey) => {
       const binId = markerObj.serial || markerKey;
       if (servicedBinSerials.has(binId)) return;
@@ -10099,11 +10137,20 @@ window.addEventListener('DOMContentLoaded', async () => {
      inside — categories or option buttons — sits with heaps of space
      either side of the bar. */
   body.map-settings-open #mapSettingsBarBox {
-    height: auto !important;
-    max-height: none !important;
+    /* Same footprint as the normal run/houses/bins bar (42px, no extra
+       top/bottom padding) just for being in settings mode. It only needs
+       to grow once a category is picked and the options row underneath
+       row 1 actually has buttons to show - see .has-options below. */
+    height: 42px !important;
     min-height: 42px !important;
+    max-height: 42px !important;
     flex-direction: column !important;
     align-items: stretch !important;
+    padding: 0 10px !important;
+  }
+  body.map-settings-open #mapSettingsBarBox.has-options {
+    height: auto !important;
+    max-height: none !important;
     padding: 8px 10px !important;
   }
   .map-settings-bar-row1 {
@@ -10353,7 +10400,6 @@ window.addEventListener('DOMContentLoaded', async () => {
       margin-bottom: 0 !important;
     }
   }
-
   /* ===== square-top-bar-integrated-settings =====
      Top bar (run/houses/bins bar + gear): straight edges everywhere, and
      the gear pulled flush against the colored bar (no gap, single shared
@@ -10391,32 +10437,6 @@ window.addEventListener('DOMContentLoaded', async () => {
     font-size: 54px !important;
   }
 
-  /* ===== next-bin-box-floating-badges =====
-     GPS signal and next-bin distance both live ABOVE the box now, clear
-     of its shaded/faded background, instead of sharing a cell inside the
-     card's grid. They're positioned relative to div.map-address-telemetry
-     itself (which is position:fixed, so it's their containing block) —
-     that way they track the box if its height changes, always sitting
-     just above it rather than at a fixed screen coordinate. */
-  div.map-address-telemetry {
-    position: fixed !important; /* re-affirm: containing block for the floats below */
-  }
-  .map-telemetry-float {
-    position: absolute !important;
-    top: -28px !important;
-    font-size: 13px !important;
-    font-weight: 700 !important;
-    line-height: 1 !important;
-    color: var(--bright-green) !important;
-    background: transparent !important;
-    white-space: nowrap !important;
-    pointer-events: none !important;
-    text-shadow: 0 1px 3px rgba(0,0,0,0.9), 0 0 6px rgba(0,0,0,0.65) !important;
-    z-index: 2 !important;
-  }
-  .map-telemetry-float-left { left: 14px !important; }
-  .map-telemetry-float-right { right: 14px !important; }
-
   /* ===== next-bin-box-width-cap =====
      Edge-to-edge full-bleed width made sense as a way to use up spare
      horizontal room, but it just stretches the box across the whole
@@ -10432,7 +10452,6 @@ window.addEventListener('DOMContentLoaded', async () => {
     margin-left: auto !important;
     margin-right: auto !important;
   }
-
   /* ===== next-bin-box-landscape-hard-left =====
      Centering the (narrower-than-screen) box in landscape just leaves
      dead, wasted space down both sides of it. Pin it hard against the
