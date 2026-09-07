@@ -7298,9 +7298,6 @@ window.addEventListener('DOMContentLoaded', async () => {
   ];
 
   let isTrackUpEnabled = false;
-  // The zoom level Leaflet was at just before Track-Up turned on, so it can
-  // be restored exactly when Track-Up turns back off.
-  let trackUpOriginalZoom = null;
   let houseStreetModes = JSON.parse(localStorage.getItem('lukezBunzHouseStreetModes') || '{}');
 
   const q = id => document.getElementById(id);
@@ -7971,63 +7968,67 @@ window.addEventListener('DOMContentLoaded', async () => {
     const heading = (lastValidHeading !== undefined && Number.isFinite(lastValidHeading)) ? lastValidHeading : 0;
 
     if (isTrackUpEnabled) {
-      // A uniform scale must cover the container's full diagonal at any
-      // rotation angle, not just a fixed guess - otherwise tall/narrow phone
-      // screens show grey corners near 45°/135° rotation angles.
+      // A uniform enlargement must cover the container's full diagonal at
+      // any rotation angle, not just a fixed guess - otherwise tall/narrow
+      // phone screens show grey corners near 45°/135° rotation angles.
       let scale = 1.5;
+      let w = 0, h = 0;
       if (container && container.clientWidth && container.clientHeight) {
-        const w = container.clientWidth;
-        const h = container.clientHeight;
+        w = container.clientWidth;
+        h = container.clientHeight;
         const diagonal = Math.sqrt(w * w + h * h);
         scale = Math.max(1.5, (diagonal / Math.min(w, h)) + 0.1);
       }
 
-      // Covering that extra ground purely by CSS-stretching the already
-      // rendered tiles is what made the map look "zoomed in" and blurry -
-      // a 1.5x+ CSS scale is a crude upscale of the same pixels. Instead,
-      // do the bulk of the enlargement with a real Leaflet zoom step first
-      // (that pulls in properly rendered, sharp tiles at the higher zoom),
-      // then only apply whatever small leftover scale is needed on top -
-      // usually well under 1x, i.e. no visible blur at all.
-      if (leafletMap) {
-        if (trackUpOriginalZoom === null) {
-          trackUpOriginalZoom = leafletMap.getZoom();
-        }
-        const zoomBoost = Math.max(0, Math.ceil(Math.log2(scale)));
-        const maxZoom = (typeof leafletMap.getMaxZoom === 'function') ? leafletMap.getMaxZoom() : trackUpOriginalZoom + zoomBoost;
-        const targetZoom = Math.min(trackUpOriginalZoom + zoomBoost, maxZoom);
-        leafletMap.setZoom(targetZoom);
-        scale = scale / Math.pow(2, targetZoom - trackUpOriginalZoom);
-      }
+      // Cover that extra ground by physically enlarging the map element
+      // itself (real width/height, centred on the same point) rather than
+      // CSS-scaling it up. A CSS scale just stretches the tiles Leaflet
+      // already rendered for the normal-size box - that's what made the
+      // map look "zoomed in" and blurry. Resizing the real element instead
+      // makes Leaflet render genuinely sharp tiles to fill the bigger area
+      // at the SAME zoom level, so nothing gets stretched past its native
+      // resolution and the apparent zoom level doesn't change at all.
+      if (mapEl && w && h) {
+        const bigW = w * scale;
+        const bigH = h * scale;
+        const offsetX = (bigW - w) / 2;
+        const offsetY = (bigH - h) / 2;
 
-      if (mapEl) {
-        mapEl.style.transform = `scale(${scale}) rotate(${-heading}deg)`;
+        mapEl.classList.add('map-track-up-enlarged');
+        mapEl.style.setProperty('--tu-map-top', (-offsetY) + 'px');
+        mapEl.style.setProperty('--tu-map-left', (-offsetX) + 'px');
+        mapEl.style.setProperty('--tu-map-w', bigW + 'px');
+        mapEl.style.setProperty('--tu-map-h', bigH + 'px');
+        mapEl.style.transform = `rotate(${-heading}deg)`;
+        if (leafletMap) leafletMap.invalidateSize({ pan: false, animate: false });
+
+        // Leaflet's own zoom/attribution controls live inside #mainLeafletMap
+        // and normally hold a fixed spot via CSS `position:fixed`, which - once
+        // an ancestor is transformed - re-anchors to that ancestor instead of
+        // the viewport. Counter-rotating plus translating them back by exactly
+        // the enlargement offset (in the rotated element's own coordinate
+        // space) cancels the resize-and-rotate out completely, so they land
+        // back at their normal on-screen spot, upright, regardless of heading.
+        if (controlContainer) {
+          controlContainer.style.transform = `rotate(${heading}deg) translate(${-offsetX}px, ${offsetY}px)`;
+          controlContainer.style.transformOrigin = '50% 50%';
+        }
       }
       if (arrowBtnSvg) {
         arrowBtnSvg.style.transform = `rotate(${heading}deg)`;
       }
-      // Counter-rotate Leaflet's own zoom/attribution controls (they live
-      // inside #mainLeafletMap) so they stay upright and normal-sized
-      // instead of spinning and scaling with the map underneath.
-      if (controlContainer) {
-        controlContainer.style.transform = `rotate(${heading}deg) scale(${1 / scale})`;
-        controlContainer.style.transformOrigin = 'top right';
-      }
     } else {
-      // Restore the real zoom level Track-Up borrowed, so North-Up hands
-      // back a map at the same zoom the driver had it at before.
-      if (leafletMap && trackUpOriginalZoom !== null) {
-        leafletMap.setZoom(trackUpOriginalZoom);
-        trackUpOriginalZoom = null;
-      }
       if (mapEl) {
+        mapEl.classList.remove('map-track-up-enlarged');
         mapEl.style.transform = 'none';
+        if (leafletMap) leafletMap.invalidateSize({ pan: false, animate: false });
       }
       if (arrowBtnSvg) {
         arrowBtnSvg.style.transform = 'none';
       }
       if (controlContainer) {
         controlContainer.style.transform = 'none';
+        controlContainer.style.transformOrigin = '';
       }
     }
   }
@@ -9941,6 +9942,22 @@ window.addEventListener('DOMContentLoaded', async () => {
       margin-left: 0 !important;
       margin-right: auto !important;
     }
+  }
+
+  /* ===== track-up-real-resize =====
+     Track-Up mode needs #mainLeafletMap physically bigger than the
+     viewport (not just CSS-scaled) so rotating it never reveals grey
+     corners, while Leaflet still renders real, sharp tiles to fill that
+     bigger area at the same zoom level. The base rule above sets
+     top/left/width/height with !important, so a plain inline style from
+     JS can't move it - this class matches (in fact beats, via the extra
+     class) that rule's specificity, and reads its actual pixel values
+     from CSS custom properties JS sets alongside it. */
+  #mainLeafletMap.map-track-up-enlarged {
+    top: var(--tu-map-top, 0) !important;
+    left: var(--tu-map-left, 0) !important;
+    width: var(--tu-map-w, 100%) !important;
+    height: var(--tu-map-h, 100%) !important;
   }
 
 </style>
