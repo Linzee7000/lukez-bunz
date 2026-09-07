@@ -1285,6 +1285,7 @@
     .geofence-row{display:flex;align-items:center;gap:9px;border:1px solid var(--slate-200);border-radius:10px;padding:8px 10px;margin-bottom:8px}
     .geofence-swatch{width:28px;height:28px;border-radius:8px;border:1px solid var(--slate-300);flex:0 0 auto;padding:0;cursor:pointer}
     .geofence-row-name{flex:1;font-weight:700;font-size:13px;color:var(--slate-800);background:none;border:none;text-align:left;cursor:pointer;padding:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .geofence-rename-hint{font-size:11px;color:var(--slate-400);font-weight:400;}
     .geofence-row-meta{font-size:11px;color:var(--slate-500);margin-top:1px}
     .geofence-row-actions{display:flex;gap:4px;flex:0 0 auto}
     .geofence-icon-btn{border:1px solid var(--slate-300);background:var(--white);border-radius:7px;padding:5px 7px;font-size:13px;cursor:pointer}
@@ -2730,8 +2731,9 @@
         <!-- CONTEXTUAL FUNCTION BAR: swapped in whenever a settings function
              (Geofence draw/edit, etc.) takes over the map. Same visual
              language as the bar above — one long fading box + a matching
-             square close button — just shows that function's name and its
-             own buttons instead of run/houses/bins. -->
+             square close button — just shows that function's name here;
+             its action buttons render in #mapContextRow2 below instead
+             (see that block's comment). -->
         <div class="map-top-bar map-summary-bar map-context-bar" id="mapContextBar" style="display:none;">
           <div class="map-run-colored-box map-context-box" id="mapContextBox">
             <span id="mapContextTitle" class="map-run-title">Mode</span>
@@ -2740,10 +2742,12 @@
           </div>
           <button type="button" class="map-settings-top-btn" id="mapContextCloseBtn" onclick="mapTopBarContextCloseClicked()" title="Close">&times;</button>
         </div>
-        <!-- Second row for contexts with more buttons than fit on one line
-             (e.g. run boundary editing's Snap Houses / Snap Roads / Remove
-             points) — shown below the title/Done/Close row in portrait
-             only; see .map-context-row2 CSS. -->
+        <!-- Action-button bar for the active context (e.g. run boundary
+             editing's Snap Houses / Snap Roads / Remove points / Done, or
+             geofence drawing's Undo / Finish). Rendered by
+             setMapTopBarContext and fixed to the bottom of the screen,
+             flush above the bottom nav — see #mapContextRow2 CSS — so it
+             never grows over the zoom/layers controls at the top. -->
         <div class="map-context-row2" id="mapContextRow2"></div>
 
         <!-- SETTINGS BAR: replaces the old centre-of-screen "Map settings"
@@ -4860,18 +4864,18 @@
   // ---- Map top-bar contextual mode ----------------------------------
   // Generic mechanism so any settings function (Geofence draw/edit today,
   // others later) can take over the main top bar: it shows that function's
-  // name plus its own buttons in place of run/houses/bins, and reverts to
-  // the normal bar the moment the function is closed.
+  // name in the top strip (plus a close X) and renders all of that
+  // function's action buttons in a dedicated bar pinned to the bottom of
+  // the screen, flush above the bottom nav — keeping the top strip lean
+  // (title + close only) so it never fights the zoom/layers controls
+  // stacked on the right under it. Reverts to the normal bar the moment
+  // the function is closed.
   window.__mapContextOnClose = null;
   window.__mapContextActions = [];
 
-  // buttons: array of {label, icon, onClick, variant, key, row}. Buttons
-  // flagged row:2 render in the dedicated second-row container too (they
-  // still get a mirrored copy in row 1 so the bar still works as one row
-  // on wide/landscape screens — see .map-context-row2 CSS for which copy
-  // actually shows). `key` lets a button's active/lit state be toggled
-  // later from anywhere via setMapContextBtnActive(key, bool) without
-  // needing to know whether the row-1 or row-2 copy is the visible one.
+  // buttons: array of {label, icon, onClick, variant, key}. `key` lets a
+  // button's active/lit state be toggled later from anywhere via
+  // setMapContextBtnActive(key, bool).
   window.setMapTopBarContext = function(title, buttons, onClose){
     const normalBar = document.getElementById('mapNormalTopBar');
     const contextBar = document.getElementById('mapContextBar');
@@ -4884,20 +4888,15 @@
     const allButtons = (buttons||[]).map((b,i)=>({...b, key: b.key || `ctxbtn_${i}`}));
 
     if(titleEl) titleEl.textContent = title || '';
-    if(dividerEl) dividerEl.style.display = allButtons.length ? '' : 'none';
+    if(dividerEl) dividerEl.style.display = 'none';
+    if(btnsEl) btnsEl.innerHTML = '';
 
     window.__mapContextActions = allButtons.map(b=>b.onClick);
 
-    if(btnsEl){
-      btnsEl.innerHTML = allButtons.map((b,i)=>
-        `<button type="button" class="map-context-btn ${b.variant||''} ${b.row===2?'map-context-btn-row2mirror':''}" data-context-key="${b.key}" onclick="event.stopPropagation(); window.__mapContextActions[${i}]()">${b.icon?b.icon+' ':''}${esc(b.label||'')}</button>`
-      ).join('');
-    }
     if(row2El){
-      const row2Buttons = allButtons.map((b,i)=>({...b, i})).filter(b=>b.row===2);
-      if(row2Buttons.length){
-        row2El.innerHTML = row2Buttons.map(b=>
-          `<button type="button" class="map-context-btn ${b.variant||''}" data-context-key="${b.key}" onclick="event.stopPropagation(); window.__mapContextActions[${b.i}]()">${b.icon?b.icon+' ':''}${esc(b.label||'')}</button>`
+      if(allButtons.length){
+        row2El.innerHTML = allButtons.map((b,i)=>
+          `<button type="button" class="map-context-btn ${b.variant||''}" data-context-key="${b.key}" onclick="event.stopPropagation(); window.__mapContextActions[${i}]()">${b.icon?b.icon+' ':''}${esc(b.label||'')}</button>`
         ).join('');
         row2El.classList.add('has-row2');
       } else {
@@ -5161,7 +5160,7 @@
       <div class="geofence-row">
         <input type="color" class="geofence-swatch" value="${fence.color}" onchange="recolorGeofence('${fence.id}', this.value)" title="Colour">
         <div style="flex:1;min-width:0;">
-          <button type="button" class="geofence-row-name" onclick="renameGeofence('${fence.id}')" title="Tap to rename">${esc(fence.name)}</button>
+          <button type="button" class="geofence-row-name" onclick="renameGeofence('${fence.id}')" title="Tap to rename">${esc(fence.name)} <span class="geofence-rename-hint">✎</span></button>
           <div class="geofence-row-meta">${fence.points.length} point(s) · ${esc(formatRunsBadge(fence.runs))}</div>
         </div>
         <div class="geofence-row-actions">
@@ -9692,6 +9691,46 @@ window.addEventListener('DOMContentLoaded', async () => {
     border-color: var(--bright-green-dim) !important;
   }
 
+  /* Context action-button bar (Snap Houses / Snap Roads / Remove points
+     for boundary editing, Undo / Finish for geofence drawing, etc). Used
+     to render as a second row squeezed in right under the top bar, where
+     it could grow tall enough to cover the zoom/layers/follow controls
+     stacked on the right. Every action button now renders in here (not
+     in the top strip, which stays just title + close) and the whole
+     thing is pinned to the bottom of the screen, flush above the bottom
+     nav — same treatment as the settings options row: solid black-chrome
+     backdrop, square corners, no gap to the nav bar below it. Scoped to
+     the #mapContextRow2 id (not the shared .map-context-row2 class) so
+     it doesn't affect the settings options row, which reuses that class
+     but stays anchored under the settings strip. */
+  #mapContextRow2 {
+    display: none;
+    position: fixed !important;
+    left: 0 !important;
+    right: 0 !important;
+    bottom: 58px !important;
+    z-index: 2500 !important;
+    width: 100% !important;
+    flex-wrap: wrap !important;
+    row-gap: 0 !important;
+    column-gap: 6px !important;
+    margin-top: 0 !important;
+    padding: 8px !important;
+    background: linear-gradient(180deg, var(--bar-black-hi) 0%, var(--bar-black) 100%) !important;
+    border-radius: 0 !important;
+    border-top: 1px solid #000 !important;
+    box-shadow:
+      inset 0 1px 0 rgba(255,255,255,0.14),
+      0 -3px 10px rgba(0,0,0,0.4) !important;
+  }
+  #mapContextRow2.has-row2 {
+    display: flex !important;
+  }
+  #mapContextRow2 .map-context-btn {
+    flex: 0 0 auto !important;
+    justify-content: center !important;
+  }
+
   /* Second row of context buttons — only used when a context (like run
      boundary editing) supplies more buttons than comfortably fit on one
      line. Hidden by default; the portrait/landscape rules below decide
@@ -9705,13 +9744,6 @@ window.addEventListener('DOMContentLoaded', async () => {
   .map-context-row2 .map-context-btn {
     flex: 1 1 0 !important;
     justify-content: center !important;
-  }
-  @media (orientation: portrait) {
-    .map-context-row2.has-row2 { display: flex !important; }
-    .map-context-btn-row2mirror { display: none !important; }
-  }
-  @media (orientation: landscape) {
-    .map-context-row2 { display: none !important; }
   }
 
   /* --- SETTINGS BAR: category strip in the top bar + the options row
