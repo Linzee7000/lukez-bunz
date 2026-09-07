@@ -1436,6 +1436,7 @@
     .address-telemetry-speed{grid-column:2;grid-row:2 / span 2;align-self:center;text-align:right;white-space:nowrap}
     .address-telemetry-speed span{display:block;font-size:48px;line-height:.85;font-weight:800;color:var(--sky-400)}
     .address-telemetry-speed small{display:block;font-size:12px;color:var(--slate-400);margin-top:5px;font-weight:700;text-transform:uppercase;letter-spacing:.06em}
+    .address-telemetry-speed-meta{display:block;font-size:11px;color:var(--slate-400);margin-bottom:4px;font-weight:700;text-align:right;white-space:nowrap;line-height:1}
     .address-telemetry-runs{display:flex;gap:6px;flex-wrap:wrap;min-height:32px;align-items:center}
     .address-telemetry-runs .hdr-run-badge{font-size:13px;padding:4px 8px}
     .address-telemetry-bins{display:flex;gap:6px;flex-wrap:wrap;border-top:1px solid rgba(148,163,184,.22);margin-top:10px;padding-top:10px}
@@ -2578,6 +2579,9 @@
   .map-address-telemetry .address-telemetry-speed small {
     color: var(--bright-green-dim) !important;
   }
+  .map-address-telemetry .address-telemetry-speed-meta {
+    color: var(--bright-green-dim) !important;
+  }
   .map-address-telemetry .hud-bin-container {
     margin-top: 8px !important;
     display: flex !important;
@@ -2780,7 +2784,7 @@
         <div id="hudStreetName" class="address-telemetry-address">Scanning Street...</div>
         <div id="hudGpsDirection" class="address-telemetry-gps">📡 GPS · 🧭 N 0°</div>
         <div id="hudAddressMeta" class="address-telemetry-meta">...</div>
-        <div class="address-telemetry-speed"><span id="hudSpeed">0</span></div>
+        <div class="address-telemetry-speed"><div id="hudSpeedMeta" class="address-telemetry-speed-meta">📍 — · 🧭 —</div><span id="hudSpeed">0</span></div>
         <div id="hudRunsAtAddress" class="address-telemetry-runs"></div>
         <div></div>
       </div>
@@ -2937,7 +2941,7 @@
         <div class="address-telemetry-grid">
           <div id="mapLiveStreet" class="address-telemetry-address">check filter</div>
           <div id="mapAddressMeta" class="address-telemetry-meta">...</div>
-          <div class="address-telemetry-speed"><span id="mapLiveSpeed">0</span></div>
+          <div class="address-telemetry-speed"><div id="mapSpeedMeta" class="address-telemetry-speed-meta">📍 — · 🧭 —</div><span id="mapLiveSpeed">0</span></div>
           <div id="mapRunsAtAddress" class="address-telemetry-runs"></div>
           <div></div>
         </div>
@@ -3479,6 +3483,11 @@
   let streetHashIndex = new Map();
   let userCurrentLocation = null;
   let lastValidHeading = 0;
+  // Distance (metres) from the truck to the next/current bin address, kept
+  // in sync with the floating 📍 badge so the new meta line above the
+  // speed digits (#hudSpeedMeta / #mapSpeedMeta) can show the same number
+  // without recomputing it a second time.
+  let lastDistToNextBinM = null;
   let lastGpsCoords = { lat: 0, lng: 0 };
   let gpsWatchId = null;
 
@@ -5868,6 +5877,23 @@
     return sectors[Math.round(deg / 45) % 8];
   }
 
+  // Small line shown directly above the big speed digits: distance to the
+  // next bin (kept in sync with lastDistToNextBinM, set whenever
+  // renderCurrentAddressTelemetry runs) plus the current travel direction
+  // (kept in sync with lastValidHeading, set on every GPS fix). Called from
+  // both places so whichever one changes first, the line updates.
+  function updateSpeedMetaLine() {
+    const distPart = (lastDistToNextBinM !== null && Number.isFinite(lastDistToNextBinM))
+      ? `📍 ${lastDistToNextBinM}m`
+      : '📍 —';
+    const dirPart = `🧭 ${getCardinalDirection(lastValidHeading || 0)}`;
+    const text = `${distPart} · ${dirPart}`;
+    ['hudSpeedMeta', 'mapSpeedMeta'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.innerText = text;
+    });
+  }
+
   function getDistanceMeters(lat1, lon1, lat2, lon2) {
     const R = 6371e3;
     const φ1 = lat1 * Math.PI / 180;
@@ -7536,6 +7562,18 @@ window.addEventListener('DOMContentLoaded', async () => {
   ];
 
   let isTrackUpEnabled = false;
+  // Continuous (unwrapped) map rotation angle. #mainLeafletMap has a CSS
+  // transition on transform, and CSS animates rotate() by the raw numeric
+  // degree difference between the old and new value - NOT the shortest way
+  // round the compass. Feeding it the raw 0-359 heading every time meant a
+  // heading crossing the 360/0 boundary (e.g. 358deg -> 3deg) produced a
+  // huge ~355deg swing the "long way" instead of a small 5deg correction -
+  // that's what looked like the screen "spinning/confused" when turning
+  // near north. Keeping one running total here and always stepping it by
+  // the shortest angular delta means the value handed to CSS is always
+  // close to its previous value, so the transition is always the short
+  // way round, however many times the heading wraps.
+  let mapRotationDeg = 0;
   let houseStreetModes = JSON.parse(localStorage.getItem('lukezBunzHouseStreetModes') || '{}');
 
   const q = id => document.getElementById(id);
@@ -8203,7 +8241,16 @@ window.addEventListener('DOMContentLoaded', async () => {
     const mapEl = document.getElementById('mainLeafletMap');
     const arrowBtnSvg = document.getElementById('trackUpCompassIcon');
     const controlContainer = mapEl ? mapEl.querySelector('.leaflet-control-container') : null;
-    const heading = (lastValidHeading !== undefined && Number.isFinite(lastValidHeading)) ? lastValidHeading : 0;
+    const rawHeading = (lastValidHeading !== undefined && Number.isFinite(lastValidHeading)) ? lastValidHeading : 0;
+
+    // Step the running rotation total by the shortest angular delta to the
+    // new target, instead of jumping straight to -rawHeading. This is what
+    // stops the map spinning almost all the way round whenever the GPS
+    // heading crosses 0/360 (see mapRotationDeg comment above).
+    const targetRotation = isTrackUpEnabled ? -rawHeading : 0;
+    const shortestDelta = ((targetRotation - mapRotationDeg + 540) % 360) - 180;
+    mapRotationDeg += shortestDelta;
+    const heading = -mapRotationDeg; // effective heading used below for the counter-rotated overlay controls
 
     if (isTrackUpEnabled) {
       // A uniform enlargement must cover the container's full diagonal at
@@ -9047,6 +9094,11 @@ window.addEventListener('DOMContentLoaded', async () => {
 
   const distText = site ? `📍 ${distToProp}m` : '📍 —';
 
+  // Keep the new meta line above the speed digits in sync with the same
+  // distance-to-next-bin value used by the floating 📍 badge above.
+  lastDistToNextBinM = site ? distToProp : null;
+  updateSpeedMetaLine();
+
   const mapDistanceEl = document.getElementById('mapNextBinDistance');
   if (mapDistanceEl) mapDistanceEl.innerText = distText;
 
@@ -9148,6 +9200,11 @@ window.addEventListener('DOMContentLoaded', async () => {
       const cardinal = getCardinalDirection(lastValidHeading);
       mapHeadingEl.innerText = `🛰️ ±${accuracy}m · 🧭 ${cardinal} ${lastValidHeading}°`;
     }
+
+    // Travel direction changes with every fix even when the distance to
+    // the next bin hasn't (e.g. sitting at an address) - keep the meta
+    // line above the speed digits current too.
+    updateSpeedMetaLine();
 
     if (isTruckFollowEnabled && leafletMap) {
       if (!hasAutoCenteredTruck) {
@@ -9783,19 +9840,27 @@ window.addEventListener('DOMContentLoaded', async () => {
     max-height: 42px !important;
     box-sizing: border-box !important;
     margin: 0 !important;
-    padding: 0 16px !important;
+    padding: 0 10px !important;
     border: none !important;
     border-radius: 8px !important;
     display: flex !important;
     align-items: center !important;
-    gap: 10px !important;
-    font-size: 14.5px !important;
+    gap: 8px !important;
+    font-size: 15.5px !important;
     font-weight: 700 !important;
     line-height: 1 !important;
     white-space: nowrap !important;
     overflow: hidden !important;
     cursor: pointer !important;
     box-shadow: 0 2px 8px rgba(15,23,42,0.18) !important;
+    /* Reset native button chrome. Without this, some mobile browsers give
+       a <button> its own minimum block size / vertical padding from the
+       OS form-control style that can win out over the explicit height
+       above, which is what let this box render visibly taller than the
+       fixed-42px gear button beside it. */
+    -webkit-appearance: none !important;
+    appearance: none !important;
+    font-family: inherit !important;
   }
 
   /* Colored (stream) bars stay fully coloured until 90% of their own
@@ -9831,15 +9896,15 @@ window.addEventListener('DOMContentLoaded', async () => {
   .map-run-stat {
     display: inline-flex !important;
     align-items: center !important;
-    gap: 4px !important;
+    gap: 3px !important;
     flex-shrink: 0 !important;
-    font-size: 14px !important;
+    font-size: 15.5px !important;
   }
   .map-run-stat .map-stat-icon {
-    font-size: 16px !important;
+    font-size: 15px !important;
   }
   .map-run-stat b {
-    font-size: 14px !important;
+    font-size: 15.5px !important;
     font-weight: 800 !important;
     line-height: 1 !important;
   }
@@ -9873,6 +9938,9 @@ window.addEventListener('DOMContentLoaded', async () => {
     padding: 0 !important;
     transform: translateY(0) !important;
     transition: transform 0.08s ease, box-shadow 0.08s ease !important;
+    -webkit-appearance: none !important;
+    appearance: none !important;
+    font-family: inherit !important;
   }
   .map-settings-top-btn:active {
     transform: translateY(3px) !important;
