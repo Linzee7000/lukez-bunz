@@ -96,13 +96,12 @@
     /* Top Bar — flush to the left edge of the screen, black chrome with
        bright green text (see --bar-black / --bright-green above). The
        container has 10px of side padding, so we pull the bar out with a
-       negative left margin and drop its left corners square so it truly
-       reaches the edge instead of just looking close to it. */
+       negative left margin. Square corners throughout — no rounding. */
     .app-header {
       background-color: var(--bar-black);
       color: var(--bright-green);
       padding: 12px 16px 12px 20px;
-      border-radius: 0 12px 12px 0;
+      border-radius: 0;
       margin: 0 -10px 8px -10px;
       box-shadow: 0 4px 12px rgba(0,0,0,0.4);
       display: flex;
@@ -5848,8 +5847,13 @@
   
   function hasActiveMapTelemetryFilter() {
     const source = String(activeFilterDataSource || 'all').trim().toLowerCase();
+    // A specific run selection (made here on Map, or picked from any other
+    // screen's filter drawer, e.g. Edit KML) only counts as "filtered
+    // enough" while it's still a targeted pick of 3 runs or fewer. Select
+    // more than that and it's too broad to be worth showing the box for.
+    const runsSelected = selectedRunsSet ? selectedRunsSet.size : 0;
     return !!(
-      (selectedRunsSet && selectedRunsSet.size > 0) ||
+      (runsSelected > 0 && runsSelected <= 3) ||
       String(activeFilterStream || '').trim() ||
       String(activeFilterDay || '').trim() ||
       String(activeFilterWeek || '').trim() ||
@@ -7437,6 +7441,9 @@ window.addEventListener('DOMContentLoaded', async () => {
     } else return;
 
     renderUnifiedModal();
+    // Reflect the new selection on the next-bin box immediately, even when
+    // this drawer was opened from a screen other than Map (Edit KML, etc.).
+    if (typeof updateMapTelemetryVisibility === 'function') updateMapTelemetryVisibility();
   });
 
   window.openFilterDrawerModal = function() {
@@ -7454,6 +7461,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     const searchInp = q('searchInput');
     if (searchInp) searchInp.value = '';
     renderUnifiedModal();
+    if (typeof updateMapTelemetryVisibility === 'function') updateMapTelemetryVisibility();
     closeModal('mapRunPickerModal');
     renderActiveFilterChips();
     triggerUniversalDataRefresh();
@@ -8002,6 +8010,10 @@ window.addEventListener('DOMContentLoaded', async () => {
     isRoadSnapEditing = !isRoadSnapEditing;
     const btn = document.getElementById('btnRoadSnap');
     if (btn) btn.classList.toggle('active', isRoadSnapEditing);
+    // Boundary editing hides the next-bin box the same way bin/house select
+    // mode and geofence editing already do.
+    mapEditingActive = isRoadSnapEditing;
+    updateMapTelemetryVisibility();
 
     if (isRoadSnapEditing) {
       closeMapSettingsModal();
@@ -9663,39 +9675,63 @@ window.addEventListener('DOMContentLoaded', async () => {
 
   /* ===== next-bin-box-fade-and-stream-colour-fix ===== */
   /* "Next bin box" (the black telemetry card on Map showing the current
-     street + upcoming bins) fades left-to-right instead of staying a
-     flat solid block: hard/flush on the left with no soft edge there,
-     already at 10% transparent for its first half, then dissolving the
-     rest of the way to fully transparent by the 3/4 mark so the right
-     edge blends into the map underneath. Square corners throughout —
-     no rounding on the outer box. */
+     street + upcoming bins): the BACKGROUND fades left-to-right — solid
+     through the first 3/4 of the screen, then a slow dissolve from 10%
+     transparent (at the 3/4 mark) to 95% transparent at the far right
+     edge, blending into the map underneath. The fade lives on a ::before
+     layer behind the content, not on the box itself, so it never touches
+     the text/icons — those stay fully readable (e.g. the speed readout)
+     no matter where they sit horizontally. Square corners throughout —
+     no rounding anywhere on the box. */
   .map-address-telemetry {
-    -webkit-mask-image: linear-gradient(90deg, rgba(0,0,0,0.9) 0%, rgba(0,0,0,0.9) 50%, transparent 75%, transparent 100%) !important;
-            mask-image: linear-gradient(90deg, rgba(0,0,0,0.9) 0%, rgba(0,0,0,0.9) 50%, transparent 75%, transparent 100%) !important;
+    position: fixed !important;
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
     border-radius: 0 !important;
+  }
+  .map-address-telemetry::before {
+    content: "" !important;
+    position: absolute !important;
+    inset: 0 !important;
+    z-index: -1 !important;
+    border-radius: 0 !important;
+    background: linear-gradient(180deg, var(--bar-black-hi) 0%, var(--bar-black) 100%) !important;
+    border: 1px solid #000 !important;
+    box-shadow:
+      inset 0 1px 0 rgba(255,255,255,0.12),
+      0 3px 0 rgba(0,0,0,0.55),
+      0 6px 14px rgba(0,0,0,0.45) !important;
+    -webkit-mask-image: linear-gradient(90deg, rgba(0,0,0,1) 0%, rgba(0,0,0,1) 75%, rgba(0,0,0,0.9) 75%, rgba(0,0,0,0.05) 100%) !important;
+            mask-image: linear-gradient(90deg, rgba(0,0,0,1) 0%, rgba(0,0,0,1) 75%, rgba(0,0,0,0.9) 75%, rgba(0,0,0,0.05) 100%) !important;
+    pointer-events: none !important;
   }
 
   /* Bin serial rows: no longer their own little boxed card (no rounded
      corners, no border, no shadow, no gap between rows) — each stream row
      runs the full width with a single straight divider line below it, like
      a plain table row. The serial half carries the SAME colour as its
-     stream chip on the left, fading out with the same 10%-transparent-by-
-     half / gone-by-3/4 curve as the box itself, instead of the plain white
-     (which dark mode then flattened to a near-black slate). */
+     stream chip on the left, fading out with the same solid-until-3/4,
+     10%-at-3/4-to-95%-at-the-edge curve as the box's own background
+     (this gradient only ever colours a background, never masks text, so
+     it was never a readability risk the way the box-level mask was). */
   .next-bin-row { background: transparent !important; }
   .next-bin-stream-garbage .next-bin-serial-area {
-    background: linear-gradient(90deg, rgba(220,38,38,0.9) 0%, rgba(220,38,38,0.9) 50%, rgba(220,38,38,0) 75%, rgba(220,38,38,0) 100%) !important;
+    background: linear-gradient(90deg, rgba(220,38,38,0.9) 0%, rgba(220,38,38,0.9) 75%, rgba(220,38,38,0.81) 75%, rgba(220,38,38,0.045) 100%) !important;
   }
   .next-bin-stream-recycling .next-bin-serial-area {
-    background: linear-gradient(90deg, rgba(234,179,8,0.9) 0%, rgba(234,179,8,0.9) 50%, rgba(234,179,8,0) 75%, rgba(234,179,8,0) 100%) !important;
+    background: linear-gradient(90deg, rgba(234,179,8,0.9) 0%, rgba(234,179,8,0.9) 75%, rgba(234,179,8,0.81) 75%, rgba(234,179,8,0.045) 100%) !important;
   }
   .next-bin-stream-fogo .next-bin-serial-area {
-    background: linear-gradient(90deg, rgba(22,163,74,0.9) 0%, rgba(22,163,74,0.9) 50%, rgba(22,163,74,0) 75%, rgba(22,163,74,0) 100%) !important;
+    background: linear-gradient(90deg, rgba(22,163,74,0.9) 0%, rgba(22,163,74,0.9) 75%, rgba(22,163,74,0.81) 75%, rgba(22,163,74,0.045) 100%) !important;
   }
 
   /* ===== next-bin-box-edge-to-edge-fix ===== */
-  /* Same "hard to the edge" treatment the top bar already gets: flush to
-     both screen edges, on every screen/orientation, no inset margin and
+  /* Truly flush to both screen edges on every screen/orientation: fixed
+     positioning anchors it to the actual viewport instead of the
+     app's centred, max-width .container, which is what was still
+     leaving a visible gap on wider screens even though left/right were
+     already 0 relative to the (narrower) container. No inset margin and
      no width cap. */
   .map-address-telemetry {
     left: 0 !important;
