@@ -40,6 +40,9 @@
 
   /* New top-bar theme: black chrome, bright green text, 3D relief buttons */
   --bar-black:#000000; --bar-black-hi:#1a1a1a; --bright-green:#39ff14; --bright-green-dim:#25a80e;
+  /* Dark grey page background used behind the Search & Drive screens
+     (Map screen is a full-bleed overlay and never shows this). */
+  --page-bg-dark:#25282c;
   /* Bright stream-matched text colours (for text ON the black chrome —
      vivid enough to stand out the same way --bright-green does). */
   --bright-red:#ff3131; --bright-yellow:#ffe600;
@@ -80,7 +83,7 @@
       font-weight: 400;
     }
     body {
-      background-color: var(--slate-100);
+      background-color: var(--page-bg-dark);
       margin: 0;
       padding: 0;
       color: var(--slate-800);
@@ -262,10 +265,15 @@
       display: block;
     }
 
-    /* Search Toolbar — matches the Maps page top-bar chrome: black
-       gradient, square-ish 8px corners, 3D relief on the action button. */
+    /* Search / Drive Toolbar — same chrome as the Maps page top bar:
+       dark green fading to black by default, swapping to the active
+       filter's stream colour (also fading to black) once one is applied.
+       Default colour below matches .stream-none; the .search-card.stream-*
+       classes further down (see "search-card-stream-fade") override it
+       once a filter is active, using the exact same fade stops as
+       .map-run-colored-box.stream-*. */
     .search-card {
-      background: linear-gradient(180deg, var(--bar-black-hi) 0%, var(--bar-black) 100%);
+      background: linear-gradient(90deg, var(--brand-dark) 0%, var(--brand-dark) 90%, #000 95%, #000 100%);
       border: 1px solid #000;
       border-radius: 0;
       padding: 10px 16px;
@@ -282,7 +290,17 @@
         0 3px 0 rgba(0,0,0,0.55),
         0 5px 8px rgba(0,0,0,0.45);
       box-sizing: border-box;
+      transition: background 0.15s ease;
     }
+    /* ===== search-card-stream-fade =====
+       Mirrors .map-run-colored-box.stream-* exactly: solid stream colour
+       until 90% across, then dissolving to solid black by 95%. Toggled by
+       JS (applyActiveStreamTheme) whenever the active filter changes. */
+    .search-card.stream-gar { background: linear-gradient(90deg, var(--red-600) 0%, var(--red-600) 90%, #000 95%, #000 100%); border-color: var(--red-700); }
+    .search-card.stream-rec { background: linear-gradient(90deg, var(--yellow-400) 0%, var(--yellow-400) 90%, #000 95%, #000 100%); border-color: var(--yellow-500); }
+    .search-card.stream-summer { background: linear-gradient(90deg, var(--amber-500) 0%, var(--amber-500) 90%, #000 95%, #000 100%); border-color: var(--amber-600); }
+    .search-card.stream-fog { background: linear-gradient(90deg, var(--green-600) 0%, var(--green-600) 90%, #000 95%, #000 100%); border-color: var(--green-700); }
+    .search-card.stream-none { background: linear-gradient(90deg, var(--brand-dark) 0%, var(--brand-dark) 90%, #000 95%, #000 100%); border-color: var(--brand-dark); }
     .search-input-wrapper {
       display: flex;
       gap: 8px;
@@ -345,6 +363,10 @@
     .filter-menu-btn.active .icon-img {
       filter: none;
     }
+
+    /* Sits directly on the page background (not inside a card), so it
+       needs to stay legible now that the page background is dark. */
+    #resultsSummary { color: var(--slate-300) !important; }
 
     .active-filters-bar {
       display: flex;
@@ -2907,7 +2929,7 @@
   <div id="syncStatusMsg" class="sync-status-msg">Saving changes...</div>
 
   <!-- Search Card -->
-  <div class="search-card">
+  <div class="search-card" id="searchCard">
     <div class="search-input-wrapper">
       <input type="text" id="searchInput" class="main-search-input" placeholder="Type street, serial, PID, or Run..." oninput="handleSearch()">
       <button type="button" id="btnFilterMenu" class="filter-menu-btn" onclick="openFilterDrawerModal()"><img class="icon-img" src="filter.png" alt="">Filters</button>
@@ -4190,6 +4212,31 @@
     return { cls: 'active-chip-stream-none', icon: '📍' };
   }
 
+  /* Applies the current active-filter stream colour (or the default dark
+     green when nothing is filtered) to every "top bar" surface in the
+     app: the Search/Drive search-card, and — via the body class — the
+     Maps top-bar buttons that used to flash bright green (see the
+     "top-bar-buttons-stream-colour" CSS). Single choke point, called
+     any time activeFilterStream changes. */
+  function applyActiveStreamTheme() {
+    const st = clean(activeFilterStream);
+    const cls = st === 'Garbage' ? 'stream-gar'
+      : st === 'Recycling' ? 'stream-rec'
+      : st === 'SummerRecycling' ? 'stream-summer'
+      : st === 'FOGO' ? 'stream-fog'
+      : 'stream-none';
+    const streamClasses = ['stream-gar', 'stream-rec', 'stream-summer', 'stream-fog', 'stream-none'];
+
+    document.body.classList.remove(...streamClasses);
+    document.body.classList.add(cls);
+
+    const card = document.getElementById('searchCard');
+    if (card) {
+      card.classList.remove(...streamClasses);
+      card.classList.add(cls);
+    }
+  }
+
   function renderActiveFilterChips() {
     const bar = document.getElementById('activeFiltersBar');
     const chips = [];
@@ -4228,6 +4275,7 @@
 
     bar.innerHTML = chips.join('');
     document.getElementById('btnFilterMenu').classList.toggle('active', chips.length > 0);
+    applyActiveStreamTheme();
   }
 
 
@@ -9865,6 +9913,12 @@ window.addEventListener('DOMContentLoaded', async () => {
       else box.classList.add('stream-none');
     }
 
+    // Keep the body/search-card theme (see applyActiveStreamTheme) and the
+    // Maps top-bar button colours in sync too — renderMapData/this function
+    // can run from map-only interactions (panning into a new run's area,
+    // etc.) that don't go through renderActiveFilterChips.
+    if (typeof applyActiveStreamTheme === 'function') applyActiveStreamTheme();
+
     // Keep the next-bin box's address text colour matched to the same
     // active stream as the run box above (see .addr-stream-* CSS).
     const addressBox = document.querySelector('.map-address-telemetry');
@@ -10285,12 +10339,16 @@ window.addEventListener('DOMContentLoaded', async () => {
       inset 0 1px 0 rgba(255,255,255,0.1),
       inset 0 1px 2px rgba(0,0,0,0.5) !important;
   }
-  /* Primary (e.g. "Done") stands out as a solid bright-green button with
-     black text, instead of just another black chip. */
+  /* Primary (e.g. "Done") stands out as a solid button with white text,
+     instead of just another black chip. Colour now follows the active
+     filter's stream colour (see "top-bar-buttons-stream-colour" below)
+     instead of always lighting up bright green — this default (no
+     filter) shade is the same dark green used everywhere else for
+     stream-none. */
   .map-context-btn.primary {
-    background: linear-gradient(180deg, #5cff3a 0%, var(--bright-green) 100%) !important;
-    color: #062b00 !important;
-    border-color: var(--bright-green-dim) !important;
+    background: linear-gradient(180deg, var(--brand-light) 0%, var(--brand-dark) 100%) !important;
+    color: #fff !important;
+    border-color: var(--brand-dark) !important;
   }
   .map-context-btn.danger {
     background: linear-gradient(180deg, #ef4444 0%, rgba(220,38,38,0.95) 100%) !important;
@@ -10298,11 +10356,12 @@ window.addEventListener('DOMContentLoaded', async () => {
     color: #fff !important;
   }
   /* Toggle-style buttons (e.g. Remove points) show a pressed/lit state
-     while active, using the same green-on-black language as .primary. */
+     while active, using the same stream-colour-on-black language as
+     .primary. */
   .map-context-btn.active {
-    background: linear-gradient(180deg, #5cff3a 0%, var(--bright-green) 100%) !important;
-    color: #062b00 !important;
-    border-color: var(--bright-green-dim) !important;
+    background: linear-gradient(180deg, var(--brand-light) 0%, var(--brand-dark) 100%) !important;
+    color: #fff !important;
+    border-color: var(--brand-dark) !important;
   }
 
   /* Context action-button bar (Snap Houses / Snap Roads / Remove points
@@ -10421,9 +10480,47 @@ window.addEventListener('DOMContentLoaded', async () => {
   #mapSettingsBarBox .map-run-title { color: #fff !important; }
 
   .map-settings-cat-btn.active {
-    background: linear-gradient(180deg, #5cff3a 0%, var(--bright-green) 100%) !important;
-    color: #062b00 !important;
-    border-color: var(--bright-green-dim) !important;
+    background: linear-gradient(180deg, var(--brand-light) 0%, var(--brand-dark) 100%) !important;
+    color: #fff !important;
+    border-color: var(--brand-dark) !important;
+  }
+
+  /* ===== top-bar-buttons-stream-colour =====
+     The three "lit up" button states on the Maps top bar — the Done/
+     primary action, an active toggle (Remove points, etc.), and the
+     selected settings category — used to always flash bright green.
+     They now follow whichever stream colour is currently active (the
+     same colour the run box itself is showing), falling back to the
+     default dark green above when no filter/run is selected. Higher
+     specificity than the plain .primary/.active/.map-settings-cat-btn.active
+     rules above, so this wins whenever a stream is active. */
+  body.stream-gar .map-context-btn.primary,
+  body.stream-gar .map-context-btn.active,
+  body.stream-gar .map-settings-cat-btn.active {
+    background: linear-gradient(180deg, #ff6b6b 0%, var(--red-600) 100%) !important;
+    color: #fff !important;
+    border-color: var(--red-700) !important;
+  }
+  body.stream-rec .map-context-btn.primary,
+  body.stream-rec .map-context-btn.active,
+  body.stream-rec .map-settings-cat-btn.active {
+    background: linear-gradient(180deg, #fde047 0%, var(--yellow-400) 100%) !important;
+    color: var(--slate-800) !important;
+    border-color: var(--yellow-500) !important;
+  }
+  body.stream-summer .map-context-btn.primary,
+  body.stream-summer .map-context-btn.active,
+  body.stream-summer .map-settings-cat-btn.active {
+    background: linear-gradient(180deg, #fbbf24 0%, var(--amber-500) 100%) !important;
+    color: #fff !important;
+    border-color: var(--amber-600) !important;
+  }
+  body.stream-fog .map-context-btn.primary,
+  body.stream-fog .map-context-btn.active,
+  body.stream-fog .map-settings-cat-btn.active {
+    background: linear-gradient(180deg, #4ade80 0%, var(--green-600) 100%) !important;
+    color: #fff !important;
+    border-color: var(--green-700) !important;
   }
   /* Portrait screens can't fit all 5 category buttons at full width (text
      + icon each) — the row would clip and hide the later buttons behind
