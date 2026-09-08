@@ -3166,7 +3166,7 @@
     <div class="address-telemetry-card drive-address-telemetry">
       <div class="address-telemetry-grid">
         <div id="hudStreetName" class="address-telemetry-address">Scanning Street...</div>
-        <div id="hudGpsDirection" class="address-telemetry-gps">📡 GPS · 🧭 N 0°</div>
+        <div id="hudGpsDirection" class="address-telemetry-gps"><img class="icon-img meta-readout-icon" src="house.png" alt=""> GPS · <img class="icon-img meta-readout-icon" src="navigation.png" alt=""> 0°</div>
         <div id="hudAddressMeta" class="address-telemetry-meta">...</div>
         <div class="address-telemetry-speed"><span id="hudSpeed">0</span></div>
         <div id="hudRunsAtAddress" class="address-telemetry-runs"></div>
@@ -3332,7 +3332,7 @@
                top-right cell (col 2 / row 1 - see .address-telemetry-gps
                positioning) instead of floating above the box, and picks up
                the active stream's colour via .map-next-bin-meta (see CSS). -->
-          <div id="mapSpeedMeta" class="address-telemetry-gps map-next-bin-meta">📍 — · 🧭 —</div>
+          <div id="mapSpeedMeta" class="address-telemetry-gps map-next-bin-meta"><img class="icon-img meta-readout-icon" src="house.png" alt=""> — · <img class="icon-img meta-readout-icon" src="navigation.png" alt=""> —</div>
           <div id="mapAddressMeta" class="address-telemetry-meta">...</div>
           <div class="address-telemetry-speed"><span id="mapLiveSpeed">0</span></div>
           <div id="mapRunsAtAddress" class="address-telemetry-runs"></div>
@@ -6627,13 +6627,14 @@
   // speed digits on Drive; that was a duplicate and has been removed.
   function updateSpeedMetaLine() {
     const distPart = (lastDistToNextBinM !== null && Number.isFinite(lastDistToNextBinM))
-      ? `📍 ${lastDistToNextBinM}m`
-      : '📍 —';
-    const dirPart = `🧭 ${getCardinalDirection(lastValidHeading || 0)}`;
+      ? `<img class="icon-img meta-readout-icon" src="house.png" alt=""> ${lastDistToNextBinM}m`
+      : `<img class="icon-img meta-readout-icon" src="house.png" alt=""> —`;
+    const heading = Math.round(lastValidHeading || 0) % 360;
+    const dirPart = `<img class="icon-img meta-readout-icon" src="navigation.png" alt=""> ${heading}°`;
     const text = `${distPart} · ${dirPart}`;
     ['hudGpsDirection', 'mapSpeedMeta'].forEach(id => {
       const el = document.getElementById(id);
-      if (el) el.innerText = text;
+      if (el) el.innerHTML = text;
     });
   }
 
@@ -6654,6 +6655,13 @@
     const y = Math.sin(Δλ) * Math.cos(φ2);
     const x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
     return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+  }
+
+  // Smallest angle (0-180) between two compass bearings, independent of
+  // which one is "bigger" or wraps past 360.
+  function angularDifference(a, b) {
+    const d = Math.abs(a - b) % 360;
+    return d > 180 ? 360 - d : d;
   }
 
   function evaluateTravelDirection(truckLat, truckLng, heading, propLat, propLng, streetName = '') {
@@ -6677,7 +6685,18 @@
         const first = flippedNodes[0];
         const last = flippedNodes[flippedNodes.length - 1];
         const streetVector = getBearing(first.lat, first.lng, last.lat, last.lng);
-        if (!isNaN(streetVector)) effectiveHeading = streetVector;
+        // streetVector is just the street's axis (a line), not a direction -
+        // "first flipped to last flipped" is exactly as likely to point
+        // backwards along the street as forwards. Fold it onto whichever
+        // of streetVector / streetVector+180 actually matches the truck's
+        // current live heading, so a U-turn or a return pass down the same
+        // street doesn't leave this pointing the wrong way and flip
+        // left/right for the rest of the street.
+        if (!isNaN(streetVector)) {
+          effectiveHeading = angularDifference(streetVector, heading) <= 90
+            ? streetVector
+            : (streetVector + 180) % 360;
+        }
       }
     }
 
@@ -11458,7 +11477,49 @@ window.addEventListener('DOMContentLoaded', async () => {
     text-shadow: 0 2px 4px rgba(0,0,0,0.55) !important;
   }
 
-  /* ===== next-bin-box-width-cap =====
+  /* ===== next-bin-meta-bigger-icons-and-degrees =====
+     Distance + heading readout (top-right of the box): bigger text/icons
+     than the rest of the small secondary labels, since it's a primary
+     glanceable readout while driving. Icons are plain house/navigation
+     PNGs recoloured via filter (white by default, black specifically on
+     the yellow/recycling-summer stream so they stay legible against the
+     lighter background — same rule the text itself follows). */
+  .map-address-telemetry .map-next-bin-meta {
+    font-size: 22px !important;
+    font-weight: 700 !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    gap: 4px !important;
+  }
+  .map-address-telemetry .map-next-bin-meta .meta-readout-icon {
+    width: 20px !important;
+    height: 20px !important;
+    flex-shrink: 0 !important;
+    filter: brightness(0) invert(1) !important;
+  }
+  .map-address-telemetry .map-next-bin-meta {
+    color: #fff !important;
+  }
+  .map-address-telemetry.addr-stream-gar .map-next-bin-meta,
+  .map-address-telemetry.addr-stream-fog .map-next-bin-meta,
+  .map-address-telemetry.addr-stream-none .map-next-bin-meta {
+    color: #fff !important;
+  }
+  .map-address-telemetry.addr-stream-gar .map-next-bin-meta .meta-readout-icon,
+  .map-address-telemetry.addr-stream-fog .map-next-bin-meta .meta-readout-icon,
+  .map-address-telemetry.addr-stream-none .map-next-bin-meta .meta-readout-icon {
+    filter: brightness(0) invert(1) !important;
+  }
+  .map-address-telemetry.addr-stream-rec .map-next-bin-meta,
+  .map-address-telemetry.addr-stream-summer .map-next-bin-meta {
+    color: #000 !important;
+  }
+  .map-address-telemetry.addr-stream-rec .map-next-bin-meta .meta-readout-icon,
+  .map-address-telemetry.addr-stream-summer .map-next-bin-meta .meta-readout-icon {
+    filter: brightness(0) !important;
+  }
+
+
      Edge-to-edge full-bleed width made sense as a way to use up spare
      horizontal room, but it just stretches the box across the whole
      screen (very noticeable on tablets, and in landscape) for no real
