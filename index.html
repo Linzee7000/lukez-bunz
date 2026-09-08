@@ -139,6 +139,50 @@
     .app-header.stream-summer { background: linear-gradient(90deg, var(--amber-500) 0%, var(--amber-500) 85%, #000 90%, #000 100%); }
     .app-header.stream-fog { background: linear-gradient(90deg, var(--green-600) 0%, var(--green-600) 85%, #000 90%, #000 100%); }
     .app-header.stream-none { background: linear-gradient(90deg, var(--brand-dark) 0%, var(--brand-dark) 85%, #000 90%, #000 100%); }
+
+    /* ===== Area Runs Bar =====
+       Directly under the top bar: one row per stream (Garbage, then
+       Recycling, then FOGO) showing the run number servicing wherever the
+       truck currently is. Flush hard against the true left screen edge
+       (same full-bleed trick as .app-header), stream-coloured background
+       that plateaus behind the icon/text then fades away — Garbage at
+       full stream colour, Recycling and FOGO at 20% stream colour — so
+       the shading never runs the full width of the screen. A row is
+       simply omitted when that stream has no run at the current spot. */
+    .area-runs-bar {
+      width: 100vw;
+      position: relative;
+      left: 50%;
+      right: 50%;
+      margin-left: -50vw;
+      margin-right: -50vw;
+      margin-bottom: 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .area-runs-bar:empty { display: none; margin-bottom: 0; }
+    .area-run-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      height: 26px;
+      padding: 0 0 0 12px;
+      font-size: 13.5px;
+      font-weight: 700;
+      color: #fff;
+      white-space: nowrap;
+    }
+    .area-run-row .icon-img { width: 15px; height: 15px; filter: brightness(0) invert(1); }
+    .area-run-row.area-run-gar {
+      background: linear-gradient(90deg, var(--red-600) 0%, var(--red-600) 30%, rgba(220,38,38,0) 45%, rgba(220,38,38,0) 100%);
+    }
+    .area-run-row.area-run-rec {
+      background: linear-gradient(90deg, rgba(234,179,8,0.2) 0%, rgba(234,179,8,0.2) 30%, rgba(234,179,8,0) 45%, rgba(234,179,8,0) 100%);
+    }
+    .area-run-row.area-run-fog {
+      background: linear-gradient(90deg, rgba(22,163,74,0.2) 0%, rgba(22,163,74,0.2) 30%, rgba(22,163,74,0) 45%, rgba(22,163,74,0) 100%);
+    }
     .app-header h1 {
       margin: 0;
       font-size: 18px;
@@ -3043,6 +3087,13 @@
       <button id="syncBtn" class="sync-btn" type="button" onclick="startUpdateProcess()" title="Save & Refresh"><img id="syncBtnIcon" class="icon-img" src="reload.png" alt=""></button>
     </div>
   </div>
+
+  <!-- Area Runs Bar: sits directly under the top bar and shows the run
+       number(s) servicing whatever area the truck's current GPS position
+       is in — Garbage on top, then Recycling, then FOGO — regardless of
+       which tab is active or what filter is applied. Populated by
+       updateAreaRunsBar() (see JS), which re-runs on every GPS fix. -->
+  <div id="areaRunsBar" class="area-runs-bar"></div>
 
   <div id="pBarWrap" class="progress-bar-wrap"><div id="pBarFill" class="progress-bar-fill"></div></div>
   <div id="syncStatusMsg" class="sync-status-msg">Saving changes...</div>
@@ -6573,6 +6624,47 @@
     return bits.join('');
   }
 
+  /* ===== Area Runs Bar =====
+     Stacked, always-left-flush rows shown directly under the top bar:
+     Garbage, then Recycling, then FOGO — whichever runs service the site
+     nearest the truck's current GPS position, independent of the active
+     tab or any applied filter. A stream is simply left out when the
+     current site has no run assigned for it. */
+  function buildAreaRunsBarHtml(site) {
+    if (!site || !site.soloSchedule) return '';
+    const sch = site.soloSchedule;
+    const week = (sch.weekLetter || '').trim().toUpperCase();
+    let html = '';
+    if (sch.garRun) {
+      html += `<div class="area-run-row area-run-gar"><img class="icon-img" src="bin.png" alt="">Run ${esc(String(sch.garRun))}</div>`;
+    }
+    if (sch.recRun) {
+      html += `<div class="area-run-row area-run-rec">♻️ Run ${esc(String(sch.recRun))}${week?esc(week):''}</div>`;
+    }
+    if (sch.fogRun) {
+      html += `<div class="area-run-row area-run-fog">🌳 Run ${esc(String(sch.fogRun))}${week?esc(week):''}</div>`;
+    }
+    return html;
+  }
+
+  // Finds the site nearest the truck's current GPS position (no filter or
+  // distance-ahead logic — this bar always reflects wherever you are right
+  // now) and refreshes the Area Runs Bar with that site's runs.
+  function updateAreaRunsBar() {
+    const bar = document.getElementById('areaRunsBar');
+    if (!bar) return;
+    if (!userCurrentLocation || !siteRecords || !siteRecords.length) { bar.innerHTML = ''; return; }
+    let nearest = null, nearestDist = Infinity;
+    siteRecords.forEach(site => {
+      if (site.lat && site.lng && Number(site.lat) !== 0) {
+        const d = getDistanceMeters(userCurrentLocation.lat, userCurrentLocation.lng, Number(site.lat), Number(site.lng));
+        if (d < nearestDist) { nearestDist = d; nearest = site; }
+      }
+    });
+    const site = nearestDist <= 300 ? nearest : null;
+    bar.innerHTML = buildAreaRunsBarHtml(site);
+  }
+
   function normaliseRunForAddressFilter(value) {
     return String(value || '').trim().toUpperCase().replace(/\s+/g, '');
   }
@@ -6686,7 +6778,7 @@
   function updateMapTelemetryVisibility() {
     const box = document.querySelector('.map-address-telemetry');
     if (!box) return;
-    const shouldMinimize = mapEditingActive || settingsMenuOpen || !isNextBinBoxVisible || !hasActiveMapTelemetryFilter();
+    const shouldMinimize = mapEditingActive || settingsMenuOpen || !isNextBinBoxVisible;
     box.classList.toggle('map-telemetry-hidden', shouldMinimize);
     box.style.display = '';
   }
@@ -7531,6 +7623,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     await saveToDB("masterRecords", siteRecords);
     renderActiveFilterChips();
     updateDriverHud();
+    updateAreaRunsBar();
     if (activeTab === 'search') handleSearch();
     if (activeTab === 'map') {
       requestAnimationFrame(() => {
@@ -9837,6 +9930,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     // the next bin hasn't (e.g. sitting at an address) - keep the
     // top-right distance/direction readout current too.
     updateSpeedMetaLine();
+    updateAreaRunsBar();
 
     if (isTruckFollowEnabled && leafletMap) {
       if (!hasAutoCenteredTruck) {
@@ -11055,8 +11149,8 @@ window.addEventListener('DOMContentLoaded', async () => {
        colour the rest of the way — same break points as the top bar. */
     background: linear-gradient(90deg,
       rgba(26,26,26,0.9) 0%,
-      rgba(0,0,0,0.9) 80%,
-      var(--brand-dark) 85%,
+      rgba(0,0,0,0.9) 70%,
+      var(--brand-dark) 75%,
       var(--brand-dark) 100%) !important;
     border-top: 1px solid #000 !important;
     border-bottom: 1px solid #000 !important;
@@ -11070,29 +11164,29 @@ window.addEventListener('DOMContentLoaded', async () => {
   div.map-address-telemetry.addr-stream-gar::before {
     background: linear-gradient(90deg,
       rgba(26,26,26,0.9) 0%,
-      rgba(0,0,0,0.9) 80%,
-      var(--red-600) 85%,
+      rgba(0,0,0,0.9) 70%,
+      var(--red-600) 75%,
       var(--red-600) 100%) !important;
   }
   div.map-address-telemetry.addr-stream-rec::before {
     background: linear-gradient(90deg,
       rgba(26,26,26,0.9) 0%,
-      rgba(0,0,0,0.9) 80%,
-      var(--yellow-400) 85%,
+      rgba(0,0,0,0.9) 70%,
+      var(--yellow-400) 75%,
       var(--yellow-400) 100%) !important;
   }
   div.map-address-telemetry.addr-stream-summer::before {
     background: linear-gradient(90deg,
       rgba(26,26,26,0.9) 0%,
-      rgba(0,0,0,0.9) 80%,
-      var(--amber-500) 85%,
+      rgba(0,0,0,0.9) 70%,
+      var(--amber-500) 75%,
       var(--amber-500) 100%) !important;
   }
   div.map-address-telemetry.addr-stream-fog::before {
     background: linear-gradient(90deg,
       rgba(26,26,26,0.9) 0%,
-      rgba(0,0,0,0.9) 80%,
-      var(--green-600) 85%,
+      rgba(0,0,0,0.9) 70%,
+      var(--green-600) 75%,
       var(--green-600) 100%) !important;
   }
 
@@ -11109,13 +11203,13 @@ window.addEventListener('DOMContentLoaded', async () => {
      black rather than fade to transparent for them to read clearly. */
   .next-bin-row { background: transparent !important; }
   .next-bin-stream-garbage .next-bin-serial-area {
-    background: linear-gradient(90deg, rgba(220,38,38,0.9) 0%, rgba(220,38,38,0.9) 80%, rgba(26,26,26,0.9) 85%, rgba(26,26,26,0.9) 100%) !important;
+    background: linear-gradient(90deg, rgba(220,38,38,0.9) 0%, rgba(220,38,38,0.9) 70%, rgba(26,26,26,0.9) 75%, rgba(26,26,26,0.9) 100%) !important;
   }
   .next-bin-stream-recycling .next-bin-serial-area {
-    background: linear-gradient(90deg, rgba(234,179,8,0.9) 0%, rgba(234,179,8,0.9) 80%, rgba(26,26,26,0.9) 85%, rgba(26,26,26,0.9) 100%) !important;
+    background: linear-gradient(90deg, rgba(234,179,8,0.9) 0%, rgba(234,179,8,0.9) 70%, rgba(26,26,26,0.9) 75%, rgba(26,26,26,0.9) 100%) !important;
   }
   .next-bin-stream-fogo .next-bin-serial-area {
-    background: linear-gradient(90deg, rgba(22,163,74,0.9) 0%, rgba(22,163,74,0.9) 80%, rgba(26,26,26,0.9) 85%, rgba(26,26,26,0.9) 100%) !important;
+    background: linear-gradient(90deg, rgba(22,163,74,0.9) 0%, rgba(22,163,74,0.9) 70%, rgba(26,26,26,0.9) 75%, rgba(26,26,26,0.9) 100%) !important;
   }
 
   /* ===== next-bin-box-edge-to-edge-fix ===== */
