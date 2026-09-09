@@ -9104,6 +9104,40 @@ window.addEventListener('DOMContentLoaded', async () => {
         return best;
       });
 
+      // Step 1b: bridge small stretches of points that fell just outside
+      // MATCH_NEIGHBOR_METERS but sit directly between two stretches that
+      // both matched the SAME neighbour. These are "cut corner" points
+      // left over from the old boundary — a bit further from the
+      // neighbour's edge than the threshold allows, but clearly meant to
+      // sit on that same shared line, not off on their own. Since both
+      // sides already confirm which neighbour this stretch belongs to, we
+      // can safely match them too, with a looser distance cap.
+      const BRIDGE_MAX_METERS = MATCH_NEIGHBOR_METERS * 3;
+      const BRIDGE_MAX_GAP_POINTS = 8;
+      const otherBorderByKey = {};
+      otherBorders.forEach(({ key, pts }) => { otherBorderByKey[key] = pts; });
+      {
+        let bi = 0;
+        while (bi < n) {
+          if (candidates[bi]) { bi++; continue; }
+          let bj = bi;
+          while (bj < n && !candidates[bj]) bj++;
+          const gapLen = bj - bi;
+          const before = candidates[(bi - 1 + n) % n];
+          const after = bj < n ? candidates[bj] : null;
+          if (before && after && before.neighborKey === after.neighborKey && gapLen <= BRIDGE_MAX_GAP_POINTS) {
+            const neighborPts = otherBorderByKey[before.neighborKey];
+            for (let bk = bi; bk < bj; bk++) {
+              const hit = nearestOnBorderLoop(currentPts[bk], neighborPts);
+              if (hit.dist <= BRIDGE_MAX_METERS) {
+                candidates[bk] = { neighborKey: before.neighborKey, param: hit.param, dist: hit.dist };
+              }
+            }
+          }
+          bi = bj;
+        }
+      }
+
       // This is a closed loop, so a matched stretch can wrap past the end
       // of the array back to index 0. Rotate the scan to start right
       // after an unmatched point (if there is one) so that wrap-around
