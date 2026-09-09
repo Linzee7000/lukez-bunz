@@ -179,13 +179,22 @@
          fully transparent by the row's right edge. */
       width: 96px;
       overflow: hidden;
+      /* Rows are tappable — clicking one swaps you onto that run (see
+         openRunDirectlyOnMap call in buildAreaRunsBarHtml). */
+      cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
     }
+    .area-run-row:active { opacity: 0.7; }
     .area-run-row .icon-img { width: 13px; height: 13px; filter: brightness(0) invert(1); flex-shrink: 0; }
     .area-run-row.area-run-gar {
       background: linear-gradient(90deg, var(--red-600) 0%, var(--red-600) 55%, rgba(220,38,38,0) 100%);
     }
     .area-run-row.area-run-rec {
       background: linear-gradient(90deg, rgba(255,230,0,0.8) 0%, rgba(255,230,0,0.8) 55%, rgba(255,230,0,0) 100%);
+      color: var(--near-black);
+    }
+    .area-run-row.area-run-summer {
+      background: linear-gradient(90deg, rgba(245,158,11,0.8) 0%, rgba(245,158,11,0.8) 55%, rgba(245,158,11,0) 100%);
       color: var(--near-black);
     }
     .area-run-row.area-run-fog {
@@ -6752,24 +6761,35 @@
 
   /* ===== Area Runs Bar =====
      Stacked, always-left-flush rows shown directly under the Map screen's
-     own top bar: Garbage, then Recycling, then FOGO — whichever runs
-     service the site nearest the truck's current GPS position,
-     independent of any applied filter. A stream is simply left out when
-     the current site has no run assigned for it. No "Run" label — just
-     the icon and the number/week. */
+     own top bar: Garbage, Recycling, Summer Recycling, then FOGO —
+     whichever runs service the site nearest the truck's current GPS
+     position, independent of any applied filter. A stream is simply left
+     out when the current site has no run assigned for it, or when that
+     run is already the one currently selected/applied (no point offering
+     to swap onto the run you're already viewing). No "Run" label — just
+     the icon and the number/week. Tapping a row swaps you straight onto
+     that run via the same openRunDirectlyOnMap() the bin-box run badges
+     use. */
   function buildAreaRunsBarHtml(site) {
     if (!site || !site.soloSchedule) return '';
     const sch = site.soloSchedule;
     const week = (sch.weekLetter || '').trim().toUpperCase();
+    const lat = site.lat || 0, lng = site.lng || 0;
+    const day = esc(String(sch.day || ''));
+    const goTo = (run, streamKey, isSummer) =>
+      `event.stopPropagation(); openRunDirectlyOnMap('${esc(String(run))}', '${streamKey}', '${day}', '${esc(week)}', ${isSummer}, ${lat}, ${lng})`;
     let html = '';
-    if (sch.garRun) {
-      html += `<div class="area-run-row area-run-gar"><img class="icon-img" src="bin.png" alt="">${esc(String(sch.garRun))}</div>`;
+    if (sch.garRun && !addressRunIsSelected(sch.garRun)) {
+      html += `<div class="area-run-row area-run-gar" onclick="${goTo(sch.garRun, 'Garbage', false)}"><img class="icon-img" src="bin.png" alt="">${esc(String(sch.garRun))}</div>`;
     }
-    if (sch.recRun) {
-      html += `<div class="area-run-row area-run-rec">♻️ ${esc(String(sch.recRun))}${week?esc(week):''}</div>`;
+    if (sch.recRun && !addressRunIsSelected(sch.recRun)) {
+      html += `<div class="area-run-row area-run-rec" onclick="${goTo(sch.recRun, 'Recycling', false)}">♻️ ${esc(String(sch.recRun))}${week?esc(week):''}</div>`;
     }
-    if (sch.fogRun) {
-      html += `<div class="area-run-row area-run-fog">🌳 ${esc(String(sch.fogRun))}${week?esc(week):''}</div>`;
+    if (sch.recSummerRun && !addressRunIsSelected(sch.recSummerRun)) {
+      html += `<div class="area-run-row area-run-summer" onclick="${goTo(sch.recSummerRun, 'SummerRecycling', true)}">☀️ ${esc(String(sch.recSummerRun))}</div>`;
+    }
+    if (sch.fogRun && !addressRunIsSelected(sch.fogRun)) {
+      html += `<div class="area-run-row area-run-fog" onclick="${goTo(sch.fogRun, 'FOGO', false)}">🌳 ${esc(String(sch.fogRun))}${week?esc(week):''}</div>`;
     }
     return html;
   }
@@ -10079,9 +10099,12 @@ window.addEventListener('DOMContentLoaded', async () => {
     </button>
   ` : '';
 
+  // Run badges used to be duplicated here too, but that's now covered by
+  // the tappable Area Runs Bar above the map (see buildAreaRunsBarHtml) —
+  // this box just keeps the serial-number toggle.
   const mapRunsEl = document.getElementById('mapRunsAtAddress');
   if (mapRunsEl) {
-    mapRunsEl.innerHTML = `<div class="runs-scroll-strip">${buildRunsAtAddress(site, false)}${serialToggleBtn}</div>`;
+    mapRunsEl.innerHTML = `<div class="runs-scroll-strip">${serialToggleBtn}</div>`;
     // The strip scrolls internally so a long run list never clips the
     // toggle button — but it always starts scrolled to the left, which
     // left the toggle sitting half-cut at the right edge until the user
