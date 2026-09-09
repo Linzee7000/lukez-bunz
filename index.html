@@ -3166,7 +3166,7 @@
     <div class="address-telemetry-card drive-address-telemetry">
       <div class="address-telemetry-grid">
         <div id="hudStreetName" class="address-telemetry-address">Scanning Street...</div>
-        <div id="hudGpsDirection" class="address-telemetry-gps"><img class="icon-img meta-readout-icon" src="houses.png" alt=""> GPS · <img class="icon-img meta-readout-icon" src="navigation.png" alt=""> 0°</div>
+        <div id="hudGpsDirection" class="address-telemetry-gps"><img class="icon-img meta-readout-icon" src="houses.png" alt="">GPS · <img class="icon-img meta-readout-icon" src="navigation.png" alt="">0°</div>
         <div id="hudAddressMeta" class="address-telemetry-meta">...</div>
         <div class="address-telemetry-speed"><span id="hudSpeed">0</span></div>
         <div id="hudRunsAtAddress" class="address-telemetry-runs"></div>
@@ -3198,6 +3198,7 @@
             <span class="map-run-divider" aria-hidden="true"></span>
             <span class="map-run-stat"><img class="icon-img map-stat-icon" src="houses.png" alt=""><b id="mapTotalHouses">0</b></span>
             <span class="map-run-stat"><img class="icon-img map-stat-icon" src="bin.png" alt=""><b id="mapTotalBins">0</b></span>
+            <span class="map-run-stat" title="Bins flipped this run">✅<b id="mapFlippedBins">0</b></span>
           </button>
           <button type="button" id="btnMapSettingsTop" class="map-settings-top-btn" onclick="openMapSettingsModal()" title="Map settings"><img class="icon-img" src="settings.png" alt=""></button>
         </div>
@@ -3332,7 +3333,7 @@
                top-right cell (col 2 / row 1 - see .address-telemetry-gps
                positioning) instead of floating above the box, and picks up
                the active stream's colour via .map-next-bin-meta (see CSS). -->
-          <div id="mapSpeedMeta" class="address-telemetry-gps map-next-bin-meta"><img class="icon-img meta-readout-icon" src="houses.png" alt=""> — · <img class="icon-img meta-readout-icon" src="navigation.png" alt=""> —</div>
+          <div id="mapSpeedMeta" class="address-telemetry-gps map-next-bin-meta"><img class="icon-img meta-readout-icon" src="houses.png" alt="">— · <img class="icon-img meta-readout-icon" src="navigation.png" alt="">—</div>
           <div id="mapAddressMeta" class="address-telemetry-meta">...</div>
           <div class="address-telemetry-speed"><span id="mapLiveSpeed">0</span></div>
           <div id="mapRunsAtAddress" class="address-telemetry-runs"></div>
@@ -4562,6 +4563,7 @@
     bar.innerHTML = chips.join('');
     document.getElementById('btnFilterMenu').classList.toggle('active', chips.length > 0);
     applyActiveStreamTheme();
+    syncRunProgressState();
   }
 
 
@@ -6627,10 +6629,10 @@
   // speed digits on Drive; that was a duplicate and has been removed.
   function updateSpeedMetaLine() {
     const distPart = (lastDistToNextBinM !== null && Number.isFinite(lastDistToNextBinM))
-      ? `<img class="icon-img meta-readout-icon" src="houses.png" alt=""> ${lastDistToNextBinM}m`
-      : `<img class="icon-img meta-readout-icon" src="houses.png" alt=""> —`;
+      ? `<img class="icon-img meta-readout-icon" src="houses.png" alt="">${lastDistToNextBinM}m`
+      : `<img class="icon-img meta-readout-icon" src="houses.png" alt="">—`;
     const heading = Math.round(lastValidHeading || 0) % 360;
-    const dirPart = `<img class="icon-img meta-readout-icon" src="navigation.png" alt=""> ${heading}°`;
+    const dirPart = `<img class="icon-img meta-readout-icon" src="navigation.png" alt="">${heading}°`;
     const text = `${distPart} · ${dirPart}`;
     ['hudGpsDirection', 'mapSpeedMeta'].forEach(id => {
       const el = document.getElementById(id);
@@ -7516,6 +7518,91 @@ function promptEditBin(propId, streamKey, binIdx) {
     });
   }
 
+  // ----- Run progress persistence (flipped/missed bins) -----
+  // Filtering a run counts as starting it. Bins that got flipped (collected,
+  // dot removed) or turned red (missed - driven past too fast) while working
+  // that run must stay that way if the Map screen or the whole app gets
+  // closed and reopened - they only reset once a *different* run is
+  // filtered, or a new day begins.
+  function runProgressSignature() {
+    const runs = Array.from(selectedRunsSet || []).sort().join(',');
+    return `${activeFilterStream || ''}|${activeFilterWeek || ''}|${activeFilterDataSource || ''}|${runs}`;
+  }
+
+  function todayKey() {
+    const d = new Date();
+    return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+  }
+
+  async function saveRunProgress() {
+    if (!selectedRunsSet || selectedRunsSet.size === 0) return;
+    await saveToDB('runProgressState', {
+      signature: runProgressSignature(),
+      day: todayKey(),
+      serviced: Array.from(servicedBinSerials),
+      missed: Array.from(missedBinSerials),
+      // Raw filter fields, so the same run can be re-selected on app/page
+      // resume even though the signature alone can't be reversed back into
+      // them.
+      filterStream: activeFilterStream,
+      filterWeek: activeFilterWeek,
+      filterDataSource: activeFilterDataSource,
+      filterDay: activeFilterDay,
+      runs: Array.from(selectedRunsSet || [])
+    });
+  }
+
+  // Called once at startup, before the first renderActiveFilterChips(), so a
+  // run that was filtered (and therefore "started") last time the map/app
+  // was open is still filtered now - the person resumes the run rather than
+  // landing back on "Select run". Bin flip/missed state is restored
+  // separately by syncRunProgressState (same-day match), which
+  // renderActiveFilterChips triggers on its own.
+  async function restoreRunFilterFromDB() {
+    let stored = null;
+    try { stored = await loadFromDB('runProgressState'); } catch (e) {}
+    if (!stored || !Array.isArray(stored.runs) || stored.runs.length === 0) return;
+    activeFilterStream = stored.filterStream || '';
+    activeFilterWeek = stored.filterWeek || '';
+    activeFilterDataSource = stored.filterDataSource || 'all';
+    activeFilterDay = stored.filterDay || '';
+    selectedRunsSet = new Set(stored.runs);
+  }
+
+  // Tracks which run+day combo servicedBinSerials/missedBinSerials currently
+  // hold, so this only has to load/reset once per actual change, not on
+  // every re-render.
+  let runProgressSyncedKey = null;
+  async function syncRunProgressState() {
+    if (!selectedRunsSet || selectedRunsSet.size === 0) return;
+    const sig = runProgressSignature();
+    const day = todayKey();
+    const syncKey = `${sig}::${day}`;
+    if (runProgressSyncedKey === syncKey) return;
+
+    const stored = await loadFromDB('runProgressState');
+    if (stored && stored.signature === sig && stored.day === day) {
+      // Same run, still the same day: resume exactly where it left off.
+      servicedBinSerials = new Set(stored.serviced || []);
+      missedBinSerials = new Set(stored.missed || []);
+    } else {
+      // A different run just got filtered, or it's a new day: start fresh.
+      servicedBinSerials = new Set();
+      missedBinSerials = new Set();
+      await saveRunProgress();
+    }
+    runProgressSyncedKey = syncKey;
+    updateFlippedBinCount();
+    if (leafletMap && document.getElementById('mapScreen')?.classList.contains('active') && typeof renderMapData === 'function') {
+      renderMapData();
+    }
+  }
+
+  function updateFlippedBinCount() {
+    const el = document.getElementById('mapFlippedBins');
+    if (el) el.textContent = servicedBinSerials.size;
+  }
+
   function mergeEditsIntoRecords(records, edits) {
     if (!edits || edits.length === 0) return records;
 
@@ -7665,6 +7752,10 @@ window.addEventListener('DOMContentLoaded', async () => {
       if (cached && cached.length > 0) {
         siteRecords = mergeEditsIntoRecords(cached, masterEditsLog);
         buildFastStreetIndex();
+        // Resume whichever run was filtered (started) last time, before the
+        // first filter-chip render, so the person comes back to the same
+        // run instead of "Select run".
+        await restoreRunFilterFromDB();
         renderActiveFilterChips();
         updateDriverHud();
         switchMainTab('search');
@@ -10111,12 +10202,15 @@ window.addEventListener('DOMContentLoaded', async () => {
       if (speedKmh <= 6) {
         servicedBinSerials.add(binId);
         if (mapMarkersLayer && markerObj.layer) mapMarkersLayer.removeLayer(markerObj.layer);
+        updateFlippedBinCount();
+        saveRunProgress();
       } else if (d <= 9 && !missedBinSerials.has(binId)) {
         missedBinSerials.add(binId);
         if (markerObj.layer) {
           const innerDot = markerObj.layer.getElement()?.querySelector('.bin-dot-inner');
           if (innerDot) innerDot.style.backgroundColor = '#ef4444';
         }
+        saveRunProgress();
       }
     });
 
@@ -10319,6 +10413,11 @@ window.addEventListener('DOMContentLoaded', async () => {
             if (!p) return;
             const serial = clean(bin.serial).toUpperCase();
             if (serial && servicedBinSerials.has(serial)) return;
+            // A bin already flagged missed (driven past too fast) earlier in
+            // this same run stays red when its marker is (re)drawn - e.g.
+            // after resuming the run - instead of drawing back in the
+            // stream's normal colour and waiting to be re-detected.
+            const dotFillColor = serial && missedBinSerials.has(serial) ? '#ef4444' : fillColor;
 
             const key = `${siteId}|${src}|${g.stream}|${idx}|${serial}`;
             let originalDragPos = null;
@@ -10331,7 +10430,7 @@ window.addEventListener('DOMContentLoaded', async () => {
                     width: 14px;
                     height: 14px;
                     border-radius: 50%;
-                    background-color: ${fillColor};
+                    background-color: ${dotFillColor};
                     border: 2.5px solid ${runOutlineColor};
                     box-shadow: 0 1px 3px rgba(0,0,0,0.4);
                     box-sizing: border-box;
@@ -10496,6 +10595,7 @@ window.addEventListener('DOMContentLoaded', async () => {
       total += (source?.[streamKey] || []).length;
     }));
     if (b) b.textContent = total;
+    updateFlippedBinCount();
   };
 
   window.triggerUniversalDataRefresh = function() {
@@ -11489,12 +11589,13 @@ window.addEventListener('DOMContentLoaded', async () => {
     font-weight: 400 !important;
     display: inline-flex !important;
     align-items: center !important;
-    gap: 4px !important;
+    gap: 0 !important;
   }
   .map-address-telemetry .map-next-bin-meta .meta-readout-icon {
     width: 13px !important;
     height: 13px !important;
     flex-shrink: 0 !important;
+    margin-right: 0 !important;
     filter: brightness(0) invert(1) !important;
   }
   .map-address-telemetry .map-next-bin-meta {
