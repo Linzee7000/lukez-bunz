@@ -9020,13 +9020,49 @@ window.addEventListener('DOMContentLoaded', async () => {
   }
 
   // Interpolated point at continuous `param` (segment index + t) along a
-  // closed loop of length n, wrapping as needed.
+  // closed loop of length n, wrapping as needed. Works fine with params
+  // outside [0, n) too (e.g. 7.2 on a 6-point loop) since it's modulo'd
+  // here — that's what lets the unwrapped/monotonic param values used
+  // below resolve back to the right physical point.
   function pointAtParam(border, param) {
     const n = border.length;
     let p = ((param % n) + n) % n;
     const seg = Math.floor(p), t = p - seg;
     const a = border[seg], b = border[(seg + 1) % n];
     return { lat: a.lat + (b.lat - a.lat) * t, lng: a.lng + (b.lng - a.lng) * t };
+  }
+
+  // The actual points of `neighborPts` from paramStart to paramEnd
+  // (inclusive), walking in whichever direction paramEnd is from
+  // paramStart. Crucially this pulls in every ORIGINAL neighbour vertex
+  // that falls in between, not just the two endpoints — otherwise a
+  // curved stretch of the neighbour's boundary gets replaced by one
+  // straight chord and leaves a visible gap/bulge against the neighbour's
+  // actual line, which is what was still happening after the first fix.
+  function sliceNeighborRange(neighborPts, paramStart, paramEnd) {
+    if (Math.abs(paramEnd - paramStart) < 1e-9) return [pointAtParam(neighborPts, paramStart)];
+    const pts = [pointAtParam(neighborPts, paramStart)];
+    if (paramEnd > paramStart) {
+      for (let idx = Math.ceil(paramStart + 1e-9); idx < paramEnd - 1e-9; idx++) pts.push(pointAtParam(neighborPts, idx));
+    } else {
+      for (let idx = Math.floor(paramStart - 1e-9); idx > paramEnd + 1e-9; idx--) pts.push(pointAtParam(neighborPts, idx));
+    }
+    pts.push(pointAtParam(neighborPts, paramEnd));
+    return pts;
+  }
+
+  // Drop points that are (near-)duplicates of the point right before them
+  // — junctions between two matched groups, or a group's endpoint landing
+  // exactly on a neighbour vertex, can otherwise leave a zero-length
+  // sliver in the saved boundary. Checks the wrap-around join too, since
+  // this is a closed polygon.
+  function dedupeLoopPoints(pts) {
+    const out = [];
+    pts.forEach(p => {
+      if (!out.length || metersBetween(out[out.length - 1], p) > 0.02) out.push(p);
+    });
+    if (out.length > 1 && metersBetween(out[out.length - 1], out[0]) <= 0.02) out.pop();
+    return out;
   }
 
   window.snapBoundaryToNeighbor = async function() {
@@ -9068,56 +9104,74 @@ window.addEventListener('DOMContentLoaded', async () => {
         return best;
       });
 
-      // Step 2: walk the run's points in order, grouping consecutive
-      // points matched to the same neighbour, and enforce a single
-      // consistent direction of travel along that neighbour's edge within
-      // each group so the shared line can't fold back on itself.
+      // This is a closed loop, so a matched stretch can wrap past the end
+      // of the array back to index 0. Rotate the scan to start right
+      // after an unmatched point (if there is one) so that wrap-around
+      // stretch is seen as one contiguous group instead of being cut in
+      // two by the array boundary.
+      let rotateAt = candidates.findIndex(c => !c);
+      if (rotateAt === -1) rotateAt = 0;
+      const order = Array.from({ length: n }, (_, k) => (rotateAt + k) % n);
+
+      // Step 2: walk the run's points in this rotated order, grouping
+      // consecutive points matched to the same neighbour, enforcing a
+      // single consistent direction of travel within each group (so the
+      // shared line can't fold back on itself), and then rebuilding that
+      // whole stretch from the neighbour's OWN vertices so it follows any
+      // curve exactly instead of leaving gaps between sparse matched
+      // points.
       let movedHere = 0;
-      let i = 0;
-      while (i < n) {
-        if (!candidates[i]) { i++; continue; }
-        const neighborKey = candidates[i].neighborKey;
-        let j = i;
-        while (j < n && candidates[j] && candidates[j].neighborKey === neighborKey) j++;
+      const resultPts = [];
+      let k = 0;
+      while (k < n) {
+        const origIdx = order[k];
+        if (!candidates[origIdx]) { resultPts.push(currentPts[origIdx]); k++; continue; }
+
+        const neighborKey = candidates[origIdx].neighborKey;
         const groupIdx = [];
-        for (let k = i; k < j; k++) groupIdx.push(k);
-
-        if (groupIdx.length) {
-          const neighborPts = otherBorders.find(o => o.key === neighborKey).pts;
-          const period = neighborPts.length;
-
-          // Unwrap raw params relative to one another so a seam in the
-          // neighbour's own point order (param wrapping past 0) doesn't
-          // look like a backwards jump.
-          const raw = groupIdx.map(k => candidates[k].param);
-          const unwrapped = [raw[0]];
-          for (let g = 1; g < raw.length; g++) {
-            let v = raw[g];
-            let diff = v - unwrapped[g - 1];
-            while (diff > period / 2) { v -= period; diff = v - unwrapped[g - 1]; }
-            while (diff < -period / 2) { v += period; diff = v - unwrapped[g - 1]; }
-            unwrapped.push(v);
-          }
-
-          const ascending = unwrapped[unwrapped.length - 1] >= unwrapped[0];
-          const EPS = 1e-4;
-          for (let g = 1; g < unwrapped.length; g++) {
-            if (ascending && unwrapped[g] <= unwrapped[g - 1]) unwrapped[g] = unwrapped[g - 1] + EPS;
-            if (!ascending && unwrapped[g] >= unwrapped[g - 1]) unwrapped[g] = unwrapped[g - 1] - EPS;
-          }
-
-          groupIdx.forEach((k, g) => {
-            currentPts[k] = pointAtParam(neighborPts, unwrapped[g]);
-            movedHere++;
-          });
-          touchedNeighbors.add(neighborKey.toUpperCase());
+        let k2 = k;
+        while (k2 < n && candidates[order[k2]] && candidates[order[k2]].neighborKey === neighborKey) {
+          groupIdx.push(order[k2]);
+          k2++;
         }
 
-        i = j;
+        const neighborPts = otherBorders.find(o => o.key === neighborKey).pts;
+        const period = neighborPts.length;
+
+        // Unwrap raw params relative to one another so a seam in the
+        // neighbour's own point order (param wrapping past 0) doesn't
+        // look like a backwards jump.
+        const raw = groupIdx.map(idx => candidates[idx].param);
+        const unwrapped = [raw[0]];
+        for (let g = 1; g < raw.length; g++) {
+          let v = raw[g];
+          let diff = v - unwrapped[g - 1];
+          while (diff > period / 2) { v -= period; diff = v - unwrapped[g - 1]; }
+          while (diff < -period / 2) { v += period; diff = v - unwrapped[g - 1]; }
+          unwrapped.push(v);
+        }
+
+        const ascending = unwrapped[unwrapped.length - 1] >= unwrapped[0];
+        const EPS = 1e-4;
+        for (let g = 1; g < unwrapped.length; g++) {
+          if (ascending && unwrapped[g] <= unwrapped[g - 1]) unwrapped[g] = unwrapped[g - 1] + EPS;
+          if (!ascending && unwrapped[g] >= unwrapped[g - 1]) unwrapped[g] = unwrapped[g - 1] - EPS;
+        }
+
+        // Rebuild this whole stretch from the neighbour's own vertices
+        // between the first and last matched param — this is what pulls
+        // in any curve the sparser current-run points were cutting the
+        // corner on.
+        sliceNeighborRange(neighborPts, unwrapped[0], unwrapped[unwrapped.length - 1])
+          .forEach(p => resultPts.push(p));
+        movedHere += groupIdx.length;
+        touchedNeighbors.add(neighborKey.toUpperCase());
+
+        k = k2;
       }
 
       if (movedHere) {
-        customRunBorders[runKey] = currentPts.map(p => [p.lat, p.lng]);
+        customRunBorders[runKey] = dedupeLoopPoints(resultPts).map(p => [p.lat, p.lng]);
         totalMoved += movedHere;
         touchedRuns.push(runKey.toUpperCase());
       }
@@ -9131,7 +9185,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     await saveToDB('customRunBorders', customRunBorders);
     renderMapData();
     if (isRoadSnapEditing) enableBoundaryVertexHandles();
-    customAlert(`Matched ${totalMoved} boundary point(s) on ${touchedRuns.join(', ')} to ${Array.from(touchedNeighbors).join(', ')}'s edge.`);
+    customAlert(`Matched ${totalMoved} boundary point(s) on ${touchedRuns.join(', ')} to ${Array.from(touchedNeighbors).join(', ')}'s edge — following its exact line, including any curves.`);
   };
 
   // Run Boundary > Export: write the run's current boundary (whichever is
