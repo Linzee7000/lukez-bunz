@@ -8923,34 +8923,139 @@ window.addEventListener('DOMContentLoaded', async () => {
       return;
     }
 
+    // Precompute a turf LineString per road once, since each is tested
+    // against every boundary point below.
+    const roadFeatures = roadLines
+      .filter(coords => coords.length >= 2)
+      .map(coords => ({ coords, line: turf.lineString(coords) }));
+
     const MAX_SNAP_METERS = 35;
-    let movedCount = 0;
-    const snapped = points.map(pt => {
+    const n = points.length;
+
+    // Step 1: best edge-projected candidate per point, across every
+    // fetched road line, within the snap threshold. `location` is the
+    // distance in metres along that road's own line — used below both to
+    // order matched points and to cut out the exact stretch of road
+    // between them.
+    const candidates = points.map(pt => {
       const turfPt = turf.point([pt.lng, pt.lat]);
       let best = null;
-      roadLines.forEach(coords => {
-        if (coords.length < 2) return;
-        try {
-          const line = turf.lineString(coords);
-          const res = turf.nearestPointOnLine(line, turfPt, { units: 'meters' });
-          if (res && (!best || res.properties.dist < best.dist)) {
-            best = { dist: res.properties.dist, coord: res.geometry.coordinates };
-          }
-        } catch (e) { /* skip malformed way geometry */ }
+      roadFeatures.forEach((rf, roadIdx) => {
+        let res;
+        try { res = turf.nearestPointOnLine(rf.line, turfPt, { units: 'meters' }); }
+        catch (e) { return; }
+        if (res && res.properties.dist <= MAX_SNAP_METERS && (!best || res.properties.dist < best.dist)) {
+          best = { roadIdx, location: res.properties.location, coord: res.geometry.coordinates, dist: res.properties.dist };
+        }
       });
-      if (best && best.dist <= MAX_SNAP_METERS) {
-        movedCount++;
-        return { lat: best.coord[1], lng: best.coord[0] };
-      }
-      return pt;
+      return best;
     });
 
-    customRunBorders[runKey] = snapped.map(p => [p.lat, p.lng]);
+    // Step 1b: bridge short stretches of points that fell just outside
+    // MAX_SNAP_METERS but sit directly between two stretches that both
+    // matched the SAME road — e.g. a "cut corner" point left over from
+    // before this run had a boundary that hugged the road, now a bit
+    // further from the centreline than the strict threshold allows.
+    const BRIDGE_MAX_METERS = MAX_SNAP_METERS * 3;
+    const BRIDGE_MAX_GAP_POINTS = 8;
+    {
+      let bi = 0;
+      while (bi < n) {
+        if (candidates[bi]) { bi++; continue; }
+        let bj = bi;
+        while (bj < n && !candidates[bj]) bj++;
+        const gapLen = bj - bi;
+        const before = candidates[(bi - 1 + n) % n];
+        const after = bj < n ? candidates[bj] : null;
+        if (before && after && before.roadIdx === after.roadIdx && gapLen <= BRIDGE_MAX_GAP_POINTS) {
+          const rf = roadFeatures[before.roadIdx];
+          for (let bk = bi; bk < bj; bk++) {
+            const turfPt = turf.point([points[bk].lng, points[bk].lat]);
+            let res;
+            try { res = turf.nearestPointOnLine(rf.line, turfPt, { units: 'meters' }); } catch (e) { continue; }
+            if (res && res.properties.dist <= BRIDGE_MAX_METERS) {
+              candidates[bk] = { roadIdx: before.roadIdx, location: res.properties.location, coord: res.geometry.coordinates, dist: res.properties.dist };
+            }
+          }
+        }
+        bi = bj;
+      }
+    }
+
+    // This is a closed loop, so a matched stretch can wrap past the end
+    // of the array back to index 0 — rotate the scan to start right after
+    // an unmatched point (if there is one) so that stretch isn't cut in
+    // two by the array boundary.
+    let rotateAt = candidates.findIndex(c => !c);
+    if (rotateAt === -1) rotateAt = 0;
+    const order = Array.from({ length: n }, (_, k) => (rotateAt + k) % n);
+
+    // Step 2: walk the boundary in this rotated order, grouping
+    // consecutive points matched to the same road, and rebuild that whole
+    // stretch from the ROAD's own vertices (via turf.lineSliceAlong)
+    // instead of just connecting the matched points with a straight
+    // line — that's what was cutting across the curve in Arthurs Seat
+    // Road above.
+    let movedCount = 0;
+    const resultPts = [];
+    let k = 0;
+    while (k < n) {
+      const origIdx = order[k];
+      if (!candidates[origIdx]) { resultPts.push(points[origIdx]); k++; continue; }
+
+      const roadIdx = candidates[origIdx].roadIdx;
+      const groupIdx = [];
+      let k2 = k;
+      while (k2 < n && candidates[order[k2]] && candidates[order[k2]].roadIdx === roadIdx) {
+        groupIdx.push(order[k2]);
+        k2++;
+      }
+
+      if (groupIdx.length === 1) {
+        const c = candidates[groupIdx[0]];
+        resultPts.push({ lat: c.coord[1], lng: c.coord[0] });
+      } else {
+        const rf = roadFeatures[roadIdx];
+        const locs = groupIdx.map(idx => candidates[idx].location);
+        const ascending = locs[locs.length - 1] >= locs[0];
+        const lo = Math.min(locs[0], locs[locs.length - 1]);
+        const hi = Math.max(locs[0], locs[locs.length - 1]);
+        let sliceCoords;
+        try {
+          sliceCoords = turf.lineSliceAlong(rf.line, lo, hi, { units: 'meters' }).geometry.coordinates;
+        } catch (e) {
+          sliceCoords = null;
+        }
+        if (sliceCoords && sliceCoords.length) {
+          if (!ascending) sliceCoords = sliceCoords.slice().reverse();
+          sliceCoords.forEach(([lng, lat]) => resultPts.push({ lat, lng }));
+        } else {
+          groupIdx.forEach(idx => {
+            const c = candidates[idx];
+            resultPts.push({ lat: c.coord[1], lng: c.coord[0] });
+          });
+        }
+      }
+      movedCount += groupIdx.length;
+      k = k2;
+    }
+
+    // Drop (near-)duplicate consecutive points — junctions between two
+    // matched stretches, or a group's endpoint landing exactly on a road
+    // vertex, can otherwise leave a zero-length sliver. Checks the
+    // wrap-around join too, since this is a closed polygon.
+    const deduped = [];
+    resultPts.forEach(p => {
+      if (!deduped.length || metersBetween(deduped[deduped.length - 1], p) > 0.02) deduped.push(p);
+    });
+    if (deduped.length > 1 && metersBetween(deduped[deduped.length - 1], deduped[0]) <= 0.02) deduped.pop();
+
+    customRunBorders[runKey] = deduped.map(p => [p.lat, p.lng]);
     await saveToDB('customRunBorders', customRunBorders);
 
     renderMapData();
     if (isRoadSnapEditing) enableBoundaryVertexHandles();
-    customAlert(`Snapped ${movedCount} of ${points.length} boundary point(s) to nearby roads.`);
+    customAlert(`Snapped ${movedCount} of ${points.length} boundary point(s) to nearby roads, following the road's own curves.`);
   };
 
   // Run Boundary > Match Neighbour: for every currently selected run, pull
