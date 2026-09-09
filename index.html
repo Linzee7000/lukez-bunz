@@ -3258,6 +3258,7 @@
                 <button type="button" class="map-context-btn map-settings-opt-btn map-settings-action" data-subcat="boundary" onclick="selectMapSettingsSubcat('boundary')"><img class="icon-img" src="boundary.png" alt=""> Boundary</button>
                 <button type="button" class="map-context-btn map-settings-opt-btn map-settings-action" data-subcat="geofence" onclick="selectMapSettingsSubcat('geofence')"><img class="icon-img" src="geofence.png" alt=""> Geofence</button>
                 <button type="button" class="map-context-btn map-settings-opt-btn map-settings-action" onclick="startBoundarySelectMode()"><img class="icon-img" src="select.png" alt=""> Select</button>
+                <button type="button" class="map-context-btn map-settings-opt-btn map-settings-action" onclick="window.openBinMismatchModal()">📍 Bin Check</button>
               </div>
               <div class="map-settings-option-group" id="mapSettingsGroupKml" data-group="kml">
                 <button type="button" class="map-context-btn map-settings-opt-btn map-settings-action" onclick="loadKmzForCurrentRun()"><img class="icon-img" src="add.png" alt=""> Add</button>
@@ -3718,6 +3719,28 @@
   </div>
 </div>
 
+<!-- Bin/House GPS mismatch audit: every solo bin recorded well away from
+     its own property's pin, worst first — almost always a data mismatch
+     (swapped serial, bad GPS tap) rather than a real bin location. Each
+     row can be fixed on the spot (snap the bin back onto the house pin)
+     or opened on the map to look at first. See computeAllBinHouseMismatches
+     / renderBinMismatchList / fixBinHouseMismatch. -->
+<div id="binMismatchModal" class="modal-overlay sub-modal-layer map-bottom-sheet-modal">
+  <div class="modal-box run-style-modal-box">
+    <div class="modal-header">
+      <h3>📍 Bin/House GPS Check</h3>
+      <button type="button" class="modal-close-btn" onclick="window.closeBinMismatchModal()">&times;</button>
+    </div>
+    <div class="map-settings-category-hint">
+      Bins further than <span id="binMismatchThresholdLabel">60m</span> from their own property's pin — almost always a wrong pin or a swapped serial, not a real bin spot. Worst first.
+    </div>
+    <div id="binMismatchList"></div>
+    <div class="kml-edit-footer">
+      <button type="button" class="map-tool-btn" style="flex:1;" onclick="window.closeBinMismatchModal()">Close</button>
+    </div>
+  </div>
+</div>
+
 <div id="propInspectModal" class="modal-overlay">
   <div class="modal-box">
     <div class="modal-header">
@@ -4114,6 +4137,15 @@
   let isNextBinBoxVisible = localStorage.getItem('lukezBunzNextBinBoxVisible') !== 'false';
   let hasAutoCenteredTruck = false;
   let isRoadSnapEditing = false;
+  // When "Editing run boundary" has more than one run on screen at once
+  // (multiple runs selected), this holds which one's vertices are
+  // currently draggable. The other runs' boundaries stay visible as a
+  // dashed reference line but their points can't be dragged, so you don't
+  // accidentally grab a neighbouring run's handle when two boundaries sit
+  // close together. Switched via the run chips shown in the top bar (see
+  // renderBoundaryRunSwitcher). Null/empty means "only one run showing" —
+  // in that case every handle behaves as before.
+  let activeBoundaryEditRun = null;
 
   let runColorMap = {};
   let runDotColorMap = {};
@@ -7356,6 +7388,23 @@ function promptEditBin(propId, streamKey, binIdx) {
       }
     }
 
+    // Bin(s) recorded well away from this property's own pin — see
+    // siteBinHouseMismatches. Shown the same way as the Stray Bin box
+    // above so both kinds of "this looks off" flags read consistently.
+    let binGpsAlertHtml = '';
+    const binMismatches = siteBinHouseMismatches(site);
+    if (binMismatches.length) {
+      binGpsAlertHtml = binMismatches.map(m => {
+        const severe = m.distance >= BIN_HOUSE_SEVERE_METERS;
+        return `
+          <div class="stray-bin-box" style="${severe ? 'background:#fef2f2; border-color:#fecaca;' : ''}">
+            <div>${severe ? '🚨' : '⚠️'} ${m.stream} bin ${m.bin.serial || ''} is ${Math.round(m.distance)}m from this property's pin — likely a data mismatch.</div>
+            <button type="button" class="stray-fix-btn" onclick="window.fixBinHouseMismatch('${site.propId || site.siteId}', '${m.stream}', ${m.idx})">📍 Snap to house</button>
+          </div>
+        `;
+      }).join('');
+    }
+
     const councilBinsList = [
       ...(site.councilStreams.Garbage || []),
       ...(site.councilStreams.Recycling || []),
@@ -7463,6 +7512,7 @@ function promptEditBin(propId, streamKey, binIdx) {
       ${ratingBannerHtml}
       ${specialAccessNoticeHtml(site)}
       ${strayAlertHtml}
+      ${binGpsAlertHtml}
       ${hasAnyBins ? streamBoxesHtml : '<div style="color:#94a3b8; font-style:italic; font-size:13px; padding:6px 0;">no bins registered</div>'}
     `;
 
@@ -8300,6 +8350,119 @@ window.addEventListener('DOMContentLoaded', async () => {
     await saveToDB('masterEditsLog', masterEditsLog);
     renderMapData();
   }
+
+  // Bin/House GPS Check — a bin recorded well away from its own property's
+  // pin is almost always a data problem (a bad GPS tap, or a serial that
+  // actually belongs to a neighbour) rather than a genuine bin location.
+  // BIN_HOUSE_FLAG_METERS is the "worth a look" line; BIN_HOUSE_SEVERE_METERS
+  // is "practically certain to be wrong" and gets called out more strongly
+  // in the list. Both are plain straight-line distances — there's no
+  // reliable way to tell a big rural block from a unit block in this data,
+  // so this flags on distance alone and leaves the judgement call to
+  // whoever's reviewing the list.
+  const BIN_HOUSE_FLAG_METERS = 60;
+  const BIN_HOUSE_SEVERE_METERS = 200;
+
+  function siteBinHouseMismatches(site) {
+    const hp = gps(site.lat, site.lng);
+    if (!hp) return [];
+    const out = [];
+    Object.keys(site.soloStreams || {}).forEach(stream => {
+      (site.soloStreams[stream] || []).forEach((bin, idx) => {
+        const bp = gps(bin.lat, bin.lng);
+        if (!bp) return;
+        const distance = metersBetween(hp, bp);
+        if (distance > BIN_HOUSE_FLAG_METERS) out.push({ stream, idx, bin, distance });
+      });
+    });
+    return out.sort((a, b) => b.distance - a.distance);
+  }
+
+  function computeAllBinHouseMismatches() {
+    const out = [];
+    // siteRecords directly, rather than getRecordsArray() — that helper
+    // lives inside the separate "unified-clean-script" block below and
+    // isn't reachable from here, but it's the same underlying array.
+    (siteRecords || []).forEach(site => {
+      siteBinHouseMismatches(site).forEach(m => out.push({ site, ...m }));
+    });
+    return out.sort((a, b) => b.distance - a.distance);
+  }
+
+  window.renderBinMismatchList = function(){
+    const listEl = document.getElementById('binMismatchList');
+    const labelEl = document.getElementById('binMismatchThresholdLabel');
+    if (labelEl) labelEl.textContent = `${BIN_HOUSE_FLAG_METERS}m`;
+    if (!listEl) return;
+
+    const mismatches = computeAllBinHouseMismatches();
+    if (!mismatches.length) {
+      listEl.innerHTML = `<div class="map-settings-category-hint" style="padding:10px 2px;">No bins found further than ${BIN_HOUSE_FLAG_METERS}m from their own property's pin. 🎉</div>`;
+      return;
+    }
+
+    listEl.innerHTML = mismatches.map(m => {
+      const site = m.site;
+      const propId = String(site.propId || site.siteId || '');
+      const severe = m.distance >= BIN_HOUSE_SEVERE_METERS;
+      const streamIcon = m.stream === 'Garbage' ? '🗑️' : m.stream === 'Recycling' ? '♻️' : '🌳';
+      return `
+        <div class="geofence-row" style="align-items:flex-start; ${severe ? 'background:#fef2f2;' : ''}">
+          <div style="flex:1; min-width:0;">
+            <div style="font-weight:800; font-size:13.5px; color:#1e293b;">${esc(site.addressText || propId)}</div>
+            <div style="font-size:12.5px; color:${severe ? '#b91c1c' : '#92400e'}; font-weight:700;">
+              ${severe ? '🚨' : '⚠️'} ${streamIcon} ${esc(m.stream)} bin ${esc(m.bin.serial || '')} is ${Math.round(m.distance)}m from the house
+            </div>
+          </div>
+          <div style="display:flex; gap:6px; flex-shrink:0;">
+            <button type="button" class="map-tool-btn" style="padding:6px 8px; font-size:12px;" onclick="window.jumpToBinMismatchOnMap('${propId}')">🗺️ Map</button>
+            <button type="button" class="map-tool-btn" style="padding:6px 8px; font-size:12px; background:#0f5132; border-color:#0f5132; color:#fff;" onclick="window.fixBinHouseMismatch('${propId}', '${m.stream}', ${m.idx})">📍 Fix</button>
+          </div>
+        </div>
+      `;
+    }).join('');
+  };
+
+  window.openBinMismatchModal = function(){
+    closeMapSettingsModal();
+    window.renderBinMismatchList();
+    openModal('binMismatchModal');
+  };
+
+  window.closeBinMismatchModal = function(){
+    closeModal('binMismatchModal');
+  };
+
+  // Snaps ONE flagged bin back onto its own property's pin (same move
+  // focusConsolidateBins does for every bin on a property at once) and
+  // refreshes the audit list in place so the row disappears once fixed.
+  window.fixBinHouseMismatch = async function(propId, stream, idx){
+    const site = siteRecords.find(s => String(s.propId || s.siteId) === String(propId));
+    if (!site) return;
+    const hp = gps(site.lat, site.lng);
+    if (!hp) { customAlert('This property has no GPS location set yet — set that via Edit Property first.'); return; }
+    const bin = (site.soloStreams[stream] || [])[idx];
+    if (!bin) return;
+
+    if (!(await customConfirm(`Move this ${stream} bin (${bin.serial || 'no serial'}) onto ${site.addressText || 'this property'}'s own pin?`))) return;
+
+    bin.lat = hp.lat.toFixed(6); bin.lng = hp.lng.toFixed(6);
+    logEdit({
+      timestamp: new Date().toISOString(), editType: 'BIN_EDIT',
+      propId: site.propId, siteId: site.siteId, address: site.addressText,
+      stream, serial: bin.serial, lat: bin.lat, lng: bin.lng
+    });
+    hasUnsyncedChanges = true; updateSyncButtonIcon();
+    await saveToDB('masterRecords', siteRecords);
+    await saveToDB('masterEditsLog', masterEditsLog);
+    renderMapData();
+    window.renderBinMismatchList();
+  };
+
+  window.jumpToBinMismatchOnMap = function(propId){
+    window.closeBinMismatchModal();
+    showPropertyOnMap(propId);
+  };
 
   function focusAddBin() {
     if (!mapFocusPropId) return;
@@ -9654,6 +9817,10 @@ window.addEventListener('DOMContentLoaded', async () => {
     if (isRoadSnapEditing) {
       closeMapSettingsModal();
       boundaryRemovePointsActive = false;
+      // Default the draggable ("active") run to the first one currently on
+      // screen. With only one run showing this is a no-op — every handle
+      // is draggable either way (see enableBoundaryVertexHandles).
+      activeBoundaryEditRun = (currentlyShowingRunKeys && currentlyShowingRunKeys[0]) || null;
       enableBoundaryVertexHandles();
       window.setMapTopBarContext(
         'Editing run boundary',
@@ -9666,12 +9833,45 @@ window.addEventListener('DOMContentLoaded', async () => {
         ],
         ()=>window.toggleRoadSnapEditing()
       );
+      window.renderBoundaryRunSwitcher();
     } else {
       boundaryRemovePointsActive = false;
+      activeBoundaryEditRun = null;
       disableBoundaryVertexHandles();
       await saveToDB("customRunBorders", customRunBorders);
       window.clearMapTopBarContext();
     }
+  };
+
+  // Run chips shown next to the "Editing run boundary" title whenever more
+  // than one run is on screen at once. Tapping a chip makes that run the
+  // draggable one (see activeBoundaryEditRun) without changing which runs
+  // are selected/visible/matchable — Snap Houses, Snap Roads and Match
+  // Neighbour still act on every selected run, same as before. Only which
+  // run's dots you can actually drag is what this switches.
+  window.renderBoundaryRunSwitcher = function(){
+    const btnsEl = document.getElementById('mapContextButtons');
+    if (!btnsEl) return;
+    if (!isRoadSnapEditing) { btnsEl.innerHTML = ''; return; }
+
+    const runs = Array.from(new Set((currentlyShowingRunKeys||[]).filter(Boolean)));
+    if (runs.length < 2) {
+      btnsEl.innerHTML = '';
+      return;
+    }
+    if (!activeBoundaryEditRun || !runs.some(r => mapKey(r) === mapKey(activeBoundaryEditRun))) {
+      activeBoundaryEditRun = runs[0];
+    }
+    btnsEl.innerHTML = runs.map(r => {
+      const isActive = mapKey(r) === mapKey(activeBoundaryEditRun);
+      return `<button type="button" class="boundary-run-chip${isActive ? ' active' : ''}" onclick="event.stopPropagation(); window.setActiveBoundaryEditRun('${esc(String(r))}')">${esc(String(r))}</button>`;
+    }).join('');
+  };
+
+  window.setActiveBoundaryEditRun = function(runKey){
+    activeBoundaryEditRun = runKey;
+    window.renderBoundaryRunSwitcher();
+    enableBoundaryVertexHandles();
   };
 
   // Settings > Boundary > Select: houses need to be selected on the map
@@ -9735,10 +9935,28 @@ window.addEventListener('DOMContentLoaded', async () => {
       mapEditHandlesLayer = L.layerGroup({ pane: 'lukez-handle-pane' }).addTo(leafletMap);
     }
     mapEditHandlesLayer.clearLayers();
+    if (typeof window.renderBoundaryRunSwitcher === 'function') window.renderBoundaryRunSwitcher();
+
+    // With 2+ runs showing at once, only the run picked in the switcher
+    // gets drag/insert handles — the rest are shown read-only (dashed, a
+    // touch fainter) so overlapping boundaries can't be mixed up. With
+    // just one run showing, activeBoundaryEditRun matches it anyway so
+    // this has no effect.
+    const multipleRunsShowing = new Set((currentlyShowingRunKeys||[]).map(mapKey)).size > 1;
 
     mapHullsLayer.eachLayer(layer => {
       if (layer instanceof L.Polygon && layer._runGroupKey) {
         const groupKey = layer._runGroupKey;
+        const isActiveRun = !multipleRunsShowing || mapKey(groupKey) === mapKey(activeBoundaryEditRun);
+
+        if (multipleRunsShowing) {
+          layer.setStyle(isActiveRun
+            ? { weight: 3, dashArray: null, fillOpacity: 0.12 }
+            : { weight: 2, dashArray: '6,6', fillOpacity: 0.04 });
+        }
+
+        if (!isActiveRun) return; // reference-only line — no drag handles
+
         let latlngs = layer.getLatLngs()[0] || [];
 
         function refreshHandles() {
@@ -11369,6 +11587,27 @@ window.addEventListener('DOMContentLoaded', async () => {
     align-items: center !important;
     gap: 5px !important;
     flex-shrink: 0 !important;
+    overflow-x: auto !important;
+  }
+  /* Run switcher chips shown while "Editing run boundary" has more than
+     one run on screen — tap one to make its boundary the draggable one. */
+  .boundary-run-chip {
+    flex-shrink: 0 !important;
+    border: 1px solid rgba(255,255,255,0.25) !important;
+    background: rgba(255,255,255,0.06) !important;
+    color: #fff !important;
+    font-weight: 700 !important;
+    font-size: 13px !important;
+    padding: 4px 9px !important;
+    border-radius: 5px !important;
+    cursor: pointer !important;
+    opacity: 0.65;
+  }
+  .boundary-run-chip.active {
+    background: #eab308 !important;
+    border-color: #eab308 !important;
+    color: #000 !important;
+    opacity: 1;
   }
   .map-context-btn {
     flex-shrink: 0 !important;
