@@ -8944,6 +8944,77 @@ window.addEventListener('DOMContentLoaded', async () => {
     customAlert(`Snapped ${movedCount} of ${points.length} boundary point(s) to nearby roads.`);
   };
 
+  // Run Boundary > Match Neighbor: for every currently selected run, pull
+  // each of its saved boundary points toward the nearest point on ANY
+  // other run's saved boundary, as long as that neighbor point is within
+  // MATCH_NEIGHBOR_METERS. This is how two adjoining runs (e.g. 219 and
+  // 220) end up sharing the exact same border line with no gap and no
+  // overlap: perfect run 219's shared edge first, then select run 220 and
+  // tap this — 220's nearby vertices snap onto 219's exact coordinates.
+  // Works with multiple runs selected/edited at once too, since each
+  // selected run's boundary polygon already gets its own drag handles
+  // (see enableBoundaryVertexHandles), and this just matches each of them
+  // against every other run's saved border, selected or not.
+  const MATCH_NEIGHBOR_METERS = 25;
+  window.snapBoundaryToNeighbor = async function() {
+    const runs = Array.from(selectedMapRuns());
+    if (!runs.length) {
+      customAlert('Select the run(s) you want to match first, then tap Match Neighbor.');
+      return;
+    }
+
+    const asPoint = p => Array.isArray(p)
+      ? { lat: Number(p[0]), lng: Number(p[1]) }
+      : { lat: Number(p.lat), lng: Number(p.lng) };
+
+    let totalMoved = 0;
+    const touchedRuns = [];
+
+    runs.forEach(runKey => {
+      const current = customRunBorders[runKey];
+      if (!current || current.length < 3) return;
+
+      const currentPts = current.map(asPoint);
+      let movedHere = 0;
+
+      currentPts.forEach((pt, idx) => {
+        let best = null;
+        Object.keys(customRunBorders).forEach(otherKey => {
+          if (otherKey === runKey) return;
+          const otherBorder = customRunBorders[otherKey];
+          if (!otherBorder || otherBorder.length < 3) return;
+          otherBorder.forEach(op => {
+            const o = asPoint(op);
+            const d = metersBetween(pt, o);
+            if (d <= MATCH_NEIGHBOR_METERS && (!best || d < best.dist)) {
+              best = { dist: d, point: o };
+            }
+          });
+        });
+        if (best) {
+          currentPts[idx] = best.point;
+          movedHere++;
+        }
+      });
+
+      if (movedHere) {
+        customRunBorders[runKey] = currentPts.map(p => [p.lat, p.lng]);
+        totalMoved += movedHere;
+        touchedRuns.push(runKey.toUpperCase());
+      }
+    });
+
+    if (!totalMoved) {
+      customAlert('No nearby boundary points were found on another run to match against. Make sure the neighboring run already has its own saved boundary, edited close enough to this one (within 25m).');
+      return;
+    }
+
+    await saveToDB('customRunBorders', customRunBorders);
+    renderMapData();
+    if (isRoadSnapEditing) enableBoundaryVertexHandles();
+    customAlert(`Matched ${totalMoved} boundary point(s) on ${touchedRuns.join(', ')} to a neighboring run's edge.`);
+  };
+
   // Run Boundary > Export: write the run's current boundary (whichever is
   // actually on screen — a manual/snapped override, or the computed hull)
   // out as a KML polygon.
@@ -9277,6 +9348,7 @@ window.addEventListener('DOMContentLoaded', async () => {
         [
           {label:'Snap Houses', icon:'🧲', onClick:()=>window.snapActiveBoundaryToRoads(), row:2, key:'snapHouses'},
           {label:'Snap Roads', icon:'🛣️', onClick:()=>window.snapBoundaryToRoads(), row:2, key:'snapRoads'},
+          {label:'Match Neighbor', icon:'🧷', onClick:()=>window.snapBoundaryToNeighbor(), row:2, key:'matchNeighbor'},
           {label:'Remove points', icon:'🗑️', onClick:()=>window.toggleBoundaryRemovePointsMode(), row:2, key:'removePoints'},
           {label:'Done', icon:'✔️', onClick:()=>window.toggleRoadSnapEditing(), variant:'primary', key:'boundaryDone'}
         ],
