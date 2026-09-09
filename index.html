@@ -8953,22 +8953,86 @@ window.addEventListener('DOMContentLoaded', async () => {
     customAlert(`Snapped ${movedCount} of ${points.length} boundary point(s) to nearby roads.`);
   };
 
-  // Run Boundary > Match Neighbor: for every currently selected run, pull
-  // each of its saved boundary points toward the nearest point on ANY
-  // other run's saved boundary, as long as that neighbor point is within
-  // MATCH_NEIGHBOR_METERS. This is how two adjoining runs (e.g. 219 and
-  // 220) end up sharing the exact same border line with no gap and no
-  // overlap: perfect run 219's shared edge first, then select run 220 and
-  // tap this — 220's nearby vertices snap onto 219's exact coordinates.
+  // Run Boundary > Match Neighbour: for every currently selected run, pull
+  // each of its saved boundary points onto the nearest EDGE (not just the
+  // nearest vertex) of any other run's saved boundary, as long as that
+  // neighbouring edge is within MATCH_NEIGHBOR_METERS. This is how two
+  // adjoining runs (e.g. 219 and 220) end up sharing the exact same border
+  // line with no gap and no overlap: perfect run 219's shared edge first,
+  // then select run 220 and tap this — 220's nearby vertices snap onto
+  // 219's exact edge.
+  //
+  // IMPORTANT: matching to the nearest VERTEX independently for each point
+  // (the old approach) let consecutive points on the current run's edge
+  // latch onto neighbour vertices that were themselves out of order (e.g.
+  // because the neighbour has a different vertex spacing, or two different
+  // neighbouring runs are both close by). That produced a zig-zagging,
+  // self-crossing line instead of a clean shared edge. To fix that we:
+  //   1) Project each point onto the closest point on a neighbour EDGE
+  //      (segment), not just onto a vertex — this alone removes most
+  //      zig-zag when vertex density differs between the two runs.
+  //   2) Group consecutive current-run points that matched the SAME
+  //      neighbour run together, and force their positions along that
+  //      neighbour's boundary to move in one consistent direction (never
+  //      backwards). Any point that would otherwise jump backwards along
+  //      the neighbour's edge — the actual cause of lines crossing over —
+  //      is nudged forward just enough to keep the sequence in order.
   // Works with multiple runs selected/edited at once too, since each
   // selected run's boundary polygon already gets its own drag handles
   // (see enableBoundaryVertexHandles), and this just matches each of them
   // against every other run's saved border, selected or not.
   const MATCH_NEIGHBOR_METERS = 25;
+
+  // Closest point to p on the segment a→b, done in a small local planar
+  // approximation (fine at this scale — tens of metres) so it's cheap and
+  // avoids re-deriving spherical segment maths.
+  function closestPointOnSegment(p, a, b) {
+    const mPerDegLat = 111320;
+    const mPerDegLng = 111320 * Math.cos(p.lat * Math.PI / 180);
+    const toXY = q => ({ x: (q.lng - p.lng) * mPerDegLng, y: (q.lat - p.lat) * mPerDegLat });
+    const A = toXY(a), B = toXY(b);
+    const ABx = B.x - A.x, ABy = B.y - A.y;
+    const len2 = ABx * ABx + ABy * ABy;
+    let t = len2 > 0 ? (-A.x * ABx - A.y * ABy) / len2 : 0;
+    t = Math.max(0, Math.min(1, t));
+    const projX = A.x + ABx * t, projY = A.y + ABy * t;
+    const dist = Math.hypot(projX, projY);
+    return {
+      point: { lat: p.lat + projY / mPerDegLat, lng: p.lng + projX / mPerDegLng },
+      t, dist
+    };
+  }
+
+  // Nearest point to `pt` anywhere on the closed loop `border` (a run's
+  // boundary is rendered as a polygon, so the last vertex connects back to
+  // the first). Returns the matched point plus a continuous `param`
+  // (segment index + t) describing WHERE along the loop it landed, so
+  // callers can check ordering between multiple matched points.
+  function nearestOnBorderLoop(pt, border) {
+    let best = null;
+    const n = border.length;
+    for (let i = 0; i < n; i++) {
+      const a = border[i], b = border[(i + 1) % n];
+      const hit = closestPointOnSegment(pt, a, b);
+      if (!best || hit.dist < best.dist) best = { ...hit, seg: i, param: i + hit.t };
+    }
+    return best;
+  }
+
+  // Interpolated point at continuous `param` (segment index + t) along a
+  // closed loop of length n, wrapping as needed.
+  function pointAtParam(border, param) {
+    const n = border.length;
+    let p = ((param % n) + n) % n;
+    const seg = Math.floor(p), t = p - seg;
+    const a = border[seg], b = border[(seg + 1) % n];
+    return { lat: a.lat + (b.lat - a.lat) * t, lng: a.lng + (b.lng - a.lng) * t };
+  }
+
   window.snapBoundaryToNeighbor = async function() {
     const runs = Array.from(selectedMapRuns());
     if (!runs.length) {
-      customAlert('Select the run(s) you want to match first, then tap Match Neighbor.');
+      customAlert('Select the run(s) you want to match first, then tap Match Neighbour.');
       return;
     }
 
@@ -8978,33 +9042,79 @@ window.addEventListener('DOMContentLoaded', async () => {
 
     let totalMoved = 0;
     const touchedRuns = [];
+    const touchedNeighbors = new Set();
 
     runs.forEach(runKey => {
       const current = customRunBorders[runKey];
       if (!current || current.length < 3) return;
 
       const currentPts = current.map(asPoint);
-      let movedHere = 0;
+      const n = currentPts.length;
 
-      currentPts.forEach((pt, idx) => {
+      const otherBorders = Object.keys(customRunBorders)
+        .filter(k => k !== runKey && customRunBorders[k] && customRunBorders[k].length >= 3)
+        .map(k => ({ key: k, pts: customRunBorders[k].map(asPoint) }));
+
+      // Step 1: best edge-projected candidate per point, across every
+      // other run's boundary, within the match threshold.
+      const candidates = currentPts.map(pt => {
         let best = null;
-        Object.keys(customRunBorders).forEach(otherKey => {
-          if (otherKey === runKey) return;
-          const otherBorder = customRunBorders[otherKey];
-          if (!otherBorder || otherBorder.length < 3) return;
-          otherBorder.forEach(op => {
-            const o = asPoint(op);
-            const d = metersBetween(pt, o);
-            if (d <= MATCH_NEIGHBOR_METERS && (!best || d < best.dist)) {
-              best = { dist: d, point: o };
-            }
-          });
+        otherBorders.forEach(({ key, pts }) => {
+          const hit = nearestOnBorderLoop(pt, pts);
+          if (hit.dist <= MATCH_NEIGHBOR_METERS && (!best || hit.dist < best.dist)) {
+            best = { neighborKey: key, param: hit.param, dist: hit.dist };
+          }
         });
-        if (best) {
-          currentPts[idx] = best.point;
-          movedHere++;
-        }
+        return best;
       });
+
+      // Step 2: walk the run's points in order, grouping consecutive
+      // points matched to the same neighbour, and enforce a single
+      // consistent direction of travel along that neighbour's edge within
+      // each group so the shared line can't fold back on itself.
+      let movedHere = 0;
+      let i = 0;
+      while (i < n) {
+        if (!candidates[i]) { i++; continue; }
+        const neighborKey = candidates[i].neighborKey;
+        let j = i;
+        while (j < n && candidates[j] && candidates[j].neighborKey === neighborKey) j++;
+        const groupIdx = [];
+        for (let k = i; k < j; k++) groupIdx.push(k);
+
+        if (groupIdx.length) {
+          const neighborPts = otherBorders.find(o => o.key === neighborKey).pts;
+          const period = neighborPts.length;
+
+          // Unwrap raw params relative to one another so a seam in the
+          // neighbour's own point order (param wrapping past 0) doesn't
+          // look like a backwards jump.
+          const raw = groupIdx.map(k => candidates[k].param);
+          const unwrapped = [raw[0]];
+          for (let g = 1; g < raw.length; g++) {
+            let v = raw[g];
+            let diff = v - unwrapped[g - 1];
+            while (diff > period / 2) { v -= period; diff = v - unwrapped[g - 1]; }
+            while (diff < -period / 2) { v += period; diff = v - unwrapped[g - 1]; }
+            unwrapped.push(v);
+          }
+
+          const ascending = unwrapped[unwrapped.length - 1] >= unwrapped[0];
+          const EPS = 1e-4;
+          for (let g = 1; g < unwrapped.length; g++) {
+            if (ascending && unwrapped[g] <= unwrapped[g - 1]) unwrapped[g] = unwrapped[g - 1] + EPS;
+            if (!ascending && unwrapped[g] >= unwrapped[g - 1]) unwrapped[g] = unwrapped[g - 1] - EPS;
+          }
+
+          groupIdx.forEach((k, g) => {
+            currentPts[k] = pointAtParam(neighborPts, unwrapped[g]);
+            movedHere++;
+          });
+          touchedNeighbors.add(neighborKey.toUpperCase());
+        }
+
+        i = j;
+      }
 
       if (movedHere) {
         customRunBorders[runKey] = currentPts.map(p => [p.lat, p.lng]);
@@ -9014,14 +9124,14 @@ window.addEventListener('DOMContentLoaded', async () => {
     });
 
     if (!totalMoved) {
-      customAlert('No nearby boundary points were found on another run to match against. Make sure the neighboring run already has its own saved boundary, edited close enough to this one (within 25m).');
+      customAlert('No nearby boundary edge was found on another run to match against. Make sure the neighbouring run already has its own saved boundary, edited close enough to this one (within 25m).');
       return;
     }
 
     await saveToDB('customRunBorders', customRunBorders);
     renderMapData();
     if (isRoadSnapEditing) enableBoundaryVertexHandles();
-    customAlert(`Matched ${totalMoved} boundary point(s) on ${touchedRuns.join(', ')} to a neighboring run's edge.`);
+    customAlert(`Matched ${totalMoved} boundary point(s) on ${touchedRuns.join(', ')} to ${Array.from(touchedNeighbors).join(', ')}'s edge.`);
   };
 
   // Run Boundary > Export: write the run's current boundary (whichever is
@@ -9357,7 +9467,7 @@ window.addEventListener('DOMContentLoaded', async () => {
         [
           {label:'Snap Houses', icon:'🧲', onClick:()=>window.snapActiveBoundaryToRoads(), row:2, key:'snapHouses'},
           {label:'Snap Roads', icon:'🛣️', onClick:()=>window.snapBoundaryToRoads(), row:2, key:'snapRoads'},
-          {label:'Match Neighbor', icon:'🧷', onClick:()=>window.snapBoundaryToNeighbor(), row:2, key:'matchNeighbor'},
+          {label:'Match Neighbour', icon:'🧷', onClick:()=>window.snapBoundaryToNeighbor(), row:2, key:'matchNeighbor'},
           {label:'Remove points', icon:'🗑️', onClick:()=>window.toggleBoundaryRemovePointsMode(), row:2, key:'removePoints'},
           {label:'Done', icon:'✔️', onClick:()=>window.toggleRoadSnapEditing(), variant:'primary', key:'boundaryDone'}
         ],
