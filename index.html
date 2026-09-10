@@ -827,11 +827,12 @@
 
     /* Live Street Name Overlay — a small transparent pill floated directly
        on top of the map tiles (not inside the opaque telemetry card),
-       showing just the street the truck is currently on. Positioned by
-       setupMapStreetOverlayAutoPosition() (JS) which pins its `top` right
-       under the header panel, however tall that currently is, the same
-       way #mapFixedSideControls is kept below the header. Non-interactive
-       so it never blocks map panning/zooming underneath it. */
+       showing the OpenStreetMap street name for the truck's actual GPS
+       position (see updateLiveStreetFromGps), not the nearest bin/property.
+       Positioned by setupMapStreetOverlayAutoPosition() (JS) which pins
+       its `top` right under the header panel, however tall that currently
+       is, the same way #mapFixedSideControls is kept below the header.
+       Non-interactive so it never blocks map panning/zooming underneath. */
     .map-street-transparent-overlay {
       position: absolute;
       left: 50%;
@@ -3024,10 +3025,11 @@
       </div>
 
       <!-- LIVE STREET NAME — transparent floating label sitting directly on
-           top of the map tiles (see .map-street-transparent-overlay), kept
-           in sync with the same street-name value shown in the telemetry
-           card below (#mapLiveStreet) but rendered as its own overlay so
-           it reads directly off the map surface. -->
+           top of the map tiles (see .map-street-transparent-overlay),
+           fed by real-time OpenStreetMap reverse geocoding of the truck's
+           GPS position (updateLiveStreetFromGps), so it always reflects
+           the street actually being travelled on rather than the nearest
+           bin/property, which can be a different street entirely. -->
       <div id="mapStreetOverlay" class="map-street-transparent-overlay street-overlay-hidden"></div>
 
       <div id="mainLeafletMap"></div>
@@ -4641,18 +4643,71 @@
     reposition();
   }
 
-  // Single writer for the transparent map overlay's text — mirrors
-  // whatever #mapLiveStreet currently shows (both the "nearest upcoming
-  // street" value from updateDriverHud and the "current property" value
-  // from renderCurrentAddressTelemetry write there), so the floating label
-  // on the map never drifts out of sync with the telemetry card.
+  // Single writer for the transparent map overlay's text.
   function updateMapStreetOverlay(streetName) {
     const overlay = document.getElementById('mapStreetOverlay');
     if (!overlay) return;
     const clean = (streetName || '').trim();
-    const isPlaceholder = !clean || clean === 'check filter' || clean === 'Scanning Street...';
     overlay.innerText = clean;
-    overlay.classList.toggle('street-overlay-hidden', isPlaceholder);
+    overlay.classList.toggle('street-overlay-hidden', !clean);
+  }
+
+  // ===== Live street name via OpenStreetMap reverse geocoding =====
+  // The transparent overlay shows the street actually under the truck's
+  // real GPS position — NOT the street of the nearest bin/property, which
+  // can be a completely different street (or, off-run, kilometres away).
+  // Uses Nominatim's public reverse-geocoding API (the same OSM data the
+  // map tiles already come from, so no extra attribution is needed beyond
+  // the "© OpenStreetMap contributors" already on the tile layer).
+  //
+  // Throttling: Nominatim's usage policy caps public API use at ~1
+  // request/second and asks that clients not hammer it, so this only
+  // queries again once the truck has actually moved a meaningful distance
+  // AND enough time has passed - a street name doesn't need refreshing
+  // every single GPS fix. For heavy production/commercial use, swap this
+  // endpoint for a self-hosted Nominatim instance or a paid geocoding
+  // provider instead of the public one.
+  let lastStreetGeocode = { lat: null, lng: null, time: 0 };
+  let streetGeocodeInFlight = false;
+  const STREET_GEOCODE_MIN_INTERVAL_MS = 8000;
+  const STREET_GEOCODE_MIN_MOVE_METERS = 20;
+
+  async function updateLiveStreetFromGps(lat, lng) {
+    if (typeof lat !== 'number' || typeof lng !== 'number' || isNaN(lat) || isNaN(lng)) return;
+    if (streetGeocodeInFlight) return;
+
+    const now = Date.now();
+    const timeOk = (now - lastStreetGeocode.time) >= STREET_GEOCODE_MIN_INTERVAL_MS;
+    if (!timeOk) return;
+
+    if (lastStreetGeocode.lat !== null) {
+      const moved = getDistanceMeters(lastStreetGeocode.lat, lastStreetGeocode.lng, lat, lng);
+      if (moved < STREET_GEOCODE_MIN_MOVE_METERS) return;
+    }
+
+    streetGeocodeInFlight = true;
+    lastStreetGeocode = { lat, lng, time: now };
+
+    try {
+      const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}&zoom=18&addressdetails=1`;
+      const resp = await fetch(url, { headers: { 'Accept': 'application/json' } });
+      if (!resp.ok) throw new Error('Reverse geocode HTTP ' + resp.status);
+      const data = await resp.json();
+      const addr = (data && data.address) || {};
+      // Nominatim splits roads across a few tag types depending on how
+      // OSM has the way mapped - fall back through the most common ones
+      // that actually represent "the street you're driving on".
+      const street = addr.road || addr.residential || addr.living_street ||
+                     addr.pedestrian || addr.cycleway || addr.footway || '';
+      updateMapStreetOverlay(street);
+    } catch (err) {
+      console.warn('OSM reverse geocode failed:', err);
+      // Leave the last known street showing rather than blanking the
+      // overlay out on a single dropped request/patchy connection - it'll
+      // refresh again automatically as soon as another fix succeeds.
+    } finally {
+      streetGeocodeInFlight = false;
+    }
   }
 
   function updateMapTruckPosition() {
@@ -10336,7 +10391,6 @@ window.addEventListener('DOMContentLoaded', async () => {
 
     const mapLiveStreet = q('mapLiveStreet');
     if (mapLiveStreet) mapLiveStreet.innerText = liveStreetName;
-    updateMapStreetOverlay(liveStreetName);
 
     let nearestSiteOverall = null;
     let nearestDistOverall = Infinity;
@@ -10449,7 +10503,6 @@ window.addEventListener('DOMContentLoaded', async () => {
       el.style.fontWeight = '400';
     }
   });
-  updateMapStreetOverlay(address);
 
   ['hudAddressMeta', 'mapAddressMeta'].forEach(id => {
     const el = document.getElementById(id);
@@ -10632,6 +10685,12 @@ window.addEventListener('DOMContentLoaded', async () => {
 
     applyMapHeadingRotation();
     updateMapTruckPosition();
+
+    // Live street name overlay on the map is driven by the truck's actual
+    // GPS position via OpenStreetMap reverse geocoding (see
+    // updateLiveStreetFromGps) - independent of, and more reliable than,
+    // whichever bin/property happens to be nearest.
+    updateLiveStreetFromGps(userCurrentLocation.lat, userCurrentLocation.lng);
 
     // Which side of the road a bin is on, relative to the direction of
     // travel (not a fixed compass side - "left" always means the driver's
