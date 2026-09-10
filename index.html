@@ -7346,6 +7346,29 @@
     }).map(stream=>({stream,binStream:stream==='SummerRecycling'?'Recycling':stream}));
   }
 
+  // Same eligibility rules as getDriveEligibleStreams (still respects the
+  // selected run(s)), but ignores the active stream filter (Garbage /
+  // Recycling / FOGO) - used wherever a true per-stream bin tally is
+  // needed (e.g. the Drive street card's house/garbage/recycle/fogo
+  // counts) so those counts don't collapse to 0 for the streams that
+  // just aren't the one currently being filtered to.
+  function getDriveStreamsForCounts(site){
+    const sch=site?.soloSchedule||{};
+    const selected=selectedRunsSet||new Set();
+    const candidates=['Garbage','Recycling','FOGO','SummerRecycling'];
+
+    return candidates.filter(stream=>{
+      let run='';
+      if(stream==='Garbage') run=String(sch.garRun||'').trim();
+      else if(stream==='FOGO') run=String(sch.fogRun||'').trim();
+      else if(stream==='Recycling') run=String(sch.recRun||'').trim();
+      else if(stream==='SummerRecycling') run=String(sch.recSummerRun||'').trim();
+      if(!run) return false;
+      if(selected.size && !selected.has(run.toLowerCase())) return false;
+      return true;
+    }).map(stream=>({stream,binStream:stream==='SummerRecycling'?'Recycling':stream}));
+  }
+
   function siteMatchesDriveFilters(site){
     const sch=site?.soloSchedule||{};
     const day=String(activeFilterDay||'').trim().toLowerCase();
@@ -11209,6 +11232,31 @@ window.addEventListener('DOMContentLoaded', async () => {
     const listContainer = q('hudStreetList');
     if (!listContainer) return;
 
+    // Rebuilding the whole street list (below) wipes out any card the
+    // driver has manually expanded, since it's a fresh innerHTML render -
+    // and this function runs on basically every GPS fix while driving
+    // (see onGpsPositionSuccess), which was snapping an expanded card
+    // shut and jumping the page back to the top the instant you tried to
+    // scroll it. Remember which street(s) were open and the page's
+    // scroll position before rebuilding, then restore both after.
+    const openStreetIds = new Set(
+      Array.from(listContainer.querySelectorAll('.street-group-card.open .street-group-body'))
+        .map(el => el.id)
+        .filter(Boolean)
+    );
+    const prevScrollY = window.scrollY;
+
+    const restoreStreetListState = () => {
+      if (openStreetIds.size) {
+        openStreetIds.forEach(id => {
+          const body = document.getElementById(id);
+          const card = body ? body.closest('.street-group-card') : null;
+          if (card) card.classList.add('open');
+        });
+        window.scrollTo(0, prevScrollY);
+      }
+    };
+
     // With no run selected, walking + rendering every property in the
     // whole dataset is what was crashing the app. Show quick buttons for
     // whatever run(s) actually service the truck's current location
@@ -11323,7 +11371,7 @@ window.addEventListener('DOMContentLoaded', async () => {
 
       group.sites.forEach(site => {
         houseIds.add(String(site.propId || site.siteId || site.addressText || ''));
-        const eligibleStreams = getDriveEligibleStreams(site);
+        const eligibleStreams = getDriveStreamsForCounts(site);
         eligibleStreams.forEach(({ binStream }) => {
           sources(site).forEach(src => {
             const n = (src[binStream] || []).length;
@@ -11385,6 +11433,8 @@ window.addEventListener('DOMContentLoaded', async () => {
         </div>
       `;
     }).join('') || '<div style="text-align:center; padding:30px; color:#64748b; font-weight:700;">No properties on the current run matching filter.</div>';
+
+    restoreStreetListState();
   };
 
   /* Unified Telemetry Rendering */
