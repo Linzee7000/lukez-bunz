@@ -768,6 +768,51 @@
       margin-top: 8px;
     }
 
+    /* Drive page: run-picker shown instead of the street list whenever no
+       run is selected yet (see buildDriveRunPickerHtml). */
+    .drive-run-picker {
+      padding: 10px 4px 20px;
+    }
+    .drive-run-picker-title {
+      color: #94a3b8;
+      font-size: 14px;
+      font-weight: 600;
+      text-align: center;
+      margin-bottom: 14px;
+    }
+    .drive-run-picker-buttons {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .drive-run-pick-btn {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      width: 100%;
+      padding: 16px 18px;
+      border: none;
+      border-radius: 10px;
+      color: #fff;
+      font-size: 16px;
+      font-weight: 700;
+      cursor: pointer;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.25);
+    }
+    .drive-run-pick-btn .icon-img {
+      width: 20px;
+      height: 20px;
+      filter: brightness(0) invert(1);
+    }
+    .drive-run-pick-btn:active {
+      transform: translateY(1px);
+    }
+    .drive-run-pick-gar { background: var(--red-600); }
+    .drive-run-pick-rec { background: var(--yellow-400); color: #111; }
+    .drive-run-pick-rec .icon-img { filter: none; }
+    .drive-run-pick-summer { background: linear-gradient(135deg, #f59e0b, #f97316); }
+    .drive-run-pick-fog { background: var(--green-600); }
+
     /* The Both/Left/Right toggle reused inside Map Settings > Bins - same
        look as before, just full-width in its settings row instead of
        sitting inside the old Drive telemetry card. */
@@ -4183,6 +4228,8 @@
   let isRunLocked = false;
 
   let travelMode = localStorage.getItem('lukezBunzTravelMode') || 'left';
+  // Safety cap for the Drive page's street list - see updateDriverHud.
+  const DRIVE_LIST_MAX_PROPERTIES = 1500;
   let activeTab = 'map';
   let pinSourceMode = 'flip';
   
@@ -5251,6 +5298,18 @@
   function cleanStreetAddress(addr) {
     if (!addr) return '';
     return addr.split(',')[0].replace(/\bVIC\b|\b\d{4}\b/gi, '').trim();
+  }
+
+  // baseStreetLine (and cleanStreetAddress) keep the leading house/lot
+  // number - correct for an address line, but wrong for grouping several
+  // properties under one street: "1 Besgrove Street" and "14 Besgrove
+  // Street" would otherwise end up as two different one-house groups.
+  // This strips that leading number (plus ranges like "12-14" or a unit
+  // style "12A") so grouping keys/labels are the street name alone.
+  function streetNameOnly(line) {
+    return String(line || '')
+      .replace(/^\d+[A-Za-z]?(?:[-\u2013]\d+[A-Za-z]?)?\s+/, '')
+      .trim();
   }
 
   /* ================= MAP ENGINE (RESTORED) ================= */
@@ -10956,23 +11015,96 @@ window.addEventListener('DOMContentLoaded', async () => {
     if (card) card.classList.toggle('open');
   };
 
+  // Buttons for whichever run(s) actually service the truck's current
+  // GPS area - shown on the Drive page instead of the street list
+  // whenever no run is selected yet (see updateDriverHud). Reuses the
+  // same "nearest site" idea as the Area Runs Bar, just with a more
+  // generous radius since this only needs to know roughly which area
+  // you're in, not pin an exact property.
+  function buildDriveRunPickerHtml() {
+    if (!userCurrentLocation) {
+      return '<div style="text-align:center; padding:30px; color:#64748b;">Acquiring live GPS to find nearby runs...</div>';
+    }
+    let nearest = null, nearestDist = Infinity;
+    (siteRecords || []).forEach(site => {
+      if (site.lat && site.lng && Number(site.lat) !== 0) {
+        const d = getDistanceMeters(userCurrentLocation.lat, userCurrentLocation.lng, Number(site.lat), Number(site.lng));
+        if (d < nearestDist) { nearestDist = d; nearest = site; }
+      }
+    });
+    const site = nearestDist <= 2000 ? nearest : null;
+    const sch = site && site.soloSchedule;
+    if (!sch) {
+      return '<div style="text-align:center; padding:30px; color:#64748b; font-weight:700;">No run detected near your current location.<br><span style="font-weight:400; font-size:13px;">Pick a run from the filter menu instead.</span></div>';
+    }
+
+    const day = esc(String(sch.day || ''));
+    const week = esc(String(sch.weekLetter || ''));
+    const go = (run, streamKey, isSummer) => `selectRunOnDrive('${esc(String(run))}', '${streamKey}', '${day}', '${week}', ${isSummer})`;
+    const buttons = [];
+    if (sch.garRun) buttons.push(`<button type="button" class="drive-run-pick-btn drive-run-pick-gar" onclick="${go(sch.garRun, 'Garbage', false)}"><img class="icon-img" src="bin.png" alt="">Garbage · Run ${esc(String(sch.garRun))}</button>`);
+    if (sch.recRun) buttons.push(`<button type="button" class="drive-run-pick-btn drive-run-pick-rec" onclick="${go(sch.recRun, 'Recycling', false)}"><img class="icon-img" src="recycle.png" alt="">Recycling · Run ${esc(String(sch.recRun))}${week ? ' ' + week : ''}</button>`);
+    if (sch.recSummerRun) buttons.push(`<button type="button" class="drive-run-pick-btn drive-run-pick-summer" onclick="${go(sch.recSummerRun, 'SummerRecycling', true)}">☀️ Summer Recycling · Run ${esc(String(sch.recSummerRun))}</button>`);
+    if (sch.fogRun) buttons.push(`<button type="button" class="drive-run-pick-btn drive-run-pick-fog" onclick="${go(sch.fogRun, 'FOGO', false)}"><img class="icon-img" src="fogo.png" alt="">FOGO · Run ${esc(String(sch.fogRun))}${week ? ' ' + week : ''}</button>`);
+
+    if (!buttons.length) {
+      return '<div style="text-align:center; padding:30px; color:#64748b; font-weight:700;">No run detected near your current location.<br><span style="font-weight:400; font-size:13px;">Pick a run from the filter menu instead.</span></div>';
+    }
+
+    return `
+      <div class="drive-run-picker">
+        <div class="drive-run-picker-title">No run selected - pick the run for your current area:</div>
+        <div class="drive-run-picker-buttons">${buttons.join('')}</div>
+      </div>
+    `;
+  }
+
+  // Applies the tapped run-picker button's run/stream/day/week as the
+  // active filter and renders the street list for it - stays on the
+  // Drive tab (unlike openRunDirectlyOnMap, which jumps to Map).
+  window.selectRunOnDrive = function(runName, streamKey, dayName, weekLetter, isSummer) {
+    if (!runName) return;
+    selectedRunsSet.clear();
+    selectedRunsSet.add(clean(runName).toLowerCase());
+    activeFilterStream = isSummer ? 'SummerRecycling' : (streamKey || '');
+    activeFilterDay = dayName || '';
+    activeFilterWeek = (isSummer || streamKey === 'Garbage') ? '' : (weekLetter || '');
+    renderActiveFilterChips();
+    updateDriverHud();
+  };
+
   window.updateDriverHud = function() {
     const listContainer = q('hudStreetList');
     if (!listContainer) return;
+
+    // With no run selected, walking + rendering every property in the
+    // whole dataset is what was crashing the app. Show quick buttons for
+    // whatever run(s) actually service the truck's current location
+    // instead, and do none of the heavy grouping/rendering work below
+    // until one is tapped (see selectRunOnDrive).
+    if (!selectedRunsSet || selectedRunsSet.size === 0) {
+      listContainer.innerHTML = buildDriveRunPickerHtml();
+      return;
+    }
 
     const searchQuery = clean(q('searchInput')?.value).toLowerCase();
     const records = getRecordsArray();
 
     // Group every property on the current run (matching active filters +
-    // search) by street. Also tally, across ALL records regardless of
-    // filter, which other runs (by stream) service each street - that's
-    // the "what other runs do that street" line on the summary card.
+    // search) by street name alone (house number stripped - see
+    // streetNameOnly - so "1 Besgrove Street" and "14 Besgrove Street"
+    // land in the same card instead of one street per house). Also tally,
+    // across ALL records regardless of filter, which other runs (by
+    // stream) service each street - that's the "what other runs do that
+    // street" line on the summary card.
     const streetGroups = new Map();   // streetKey -> { label, sites: [] }
     const otherRunsByStreet = new Map(); // streetKey -> Set("GAR 4", "REC 2", ...)
+    let matchedPropertyCount = 0;
 
-    records.forEach(site => {
-      const streetLabel = (site.baseStreetLine || cleanStreetAddress(site.addressText) || '').trim();
-      if (!streetLabel) return;
+    for (const site of records) {
+      const rawStreetLine = (site.baseStreetLine || cleanStreetAddress(site.addressText) || '').trim();
+      const streetLabel = streetNameOnly(rawStreetLine) || rawStreetLine;
+      if (!streetLabel) continue;
       const streetKey = streetLabel.toLowerCase();
 
       if (!otherRunsByStreet.has(streetKey)) otherRunsByStreet.set(streetKey, new Set());
@@ -10983,22 +11115,35 @@ window.addEventListener('DOMContentLoaded', async () => {
         if (run) runsSet.add(`${prefix} ${run.toUpperCase()}`);
       });
 
-      if (!siteMatchesAllActiveFilters(site)) return;
+      if (!siteMatchesAllActiveFilters(site)) continue;
 
       if (searchQuery) {
         const addrMatch = clean(site.addressText).toLowerCase().includes(searchQuery) ||
                           clean(site.propId).toLowerCase().includes(searchQuery) ||
                           clean(site.siteId).toLowerCase().includes(searchQuery) ||
                           clean(site.baseStreetLine).toLowerCase().includes(searchQuery);
-        if (!addrMatch) return;
+        if (!addrMatch) continue;
       }
 
       const eligibleStreams = getDriveEligibleStreams(site);
-      if (!eligibleStreams.length) return;
+      if (!eligibleStreams.length) continue;
 
       if (!streetGroups.has(streetKey)) streetGroups.set(streetKey, { label: streetLabel, sites: [] });
       streetGroups.get(streetKey).sites.push(site);
-    });
+      matchedPropertyCount++;
+
+      // Safety cap: even with a run selected, a bad/overly-broad filter
+      // could still match thousands of properties and hang the browser
+      // trying to build that much HTML. Bail out early and ask for a
+      // narrower filter rather than freezing the app.
+      if (matchedPropertyCount > DRIVE_LIST_MAX_PROPERTIES) {
+        listContainer.innerHTML = `<div style="text-align:center; padding:30px; color:#64748b; font-weight:700;">
+          That filter matches ${matchedPropertyCount.toLocaleString()}+ properties - too many to list here.<br>
+          <span style="font-weight:400; font-size:13px;">Narrow it down (day, week, or a single run) and it'll appear here.</span>
+        </div>`;
+        return;
+      }
+    }
 
     // The Map page's own telemetry banner (#mapLiveStreet etc.) still comes
     // from GPS proximity to the nearest property, same as before - it just
@@ -11022,7 +11167,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     }
     renderCurrentAddressTelemetry(currentSite);
 
-    // Street list itself, alphabetical order.
+    // Street list itself: one card per street, alphabetical order.
     const streetKeys = Array.from(streetGroups.keys()).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
 
     listContainer.innerHTML = streetKeys.map(key => {
