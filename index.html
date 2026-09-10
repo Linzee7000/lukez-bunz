@@ -825,6 +825,42 @@
       border-color: var(--brand-dark);
     }
 
+    /* Live Street Name Overlay — a small transparent pill floated directly
+       on top of the map tiles (not inside the opaque telemetry card),
+       showing just the street the truck is currently on. Positioned by
+       setupMapStreetOverlayAutoPosition() (JS) which pins its `top` right
+       under the header panel, however tall that currently is, the same
+       way #mapFixedSideControls is kept below the header. Non-interactive
+       so it never blocks map panning/zooming underneath it. */
+    .map-street-transparent-overlay {
+      position: absolute;
+      left: 50%;
+      transform: translateX(-50%);
+      top: 60px;
+      z-index: 900;
+      max-width: calc(100% - 32px);
+      padding: 6px 16px;
+      border-radius: 20px;
+      background: rgba(15, 23, 42, 0.45);
+      backdrop-filter: blur(3px);
+      -webkit-backdrop-filter: blur(3px);
+      color: #fff;
+      font-size: 15px;
+      font-weight: 700;
+      letter-spacing: 0.01em;
+      text-align: center;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      text-shadow: 0 1px 3px rgba(0,0,0,0.6);
+      box-shadow: 0 2px 8px rgba(0,0,0,0.25);
+      pointer-events: none;
+    }
+    .map-street-transparent-overlay:empty,
+    .map-street-transparent-overlay.street-overlay-hidden {
+      display: none;
+    }
+
     /* Bottom Map Live Telemetry Banner */
     .map-telemetry-banner {
       position: absolute;
@@ -2987,6 +3023,13 @@
         <div id="mapBinsAtAddress" class="address-telemetry-bins"></div>
       </div>
 
+      <!-- LIVE STREET NAME — transparent floating label sitting directly on
+           top of the map tiles (see .map-street-transparent-overlay), kept
+           in sync with the same street-name value shown in the telemetry
+           card below (#mapLiveStreet) but rendered as its own overlay so
+           it reads directly off the map surface. -->
+      <div id="mapStreetOverlay" class="map-street-transparent-overlay street-overlay-hidden"></div>
+
       <div id="mainLeafletMap"></div>
     </div>
   </div>
@@ -4574,6 +4617,42 @@
     mapSideOverlayResizeObserver = new ResizeObserver(reposition);
     mapSideOverlayResizeObserver.observe(header);
     reposition();
+  }
+
+  // Keeps the transparent live-street-name pill (#mapStreetOverlay) pinned
+  // just below the header, the same technique as
+  // setupMapSideOverlayAutoPosition above — the header's height changes
+  // (settings bar open/close, area-runs rows appearing/disappearing) so a
+  // fixed pixel offset would either leave a gap or get covered.
+  let mapStreetOverlayResizeObserver = null;
+  function setupMapStreetOverlayAutoPosition() {
+    const overlay = document.getElementById('mapStreetOverlay');
+    const header = document.querySelector('#mapScreenContainer .map-header-panel');
+    if (!overlay || !header || typeof ResizeObserver === 'undefined') return;
+    const GAP = 8;
+    function reposition() {
+      const headerTop = parseFloat(getComputedStyle(header).top) || 8;
+      const newTop = headerTop + header.offsetHeight + GAP;
+      overlay.style.setProperty('top', newTop + 'px', 'important');
+    }
+    if (mapStreetOverlayResizeObserver) mapStreetOverlayResizeObserver.disconnect();
+    mapStreetOverlayResizeObserver = new ResizeObserver(reposition);
+    mapStreetOverlayResizeObserver.observe(header);
+    reposition();
+  }
+
+  // Single writer for the transparent map overlay's text — mirrors
+  // whatever #mapLiveStreet currently shows (both the "nearest upcoming
+  // street" value from updateDriverHud and the "current property" value
+  // from renderCurrentAddressTelemetry write there), so the floating label
+  // on the map never drifts out of sync with the telemetry card.
+  function updateMapStreetOverlay(streetName) {
+    const overlay = document.getElementById('mapStreetOverlay');
+    if (!overlay) return;
+    const clean = (streetName || '').trim();
+    const isPlaceholder = !clean || clean === 'check filter' || clean === 'Scanning Street...';
+    overlay.innerText = clean;
+    overlay.classList.toggle('street-overlay-hidden', isPlaceholder);
   }
 
   function updateMapTruckPosition() {
@@ -10003,6 +10082,7 @@ window.addEventListener('DOMContentLoaded', async () => {
       }
 
       setupMapSideOverlayAutoPosition();
+      setupMapStreetOverlayAutoPosition();
     }
 
     // --- PASTE HERE: Dynamic Zoom Tracking for Marker Scaling ---
@@ -10256,6 +10336,7 @@ window.addEventListener('DOMContentLoaded', async () => {
 
     const mapLiveStreet = q('mapLiveStreet');
     if (mapLiveStreet) mapLiveStreet.innerText = liveStreetName;
+    updateMapStreetOverlay(liveStreetName);
 
     let nearestSiteOverall = null;
     let nearestDistOverall = Infinity;
@@ -10368,6 +10449,7 @@ window.addEventListener('DOMContentLoaded', async () => {
       el.style.fontWeight = '400';
     }
   });
+  updateMapStreetOverlay(address);
 
   ['hudAddressMeta', 'mapAddressMeta'].forEach(id => {
     const el = document.getElementById(id);
