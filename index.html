@@ -825,44 +825,51 @@
       border-color: var(--brand-dark);
     }
 
-    /* Live Street Name Overlay — a small transparent pill floated directly
-       on top of the map tiles (not inside the opaque telemetry card),
-       showing the OpenStreetMap street name for the truck's actual GPS
-       position (see updateLiveStreetFromGps), not the nearest bin/property.
-       Positioned by setupMapStreetOverlayAutoPosition() (JS) which pins
-       its `bottom` right above the bottom telemetry card, however tall
-       that card currently is (it grows/shrinks with the stream tabs and
-       serial list) — the same ResizeObserver technique already used to
-       keep #mapFixedSideControls below the header. Non-interactive so it
-       never blocks map panning/zooming underneath it. */
+    /* Live Street Name Overlay — shows the OpenStreetMap street name for
+       the truck's actual GPS position (see updateLiveStreetFromGps), not
+       the nearest bin/property. Sits in normal document flow above the
+       Area Runs Bar (see markup) rather than floating over the map — it
+       used to be a pill pinned just above the bottom telemetry card, but
+       that card's height changes constantly (stream tabs, serial rows)
+       and the pill kept drifting behind/overlapping it. Non-interactive,
+       same as before. */
     .map-street-info-overlay {
-      position: absolute;
-      left: 50%;
-      transform: translateX(-50%);
-      bottom: 240px;
-      z-index: 900;
+      position: static;
+      width: 100%;
       display: flex;
       align-items: center;
       gap: 8px;
+      margin-top: 6px;
       pointer-events: none;
     }
     .map-street-transparent-overlay {
-      max-width: 260px;
-      padding: 6px 16px;
-      border-radius: 20px;
-      background: rgba(15, 42, 90, 0.5);
-      backdrop-filter: blur(3px);
-      -webkit-backdrop-filter: blur(3px);
+      flex: 1 1 auto;
+      min-width: 0;
+      max-width: none;
+      height: 22px;
+      box-sizing: border-box;
+      padding: 0 12px;
+      border-radius: 0;
+      /* Same fading-bar look as the run-number rows below it
+         (.area-run-row) — solid dark green on the left, dissolving to
+         fully transparent by the row's right edge — instead of the old
+         floating blue pill, which drifted behind the bottom telemetry
+         card as it grew taller. */
+      background: linear-gradient(90deg, rgba(27,67,50,0.85) 0%, rgba(27,67,50,0.85) 55%, rgba(27,67,50,0) 100%);
+      backdrop-filter: none;
+      -webkit-backdrop-filter: none;
+      display: flex;
+      align-items: center;
       color: #fff;
-      font-size: 15px;
+      font-size: 13px;
       font-weight: 700;
       letter-spacing: 0.01em;
-      text-align: center;
+      text-align: left;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
-      text-shadow: 0 1px 3px rgba(0,0,0,0.6);
-      box-shadow: 0 2px 8px rgba(0,0,0,0.25);
+      text-shadow: none;
+      box-shadow: none;
     }
     /* Speed-limit sign: styled like a real AU/UK speed-limit road sign
        (white disc, red ring, black number) rather than a copy of the
@@ -2633,7 +2640,10 @@
     z-index: 1000 !important;
     margin: 0 !important;
     pointer-events: auto !important;
-    background: linear-gradient(180deg, var(--bar-black-hi) 0%, var(--bar-black) 100%) !important;
+    /* Slightly more see-through than the flat opaque bar-black gradient
+       used elsewhere, since this card (and the speed reading on it) sits
+       directly over the map. */
+    background: linear-gradient(180deg, rgba(26,26,26,0.9) 0%, rgba(0,0,0,0.9) 100%) !important;
     padding: 12px 14px !important;
     border-radius: 16px !important;
     border: 1px solid #000 !important;
@@ -3044,6 +3054,22 @@
           <button type="button" class="map-settings-top-btn" id="mapSettingsBarCloseBtn" onclick="closeMapSettingsModal()" title="Close">&times;</button>
         </div>
 
+        <!-- LIVE STREET NAME + SPEED LIMIT — sits directly under the map's
+             top bar, above the Area Runs Bar (shifting it down), fed by
+             real-time OpenStreetMap reverse geocoding of the truck's GPS
+             position (updateLiveStreetFromGps), so it always reflects the
+             street actually being travelled on rather than the nearest
+             bin/property, which can be a different street entirely. Used
+             to float as a transparent pill pinned just above the bottom
+             telemetry card, but that card's height changes constantly
+             (stream tabs, serial rows) and the pill kept ending up
+             overlapping/hidden behind it — living here in normal document
+             flow avoids that entirely. -->
+        <div id="mapStreetInfoOverlay" class="map-street-info-overlay street-overlay-hidden">
+          <div id="mapStreetOverlay" class="map-street-transparent-overlay"></div>
+          <div id="mapSpeedLimitSign" class="map-speed-limit-sign speed-sign-hidden"></div>
+        </div>
+
         <!-- Area Runs Bar: sits directly under the map's top bar and shows
              the run number(s) servicing whatever area the truck's current
              GPS position is in — Garbage, then Recycling, then FOGO —
@@ -3093,20 +3119,6 @@
           <div></div>
         </div>
         <div id="mapBinsAtAddress" class="address-telemetry-bins"></div>
-      </div>
-
-      <!-- LIVE STREET NAME + SPEED LIMIT — transparent floating overlay
-           sitting directly on top of the map tiles (see
-           .map-street-info-overlay), fed by real-time OpenStreetMap
-           reverse geocoding of the truck's GPS position
-           (updateLiveStreetFromGps), so it always reflects the street
-           actually being travelled on rather than the nearest
-           bin/property, which can be a different street entirely.
-           Positioned just above the telemetry card at the bottom of the
-           map (setupMapStreetOverlayAutoPosition), not under the header. -->
-      <div id="mapStreetInfoOverlay" class="map-street-info-overlay street-overlay-hidden">
-        <div id="mapSpeedLimitSign" class="map-speed-limit-sign speed-sign-hidden"></div>
-        <div id="mapStreetOverlay" class="map-street-transparent-overlay"></div>
       </div>
 
       <div id="mainLeafletMap"></div>
@@ -4720,22 +4732,13 @@
   // as a safety net for size changes from other causes (rotation, window
   // resize).
   function repositionMapStreetOverlay() {
-    const overlay = document.getElementById('mapStreetInfoOverlay');
-    const card = document.querySelector('#mapScreenContainer .map-address-telemetry');
-    if (!overlay || !card) return;
-    const GAP = 14;
-    const cardBottom = parseFloat(getComputedStyle(card).bottom) || 70;
-    const newBottom = cardBottom + card.offsetHeight + GAP;
-    overlay.style.setProperty('bottom', newBottom + 'px', 'important');
+    // No-op: the street overlay now sits in normal document flow above
+    // the Area Runs Bar (see markup), so it no longer needs to be
+    // repositioned to chase the bottom telemetry card's height.
   }
-  let mapStreetOverlayResizeObserver = null;
   function setupMapStreetOverlayAutoPosition() {
-    const card = document.querySelector('#mapScreenContainer .map-address-telemetry');
-    if (!card || typeof ResizeObserver === 'undefined') return;
-    if (mapStreetOverlayResizeObserver) mapStreetOverlayResizeObserver.disconnect();
-    mapStreetOverlayResizeObserver = new ResizeObserver(repositionMapStreetOverlay);
-    mapStreetOverlayResizeObserver.observe(card);
-    repositionMapStreetOverlay();
+    // No-op for the same reason — kept as a function so existing calls
+    // to it elsewhere don't need to be removed.
   }
 
   // Single writer for the transparent street-name pill's text.
@@ -12171,15 +12174,14 @@ window.addEventListener('DOMContentLoaded', async () => {
     width: 100% !important;
     max-width: none !important;
   }
-  /* A little breathing room between the run-number row above and the
-     first serial row, but still no gap between the bin rows themselves —
-     both used to be reintroduced by an earlier, more specific rule
-     (.map-address-telemetry #mapBinsAtAddress) that this plain
-     #mapBinsAtAddress selector couldn't out-rank no matter where it sat
-     in the file. Matching that selector's specificity here instead of a
-     bare ID makes this the one that actually wins. */
+  /* No gap between the stream tabs and the first serial row (or between
+     the bin rows themselves) — the tabs should read as attached to the
+     serial list they control. This used to carry 8px of "breathing room"
+     here, reintroduced by a rule specific enough to out-rank the
+     -4px/tuck-in rule earlier in the file; zeroing it out here instead of
+     there is what actually wins. */
   .map-address-telemetry #mapBinsAtAddress {
-    margin-top: 8px !important;
+    margin-top: 0 !important;
     padding-top: 0 !important;
     border-top: none !important;
     gap: 0 !important;
