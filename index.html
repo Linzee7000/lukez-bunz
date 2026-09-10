@@ -695,6 +695,43 @@
       font-size: 16px;
     }
 
+    /* Drive page street-list sort toggle (Nearby / A-Z) - a simple
+       two-button segmented control sitting just above the street list. */
+    .drive-sort-toggle {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    .drive-sort-btn {
+      flex: 1;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 5px;
+      padding: 8px 10px;
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--slate-600);
+      background: var(--white);
+      border: 1px solid var(--slate-200);
+      border-radius: 8px;
+      cursor: pointer;
+    }
+    .drive-sort-btn .icon-img {
+      width: 14px;
+      height: 14px;
+      margin-right: 0;
+      filter: none;
+    }
+    .drive-sort-btn.active {
+      color: #fff;
+      background: var(--brand);
+      border-color: var(--brand-dark);
+    }
+    .drive-sort-btn.active .icon-img {
+      filter: brightness(0) invert(1);
+    }
+
     .street-group-card {
       margin-bottom: 8px;
       border-radius: 10px;
@@ -3208,6 +3245,13 @@
         <div id="hudSpeedLimitSign" class="map-speed-limit-sign speed-sign-hidden"></div>
       </div>
     </div>
+    <!-- Sort toggle for the street list below - Nearby (closest to the
+         truck's current GPS position) or A-Z. See setDriveStreetSort /
+         driveStreetSortMode in updateDriverHud. -->
+    <div class="drive-sort-toggle">
+      <button type="button" id="driveSortNearbyBtn" class="drive-sort-btn active" onclick="setDriveStreetSort('nearby')"><img class="icon-img" src="navigation.png" alt=""> Nearby</button>
+      <button type="button" id="driveSortAzBtn" class="drive-sort-btn" onclick="setDriveStreetSort('az')">A–Z</button>
+    </div>
     <!-- Every property on the current run, grouped into one summary card
          per street (alphabetical order). Tap a street to expand it into
          that street's addresses with serials/bin sizes - see
@@ -4233,6 +4277,10 @@
   let isRunLocked = false;
 
   let travelMode = localStorage.getItem('lukezBunzTravelMode') || 'left';
+  // Which order the Drive page's street list is shown in - 'nearby'
+  // (closest to the truck's current GPS position first) or 'az'
+  // (alphabetical). See setDriveStreetSort / updateDriverHud.
+  let driveStreetSortMode = localStorage.getItem('lukezBunzDriveStreetSort') || 'nearby';
   // Safety cap for the Drive page's street list - see updateDriverHud.
   const DRIVE_LIST_MAX_PROPERTIES = 1500;
   let activeTab = 'map';
@@ -4770,6 +4818,22 @@
     const b = document.getElementById('mapBinsSideAll'); if (b) b.classList.toggle('active', travelMode === 'all');
     const l = document.getElementById('mapBinsSideLeft'); if (l) l.classList.toggle('active', travelMode === 'left');
     const r = document.getElementById('mapBinsSideRight'); if (r) r.classList.toggle('active', travelMode === 'right');
+  }
+
+  // Drive page street list sort toggle (Nearby / A-Z) - see
+  // driveStreetSortMode and the sort itself in updateDriverHud.
+  window.setDriveStreetSort = function(mode) {
+    driveStreetSortMode = mode;
+    localStorage.setItem('lukezBunzDriveStreetSort', mode);
+    syncDriveSortButtonsUI();
+    updateDriverHud();
+  };
+  // Keeps the two sort buttons in sync with driveStreetSortMode - called
+  // from setDriveStreetSort() and once on app init to reflect whatever
+  // was saved last session.
+  function syncDriveSortButtonsUI() {
+    const nearBtn = document.getElementById('driveSortNearbyBtn'); if (nearBtn) nearBtn.classList.toggle('active', driveStreetSortMode === 'nearby');
+    const azBtn = document.getElementById('driveSortAzBtn'); if (azBtn) azBtn.classList.toggle('active', driveStreetSortMode === 'az');
   }
 
   function triggerRunLockPrompt() {
@@ -8218,6 +8282,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     try {
       initDarkMode();
       syncBinsSideButtonsUI();
+      syncDriveSortButtonsUI();
       const kmzInput = document.getElementById('kmzFileInput');
       if (kmzInput) {
         kmzInput.addEventListener('change', async e => {
@@ -11373,8 +11438,29 @@ window.addEventListener('DOMContentLoaded', async () => {
     }
     renderCurrentAddressTelemetry(currentSite);
 
-    // Street list itself: one card per street, alphabetical order.
-    const streetKeys = Array.from(streetGroups.keys()).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+    // Street list itself: one card per street, either alphabetical or by
+    // distance from the truck's current GPS position (see
+    // driveStreetSortMode / setDriveStreetSort). "Nearby" falls back to
+    // A-Z automatically whenever there's no GPS fix yet to sort by.
+    let streetKeys = Array.from(streetGroups.keys());
+    if (driveStreetSortMode === 'nearby' && userCurrentLocation) {
+      const distanceCache = new Map();
+      const nearestDistanceForStreet = (key) => {
+        if (distanceCache.has(key)) return distanceCache.get(key);
+        let nearest = Infinity;
+        streetGroups.get(key).sites.forEach(site => {
+          if (site.lat && site.lng && Number(site.lat) !== 0) {
+            const d = getDistanceMeters(userCurrentLocation.lat, userCurrentLocation.lng, Number(site.lat), Number(site.lng));
+            if (d < nearest) nearest = d;
+          }
+        });
+        distanceCache.set(key, nearest);
+        return nearest;
+      };
+      streetKeys.sort((a, b) => nearestDistanceForStreet(a) - nearestDistanceForStreet(b));
+    } else {
+      streetKeys.sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+    }
 
     listContainer.innerHTML = streetKeys.map(key => {
       const group = streetGroups.get(key);
