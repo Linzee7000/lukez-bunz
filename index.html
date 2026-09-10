@@ -7346,29 +7346,6 @@
     }).map(stream=>({stream,binStream:stream==='SummerRecycling'?'Recycling':stream}));
   }
 
-  // Same eligibility rules as getDriveEligibleStreams (still respects the
-  // selected run(s)), but ignores the active stream filter (Garbage /
-  // Recycling / FOGO) - used wherever a true per-stream bin tally is
-  // needed (e.g. the Drive street card's house/garbage/recycle/fogo
-  // counts) so those counts don't collapse to 0 for the streams that
-  // just aren't the one currently being filtered to.
-  function getDriveStreamsForCounts(site){
-    const sch=site?.soloSchedule||{};
-    const selected=selectedRunsSet||new Set();
-    const candidates=['Garbage','Recycling','FOGO','SummerRecycling'];
-
-    return candidates.filter(stream=>{
-      let run='';
-      if(stream==='Garbage') run=String(sch.garRun||'').trim();
-      else if(stream==='FOGO') run=String(sch.fogRun||'').trim();
-      else if(stream==='Recycling') run=String(sch.recRun||'').trim();
-      else if(stream==='SummerRecycling') run=String(sch.recSummerRun||'').trim();
-      if(!run) return false;
-      if(selected.size && !selected.has(run.toLowerCase())) return false;
-      return true;
-    }).map(stream=>({stream,binStream:stream==='SummerRecycling'?'Recycling':stream}));
-  }
-
   function siteMatchesDriveFilters(site){
     const sch=site?.soloSchedule||{};
     const day=String(activeFilterDay||'').trim().toLowerCase();
@@ -10225,7 +10202,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   }
 
   // Direct Run Navigation from Address Cards
-  window.openRunDirectlyOnMap = function(runName, streamKey, dayName, weekLetter, isSummer, propLat, propLng) {
+  window.openRunDirectlyOnMap = function(runName, streamKey, dayName, weekLetter, isSummer, propLat, propLng, streetKey) {
     if (!runName) return;
 
     selectedRunsSet.clear();
@@ -10237,11 +10214,34 @@ window.addEventListener('DOMContentLoaded', async () => {
 
     renderActiveFilterChips();
     switchMainTab('map');
-    enableTrackUpOrientation();
+
+    // A tap here is jumping to look at a run, not starting to drive it -
+    // leave the map North-Up and stop it re-centring on the truck's live
+    // GPS position, same as any other manual look-around (see
+    // disableTrackUpOrientation / disableGpsFollow).
+    disableTrackUpOrientation();
+    disableGpsFollow();
 
     setTimeout(() => {
-      if (leafletMap && propLat && propLng && Number.isFinite(Number(propLat))) {
-        leafletMap.setView([Number(propLat), Number(propLng)], 18, { animate: true });
+      if (!leafletMap) return;
+
+      // Frame the specific street that was tapped (so it's clearly the
+      // centre of attention) while still leaving the rest of the run
+      // visible around it, rather than zooming all the way in on just
+      // one property.
+      const streetPts = streetKey
+        ? getRecordsArray()
+            .filter(s => siteStreetKey(s) === String(streetKey))
+            .map(s => gps(s.lat, s.lng))
+            .filter(Boolean)
+        : [];
+
+      if (streetPts.length > 1) {
+        leafletMap.fitBounds(streetPts.map(p => [p.lat, p.lng]), { padding: [90, 90], maxZoom: 17, animate: true });
+      } else if (streetPts.length === 1) {
+        leafletMap.setView([streetPts[0].lat, streetPts[0].lng], 16, { animate: true });
+      } else if (propLat && propLng && Number.isFinite(Number(propLat))) {
+        leafletMap.setView([Number(propLat), Number(propLng)], 16, { animate: true });
       }
     }, 150);
   };
@@ -10301,9 +10301,8 @@ window.addEventListener('DOMContentLoaded', async () => {
 
   // Switches the map into Track-Up orientation without toggling it back off
   // if it's already on - called whenever a run is picked from the Search
-  // page or filtered on the Map page (see openRunDirectlyOnMap /
-  // applyUnifiedModal), since that's the point the driver is about to
-  // start following that run.
+  // page or filtered on the Map page (see applyUnifiedModal), since that's
+  // the point the driver is about to start following that run.
   function enableTrackUpOrientation() {
     if (isTrackUpEnabled) return;
     isTrackUpEnabled = true;
@@ -10311,6 +10310,21 @@ window.addEventListener('DOMContentLoaded', async () => {
     if (btn) {
       btn.classList.add('active');
       btn.setAttribute('title', 'Track-Up (Driving Ahead)');
+    }
+    applyMapHeadingRotation();
+  }
+
+  // Opposite of enableTrackUpOrientation - forces North-Up without
+  // toggling it back on if it's already off. Used when jumping to a run
+  // from a tap (see openRunDirectlyOnMap) rather than actually starting
+  // to drive it, where a rotated map would be disorientating.
+  function disableTrackUpOrientation() {
+    if (!isTrackUpEnabled) return;
+    isTrackUpEnabled = false;
+    const btn = document.getElementById('btnTrackUpOrientation');
+    if (btn) {
+      btn.classList.remove('active');
+      btn.setAttribute('title', 'North-Up');
     }
     applyMapHeadingRotation();
   }
@@ -11086,18 +11100,19 @@ window.addEventListener('DOMContentLoaded', async () => {
     // same run chips here as they would there. Tapping one jumps straight
     // to that run on the map, same as everywhere else hdr-run-badge is used.
     const sch = site.soloSchedule || {};
+    const addrStreetKey = siteStreetKey(site);
     const runBadgesHtml = eligibleStreamsList.map(({ stream }) => {
       if (stream === 'Garbage' && sch.garRun) {
-        return `<span class="hdr-run-badge hdr-run-gar" onclick="event.stopPropagation(); openRunDirectlyOnMap('${sch.garRun}', 'Garbage', '${sch.day || ''}', '${sch.weekLetter || ''}', false, ${site.lat || 0}, ${site.lng || 0})"><img class="icon-img" src="bin.png" alt=""> ${esc(String(sch.garRun))}</span>`;
+        return `<span class="hdr-run-badge hdr-run-gar" onclick="event.stopPropagation(); openRunDirectlyOnMap('${sch.garRun}', 'Garbage', '${sch.day || ''}', '${sch.weekLetter || ''}', false, ${site.lat || 0}, ${site.lng || 0}, '${esc(addrStreetKey)}')"><img class="icon-img" src="bin.png" alt=""> ${esc(String(sch.garRun))}</span>`;
       }
       if (stream === 'Recycling' && sch.recRun) {
-        return `<span class="hdr-run-badge hdr-run-rec" onclick="event.stopPropagation(); openRunDirectlyOnMap('${sch.recRun}', 'Recycling', '${sch.day || ''}', '${sch.weekLetter || ''}', false, ${site.lat || 0}, ${site.lng || 0})"><img class="icon-img" src="recycle.png" alt="">${esc(String(sch.recRun))}${sch.weekLetter ? esc(String(sch.weekLetter).toUpperCase()) : ''}</span>`;
+        return `<span class="hdr-run-badge hdr-run-rec" onclick="event.stopPropagation(); openRunDirectlyOnMap('${sch.recRun}', 'Recycling', '${sch.day || ''}', '${sch.weekLetter || ''}', false, ${site.lat || 0}, ${site.lng || 0}, '${esc(addrStreetKey)}')"><img class="icon-img" src="recycle.png" alt="">${esc(String(sch.recRun))}${sch.weekLetter ? esc(String(sch.weekLetter).toUpperCase()) : ''}</span>`;
       }
       if (stream === 'SummerRecycling' && sch.recSummerRun) {
-        return `<span class="hdr-run-badge hdr-run-summer" onclick="event.stopPropagation(); openRunDirectlyOnMap('${sch.recSummerRun}', 'SummerRecycling', '${sch.day || ''}', '', true, ${site.lat || 0}, ${site.lng || 0})">☀️ ${esc(String(sch.recSummerRun))}</span>`;
+        return `<span class="hdr-run-badge hdr-run-summer" onclick="event.stopPropagation(); openRunDirectlyOnMap('${sch.recSummerRun}', 'SummerRecycling', '${sch.day || ''}', '', true, ${site.lat || 0}, ${site.lng || 0}, '${esc(addrStreetKey)}')">☀️ ${esc(String(sch.recSummerRun))}</span>`;
       }
       if (stream === 'FOGO' && sch.fogRun) {
-        return `<span class="hdr-run-badge hdr-run-fog" onclick="event.stopPropagation(); openRunDirectlyOnMap('${sch.fogRun}', 'FOGO', '${sch.day || ''}', '${sch.weekLetter || ''}', false, ${site.lat || 0}, ${site.lng || 0})"><img class="icon-img" src="fogo.png" alt="">${esc(String(sch.fogRun))}</span>`;
+        return `<span class="hdr-run-badge hdr-run-fog" onclick="event.stopPropagation(); openRunDirectlyOnMap('${sch.fogRun}', 'FOGO', '${sch.day || ''}', '${sch.weekLetter || ''}', false, ${site.lat || 0}, ${site.lng || 0}, '${esc(addrStreetKey)}')"><img class="icon-img" src="fogo.png" alt="">${esc(String(sch.fogRun))}</span>`;
       }
       return '';
     }).join('');
@@ -11371,14 +11386,10 @@ window.addEventListener('DOMContentLoaded', async () => {
 
       group.sites.forEach(site => {
         houseIds.add(String(site.propId || site.siteId || site.addressText || ''));
-        const eligibleStreams = getDriveStreamsForCounts(site);
-        eligibleStreams.forEach(({ binStream }) => {
-          sources(site).forEach(src => {
-            const n = (src[binStream] || []).length;
-            if (binStream === 'Garbage') garCount += n;
-            else if (binStream === 'Recycling') recCount += n;
-            else if (binStream === 'FOGO') fogCount += n;
-          });
+        sources(site).forEach(src => {
+          garCount += (src.Garbage || []).length;
+          recCount += (src.Recycling || []).length;
+          fogCount += (src.FOGO || []).length;
         });
       });
 
@@ -11388,16 +11399,16 @@ window.addEventListener('DOMContentLoaded', async () => {
         .sort((a, b) => streamOrder.indexOf(a.stream) - streamOrder.indexOf(b.stream))
         .map(b => {
           if (b.stream === 'Garbage') {
-            return `<span class="hdr-run-badge hdr-run-gar" onclick="event.stopPropagation(); openRunDirectlyOnMap('${b.run}', 'Garbage', '${b.day}', '${b.weekLetter}', false, ${b.lat || 0}, ${b.lng || 0})"><img class="icon-img" src="bin.png" alt=""> ${esc(b.run)}</span>`;
+            return `<span class="hdr-run-badge hdr-run-gar" onclick="event.stopPropagation(); openRunDirectlyOnMap('${b.run}', 'Garbage', '${b.day}', '${b.weekLetter}', false, ${b.lat || 0}, ${b.lng || 0}, '${esc(key)}')"><img class="icon-img" src="bin.png" alt=""> ${esc(b.run)}</span>`;
           }
           if (b.stream === 'Recycling') {
-            return `<span class="hdr-run-badge hdr-run-rec" onclick="event.stopPropagation(); openRunDirectlyOnMap('${b.run}', 'Recycling', '${b.day}', '${b.weekLetter}', false, ${b.lat || 0}, ${b.lng || 0})"><img class="icon-img" src="recycle.png" alt="">${esc(b.run)}${b.weekLetter ? esc(String(b.weekLetter).toUpperCase()) : ''}</span>`;
+            return `<span class="hdr-run-badge hdr-run-rec" onclick="event.stopPropagation(); openRunDirectlyOnMap('${b.run}', 'Recycling', '${b.day}', '${b.weekLetter}', false, ${b.lat || 0}, ${b.lng || 0}, '${esc(key)}')"><img class="icon-img" src="recycle.png" alt="">${esc(b.run)}${b.weekLetter ? esc(String(b.weekLetter).toUpperCase()) : ''}</span>`;
           }
           if (b.stream === 'SummerRecycling') {
-            return `<span class="hdr-run-badge hdr-run-summer" onclick="event.stopPropagation(); openRunDirectlyOnMap('${b.run}', 'SummerRecycling', '${b.day}', '', true, ${b.lat || 0}, ${b.lng || 0})">☀️ ${esc(b.run)}</span>`;
+            return `<span class="hdr-run-badge hdr-run-summer" onclick="event.stopPropagation(); openRunDirectlyOnMap('${b.run}', 'SummerRecycling', '${b.day}', '', true, ${b.lat || 0}, ${b.lng || 0}, '${esc(key)}')">☀️ ${esc(b.run)}</span>`;
           }
           if (b.stream === 'FOGO') {
-            return `<span class="hdr-run-badge hdr-run-fog" onclick="event.stopPropagation(); openRunDirectlyOnMap('${b.run}', 'FOGO', '${b.day}', '${b.weekLetter}', false, ${b.lat || 0}, ${b.lng || 0})"><img class="icon-img" src="fogo.png" alt="">${esc(b.run)}</span>`;
+            return `<span class="hdr-run-badge hdr-run-fog" onclick="event.stopPropagation(); openRunDirectlyOnMap('${b.run}', 'FOGO', '${b.day}', '${b.weekLetter}', false, ${b.lat || 0}, ${b.lng || 0}, '${esc(key)}')"><img class="icon-img" src="fogo.png" alt="">${esc(b.run)}</span>`;
           }
           return '';
         }).join('');
