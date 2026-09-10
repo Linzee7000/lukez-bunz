@@ -3608,7 +3608,9 @@
       </div>
 
       <div class="modal-actions">
+        <button type="button" id="binDeleteBtn" class="btn-cancel" style="display:none; background:var(--red-600); color:#fff; border-color:var(--red-700);" onclick="deleteBinFromEditModal()">🗑️ Delete</button>
         <button type="button" class="btn-cancel" onclick="closeModal('binEditModal')">Cancel</button>
+        <button type="button" class="stray-fix-btn" style="margin-top:0; padding:8px 14px; font-size:14px; background:var(--sky-600);" onclick="promptAddAnotherBinFromEditModal()">➕ Add</button>
         <button type="submit" class="btn-save">Save Bin</button>
       </div>
     </form>
@@ -7449,6 +7451,10 @@ function promptEditBin(propId, streamKey, binIdx) {
     document.getElementById('modalBinLat').value = binObj.lat || '';
     document.getElementById('modalBinLng').value = binObj.lng || '';
     
+    document.getElementById('binModalTitle').textContent = 'Edit Bin';
+    const delBtn = document.getElementById('binDeleteBtn');
+    if (delBtn) delBtn.style.display = '';
+    
     openModal('binEditModal');
   }
 
@@ -7476,7 +7482,54 @@ function promptEditBin(propId, streamKey, binIdx) {
     document.getElementById('modalBinLat').value = '';
     document.getElementById('modalBinLng').value = '';
     
+    document.getElementById('binModalTitle').textContent = 'Add Bin';
+    const delBtn = document.getElementById('binDeleteBtn');
+    if (delBtn) delBtn.style.display = 'none';
+    
     openModal('binEditModal');
+  }
+
+  // "➕ Add" button inside the Edit/Add Bin modal itself — lets the user
+  // jump straight from editing one bin into adding a brand-new bin on the
+  // same property (defaulting to whichever stream is currently selected)
+  // without closing this modal and hunting for the map's Add Bin tool.
+  // Any unsaved changes to the bin currently being edited are discarded,
+  // same as hitting Cancel.
+  function promptAddAnotherBinFromEditModal() {
+    const propId = document.getElementById('modalSitePropId').value;
+    const streamKey = document.getElementById('modalBinStreamSelect').value || 'Garbage';
+    promptAddCouncilBin(propId, streamKey, '', '');
+  }
+
+  // "🗑️ Delete" button inside the Edit Bin modal — only shown when editing
+  // an existing bin (binIdx >= 0). Mirrors focusDeleteSelected()'s delete
+  // logic for a single bin: confirm, log the deletion, splice it out,
+  // persist, then return to the property's inspect view.
+  async function deleteBinFromEditModal() {
+    const propId = document.getElementById('modalSitePropId').value;
+    const streamKey = document.getElementById('modalOrigStreamKey').value;
+    const binIdx = Number(document.getElementById('modalBinIdx').value);
+    if (binIdx < 0) return; // this is an in-progress "add", nothing to delete yet
+
+    const site = siteRecords.find(s => String(s.propId || s.siteId) === String(propId));
+    const b = site && site.soloStreams[streamKey] && site.soloStreams[streamKey][binIdx];
+    if (!site || !b) return;
+
+    if (!(await customConfirm(`Delete this ${streamKey} bin${b.serial ? ' (' + b.serial + ')' : ''}? This can't be undone here (it will still sync as a deletion).`))) return;
+
+    logEdit({
+      timestamp: new Date().toISOString(), editType: 'BIN_DELETED',
+      propId: site.propId, siteId: site.siteId, address: site.addressText,
+      stream: streamKey, serial: b.serial
+    });
+    site.soloStreams[streamKey].splice(binIdx, 1);
+    hasUnsyncedChanges = true; updateSyncButtonIcon();
+
+    await saveToDB('masterRecords', siteRecords);
+    await saveToDB('masterEditsLog', masterEditsLog);
+    closeModal('binEditModal');
+    openPropertyInspectModal(propId);
+    triggerUniversalDataRefresh();
   }
 
   /* Core Mutators: Synchronous In-Memory Commit + IndexedDB + Apps Script Push */
