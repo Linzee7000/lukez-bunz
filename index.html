@@ -2971,7 +2971,7 @@
       </div>
 
       <!-- CURRENT ADDRESS TELEMETRY -->
-      <div class="map-telemetry-banner address-telemetry-card map-address-telemetry">
+      <div class="map-telemetry-banner address-telemetry-card map-address-telemetry" onclick="editCurrentTelemetrySite()" title="Tap to edit this property" style="cursor:pointer;">
         <div class="address-telemetry-grid">
           <div id="mapLiveStreet" class="address-telemetry-address">check filter</div>
           <!-- Distance to next bin + travel direction: lives in the grid's
@@ -3475,7 +3475,7 @@
   const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbwYUYnOa8D5qFiLpWP5RyAmdSg8q7kRTzHWa7HlORxIgcshIyxwLM7HR0jsXGkkjGHfCA/exec";
 
 /* Global Bin Builder (Defined upfront to prevent startup TypeError) */
-  window.buildBinsAtAddress = function(site, filterByActiveStream = true, isMapTelemetry = false) {
+  window.buildBinsAtAddress = function(site, filterByActiveStream = true, isMapTelemetry = false, forceStreams = null) {
     if (!site) return '';
 
     const currentStreamFilter = (typeof activeFilterStream !== 'undefined' && activeFilterStream ? activeFilterStream : '').toLowerCase().trim();
@@ -3486,13 +3486,19 @@
     let html = '';
 
     const streams = [
-      { key: 'Garbage', icon: '<img class="icon-img" src="bin.png" alt="">', bg: '#dc2626', label: '240L' },
-      { key: 'Recycling', icon: '♻️', bg: '#eab308', label: '240L' },
-      { key: 'FOGO', icon: '🌳', bg: '#16a34a', label: '240L' }
+      { key: 'Garbage', icon: '<img class="icon-img" src="garbage.png" alt="">', bg: '#dc2626', label: '240L' },
+      { key: 'Recycling', icon: '<img class="icon-img" src="recycle.png" alt="">', bg: '#eab308', label: '240L' },
+      { key: 'FOGO', icon: '<img class="icon-img" src="fogo.png" alt="">', bg: '#16a34a', label: '240L' }
     ];
 
     streams.forEach(st => {
-      if (filterByActiveStream && currentStreamFilter && currentStreamFilter !== 'all') {
+      // A stream in forceStreams is always shown (used by the Next Bin
+      // Box's per-stream "monkey" toggles), even while a different
+      // stream/run/day filter is active for this address — otherwise
+      // there's no way to peek at, say, a Recycling serial while filtered
+      // to Garbage.
+      const isForced = forceStreams && forceStreams.has && forceStreams.has(st.key);
+      if (!isForced && filterByActiveStream && currentStreamFilter && currentStreamFilter !== 'all') {
         const targetKey = (currentStreamFilter === 'summerrecycling') ? 'recycling' : currentStreamFilter;
         if (st.key.toLowerCase() !== targetKey) return;
       }
@@ -3941,9 +3947,9 @@
   ];
 
   const SOLO_STREAMS = [
-    { key: 'Garbage', label: 'Garbage', icon: '<img class="icon-img" src="bin.png" alt="">', pillClass: 'pill-gar', headerClass: 'header-gar', badgeClass: 'hdr-run-gar', cols: [{ idx: 11, sz: '80L' }, { idx: 12, sz: '120L' }, { idx: 13, sz: '240L' }] },
-    { key: 'Recycling', label: 'Recycle', icon: '♻️', pillClass: 'pill-rec', headerClass: 'header-rec', badgeClass: 'hdr-run-rec', cols: [{ idx: 14, sz: '120L' }, { idx: 15, sz: '240L' }] },
-    { key: 'FOGO', label: 'FOGO', icon: '🌳', pillClass: 'pill-fog', headerClass: 'header-fog', badgeClass: 'hdr-run-fog', cols: [{ idx: 16, sz: '240L' }] }
+    { key: 'Garbage', label: 'Garbage', icon: '<img class="icon-img" src="garbage.png" alt="">', pillClass: 'pill-gar', headerClass: 'header-gar', badgeClass: 'hdr-run-gar', cols: [{ idx: 11, sz: '80L' }, { idx: 12, sz: '120L' }, { idx: 13, sz: '240L' }] },
+    { key: 'Recycling', label: 'Recycle', icon: '<img class="icon-img" src="recycle.png" alt="">', pillClass: 'pill-rec', headerClass: 'header-rec', badgeClass: 'hdr-run-rec', cols: [{ idx: 14, sz: '120L' }, { idx: 15, sz: '240L' }] },
+    { key: 'FOGO', label: 'FOGO', icon: '<img class="icon-img" src="fogo.png" alt="">', pillClass: 'pill-fog', headerClass: 'header-fog', badgeClass: 'hdr-run-fog', cols: [{ idx: 16, sz: '240L' }] }
   ];
 
   const COUNCIL_STREAMS = [
@@ -6945,6 +6951,57 @@ function promptEditBin(propId, streamKey, binIdx) {
     }
   }
 
+  // Next Bin Box > "Add to Run X": one-tap version of promptEditProperty
+  // for the single most common case — a bin with no run number at all for
+  // whichever stream you're currently filtered to. Assigns it straight to
+  // the run you're driving instead of making you open the full editor.
+  const STREAM_RUN_FIELD_QUICKASSIGN = { Garbage: 'garRun', Recycling: 'recRun', FOGO: 'fogRun' };
+  window.quickAssignBinToCurrentRun = async function(propId, streamKey, runValue) {
+    const field = STREAM_RUN_FIELD_QUICKASSIGN[streamKey];
+    if (!field || !runValue) return;
+    const site = siteRecords.find(s => String(s.propId || s.siteId) === String(propId));
+    if (!site || !site.soloSchedule) return;
+
+    const ok = await customConfirm(`Add this address to ${streamKey} Run ${runValue}?`);
+    if (!ok) return;
+
+    site.soloSchedule[field] = runValue;
+
+    logEdit({
+      timestamp: new Date().toISOString(),
+      editType: "PROPERTY_UPDATE",
+      propId: site.propId,
+      siteId: site.siteId,
+      address: site.addressText,
+      day: site.soloSchedule.day || '',
+      weekLetter: (site.soloSchedule.weekLetter || '').toUpperCase(),
+      garRun: site.soloSchedule.garRun || '',
+      recRun: site.soloSchedule.recRun || '',
+      recSummerRun: site.soloSchedule.recSummerRun || '',
+      fogRun: site.soloSchedule.fogRun || '',
+      runFlags: site.runFlags || ''
+    });
+    hasUnsyncedChanges = true; updateSyncButtonIcon();
+
+    await saveToDB("masterRecords", siteRecords);
+    await saveToDB("masterEditsLog", masterEditsLog);
+    triggerUniversalDataRefresh();
+    if (typeof renderMapData === 'function') renderMapData();
+    if (typeof lastTelemetrySite !== 'undefined' && lastTelemetrySite) renderCurrentAddressTelemetry(lastTelemetrySite);
+    customAlert(`Added to ${streamKey} Run ${runValue}.`);
+  };
+
+  // Next Bin Box > tap the card itself to jump straight into editing the
+  // address currently on screen, instead of having to switch to another
+  // page to find and edit the same property.
+  window.editCurrentTelemetrySite = function() {
+    if (typeof lastTelemetrySite === 'undefined' || !lastTelemetrySite) {
+      customAlert('No address currently on screen to edit.');
+      return;
+    }
+    promptEditProperty(String(lastTelemetrySite.propId || lastTelemetrySite.siteId || ''));
+  };
+
   function promptRateProperty(propId) {
     const site = siteRecords.find(s => String(s.propId || s.siteId) === String(propId));
     if (!site) return;
@@ -7350,6 +7407,22 @@ let siteReminders = JSON.parse(localStorage.getItem('siteReminders') || '{}');
 
   window.toggleMapSerialNumbers = function() {
     isMapSerialManuallyHidden = !isMapSerialManuallyHidden;
+    if (typeof lastTelemetrySite !== 'undefined' && lastTelemetrySite) {
+      renderCurrentAddressTelemetry(lastTelemetrySite);
+    }
+  };
+
+  // Per-stream "monkey" toggles on the Next Bin Box: normally a bin only
+  // shows here if this address actually matches the currently-applied
+  // run/day/stream filter (see isSiteOnFilteredRun in
+  // renderCurrentAddressTelemetry). These let you force one stream's
+  // serial into view for whichever address is currently on screen even
+  // though it's filtered out — e.g. filtered to Garbage, but you want to
+  // quickly check this house's Recycling serial too.
+  let forcedBinStreams = new Set();
+  window.toggleForcedBinStream = function(streamKey) {
+    if (forcedBinStreams.has(streamKey)) forcedBinStreams.delete(streamKey);
+    else forcedBinStreams.add(streamKey);
     if (typeof lastTelemetrySite !== 'undefined' && lastTelemetrySite) {
       renderCurrentAddressTelemetry(lastTelemetrySite);
     }
@@ -10328,7 +10401,9 @@ window.addEventListener('DOMContentLoaded', async () => {
   if (hudRunsEl) hudRunsEl.innerHTML = buildRunsAtAddress(site, false);
 
   const isSiteOnFilteredRun = site && (typeof siteMatchesAllActiveFilters === 'function' ? siteMatchesAllActiveFilters(site) : true);
-  const mapBins = isSiteOnFilteredRun ? window.buildBinsAtAddress(site, true, true) : '';
+  const mapBins = site && (isSiteOnFilteredRun || forcedBinStreams.size > 0)
+    ? window.buildBinsAtAddress(site, true, true, forcedBinStreams)
+    : '';
   const showSerials = !isMapSerialManuallyHidden && Boolean(mapBins);
 
   // Serial toggle now lives directly beside the FOGO run badge (the last
@@ -10343,12 +10418,30 @@ window.addEventListener('DOMContentLoaded', async () => {
     </button>
   ` : '';
 
+  // One force-toggle "monkey" per stream, each labelled with that stream's
+  // own icon, so you can peek at a stream's serial at this address even
+  // when it isn't the one you're currently filtered to (or this address
+  // doesn't match the current run/day filter at all). Only offered for
+  // streams this address actually has a bin recorded for.
+  const STREAM_FORCE_ICONS = { Garbage: 'garbage.png', Recycling: 'recycle.png', FOGO: 'fogo.png' };
+  let forceStreamBtns = '';
+  if (site) {
+    const forceDisplaySources = (activeFilterDataSource === 'council') ? (site.councilStreams || {}) : (site.soloStreams || {});
+    forceStreamBtns = Object.keys(STREAM_FORCE_ICONS).filter(sk => (forceDisplaySources[sk] || []).length > 0).map(sk => {
+      const forced = forcedBinStreams.has(sk);
+      return `
+        <button type="button" class="map-serial-toggle" onclick="event.stopPropagation(); window.toggleForcedBinStream('${sk}')" title="${forced ? `Stop forcing ${sk} serials at this address` : `Force show ${sk} serials at this address`}" style="flex:0 0 auto; margin-left:4px; background:${forced ? '#166534' : '#334155'}; color:#f8fafc; border:1px solid #1e293b; border-radius:5px; padding:4px 6px; font-size:13px; line-height:1.2; cursor:pointer; display:inline-flex; align-items:center; gap:3px;">
+          <img class="icon-img" src="${STREAM_FORCE_ICONS[sk]}" alt="" style="width:14px;height:14px;">${forced ? '🙈' : '🙉'}
+        </button>`;
+    }).join('');
+  }
+
   // Run badges used to be duplicated here too, but that's now covered by
   // the tappable Area Runs Bar above the map (see buildAreaRunsBarHtml) —
-  // this box just keeps the serial-number toggle.
+  // this box just keeps the serial-number toggle(s).
   const mapRunsEl = document.getElementById('mapRunsAtAddress');
   if (mapRunsEl) {
-    mapRunsEl.innerHTML = `<div class="runs-scroll-strip">${serialToggleBtn}</div>`;
+    mapRunsEl.innerHTML = `<div class="runs-scroll-strip">${serialToggleBtn}${forceStreamBtns}</div>`;
     // The strip scrolls internally so a long run list never clips the
     // toggle button — but it always starts scrolled to the left, which
     // left the toggle sitting half-cut at the right edge until the user
@@ -10359,9 +10452,32 @@ window.addEventListener('DOMContentLoaded', async () => {
     if (stripEl) stripEl.scrollLeft = stripEl.scrollWidth;
   }
 
+  // Unassigned-run quick add: while filtered to a single stream + single
+  // run, flag when the address on screen has a bin for that stream but no
+  // run number assigned to it at all — one tap to slot it straight onto
+  // the run you're currently driving, or open the property editor to pick
+  // a different one from the list.
+  const STREAM_RUN_FIELD = { Garbage: 'garRun', Recycling: 'recRun', FOGO: 'fogRun' };
+  let unassignedBinBannerHtml = '';
+  if (site && activeFilterStream && STREAM_RUN_FIELD[activeFilterStream]) {
+    const field = STREAM_RUN_FIELD[activeFilterStream];
+    const hasStreamBin = ((site.soloStreams && site.soloStreams[activeFilterStream]) || []).length > 0;
+    const runAlreadyAssigned = clean(site.soloSchedule && site.soloSchedule[field]);
+    if (hasStreamBin && !runAlreadyAssigned) {
+      const propId = esc(String(site.propId || site.siteId || ''));
+      const currentRun = (selectedRunsSet && selectedRunsSet.size === 1) ? Array.from(selectedRunsSet)[0].toUpperCase() : '';
+      unassignedBinBannerHtml = `
+        <div class="unassigned-bin-banner" onclick="event.stopPropagation();" style="display:flex; align-items:center; gap:8px; flex-wrap:wrap; background:#7c2d12; color:#fff; border-radius:8px; padding:6px 10px; margin-top:6px; font-size:13px; font-weight:700;">
+          <span>⚠️ No ${esc(activeFilterStream)} run assigned to this bin</span>
+          ${currentRun ? `<button type="button" onclick="event.stopPropagation(); window.quickAssignBinToCurrentRun('${propId}', '${esc(activeFilterStream)}', '${esc(currentRun)}')" style="background:#16a34a; color:#fff; border:none; border-radius:6px; padding:4px 8px; font-size:12px; font-weight:700; cursor:pointer;">Add to Run ${esc(currentRun)}</button>` : ''}
+          <button type="button" onclick="event.stopPropagation(); promptEditProperty('${propId}')" style="background:#334155; color:#fff; border:none; border-radius:6px; padding:4px 8px; font-size:12px; font-weight:700; cursor:pointer;">Choose run…</button>
+        </div>`;
+    }
+  }
+
   const mapBinsEl = document.getElementById('mapBinsAtAddress');
   if (mapBinsEl) {
-    mapBinsEl.innerHTML = showSerials ? mapBins : '';
+    mapBinsEl.innerHTML = (showSerials ? mapBins : '') + unassignedBinBannerHtml;
     mapBinsEl.style.display = 'flex';
     mapBinsEl.style.flexDirection = 'column';
   }
