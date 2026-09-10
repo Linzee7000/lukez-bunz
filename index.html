@@ -8714,6 +8714,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     mapSelectMode = true;
     mapEditingActive = true;
     updateMapTelemetryVisibility();
+    disableGpsFollow();
     document.getElementById('propertyFocusToolbar').style.display = 'flex';
     const title = mapFocusPropId
       ? (() => { const s = siteRecords.find(x => String(x.propId || x.siteId) === mapFocusPropId); return s ? (s.baseStreetLine || s.addressText || 'Property').split(',')[0] : 'Property'; })()
@@ -9386,6 +9387,9 @@ window.addEventListener('DOMContentLoaded', async () => {
     closeModal('mapRunPickerModal');
     renderActiveFilterChips();
     triggerUniversalDataRefresh();
+    // Matches openRunDirectlyOnMap's behaviour - filtering to a specific
+    // run here is the same "about to drive this run" moment.
+    if (selectedRunsSet && selectedRunsSet.size) enableTrackUpOrientation();
   };
 
   // Kept for backwards compatibility with any lingering callers; the panel
@@ -10210,6 +10214,7 @@ window.addEventListener('DOMContentLoaded', async () => {
 
     renderActiveFilterChips();
     switchMainTab('map');
+    enableTrackUpOrientation();
 
     setTimeout(() => {
       if (leafletMap && propLat && propLng && Number.isFinite(Number(propLat))) {
@@ -10239,6 +10244,24 @@ window.addEventListener('DOMContentLoaded', async () => {
   };
   window.toggleMapSideView = window.toggleTruckFollow;
 
+  // Turns off GPS follow ("locate me") the same way tapping the follow
+  // button off does, without toggling it back on if it's already off.
+  // Called whenever the driver opens an editing/select mode from the Map
+  // Settings menu (boundary edit, house/bin select, etc.) - GPS
+  // auto-centring would otherwise yank the map out from under a point
+  // they're trying to drag or tap.
+  function disableGpsFollow() {
+    if (!isTruckFollowEnabled) return;
+    isTruckFollowEnabled = false;
+    hasAutoCenteredTruck = false;
+    const btn = document.getElementById('btnTruckFollowTarget');
+    if (btn) {
+      btn.classList.remove('active');
+      const icon = btn.querySelector('img');
+      if (icon) icon.src = 'target.png';
+    }
+  }
+
   // Track-Up / North-Up Toggle
   window.toggleTrackUpOrientation = function(ev) {
     if (ev) ev.stopPropagation();
@@ -10252,6 +10275,22 @@ window.addEventListener('DOMContentLoaded', async () => {
 
     applyMapHeadingRotation();
   };
+
+  // Switches the map into Track-Up orientation without toggling it back off
+  // if it's already on - called whenever a run is picked from the Search
+  // page or filtered on the Map page (see openRunDirectlyOnMap /
+  // applyUnifiedModal), since that's the point the driver is about to
+  // start following that run.
+  function enableTrackUpOrientation() {
+    if (isTrackUpEnabled) return;
+    isTrackUpEnabled = true;
+    const btn = document.getElementById('btnTrackUpOrientation');
+    if (btn) {
+      btn.classList.add('active');
+      btn.setAttribute('title', 'Track-Up (Driving Ahead)');
+    }
+    applyMapHeadingRotation();
+  }
 
   function applyMapHeadingRotation() {
     const container = document.getElementById('mapScreenContainer');
@@ -10365,6 +10404,7 @@ window.addEventListener('DOMContentLoaded', async () => {
 
     if (isRoadSnapEditing) {
       closeMapSettingsModal();
+      disableGpsFollow();
       boundaryRemovePointsActive = false;
       // Default the draggable ("active") run to the first one currently on
       // screen. With only one run showing this is a no-op — every handle
@@ -10432,6 +10472,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   // exactly those buttons pinned above the bottom nav.
   window.startBoundarySelectMode = function(){
     closeMapSettingsModal();
+    disableGpsFollow();
     mapEditingActive = true;
     updateMapTelemetryVisibility();
     boundarySelectModeActive = true;
