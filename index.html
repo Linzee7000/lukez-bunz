@@ -1834,6 +1834,13 @@
    #mapRunsAtAddress needs `overflow:visible` here (overriding line 1819's
    `overflow:hidden`) so a tab's "pulled forward" elevation isn't clipped. */
 .map-address-telemetry #mapRunsAtAddress.stream-tabs-mode{overflow:visible!important;align-items:flex-end!important;}
+/* Close the gap the old rule left between the tabs row and the serial
+   list (that gap made sense for the old tiny buttons, but now it makes
+   the tabs look detached from the box they control) — zero out the box's
+   top spacing/border so the box starts immediately under the tabs, then
+   pull it up 4px so the (colour-matched) tabs visibly tuck into its top
+   edge instead of floating above it. */
+.map-address-telemetry #mapBinsAtAddress{margin-top:-4px!important;padding-top:0!important;border-top:none!important;}
 .map-stream-tabs-row{display:flex;align-items:flex-end;gap:4px;}
 .map-stream-tab{
   display:inline-flex;align-items:center;gap:5px;
@@ -4665,26 +4672,27 @@
   }
 
   // Keeps the right-hand side control cluster (#mapFixedSideControls)
-  // pinned just below the top header bar, however tall that header
-  // currently is - the header (.map-header-panel) grows when the settings
-  // bar is opened, and grows again when a settings category's options row
-  // slides out, and a hard-coded pixel guess for each of those states could
-  // never keep up (and would either leave a gap or, once content changed,
-  // get covered again). A ResizeObserver on the header measures its real
-  // rendered height on every change and writes the side overlay's `top`
-  // straight onto the element with 'important' priority, which beats any
-  // stylesheet rule (including other !important ones) without needing this
-  // to fight the cascade.
+  // level with the Area Runs Bar's run badges on the left (#areaRunsBar),
+  // not below the whole header+run-bar stack. The header (.map-header-panel)
+  // grows when the settings bar opens, when a category's options row
+  // slides out, etc. - and #areaRunsBar's own height changes too (0-3 rows
+  // depending on how many streams have a run here) - so a hard-coded pixel
+  // guess for either could never keep up. A ResizeObserver on the header
+  // re-measures on every change and aligns the overlay's `top` to
+  // #areaRunsBar's actual offsetTop (its position is relative to the
+  // header panel, since that's its nearest positioned ancestor) - i.e.
+  // exactly where whichever top bar is currently showing ends and the run
+  // badges begin, which is the same row the badges start on.
   let mapSideOverlayResizeObserver = null;
   function setupMapSideOverlayAutoPosition() {
     const overlay = document.getElementById('mapFixedSideControls');
     const header = document.querySelector('#mapScreenContainer .map-header-panel');
+    const runsBar = document.getElementById('areaRunsBar');
     if (!overlay || !header || typeof ResizeObserver === 'undefined') return;
-    const GAP = 8;
     function reposition() {
       const headerTop = parseFloat(getComputedStyle(header).top) || 8;
-      const newTop = headerTop + header.offsetHeight + GAP;
-      overlay.style.setProperty('top', newTop + 'px', 'important');
+      const runsBarTop = runsBar ? runsBar.offsetTop : header.offsetHeight;
+      overlay.style.setProperty('top', (headerTop + runsBarTop) + 'px', 'important');
     }
     if (mapSideOverlayResizeObserver) mapSideOverlayResizeObserver.disconnect();
     mapSideOverlayResizeObserver = new ResizeObserver(reposition);
@@ -4698,21 +4706,36 @@
   // above — the card's height changes constantly (stream tabs, how many
   // serial rows are expanded, etc.) so a fixed pixel offset would either
   // leave a gap or get covered as the card grows.
-  let mapStreetOverlayResizeObserver = null;
-  function setupMapStreetOverlayAutoPosition() {
+  //
+  // repositionMapStreetOverlay() is a standalone function (not buried
+  // inside the setup function) for a reason: a ResizeObserver callback
+  // fires on the browser's own schedule (typically the next animation
+  // frame), which is usually fine but left a window where the card had
+  // already grown (new address, tabs, serial rows) while the overlay was
+  // still sitting at its old, now-too-low position — reading as the
+  // overlay being "hidden behind"/overlapping the card. Calling this
+  // directly at the end of renderCurrentAddressTelemetry (see below)
+  // closes that gap by repositioning the instant the content that
+  // resizes the card actually changes, with the ResizeObserver kept only
+  // as a safety net for size changes from other causes (rotation, window
+  // resize).
+  function repositionMapStreetOverlay() {
     const overlay = document.getElementById('mapStreetInfoOverlay');
     const card = document.querySelector('#mapScreenContainer .map-address-telemetry');
-    if (!overlay || !card || typeof ResizeObserver === 'undefined') return;
-    const GAP = 10;
-    function reposition() {
-      const cardBottom = parseFloat(getComputedStyle(card).bottom) || 70;
-      const newBottom = cardBottom + card.offsetHeight + GAP;
-      overlay.style.setProperty('bottom', newBottom + 'px', 'important');
-    }
+    if (!overlay || !card) return;
+    const GAP = 14;
+    const cardBottom = parseFloat(getComputedStyle(card).bottom) || 70;
+    const newBottom = cardBottom + card.offsetHeight + GAP;
+    overlay.style.setProperty('bottom', newBottom + 'px', 'important');
+  }
+  let mapStreetOverlayResizeObserver = null;
+  function setupMapStreetOverlayAutoPosition() {
+    const card = document.querySelector('#mapScreenContainer .map-address-telemetry');
+    if (!card || typeof ResizeObserver === 'undefined') return;
     if (mapStreetOverlayResizeObserver) mapStreetOverlayResizeObserver.disconnect();
-    mapStreetOverlayResizeObserver = new ResizeObserver(reposition);
+    mapStreetOverlayResizeObserver = new ResizeObserver(repositionMapStreetOverlay);
     mapStreetOverlayResizeObserver.observe(card);
-    reposition();
+    repositionMapStreetOverlay();
   }
 
   // Single writer for the transparent street-name pill's text.
@@ -10736,6 +10759,13 @@ window.addEventListener('DOMContentLoaded', async () => {
   }
 
   updateMapTelemetryVisibility();
+
+  // The card's height just potentially changed (address, tabs, serial
+  // rows all just got rewritten above) - reposition the transparent
+  // street/speed-limit overlay immediately so it never lags a frame
+  // behind and ends up overlapping the card. See repositionMapStreetOverlay
+  // for why this direct call exists alongside the ResizeObserver.
+  if (typeof repositionMapStreetOverlay === 'function') repositionMapStreetOverlay();
 };
   
   /* GPS Position Watcher */
