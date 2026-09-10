@@ -717,6 +717,12 @@
       flex: 1;
       min-width: 0;
     }
+    .street-summary-top-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
     .street-summary-name {
       font-size: 15.5px;
       font-weight: 700;
@@ -5311,6 +5317,15 @@
       .trim();
   }
 
+  // Same "house number stripped" street identity used to group the Drive
+  // page's street cards - reused so "focus this street on the map" (see
+  // showStreetOnMap) matches exactly the same set of properties.
+  function siteStreetKey(site) {
+    const raw = (site.baseStreetLine || cleanStreetAddress(site.addressText) || '').trim();
+    const label = streetNameOnly(raw) || raw;
+    return label.toLowerCase();
+  }
+
   /* ================= MAP ENGINE (RESTORED) ================= */
   function mapKey(v){ return String(v||'').trim().toLowerCase(); }
   function gps(lat,lng){ lat=parseFloat(lat); lng=parseFloat(lng); return Number.isFinite(lat)&&Number.isFinite(lng)&&lat!==0&&lng!==0?{lat,lng}:null; }
@@ -8531,6 +8546,7 @@ window.addEventListener('DOMContentLoaded', async () => {
      rather than drawing a second, separate set of markers.
      ============================================================ */
   let mapFocusPropId = null;      // set = only this property's bins are shown
+  let mapFocusStreetKey = null;   // set = only this street's properties are shown (see showStreetOnMap)
   let mapSelectMode = false;      // tap-to-select armed
   let mapBoxSelectArmed = false;
   let mapSelectedBinKeys = new Set();   // activeMapCircleMarkers keys
@@ -8630,6 +8646,58 @@ window.addEventListener('DOMContentLoaded', async () => {
       renderMapData();
     }));
   }
+
+  // Entry point from the Drive page's street card map button: narrows the
+  // map to every property on that street (all streams, ignoring the
+  // current stream/day/run filters - see mapFocusStreetKey in
+  // renderMapData) and fits the map to that street, instead of opening the
+  // bin-editing tools panel showPropertyOnMap does.
+  window.showStreetOnMap = function(streetKey) {
+    if (!streetKey) return;
+    mapFocusPropId = null;
+    mapFocusStreetKey = String(streetKey);
+
+    // GPS follow would otherwise re-centre the map back on the truck on the
+    // very next fix, undoing the fitBounds below - turn it off, same as
+    // tapping the follow-toggle button off (see toggleTruckFollow).
+    if (isTruckFollowEnabled) {
+      isTruckFollowEnabled = false;
+      hasAutoCenteredTruck = false;
+      const followBtn = document.getElementById('btnTruckFollowTarget');
+      if (followBtn) {
+        followBtn.classList.remove('active');
+        const icon = followBtn.querySelector('img');
+        if (icon) icon.src = 'target.png';
+      }
+    }
+
+    switchMainTab('map');
+
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      renderMapData();
+      const site = siteRecords.find(s => siteStreetKey(s) === mapFocusStreetKey);
+      const streetLabel = site ? toSentenceCaseLabel(streetNameOnly((site.baseStreetLine || cleanStreetAddress(site.addressText) || '').trim()) || site.baseStreetLine || 'Street') : 'Street';
+      window.setMapTopBarContext(streetLabel, [], () => window.exitStreetFocus());
+
+      const pts = siteRecords
+        .filter(s => siteStreetKey(s) === mapFocusStreetKey)
+        .map(s => gps(s.lat, s.lng))
+        .filter(Boolean);
+      if (leafletMap && pts.length === 1) {
+        leafletMap.setView([pts[0].lat, pts[0].lng], 18, { animate: true });
+      } else if (leafletMap && pts.length > 1) {
+        leafletMap.fitBounds(pts.map(p => [p.lat, p.lng]), { padding: [40, 40] });
+      }
+    }));
+  };
+
+  // Leaves street-focus mode (tapped the × on the top-bar context set by
+  // showStreetOnMap above) and goes back to whatever filters were already
+  // active.
+  window.exitStreetFocus = function() {
+    mapFocusStreetKey = null;
+    renderMapData();
+  };
 
   // Entry point from the map's own side controls: works on whatever is
   // currently visible on the map, across every property.
@@ -11117,11 +11185,12 @@ window.addEventListener('DOMContentLoaded', async () => {
     // search) by street name alone (house number stripped - see
     // streetNameOnly - so "1 Besgrove Street" and "14 Besgrove Street"
     // land in the same card instead of one street per house). Also tally,
-    // across ALL records regardless of filter, which other runs (by
-    // stream) service each street - that's the "what other runs do that
-    // street" line on the summary card.
+    // across ALL records regardless of filter, every run (by stream) that
+    // services each street - shown as run-number badges on the summary
+    // card (see streetRunBadgesByStreet below), same as the per-address
+    // badges further down.
     const streetGroups = new Map();   // streetKey -> { label, sites: [] }
-    const otherRunsByStreet = new Map(); // streetKey -> Set("GAR 4", "REC 2", ...)
+    const streetRunBadgesByStreet = new Map(); // streetKey -> Map("Garbage|4" -> {stream, run, day, weekLetter, isSummer})
     let matchedPropertyCount = 0;
 
     for (const site of records) {
@@ -11130,13 +11199,23 @@ window.addEventListener('DOMContentLoaded', async () => {
       if (!streetLabel) continue;
       const streetKey = streetLabel.toLowerCase();
 
-      if (!otherRunsByStreet.has(streetKey)) otherRunsByStreet.set(streetKey, new Set());
-      const runsSet = otherRunsByStreet.get(streetKey);
+      if (!streetRunBadgesByStreet.has(streetKey)) streetRunBadgesByStreet.set(streetKey, new Map());
+      const badgeMap = streetRunBadgesByStreet.get(streetKey);
       const sch = site.soloSchedule || {};
-      [['GAR', sch.garRun], ['REC', sch.recRun], ['FOG', sch.fogRun], ['REC', sch.recSummerRun]].forEach(([prefix, run]) => {
+      [
+        ['Garbage', sch.garRun, false],
+        ['Recycling', sch.recRun, false],
+        ['FOGO', sch.fogRun, false],
+        ['SummerRecycling', sch.recSummerRun, true]
+      ].forEach(([stream, run, isSummer]) => {
         run = String(run || '').trim();
-        if (run) runsSet.add(`${prefix} ${run.toUpperCase()}`);
+        if (!run) return;
+        const badgeKey = stream + '|' + run.toLowerCase();
+        if (!badgeMap.has(badgeKey)) {
+          badgeMap.set(badgeKey, { stream, run, day: sch.day || '', weekLetter: sch.weekLetter || '', isSummer, lat: site.lat, lng: site.lng });
+        }
       });
+
 
       if (!siteMatchesAllActiveFilters(site)) continue;
 
@@ -11209,7 +11288,25 @@ window.addEventListener('DOMContentLoaded', async () => {
         });
       });
 
-      const otherRuns = Array.from(otherRunsByStreet.get(key) || []).sort();
+      const badgeMap = streetRunBadgesByStreet.get(key) || new Map();
+      const streamOrder = ['Garbage', 'Recycling', 'SummerRecycling', 'FOGO'];
+      const streetBadgesHtml = Array.from(badgeMap.values())
+        .sort((a, b) => streamOrder.indexOf(a.stream) - streamOrder.indexOf(b.stream))
+        .map(b => {
+          if (b.stream === 'Garbage') {
+            return `<span class="hdr-run-badge hdr-run-gar" onclick="event.stopPropagation(); openRunDirectlyOnMap('${b.run}', 'Garbage', '${b.day}', '${b.weekLetter}', false, ${b.lat || 0}, ${b.lng || 0})"><img class="icon-img" src="bin.png" alt=""> ${esc(b.run)}</span>`;
+          }
+          if (b.stream === 'Recycling') {
+            return `<span class="hdr-run-badge hdr-run-rec" onclick="event.stopPropagation(); openRunDirectlyOnMap('${b.run}', 'Recycling', '${b.day}', '${b.weekLetter}', false, ${b.lat || 0}, ${b.lng || 0})"><img class="icon-img" src="recycle.png" alt="">${esc(b.run)}${b.weekLetter ? esc(String(b.weekLetter).toUpperCase()) : ''}</span>`;
+          }
+          if (b.stream === 'SummerRecycling') {
+            return `<span class="hdr-run-badge hdr-run-summer" onclick="event.stopPropagation(); openRunDirectlyOnMap('${b.run}', 'SummerRecycling', '${b.day}', '', true, ${b.lat || 0}, ${b.lng || 0})">☀️ ${esc(b.run)}</span>`;
+          }
+          if (b.stream === 'FOGO') {
+            return `<span class="hdr-run-badge hdr-run-fog" onclick="event.stopPropagation(); openRunDirectlyOnMap('${b.run}', 'FOGO', '${b.day}', '${b.weekLetter}', false, ${b.lat || 0}, ${b.lng || 0})"><img class="icon-img" src="fogo.png" alt="">${esc(b.run)}</span>`;
+          }
+          return '';
+        }).join('');
       const streetId = `street_${key.replace(/[^a-z0-9]/gi, '_')}`;
 
       const addressCardsHtml = group.sites
@@ -11220,16 +11317,20 @@ window.addEventListener('DOMContentLoaded', async () => {
 
       return `
         <div class="street-group-card">
-          <button type="button" class="street-summary-card" onclick="toggleStreetGroup('${streetId}')">
+          <div class="street-summary-card" onclick="toggleStreetGroup('${streetId}')">
             <div class="street-summary-main">
-              <div class="street-summary-name">${esc(toSentenceCaseLabel(group.label))}</div>
+              <div class="street-summary-top-row">
+                <div class="street-summary-name">${esc(toSentenceCaseLabel(group.label))}</div>
+                <button type="button" class="single-nav-btn" onclick="event.stopPropagation(); showStreetOnMap('${key}')">🗺️</button>
+              </div>
               <div class="street-summary-meta">
                 <span><img class="icon-img" src="houses.png" alt="">${houseIds.size}</span>
                 <span><img class="icon-img" src="bin.png" alt="">${binCount}</span>
               </div>
+              ${streetBadgesHtml ? `<div class="address-run-badges">${streetBadgesHtml}</div>` : ''}
             </div>
             <span class="street-summary-chevron">▾</span>
-          </button>
+          </div>
           <div class="street-group-body" id="${streetId}">
             ${addressCardsHtml}
           </div>
@@ -11612,16 +11713,19 @@ window.addEventListener('DOMContentLoaded', async () => {
 
     const st = clean(activeFilterStream);
     const selected = selectedMapRuns();
-    const types = mapFocusPropId ? ['Garbage', 'Recycling', 'SummerRecycling', 'FOGO'] : (st ? [st] : ['Garbage', 'Recycling', 'FOGO']);
+    const hasFocus = mapFocusPropId || mapFocusStreetKey;
+    const types = hasFocus ? ['Garbage', 'Recycling', 'SummerRecycling', 'FOGO'] : (st ? [st] : ['Garbage', 'Recycling', 'FOGO']);
     const groups = new Map();
     const records = getRecordsArray();
 
     records.forEach(site => {
-      const isFocusedSite = mapFocusPropId && String(site.propId || site.siteId) === mapFocusPropId;
-      // Focus mode ("Show on Map" for one address) shows only that address,
+      const isFocusedSite = (mapFocusPropId && String(site.propId || site.siteId) === mapFocusPropId) ||
+                             (mapFocusStreetKey && siteStreetKey(site) === mapFocusStreetKey);
+      // Focus mode ("Show on Map" for one address, or "focus street" for a
+      // whole street - see showStreetOnMap) shows only that address/street,
       // with every stream it has, regardless of whatever stream/day/run
       // filters are currently set elsewhere in the app.
-      if (mapFocusPropId && !isFocusedSite) return;
+      if (hasFocus && !isFocusedSite) return;
 
       types.forEach(stream => {
         const item = getSiteRuns(site);
