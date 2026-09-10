@@ -830,19 +830,27 @@
        showing the OpenStreetMap street name for the truck's actual GPS
        position (see updateLiveStreetFromGps), not the nearest bin/property.
        Positioned by setupMapStreetOverlayAutoPosition() (JS) which pins
-       its `top` right under the header panel, however tall that currently
-       is, the same way #mapFixedSideControls is kept below the header.
-       Non-interactive so it never blocks map panning/zooming underneath. */
-    .map-street-transparent-overlay {
+       its `bottom` right above the bottom telemetry card, however tall
+       that card currently is (it grows/shrinks with the stream tabs and
+       serial list) — the same ResizeObserver technique already used to
+       keep #mapFixedSideControls below the header. Non-interactive so it
+       never blocks map panning/zooming underneath it. */
+    .map-street-info-overlay {
       position: absolute;
       left: 50%;
       transform: translateX(-50%);
-      top: 60px;
+      bottom: 240px;
       z-index: 900;
-      max-width: calc(100% - 32px);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      pointer-events: none;
+    }
+    .map-street-transparent-overlay {
+      max-width: 260px;
       padding: 6px 16px;
       border-radius: 20px;
-      background: rgba(15, 23, 42, 0.45);
+      background: rgba(15, 42, 90, 0.5);
       backdrop-filter: blur(3px);
       -webkit-backdrop-filter: blur(3px);
       color: #fff;
@@ -855,10 +863,30 @@
       text-overflow: ellipsis;
       text-shadow: 0 1px 3px rgba(0,0,0,0.6);
       box-shadow: 0 2px 8px rgba(0,0,0,0.25);
-      pointer-events: none;
     }
-    .map-street-transparent-overlay:empty,
-    .map-street-transparent-overlay.street-overlay-hidden {
+    /* Speed-limit sign: styled like a real AU/UK speed-limit road sign
+       (white disc, red ring, black number) rather than a copy of the
+       transparent street pill, so it reads instantly at a glance. */
+    .map-speed-limit-sign {
+      flex: 0 0 auto;
+      width: 40px;
+      height: 40px;
+      border-radius: 50%;
+      background: #fff;
+      border: 4px solid #dc2626;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.35);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 15px;
+      font-weight: 800;
+      color: #111;
+      line-height: 1;
+    }
+    .map-street-info-overlay:empty,
+    .map-street-info-overlay.street-overlay-hidden,
+    .map-speed-limit-sign:empty,
+    .map-speed-limit-sign.speed-sign-hidden {
       display: none;
     }
 
@@ -1795,6 +1823,42 @@
 .map-address-telemetry #mapBinsAtAddress .address-bin-actions{position:relative;display:flex!important;align-items:center!important;padding:4px 6px!important;margin-left:auto!important;flex:0 0 52px!important;justify-content:center!important;width:52px!important;box-sizing:border-box!important;}
 .map-address-telemetry #mapBinsAtAddress .bin-face-btn{width:40px!important;height:40px!important;flex:0 0 40px!important;pointer-events:auto!important;}
 .map-address-telemetry #mapBinsAtAddress *{pointer-events:auto!important;}
+
+/* Per-stream "tabs" that replaced the old monochrome force-toggle buttons
+   (see buildStreamTabsRow / toggleMapStreamTab in JS). They render inside
+   the same #mapRunsAtAddress slot that used to hold those buttons — which
+   already sits directly above #mapBinsAtAddress's top border — so no new
+   container or repositioning was needed, just a restyle. Each tab is
+   colour-coded to its stream (red/yellow/green), shows that stream's run
+   number, and carries a ▼/▲ arrow to show/hide that stream's serial list.
+   #mapRunsAtAddress needs `overflow:visible` here (overriding line 1819's
+   `overflow:hidden`) so a tab's "pulled forward" elevation isn't clipped. */
+.map-address-telemetry #mapRunsAtAddress.stream-tabs-mode{overflow:visible!important;align-items:flex-end!important;}
+.map-stream-tabs-row{display:flex;align-items:flex-end;gap:4px;}
+.map-stream-tab{
+  display:inline-flex;align-items:center;gap:5px;
+  border:none;border-radius:8px 8px 0 0;
+  padding:5px 9px 4px;
+  font-size:13px;font-weight:800;color:#fff;
+  cursor:pointer;
+  box-shadow:0 -1px 4px rgba(0,0,0,.25);
+  position:relative;
+  z-index:1;
+  transform:translateY(3px);
+  transition:transform .15s ease, box-shadow .15s ease;
+  font-family:inherit;
+}
+.map-stream-tab .map-stream-tab-run{font-family:monospace;letter-spacing:.02em;}
+.map-stream-tab .map-stream-tab-arrow{font-size:10px;opacity:.9;margin-left:1px;}
+/* The tab for the one stream currently shown (when it's the only one
+   visible) pops forward - higher z-index, lifted up, bigger shadow - like
+   the active tab in a real folder-tab UI sitting in front of the rest. */
+.map-stream-tab.tab-front{
+  transform:translateY(-4px);
+  z-index:3;
+  box-shadow:0 -3px 10px rgba(0,0,0,.45);
+}
+
 .map-address-telemetry.address-telemetry-card{padding:9px 12px!important;}
 .map-address-telemetry .address-telemetry-grid{grid-template-columns:minmax(0,1fr) 100px!important;width:100%!important;column-gap:10px!important;row-gap:5px!important;display:grid!important;grid-template-rows:auto auto auto!important;position:static!important;order:1!important;flex:0 0 auto!important;min-width:0!important;box-sizing:border-box!important;}
 .map-address-telemetry .address-telemetry-meta{grid-column:1!important;grid-row:2!important;min-width:0!important;min-height:18px!important;}
@@ -3024,13 +3088,19 @@
         <div id="mapBinsAtAddress" class="address-telemetry-bins"></div>
       </div>
 
-      <!-- LIVE STREET NAME — transparent floating label sitting directly on
-           top of the map tiles (see .map-street-transparent-overlay),
-           fed by real-time OpenStreetMap reverse geocoding of the truck's
-           GPS position (updateLiveStreetFromGps), so it always reflects
-           the street actually being travelled on rather than the nearest
-           bin/property, which can be a different street entirely. -->
-      <div id="mapStreetOverlay" class="map-street-transparent-overlay street-overlay-hidden"></div>
+      <!-- LIVE STREET NAME + SPEED LIMIT — transparent floating overlay
+           sitting directly on top of the map tiles (see
+           .map-street-info-overlay), fed by real-time OpenStreetMap
+           reverse geocoding of the truck's GPS position
+           (updateLiveStreetFromGps), so it always reflects the street
+           actually being travelled on rather than the nearest
+           bin/property, which can be a different street entirely.
+           Positioned just above the telemetry card at the bottom of the
+           map (setupMapStreetOverlayAutoPosition), not under the header. -->
+      <div id="mapStreetInfoOverlay" class="map-street-info-overlay street-overlay-hidden">
+        <div id="mapSpeedLimitSign" class="map-speed-limit-sign speed-sign-hidden"></div>
+        <div id="mapStreetOverlay" class="map-street-transparent-overlay"></div>
+      </div>
 
       <div id="mainLeafletMap"></div>
     </div>
@@ -3543,6 +3613,7 @@
       // there's no way to peek at, say, a Recycling serial while filtered
       // to Garbage.
       const isForced = forceStreams && forceStreams.has && forceStreams.has(st.key);
+      if (typeof hiddenBinStreams !== 'undefined' && hiddenBinStreams.has(st.key)) return;
       if (!isForced && filterByActiveStream && currentStreamFilter && currentStreamFilter !== 'all') {
         const targetKey = (currentStreamFilter === 'summerrecycling') ? 'recycling' : currentStreamFilter;
         if (st.key.toLowerCase() !== targetKey) return;
@@ -4621,52 +4692,73 @@
     reposition();
   }
 
-  // Keeps the transparent live-street-name pill (#mapStreetOverlay) pinned
-  // just below the header, the same technique as
-  // setupMapSideOverlayAutoPosition above — the header's height changes
-  // (settings bar open/close, area-runs rows appearing/disappearing) so a
-  // fixed pixel offset would either leave a gap or get covered.
+  // Keeps the transparent live-street-name/speed-limit overlay
+  // (#mapStreetInfoOverlay) pinned just above the bottom telemetry card,
+  // the same ResizeObserver technique as setupMapSideOverlayAutoPosition
+  // above — the card's height changes constantly (stream tabs, how many
+  // serial rows are expanded, etc.) so a fixed pixel offset would either
+  // leave a gap or get covered as the card grows.
   let mapStreetOverlayResizeObserver = null;
   function setupMapStreetOverlayAutoPosition() {
-    const overlay = document.getElementById('mapStreetOverlay');
-    const header = document.querySelector('#mapScreenContainer .map-header-panel');
-    if (!overlay || !header || typeof ResizeObserver === 'undefined') return;
-    const GAP = 8;
+    const overlay = document.getElementById('mapStreetInfoOverlay');
+    const card = document.querySelector('#mapScreenContainer .map-address-telemetry');
+    if (!overlay || !card || typeof ResizeObserver === 'undefined') return;
+    const GAP = 10;
     function reposition() {
-      const headerTop = parseFloat(getComputedStyle(header).top) || 8;
-      const newTop = headerTop + header.offsetHeight + GAP;
-      overlay.style.setProperty('top', newTop + 'px', 'important');
+      const cardBottom = parseFloat(getComputedStyle(card).bottom) || 70;
+      const newBottom = cardBottom + card.offsetHeight + GAP;
+      overlay.style.setProperty('bottom', newBottom + 'px', 'important');
     }
     if (mapStreetOverlayResizeObserver) mapStreetOverlayResizeObserver.disconnect();
     mapStreetOverlayResizeObserver = new ResizeObserver(reposition);
-    mapStreetOverlayResizeObserver.observe(header);
+    mapStreetOverlayResizeObserver.observe(card);
     reposition();
   }
 
-  // Single writer for the transparent map overlay's text.
+  // Single writer for the transparent street-name pill's text.
   function updateMapStreetOverlay(streetName) {
+    const wrap = document.getElementById('mapStreetInfoOverlay');
     const overlay = document.getElementById('mapStreetOverlay');
-    if (!overlay) return;
+    if (!overlay || !wrap) return;
     const clean = (streetName || '').trim();
     overlay.innerText = clean;
-    overlay.classList.toggle('street-overlay-hidden', !clean);
+    wrap.classList.toggle('street-overlay-hidden', !clean);
   }
 
-  // ===== Live street name via OpenStreetMap reverse geocoding =====
+  // Single writer for the speed-limit sign.
+  function updateMapSpeedLimitSign(maxspeed) {
+    const sign = document.getElementById('mapSpeedLimitSign');
+    if (!sign) return;
+    // Nominatim/OSM maxspeed values are sometimes plain numbers ("50") and
+    // sometimes prefixed with a country/zone code ("AU:50",
+    // "AU:urban") — strip everything but the digits so the sign just
+    // shows a clean number. A non-numeric zone name (e.g. "urban",
+    // "national") has nothing useful to show on a round number sign, so
+    // it's treated the same as "no limit known" and the sign is hidden.
+    const digits = String(maxspeed || '').replace(/[^0-9]/g, '');
+    sign.innerText = digits;
+    sign.classList.toggle('speed-sign-hidden', !digits);
+  }
+
+  // ===== Live street name + speed limit via OpenStreetMap =====
   // The transparent overlay shows the street actually under the truck's
   // real GPS position — NOT the street of the nearest bin/property, which
   // can be a completely different street (or, off-run, kilometres away).
   // Uses Nominatim's public reverse-geocoding API (the same OSM data the
   // map tiles already come from, so no extra attribution is needed beyond
   // the "© OpenStreetMap contributors" already on the tile layer).
+  // `extratags=1` additionally pulls back the OSM way's raw tags when
+  // available, which is where a road's posted speed limit (`maxspeed`)
+  // lives — most residential streets in OSM don't have it tagged, so the
+  // sign simply stays hidden whenever it's missing.
   //
   // Throttling: Nominatim's usage policy caps public API use at ~1
   // request/second and asks that clients not hammer it, so this only
   // queries again once the truck has actually moved a meaningful distance
-  // AND enough time has passed - a street name doesn't need refreshing
-  // every single GPS fix. For heavy production/commercial use, swap this
-  // endpoint for a self-hosted Nominatim instance or a paid geocoding
-  // provider instead of the public one.
+  // AND enough time has passed - a street name/speed limit doesn't need
+  // refreshing every single GPS fix. For heavy production/commercial use,
+  // swap this endpoint for a self-hosted Nominatim instance or a paid
+  // geocoding provider instead of the public one.
   let lastStreetGeocode = { lat: null, lng: null, time: 0 };
   let streetGeocodeInFlight = false;
   const STREET_GEOCODE_MIN_INTERVAL_MS = 8000;
@@ -4689,7 +4781,7 @@
     lastStreetGeocode = { lat, lng, time: now };
 
     try {
-      const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}&zoom=18&addressdetails=1`;
+      const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}&zoom=18&addressdetails=1&extratags=1`;
       const resp = await fetch(url, { headers: { 'Accept': 'application/json' } });
       if (!resp.ok) throw new Error('Reverse geocode HTTP ' + resp.status);
       const data = await resp.json();
@@ -4700,11 +4792,14 @@
       const street = addr.road || addr.residential || addr.living_street ||
                      addr.pedestrian || addr.cycleway || addr.footway || '';
       updateMapStreetOverlay(street);
+      const extratags = (data && data.extratags) || {};
+      updateMapSpeedLimitSign(extratags.maxspeed || '');
     } catch (err) {
       console.warn('OSM reverse geocode failed:', err);
-      // Leave the last known street showing rather than blanking the
-      // overlay out on a single dropped request/patchy connection - it'll
-      // refresh again automatically as soon as another fix succeeds.
+      // Leave the last known street/speed limit showing rather than
+      // blanking the overlay out on a single dropped request/patchy
+      // connection - it'll refresh again automatically as soon as another
+      // fix succeeds.
     } finally {
       streetGeocodeInFlight = false;
     }
@@ -7536,31 +7631,86 @@ let siteReminders = JSON.parse(localStorage.getItem('siteReminders') || '{}');
 
 
 
-  // Ensure Map Serials Toggle State works everywhere
-  let isMapSerialManuallyHidden = false;
-
-  window.toggleMapSerialNumbers = function() {
-    isMapSerialManuallyHidden = !isMapSerialManuallyHidden;
-    if (typeof lastTelemetrySite !== 'undefined' && lastTelemetrySite) {
-      renderCurrentAddressTelemetry(lastTelemetrySite);
-    }
-  };
-
-  // Per-stream "monkey" toggles on the Next Bin Box: normally a bin only
-  // shows here if this address actually matches the currently-applied
-  // run/day/stream filter (see isSiteOnFilteredRun in
-  // renderCurrentAddressTelemetry). These let you force one stream's
-  // serial into view for whichever address is currently on screen even
-  // though it's filtered out — e.g. filtered to Garbage, but you want to
-  // quickly check this house's Recycling serial too.
+  // Per-stream visibility on the Next Bin Box, driven by the coloured
+  // stream tabs (see buildStreamTabsRow) that sit directly above the
+  // serial list. Two independent sets:
+  //  - forcedBinStreams: a stream normally only shows here if this address
+  //    matches the currently-applied run/day/stream filter (see
+  //    isSiteOnFilteredRun in renderCurrentAddressTelemetry). Forcing lets
+  //    you peek at a stream's serial for the address on screen even when
+  //    it's filtered out - e.g. filtered to Garbage, but you tap the
+  //    Recycling tab to quickly check this house's Recycling serial too.
+  //  - hiddenBinStreams: the opposite - a stream that WOULD show (because
+  //    it matches the filter, or was forced) but the driver tapped its
+  //    tab's arrow to collapse it out of the way.
+  // isStreamShownAtAddress() is the single source of truth both
+  // buildBinsAtAddress (whether to render that stream's serial row) and
+  // buildStreamTabsRow (which way each tab's arrow points, and which tab
+  // gets pulled to the front) read from - so the tabs and the list they
+  // control can never drift out of sync with each other.
   let forcedBinStreams = new Set();
-  window.toggleForcedBinStream = function(streamKey) {
-    if (forcedBinStreams.has(streamKey)) forcedBinStreams.delete(streamKey);
-    else forcedBinStreams.add(streamKey);
+  let hiddenBinStreams = new Set();
+  function isStreamShownAtAddress(streamKey, site) {
+    if (!site) return false;
+    const displaySources = (typeof activeFilterDataSource !== 'undefined' && activeFilterDataSource === 'council')
+      ? (site.councilStreams || {})
+      : (site.soloStreams || {});
+    if (((displaySources[streamKey] || []).length) === 0) return false;
+    if (hiddenBinStreams.has(streamKey)) return false;
+    if (forcedBinStreams.has(streamKey)) return true;
+    const currentStreamFilter = (typeof activeFilterStream !== 'undefined' && activeFilterStream ? activeFilterStream : '').toLowerCase().trim();
+    if (!currentStreamFilter || currentStreamFilter === 'all') return true;
+    const targetKey = (currentStreamFilter === 'summerrecycling') ? 'recycling' : currentStreamFilter;
+    return streamKey.toLowerCase() === targetKey;
+  }
+  // Single tap target for a stream tab: flips it from shown->hidden or
+  // hidden/filtered-out->shown (forcing it on in the latter case).
+  window.toggleMapStreamTab = function(streamKey) {
+    if (typeof lastTelemetrySite !== 'undefined' && lastTelemetrySite && isStreamShownAtAddress(streamKey, lastTelemetrySite)) {
+      hiddenBinStreams.add(streamKey);
+    } else {
+      hiddenBinStreams.delete(streamKey);
+      forcedBinStreams.add(streamKey);
+    }
     if (typeof lastTelemetrySite !== 'undefined' && lastTelemetrySite) {
       renderCurrentAddressTelemetry(lastTelemetrySite);
     }
   };
+
+  // Builds the row of coloured stream "tabs" (red Garbage / yellow
+  // Recycling / green FOGO) that sits right above the serial list in the
+  // Next Bin Box, replacing the old monochrome 🙈/🙉 force-toggle buttons.
+  // Each tab shows that stream's run number for this property and a ▼/▲
+  // arrow for show/hide. When exactly one stream's serials are currently
+  // showing, that stream's tab gets `.tab-front` so it visually pops
+  // forward in front of the others, like the active tab in a folder-tab UI.
+  const STREAM_TAB_DEFS = [
+    { key: 'Garbage',   bg: '#dc2626', icon: 'garbage.png', runField: 'garRun' },
+    { key: 'Recycling', bg: '#eab308', icon: 'recycle.png', runField: 'recRun' },
+    { key: 'FOGO',      bg: '#16a34a', icon: 'fogo.png',    runField: 'fogRun' }
+  ];
+  function buildStreamTabsRow(site) {
+    if (!site) return '';
+    const displaySources = (typeof activeFilterDataSource !== 'undefined' && activeFilterDataSource === 'council')
+      ? (site.councilStreams || {})
+      : (site.soloStreams || {});
+    const eligible = STREAM_TAB_DEFS.filter(sd => (displaySources[sd.key] || []).length > 0);
+    if (!eligible.length) return '';
+    const withState = eligible.map(sd => ({ ...sd, shown: isStreamShownAtAddress(sd.key, site) }));
+    const shownCount = withState.filter(sd => sd.shown).length;
+    return `<div class="map-stream-tabs-row">${withState.map(sd => {
+      const run = clean(site.soloSchedule && site.soloSchedule[sd.runField]) || '—';
+      const frontCls = (shownCount === 1 && sd.shown) ? ' tab-front' : '';
+      const arrow = sd.shown ? '▼' : '▲';
+      const title = sd.shown ? `Hide ${sd.key} serials` : `Show ${sd.key} serials`;
+      return `
+        <button type="button" class="map-stream-tab${frontCls}" style="background:${sd.bg};" onclick="event.stopPropagation(); window.toggleMapStreamTab('${sd.key}')" title="${title}">
+          <img class="icon-img" src="${sd.icon}" alt="" style="width:14px;height:14px;">
+          <span class="map-stream-tab-run">${esc(run)}</span>
+          <span class="map-stream-tab-arrow">${arrow}</span>
+        </button>`;
+    }).join('')}</div>`;
+  }
 
   // Toggle Bin Issue Dropdown
   window.toggleBinIssueMenu = function(event, menuId) {
@@ -10539,53 +10689,21 @@ window.addEventListener('DOMContentLoaded', async () => {
   const mapBins = site && (isSiteOnFilteredRun || forcedBinStreams.size > 0)
     ? window.buildBinsAtAddress(site, true, true, forcedBinStreams)
     : '';
-  const showSerials = !isMapSerialManuallyHidden && Boolean(mapBins);
+  const showSerials = Boolean(mapBins);
 
-  // Serial toggle now lives directly beside the FOGO run badge (the last
-  // badge buildRunsAtAddress ever renders) — appended INSIDE the same
-  // scrollable strip as the badges themselves, rather than as a separate
-  // flex item outside it. That guarantees it always scrolls and sits
-  // right alongside FOGO specifically, instead of floating off on its own
-  // and getting squeezed/clipped by the row's outer overflow:hidden.
-  const serialToggleBtn = mapBins ? `
-    <button type="button" id="mapSerialToggle" onclick="event.stopPropagation(); window.toggleMapSerialNumbers()" title="${showSerials ? 'Hide serials' : 'Show serials'}" style="flex:0 0 auto; margin-left:6px; background:#334155; color:#f8fafc; border:1px solid #1e293b; border-radius:5px; padding:4px 7px; font-size:14px; line-height:1.2; cursor:pointer; display:inline-flex; align-items:center;">
-      ${showSerials ? '🙈' : '🙉'}
-    </button>
-  ` : '';
-
-  // One force-toggle "monkey" per stream, each labelled with that stream's
-  // own icon, so you can peek at a stream's serial at this address even
-  // when it isn't the one you're currently filtered to (or this address
-  // doesn't match the current run/day filter at all). Only offered for
-  // streams this address actually has a bin recorded for.
-  const STREAM_FORCE_ICONS = { Garbage: 'garbage.png', Recycling: 'recycle.png', FOGO: 'fogo.png' };
-  let forceStreamBtns = '';
-  if (site) {
-    const forceDisplaySources = (activeFilterDataSource === 'council') ? (site.councilStreams || {}) : (site.soloStreams || {});
-    forceStreamBtns = Object.keys(STREAM_FORCE_ICONS).filter(sk => (forceDisplaySources[sk] || []).length > 0).map(sk => {
-      const forced = forcedBinStreams.has(sk);
-      return `
-        <button type="button" class="map-serial-toggle" onclick="event.stopPropagation(); window.toggleForcedBinStream('${sk}')" title="${forced ? `Stop forcing ${sk} serials at this address` : `Force show ${sk} serials at this address`}" style="flex:0 0 auto; margin-left:4px; background:${forced ? '#166534' : '#334155'}; color:#f8fafc; border:1px solid #1e293b; border-radius:5px; padding:4px 6px; font-size:13px; line-height:1.2; cursor:pointer; display:inline-flex; align-items:center; gap:3px;">
-          <img class="icon-img" src="${STREAM_FORCE_ICONS[sk]}" alt="" style="width:14px;height:14px;">${forced ? '🙈' : '🙉'}
-        </button>`;
-    }).join('');
-  }
-
-  // Run badges used to be duplicated here too, but that's now covered by
-  // the tappable Area Runs Bar above the map (see buildAreaRunsBarHtml) —
-  // this box just keeps the serial-number toggle(s).
+  // The coloured stream tabs (red Garbage / yellow Recycling / green FOGO)
+  // render into the same #mapRunsAtAddress slot that used to hold the old
+  // monochrome force-toggle buttons — that slot already sits directly
+  // above #mapBinsAtAddress's top border, exactly where the tabs need to
+  // be, so only the contents changed, not the position. Each tab's own
+  // ▼/▲ arrow now does what the old per-stream buttons AND the separate
+  // "hide all serials" button used to do between them.
   const mapRunsEl = document.getElementById('mapRunsAtAddress');
   if (mapRunsEl) {
-    mapRunsEl.innerHTML = `<div class="runs-scroll-strip">${serialToggleBtn}${forceStreamBtns}</div>`;
-    // The strip scrolls internally so a long run list never clips the
-    // toggle button — but it always starts scrolled to the left, which
-    // left the toggle sitting half-cut at the right edge until the user
-    // scrolled it into view themselves. Auto-scroll to the far right on
-    // render so the toggle (always the last child) is fully visible by
-    // default; the badges remain reachable by scrolling left.
-    const stripEl = mapRunsEl.querySelector('.runs-scroll-strip');
-    if (stripEl) stripEl.scrollLeft = stripEl.scrollWidth;
+    mapRunsEl.classList.add('stream-tabs-mode');
+    mapRunsEl.innerHTML = buildStreamTabsRow(site);
   }
+
 
   // Unassigned-run quick add: while filtered to a single stream + single
   // run, flag when the address on screen has a bin for that stream but no
