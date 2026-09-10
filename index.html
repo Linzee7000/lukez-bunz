@@ -44,6 +44,8 @@
   /* Bright stream-matched text colours (for text ON the black chrome —
      vivid enough to stand out the same way --bright-green does). */
   --bright-red:#ff3131; --bright-yellow:#ffe600;
+  /* Purple (property-note flags, bin-reminder indicators) */
+  --purple-700:#7e22ce; --purple-600:#9333ea; --purple-400:#c084fc;
 }
 
 /* ===== Shared "3D" button relief used across every top bar (app header,
@@ -1820,7 +1822,7 @@
 .map-address-telemetry .address-telemetry-speed small{text-align:right!important;font-size:10px!important;width:100%!important;}
 .map-address-telemetry.map-telemetry-hidden{display:none!important;}
 .map-address-telemetry{display:flex!important;flex-direction:column!important;align-items:stretch!important;justify-content:flex-start!important;height:auto!important;min-height:0!important;max-height:none!important;box-sizing:border-box!important;overflow:hidden!important;}
-.map-address-telemetry .address-telemetry-address{min-width:0!important;font-size:23px!important;letter-spacing:0!important;grid-column:1!important;grid-row:1!important;overflow:hidden!important;text-overflow:ellipsis!important;white-space:nowrap!important;}
+.map-address-telemetry .address-telemetry-address{min-width:0!important;font-size:28px!important;font-weight:400!important;letter-spacing:0!important;grid-column:1!important;grid-row:1!important;overflow:hidden!important;text-overflow:ellipsis!important;white-space:nowrap!important;}
 .map-address-telemetry .address-telemetry-gps{justify-self:end!important;text-align:right!important;font-size:11px!important;max-width:100px!important;overflow:hidden!important;text-overflow:ellipsis!important;white-space:nowrap!important;grid-column:2!important;grid-row:1!important;width:100px!important;min-width:0!important;}
 .map-address-telemetry .address-telemetry-speed{justify-self:end!important;text-align:right!important;min-width:100px!important;width:100px!important;grid-column:2!important;grid-row:2 / span 2!important;align-self:center!important;margin:0!important;padding:0!important;}
 .map-address-telemetry #mapRunsAtAddress{grid-column:1!important;grid-row:3!important;display:flex!important;flex-direction:row!important;flex-wrap:nowrap!important;gap:8px!important;min-width:0!important;overflow:hidden!important;align-items:center!important;white-space:nowrap!important;}
@@ -2530,6 +2532,27 @@
     box-shadow: 0 0 6px 1px rgba(220,38,38,0.9) !important;
     animation: rec-light-pulse 1.6s ease-in-out infinite !important;
   }
+  /* Recording light now sits inline in the address header row (next to
+     the street name) instead of stacked in the side button cluster, so it
+     needs a small left margin instead of the auto-centred vertical-stack
+     margin, and must never shrink when the street name is long. */
+  .map-address-telemetry .address-telemetry-address-row {
+    display: flex !important;
+    align-items: center !important;
+    gap: 8px !important;
+  }
+  .map-address-telemetry .address-telemetry-address-text {
+    min-width: 0 !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+    white-space: nowrap !important;
+    flex: 1 1 auto !important;
+  }
+  .map-address-telemetry .address-telemetry-address-row .map-side-rec-light,
+  #mapScreenContainer .map-address-telemetry .address-telemetry-address-row .map-side-rec-light {
+    margin: 0 !important;
+    flex: 0 0 auto !important;
+  }
   @keyframes rec-light-pulse {
     0%, 100% { opacity: 1; }
     50% { opacity: 0.35; }
@@ -2695,6 +2718,21 @@
   .map-address-telemetry.addr-stream-fog .address-telemetry-speed span,
   .map-address-telemetry.addr-stream-fog .address-telemetry-meta {
     color: var(--bright-green) !important;
+  }
+  /* Property flag/note row ("🚩 Watch out for..."): gets its own purple
+     pill background so it reads as a distinct callout instead of blending
+     in with the plain suburb text this line otherwise shows. Wins over
+     the per-stream text colours above since a flagged note should stay
+     legible (white text) regardless of which stream is active. */
+  .map-address-telemetry .address-telemetry-meta.meta-has-flag-note,
+  .drive-address-telemetry .address-telemetry-meta.meta-has-flag-note {
+    color: #fff !important;
+    background: var(--purple-600) !important;
+    border-radius: 6px !important;
+    padding: 2px 8px !important;
+    margin: -2px 0 !important;
+    width: fit-content !important;
+    max-width: 100% !important;
   }
   .map-address-telemetry .address-telemetry-gps {
     color: var(--bright-green-dim) !important;
@@ -3107,7 +3145,16 @@
       <!-- CURRENT ADDRESS TELEMETRY -->
       <div class="map-telemetry-banner address-telemetry-card map-address-telemetry" onclick="editCurrentTelemetrySite()" title="Tap to edit this property" style="cursor:pointer;">
         <div class="address-telemetry-grid">
-          <div id="mapLiveStreet" class="address-telemetry-address">check filter</div>
+          <div class="address-telemetry-address address-telemetry-address-row">
+            <span id="mapLiveStreet" class="address-telemetry-address-text">check filter</span>
+            <!-- Recording light: shows the snail trail is recording (or
+                 paused) without its own tappable button - pause/resume and
+                 clear now live under Map Settings > KML. Sits in the same
+                 row as the current street name instead of floating up by
+                 the zoom controls (see .map-side-rec-light for its base
+                 styling, reused here unchanged). -->
+            <div id="snailTrailRecLight" class="map-side-rec-light" title="Trail recording"></div>
+          </div>
           <!-- Distance to next bin + travel direction: lives in the grid's
                top-right cell (col 2 / row 1 - see .address-telemetry-gps
                positioning) instead of floating above the box, and picks up
@@ -3655,16 +3702,33 @@
               const binKey = `${propId}_${b.serial || idx}`;
               const rem = (typeof siteReminders !== 'undefined') ? siteReminders[binKey] : null;
               const hasRem = Boolean(rem);
+              // A reminder with no date set is treated as always "due" (it
+              // was never meant to wait for a specific day); one with a
+              // date is only due once that day has arrived or passed, so a
+              // reminder set for next week doesn't read as urgent today.
+              const todayStr = new Date().toISOString().slice(0, 10);
+              const isDue = hasRem && (!rem.triggerDate || rem.triggerDate <= todayStr);
+              const remDateLabel = hasRem
+                ? (rem.triggerDate
+                    ? new Date(rem.triggerDate + 'T00:00:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+                    : 'no date set')
+                : '';
+              const remTitle = hasRem
+                ? `${isDue ? 'Reminder due now' : 'Reminder set for ' + remDateLabel}${rem.message ? ' — ' + rem.message : ''}`
+                : 'Set reminder';
               const menuId = `binMenu_${propId}_${st.key}_${idx}`.replace(/[^a-zA-Z0-9_]/g, '_');
 
               return `
                 <div style="display:flex; align-items:center; justify-content:space-between; ${idx < bins.length - 1 ? 'border-bottom:1px solid rgba(255,255,255,0.2);' : ''} padding:3px 0; position:relative;">
-                  <span style="font-size:17px; font-weight:400; color:${hasRem ? '#ff8a8a' : '#fff'}; font-family:monospace; letter-spacing:0.5px;">
-                    ${b.serial || '—'}
+                  <span style="display:inline-flex; align-items:center; gap:6px; min-width:0;" title="${esc(remTitle)}">
+                    <span style="font-size:17px; font-weight:700; font-family:monospace; letter-spacing:0.5px; ${hasRem ? `color:#fff; background:${isDue ? '#dc2626' : 'var(--purple-600)'}; padding:1px 7px; border-radius:5px; ${isDue ? 'animation: rec-light-pulse 1.6s ease-in-out infinite;' : ''}` : 'color:#fff; font-weight:400;'}">
+                      ${b.serial || '—'}
+                    </span>
+                    ${hasRem ? `<span style="font-size:10px; font-weight:700; color:${isDue ? '#fca5a5' : '#e9d5ff'}; white-space:nowrap;">${isDue ? '⏰ DUE' : '📅 ' + esc(remDateLabel)}</span>` : ''}
                   </span>
 
                   <div style="display:flex; align-items:center; gap:6px;">
-                    <button type="button" onclick="event.stopPropagation(); ${hasRem ? `dismissBinReminder('${binKey}')` : `openBinReminderModal('${binKey}', '${escape(site.addressText || '')}', '${b.serial || ''}')`}" style="background:none; border:none; font-size:16px; cursor:pointer; padding:0 2px;" title="${hasRem ? 'Cancel reminder' : 'Set reminder'}">
+                    <button type="button" onclick="event.stopPropagation(); ${hasRem ? `dismissBinReminder('${binKey}')` : `openBinReminderModal('${binKey}', '${escape(site.addressText || '')}', '${b.serial || ''}')`}" style="background:none; border:none; font-size:16px; cursor:pointer; padding:0 2px;" title="${hasRem ? 'Cancel reminder (' + esc(remTitle) + ')' : 'Set reminder'}">
                       ${hasRem ? '❌' : '⏰'}
                     </button>
                     <button type="button" onclick="event.stopPropagation(); window.toggleBinIssueMenu(event, '${menuId}')" style="background:none; border:none; font-size:17px; cursor:pointer; padding:0 2px;">⚠️</button>
@@ -10272,11 +10336,6 @@ window.addEventListener('DOMContentLoaded', async () => {
     const sideOverlay = document.getElementById('mapFixedSideControls');
     if (sideOverlay) {
       sideOverlay.innerHTML = `
-        <!-- Recording light: shows the snail trail is recording (or
-             paused) without its own tappable button - pause/resume and
-             clear now live under Map Settings > KML. -->
-        <div id="snailTrailRecLight" class="map-side-rec-light ${snailTrailPaused ? '' : 'recording'}" title="${snailTrailPaused ? 'Trail recording paused' : 'Trail recording'}"></div>
-
         <!-- Zoom In & Out -->
         <button type="button" onclick="if(leafletMap) leafletMap.zoomIn()" title="Zoom In">＋</button>
         <button type="button" onclick="if(leafletMap) leafletMap.zoomOut()" title="Zoom Out">－</button>
@@ -10310,6 +10369,14 @@ window.addEventListener('DOMContentLoaded', async () => {
 
       if (typeof updateMapSideLayersUI === 'function') {
         updateMapSideLayersUI();
+      }
+
+      // The recording light itself now lives in the address header (see
+      // the address-telemetry-address-row markup) instead of being rebuilt
+      // here each time, so sync its recording/paused class+title now that
+      // this side cluster (which used to hold it) has been rebuilt.
+      if (typeof updateSnailTrailButtonUI === 'function') {
+        updateSnailTrailButtonUI();
       }
 
       setupMapSideOverlayAutoPosition();
@@ -10680,9 +10747,14 @@ window.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
+  const hasFlagNote = Boolean(site && String(site.runFlags || '').trim());
+
   ['hudAddressMeta', 'mapAddressMeta'].forEach(id => {
     const el = document.getElementById(id);
-    if (el) el.innerHTML = meta;
+    if (el) {
+      el.innerHTML = meta;
+      el.classList.toggle('meta-has-flag-note', hasFlagNote);
+    }
   });
 
   let distToProp = 0;
@@ -11106,7 +11178,16 @@ window.addEventListener('DOMContentLoaded', async () => {
             // this same run stays red when its marker is (re)drawn - e.g.
             // after resuming the run - instead of drawing back in the
             // stream's normal colour and waiting to be re-detected.
-            const dotFillColor = serial && missedBinSerials.has(serial) ? '#ef4444' : fillColor;
+            // A bin with an active reminder set on it (see the ⏰ toggle in
+            // the Next Bin Box) gets flagged purple on the map too, so it's
+            // visible at a glance without opening that property's card -
+            // missed (red) still takes priority since that needs action
+            // first regardless of any reminder.
+            const reminderBinKey = `${site.propId || site.siteId || ''}_${bin.serial || idx}`;
+            const hasReminder = typeof siteReminders !== 'undefined' && Boolean(siteReminders[reminderBinKey]);
+            const dotFillColor = serial && missedBinSerials.has(serial)
+              ? '#ef4444'
+              : (hasReminder ? 'var(--purple-600)' : fillColor);
 
             const key = `${siteId}|${src}|${g.stream}|${idx}|${serial}`;
             let originalDragPos = null;
@@ -12188,6 +12269,19 @@ window.addEventListener('DOMContentLoaded', async () => {
   }
   .map-address-telemetry #mapBinsAtAddress .next-bin-row {
     margin: 0 !important;
+  }
+
+  /* ===== stream-tab-front-gap-fix =====
+     The two margin-top:0 rules above only account for a stream tab at its
+     resting position (transform: translateY(3px) — see .map-stream-tab).
+     When exactly one stream's serials are showing, that tab additionally
+     gets .tab-front, which instead lifts it to translateY(-4px) — a 7px
+     upward swing the box's margin no longer compensates for, so a visible
+     gap opens up below the tab (this is why the gap disappears with 2+
+     tabs open, where none of them is .tab-front, and reappears with only
+     one open). Pull the box up to match whenever a front tab is present. */
+  .map-address-telemetry:has(#mapRunsAtAddress.stream-tabs-mode .map-stream-tab.tab-front) #mapBinsAtAddress {
+    margin-top: -7px !important;
   }
 
   /* Bin serial rows: the stream-colour chip on the left of each row should
