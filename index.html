@@ -1421,6 +1421,7 @@
     .hdr-run-rec { background: var(--yellow-200); color: var(--near-black); border: 1px solid var(--yellow-400); }
     .hdr-run-fog { background: var(--green-100); color: var(--green-800); border: 1px solid var(--green-300); }
     .hdr-run-summer { background: var(--orange-100); color: var(--orange-700); border: 1px solid var(--orange-200); }
+    .address-run-badges { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 4px; }
 
     .header-gar { background-color: var(--red-600); color: var(--white); }
     .header-rec { background-color: var(--yellow-400); color: var(--near-black); }
@@ -3305,11 +3306,9 @@
                    Moved here from the old Drive-screen HUD toggle - see
                    setHudSide() in JS. Left Side is the default. -->
               <div class="map-settings-option-group" id="mapSettingsGroupBins" data-group="bins">
-                <div class="hud-side-toggle map-settings-bins-toggle">
-                  <button type="button" id="mapBinsSideAll" class="hud-side-btn" onclick="setHudSide('all')"><img class="icon-img" src="target.png" alt=""> Both Sides</button>
-                  <button type="button" id="mapBinsSideLeft" class="hud-side-btn active" onclick="setHudSide('left')">⬅️ Left Side</button>
-                  <button type="button" id="mapBinsSideRight" class="hud-side-btn" onclick="setHudSide('right')">➡️ Right Side</button>
-                </div>
+                <button type="button" id="mapBinsSideAll" class="map-context-btn map-settings-opt-btn" onclick="setHudSide('all')"><img class="icon-img" src="target.png" alt=""> Both Sides</button>
+                <button type="button" id="mapBinsSideLeft" class="map-context-btn map-settings-opt-btn active" onclick="setHudSide('left')">⬅️ Left Side</button>
+                <button type="button" id="mapBinsSideRight" class="map-context-btn map-settings-opt-btn" onclick="setHudSide('right')">➡️ Right Side</button>
               </div>
             </div>
             <!-- 3rd row: Boundary/Geofence's own Add/Edit/Delete, slid out under
@@ -10946,8 +10945,30 @@ window.addEventListener('DOMContentLoaded', async () => {
     const navUrl = `https://www.google.com/maps/dir/?api=1&destination=${site.lat},${site.lng}&travelmode=driving`;
 
     let hasAnyBins = false;
-    const eligibleDriveStreams = new Set(getDriveEligibleStreams(site).map(x => x.binStream));
+    const eligibleStreamsList = getDriveEligibleStreams(site);
+    const eligibleDriveStreams = new Set(eligibleStreamsList.map(x => x.binStream));
     const displaySources = activeFilterDataSource === 'council' ? (site.councilStreams || {}) : (site.soloStreams || {});
+
+    // Run-number badges - same hdr-run-badge style/colours used on the Map
+    // page (property inspect modal, live telemetry), so a driver sees the
+    // same run chips here as they would there. Tapping one jumps straight
+    // to that run on the map, same as everywhere else hdr-run-badge is used.
+    const sch = site.soloSchedule || {};
+    const runBadgesHtml = eligibleStreamsList.map(({ stream }) => {
+      if (stream === 'Garbage' && sch.garRun) {
+        return `<span class="hdr-run-badge hdr-run-gar" onclick="event.stopPropagation(); openRunDirectlyOnMap('${sch.garRun}', 'Garbage', '${sch.day || ''}', '${sch.weekLetter || ''}', false, ${site.lat || 0}, ${site.lng || 0})"><img class="icon-img" src="bin.png" alt=""> ${esc(String(sch.garRun))}</span>`;
+      }
+      if (stream === 'Recycling' && sch.recRun) {
+        return `<span class="hdr-run-badge hdr-run-rec" onclick="event.stopPropagation(); openRunDirectlyOnMap('${sch.recRun}', 'Recycling', '${sch.day || ''}', '${sch.weekLetter || ''}', false, ${site.lat || 0}, ${site.lng || 0})"><img class="icon-img" src="recycle.png" alt="">${esc(String(sch.recRun))}${sch.weekLetter ? esc(String(sch.weekLetter).toUpperCase()) : ''}</span>`;
+      }
+      if (stream === 'SummerRecycling' && sch.recSummerRun) {
+        return `<span class="hdr-run-badge hdr-run-summer" onclick="event.stopPropagation(); openRunDirectlyOnMap('${sch.recSummerRun}', 'SummerRecycling', '${sch.day || ''}', '', true, ${site.lat || 0}, ${site.lng || 0})">☀️ ${esc(String(sch.recSummerRun))}</span>`;
+      }
+      if (stream === 'FOGO' && sch.fogRun) {
+        return `<span class="hdr-run-badge hdr-run-fog" onclick="event.stopPropagation(); openRunDirectlyOnMap('${sch.fogRun}', 'FOGO', '${sch.day || ''}', '${sch.weekLetter || ''}', false, ${site.lat || 0}, ${site.lng || 0})"><img class="icon-img" src="fogo.png" alt="">${esc(String(sch.fogRun))}</span>`;
+      }
+      return '';
+    }).join('');
 
     const binPills = SOLO_STREAMS.map(st => {
       if (!eligibleDriveStreams.has(st.key)) return '';
@@ -10994,8 +11015,10 @@ window.addEventListener('DOMContentLoaded', async () => {
         <div class="address-header-row">
           <div>
             <div class="address-line1">${esc(clean(site.addressText) || cleanStreetOnly)}</div>
+            ${runBadgesHtml ? `<div class="address-run-badges">${runBadgesHtml}</div>` : ''}
           </div>
           <div class="prop-header-actions">
+            <button type="button" class="single-nav-btn" onclick="event.stopPropagation(); showPropertyOnMap('${site.propId || site.siteId}')">🗺️</button>
             <a href="${navUrl}" target="_blank" class="single-nav-btn" onclick="event.stopPropagation()">📍</a>
           </div>
         </div>
@@ -11205,7 +11228,6 @@ window.addEventListener('DOMContentLoaded', async () => {
                 <span><img class="icon-img" src="bin.png" alt="">${binCount}</span>
               </div>
             </div>
-            <div class="street-summary-runs">${otherRuns.length ? 'Also on: ' + esc(otherRuns.join(', ')) : ''}</div>
             <span class="street-summary-chevron">▾</span>
           </button>
           <div class="street-group-body" id="${streetId}">
