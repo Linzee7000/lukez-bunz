@@ -1860,11 +1860,11 @@
 .map-address-telemetry #mapBinsAtAddress{margin-top:-4px!important;padding-top:0!important;border-top:none!important;}
 .map-stream-tabs-row{display:flex;align-items:flex-end;gap:4px;}
 .map-stream-tab{
-  display:inline-flex;align-items:center;gap:5px;
-  border:1.5px solid rgba(255,255,255,.5);
-  border-bottom:none;
+  display:flex;flex-wrap:wrap;align-items:center;justify-content:center;
+  gap:1px 5px;
+  border:none;
   border-radius:8px 8px 0 0;
-  padding:5px 9px 4px;
+  padding:4px 9px 4px;
   font-size:13px;font-weight:800;color:#fff;
   cursor:pointer;
   box-shadow:0 -1px 4px rgba(0,0,0,.25);
@@ -1875,16 +1875,18 @@
      making "hidden" streams very hard to see or tap. A small +1px is
      enough for the folder-tab tuck-in look without swallowing the tab. */
   transform:translateY(1px);
-  transition:transform .15s ease, box-shadow .15s ease, border-color .15s ease;
+  transition:transform .15s ease, box-shadow .15s ease;
   font-family:inherit;
 }
-.map-stream-tab .map-stream-tab-run{font-family:monospace;letter-spacing:.02em;}
+/* Run number sits on its own row across the top of the tab (forced onto
+   a line by itself via width:100% + flex-wrap), with the icon+arrow
+   wrapping onto a second row underneath. */
+.map-stream-tab .map-stream-tab-run{width:100%;text-align:center;order:-1;font-family:monospace;letter-spacing:.02em;font-size:14px;}
 .map-stream-tab .map-stream-tab-arrow{font-size:10px;opacity:.9;margin-left:1px;}
 /* The tab for the one stream currently shown (when it's the only one
    visible) pops forward - higher z-index, lifted up, bigger shadow - like
    the active tab in a real folder-tab UI sitting in front of the rest. */
 .map-stream-tab.tab-front{
-  border-color:rgba(255,255,255,.9);
   transform:translateY(-4px);
   z-index:3;
   box-shadow:0 -3px 10px rgba(0,0,0,.45);
@@ -2092,7 +2094,11 @@
     top: 74px !important;
     right: 8px !important;
     left: auto !important;
-    z-index: 1500 !important;
+    /* Above .map-header-panel's z-index:3000 (it and its full-width rows
+       otherwise render on top of this cluster and swallow taps whenever
+       the two happen to overlap - see the offsetTop fix above for why
+       that overlap could happen at all). */
+    z-index: 3200 !important;
     display: flex !important;
     flex-direction: column !important;
     gap: 6px !important;
@@ -2434,7 +2440,7 @@
     gap: 8px !important;
     pointer-events: auto !important;
     transform: none !important;
-    z-index: 1500 !important;
+    z-index: 3200 !important;
   }
   /* The settings options row can grow to several wrapped rows of buttons
      and sits at a higher z-index than these fixed zoom/layers/follow
@@ -3737,9 +3743,9 @@
               const addrForModal = escape(site.addressText || '');
 
               return `
-                <div style="display:flex; align-items:center; justify-content:space-between; ${idx < bins.length - 1 ? 'border-bottom:1px solid rgba(255,255,255,0.2);' : ''} padding:3px 0; position:relative;">
+                <div style="display:flex; align-items:center; justify-content:space-between; ${idx < bins.length - 1 ? 'border-bottom:1px solid rgba(255,255,255,0.2);' : ''} padding:3px 6px; position:relative; ${hasRem ? `background:rgba(147,51,234,0.3); border-radius:6px; ${isDue ? 'animation: rec-light-pulse 1.6s ease-in-out infinite;' : ''}` : ''}">
                   <span class="bin-serial-tap-target" style="display:inline-flex; align-items:center; gap:6px; min-width:0; ${hasRem ? 'cursor:pointer;' : ''}" title="${esc(remTitle)}" ${hasRem ? `onclick="event.stopPropagation(); window.toggleBinReminderMenu(event, '${remMenuId}')"` : ''}>
-                    <span class="bin-serial-text" data-serial="${esc(serialLabel)}" data-msg="${hasRem && rem.message ? esc(rem.message) : ''}" style="font-size:17px; font-weight:700; font-family:monospace; letter-spacing:0.5px; max-width:170px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; ${hasRem ? `color:#fff; background:${isDue ? '#dc2626' : 'var(--purple-600)'}; padding:1px 7px; border-radius:5px; ${isDue ? 'animation: rec-light-pulse 1.6s ease-in-out infinite;' : ''}` : 'color:#fff; font-weight:400;'}">
+                    <span class="bin-serial-text" data-serial="${esc(serialLabel)}" data-msg="${hasRem && rem.message ? esc(rem.message) : ''}" style="font-size:17px; font-family:monospace; letter-spacing:0.5px; max-width:170px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#fff; font-weight:${hasRem ? '700' : '400'};">
                       ${esc(serialLabel)}
                     </span>
                     ${hasRem ? `<span style="font-size:10px; font-weight:700; color:${isDue ? '#fca5a5' : '#e9d5ff'}; white-space:nowrap;">${isDue ? '⏰ DUE' : '📅 ' + esc(remDateLabel)}</span>` : ''}
@@ -4800,7 +4806,15 @@
     if (!overlay || !header || typeof ResizeObserver === 'undefined') return;
     function reposition() {
       const headerTop = parseFloat(getComputedStyle(header).top) || 8;
-      const runsBarTop = runsBar ? runsBar.offsetTop : header.offsetHeight;
+      // runsBar collapses to display:none (and offsetTop reads as 0) when
+      // there's no run at the truck's current GPS position - falling back
+      // to runsBar.offsetTop in that case would pull the whole overlay up
+      // underneath the (higher z-index) header panel, hiding the zoom
+      // buttons behind it and swallowing taps. offsetParent is null
+      // whenever the element itself (or an ancestor) isn't rendered, so
+      // use that to detect the collapsed case and fall back to the
+      // header's real rendered height instead.
+      const runsBarTop = (runsBar && runsBar.offsetParent !== null) ? runsBar.offsetTop : header.offsetHeight;
       overlay.style.setProperty('top', (headerTop + runsBarTop) + 'px', 'important');
     }
     if (mapSideOverlayResizeObserver) mapSideOverlayResizeObserver.disconnect();
@@ -7820,7 +7834,16 @@ let siteReminders = JSON.parse(localStorage.getItem('siteReminders') || '{}');
       : (site.soloStreams || {});
     const eligible = STREAM_TAB_DEFS.filter(sd => (displaySources[sd.key] || []).length > 0);
     if (!eligible.length) return '';
-    const withState = eligible.map(sd => ({ ...sd, shown: isStreamShownAtAddress(sd.key, site) }));
+    // Whichever stream the current run/day filter is locked to gets
+    // pulled to the front (left) of the row, so e.g. filtering to a
+    // Recycling run puts the Recycling tab first, then the remaining
+    // streams in their normal Garbage/Recycling/FOGO order.
+    const currentStreamFilter = (typeof activeFilterStream !== 'undefined' && activeFilterStream ? activeFilterStream : '').toLowerCase().trim();
+    const filterTargetKey = (currentStreamFilter === 'summerrecycling') ? 'recycling' : currentStreamFilter;
+    const ordered = (filterTargetKey && filterTargetKey !== 'all')
+      ? [...eligible.filter(sd => sd.key.toLowerCase() === filterTargetKey), ...eligible.filter(sd => sd.key.toLowerCase() !== filterTargetKey)]
+      : eligible;
+    const withState = ordered.map(sd => ({ ...sd, shown: isStreamShownAtAddress(sd.key, site) }));
     const shownCount = withState.filter(sd => sd.shown).length;
     return `<div class="map-stream-tabs-row">${withState.map(sd => {
       const run = clean(site.soloSchedule && site.soloSchedule[sd.runField]) || '—';
@@ -12251,8 +12274,8 @@ window.addEventListener('DOMContentLoaded', async () => {
     background: linear-gradient(90deg,
       rgba(0,0,0,0.5) 0%,
       rgba(0,0,0,0.5) 70%,
-      rgba(27,67,50,0.8) 75%,
-      rgba(27,67,50,0.8) 100%) !important;
+      rgba(27,67,50,0.35) 75%,
+      rgba(27,67,50,0.35) 100%) !important;
     border-bottom: 1px solid #000 !important;
     border-left: 1px solid #000 !important;
     border-right: none !important;
@@ -12272,29 +12295,29 @@ window.addEventListener('DOMContentLoaded', async () => {
     background: linear-gradient(90deg,
       rgba(0,0,0,0.5) 0%,
       rgba(0,0,0,0.5) 70%,
-      rgba(220,38,38,0.8) 75%,
-      rgba(220,38,38,0.8) 100%) !important;
+      rgba(220,38,38,0.35) 75%,
+      rgba(220,38,38,0.35) 100%) !important;
   }
   div.map-address-telemetry.addr-stream-rec::before {
     background: linear-gradient(90deg,
       rgba(0,0,0,0.5) 0%,
       rgba(0,0,0,0.5) 70%,
-      rgba(250,204,21,0.8) 75%,
-      rgba(250,204,21,0.8) 100%) !important;
+      rgba(250,204,21,0.35) 75%,
+      rgba(250,204,21,0.35) 100%) !important;
   }
   div.map-address-telemetry.addr-stream-summer::before {
     background: linear-gradient(90deg,
       rgba(0,0,0,0.5) 0%,
       rgba(0,0,0,0.5) 70%,
-      rgba(245,158,11,0.8) 75%,
-      rgba(245,158,11,0.8) 100%) !important;
+      rgba(245,158,11,0.35) 75%,
+      rgba(245,158,11,0.35) 100%) !important;
   }
   div.map-address-telemetry.addr-stream-fog::before {
     background: linear-gradient(90deg,
       rgba(0,0,0,0.5) 0%,
       rgba(0,0,0,0.5) 70%,
-      rgba(22,163,74,0.8) 75%,
-      rgba(22,163,74,0.8) 100%) !important;
+      rgba(22,163,74,0.35) 75%,
+      rgba(22,163,74,0.35) 100%) !important;
   }
 
   /* Bin serial rows: no longer their own little boxed card (no rounded
