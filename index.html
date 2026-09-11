@@ -778,6 +778,24 @@
       text-overflow: ellipsis;
       margin-top: 1px;
     }
+    /* Suburb line under a house card's street name inside the Drive
+       page's expanded street list - same small dim grey uppercase
+       treatment as .street-summary-suburb on the street card above it,
+       so the two read as one consistent style instead of the old
+       full-size address-line1 (which used to spell out the whole
+       "STREET, SUBURB POSTCODE" string at the same size as the street
+       name). */
+    .drive-card-suburb {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--slate-400);
+      text-transform: uppercase;
+      letter-spacing: 0.02em;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      margin-top: 1px;
+    }
     .street-summary-right {
       flex: 0 0 auto;
       display: flex;
@@ -928,12 +946,15 @@
     .street-group-body .address-card .address-line1 { color: #fff; }
     .street-group-body .address-card .street-mode-flag-banner { margin-bottom: 8px; }
     .street-group-body .address-card .map-stream-tabs-row { margin-top: 8px; }
+    /* Tuck the serial list up under the tabs' bottom edge instead of
+       leaving an 8px gap below them - same "flush folder tab" fix
+       already used for the Map screen's own #mapBinsAtAddress. */
     .street-group-body .address-card .hud-bin-container {
       background: transparent;
       border-radius: 0 0 10px 10px;
       overflow: hidden;
       gap: 0;
-      margin-top: 8px;
+      margin-top: -4px;
     }
     /* Same overrides again, !important, so the separate light/dark-mode
        toggle (body.dark-mode, which !important-overrides .address-card
@@ -3982,7 +4003,7 @@
   const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbwYUYnOa8D5qFiLpWP5RyAmdSg8q7kRTzHWa7HlORxIgcshIyxwLM7HR0jsXGkkjGHfCA/exec";
 
 /* Global Bin Builder (Defined upfront to prevent startup TypeError) */
-  window.buildBinsAtAddress = function(site, filterByActiveStream = true, isMapTelemetry = false, forceStreams = null, showEditPencil = false, explicitShownSet = null) {
+  window.buildBinsAtAddress = function(site, filterByActiveStream = true, isMapTelemetry = false, forceStreams = null, showEditPencil = false, explicitShownSet = null, priorityStreamKey = null) {
     if (!site) return '';
 
     const currentStreamFilter = (typeof activeFilterStream !== 'undefined' && activeFilterStream ? activeFilterStream : '').toLowerCase().trim();
@@ -3998,7 +4019,15 @@
       { key: 'FOGO', icon: '<img class="icon-img" src="fogo.png" alt="">', bg: '#16a34a', label: '240L' }
     ];
 
-    streams.forEach(st => {
+    // Whichever stream was passed as "priority" (the tab most recently
+    // tapped on this card - see renderDriveAddressCard) is moved to the
+    // front of the list, so its serial rows render at the top instead of
+    // wherever the fixed Garbage/Recycling/FOGO order would put them.
+    const orderedStreams = priorityStreamKey
+      ? [...streams.filter(s => s.key === priorityStreamKey), ...streams.filter(s => s.key !== priorityStreamKey)]
+      : streams;
+
+    orderedStreams.forEach(st => {
       // explicitShownSet is an all-or-nothing override used by callers with
       // their own per-card show/hide state (see the drive street list's
       // per-property stream tabs) — when given, it's the ONLY thing that
@@ -8612,6 +8641,10 @@ let siteReminders = JSON.parse(localStorage.getItem('siteReminders') || '{}');
   // per-propId show/hide state instead, so each card's tabs are independent.
   window.__driveCardStreamHidden = window.__driveCardStreamHidden || new Map(); // propId -> Set of streamKeys explicitly hidden
   window.__driveCardStreamForced = window.__driveCardStreamForced || new Map(); // propId -> Set of streamKeys explicitly forced on
+  // propId -> the stream key of whichever tab was tapped most recently on
+  // that card, so its serial rows can be sorted to the top of the list
+  // (see renderDriveAddressCard / buildBinsAtAddress's priorityStreamKey).
+  window.__driveCardStreamPriority = window.__driveCardStreamPriority || new Map();
 
   function driveCardShownStreams(site) {
     const propId = String(site.propId || site.siteId || '');
@@ -8648,6 +8681,9 @@ let siteReminders = JSON.parse(localStorage.getItem('siteReminders') || '{}');
       hiddenSet.delete(streamKey);
       forcedSet.add(streamKey);
     }
+    // Whichever tab was just tapped becomes this card's "priority" stream,
+    // so its serial rows land at the top of the list on the next render.
+    window.__driveCardStreamPriority.set(propId, streamKey);
     if (typeof updateDriverHud === 'function') updateDriverHud();
   };
 
@@ -11737,29 +11773,6 @@ window.addEventListener('DOMContentLoaded', async () => {
     const navUrl = `https://www.google.com/maps/dir/?api=1&destination=${site.lat},${site.lng}&travelmode=driving`;
 
     let hasAnyBins = false;
-    const eligibleStreamsList = getDriveEligibleStreams(site);
-
-    // Run-number badges - same hdr-run-badge style/colours used on the Map
-    // page (property inspect modal, live telemetry), so a driver sees the
-    // same run chips here as they would there. Tapping one jumps straight
-    // to that run on the map, same as everywhere else hdr-run-badge is used.
-    const sch = site.soloSchedule || {};
-    const addrStreetKey = siteStreetKey(site);
-    const runBadgesHtml = eligibleStreamsList.map(({ stream }) => {
-      if (stream === 'Garbage' && sch.garRun) {
-        return `<span class="hdr-run-badge hdr-run-gar" onclick="event.stopPropagation(); openRunDirectlyOnMap('${sch.garRun}', 'Garbage', '${sch.day || ''}', '${sch.weekLetter || ''}', false, ${site.lat || 0}, ${site.lng || 0}, '${esc(addrStreetKey)}')"><img class="icon-img" src="bin.png" alt=""> ${esc(String(sch.garRun))}</span>`;
-      }
-      if (stream === 'Recycling' && sch.recRun) {
-        return `<span class="hdr-run-badge hdr-run-rec" onclick="event.stopPropagation(); openRunDirectlyOnMap('${sch.recRun}', 'Recycling', '${sch.day || ''}', '${sch.weekLetter || ''}', false, ${site.lat || 0}, ${site.lng || 0}, '${esc(addrStreetKey)}')"><img class="icon-img" src="recycle.png" alt="">${esc(String(sch.recRun))}${sch.weekLetter ? esc(String(sch.weekLetter).toUpperCase()) : ''}</span>`;
-      }
-      if (stream === 'SummerRecycling' && sch.recSummerRun) {
-        return `<span class="hdr-run-badge hdr-run-summer" onclick="event.stopPropagation(); openRunDirectlyOnMap('${sch.recSummerRun}', 'SummerRecycling', '${sch.day || ''}', '', true, ${site.lat || 0}, ${site.lng || 0}, '${esc(addrStreetKey)}')">☀️ ${esc(String(sch.recSummerRun))}</span>`;
-      }
-      if (stream === 'FOGO' && sch.fogRun) {
-        return `<span class="hdr-run-badge hdr-run-fog" onclick="event.stopPropagation(); openRunDirectlyOnMap('${sch.fogRun}', 'FOGO', '${sch.day || ''}', '${sch.weekLetter || ''}', false, ${site.lat || 0}, ${site.lng || 0}, '${esc(addrStreetKey)}')"><img class="icon-img" src="fogo.png" alt="">${esc(String(sch.fogRun))}</span>`;
-      }
-      return '';
-    }).join('');
 
     // Bin rows: reuse the exact same builder/markup as the Next Bin Box on
     // the map screen (same coloured stream chip + gradient serial row,
@@ -11771,7 +11784,15 @@ window.addEventListener('DOMContentLoaded', async () => {
     // driveCardShownStreams) so its stream tabs below control exactly
     // which stream rows render here, independent of every other card.
     const shownStreamsSet = driveCardShownStreams(site);
-    const binPills = window.buildBinsAtAddress(site, true, false, null, true, shownStreamsSet);
+    // Whichever stream tab the driver most recently tapped on this card
+    // (see toggleDriveCardStreamTab) is bumped to the top of the serial
+    // list below, so tapping a tab brings its bins straight into view
+    // instead of leaving them wherever the fixed Garbage/Recycling/FOGO
+    // order would otherwise put them.
+    const priorityStreamKey = window.__driveCardStreamPriority
+      ? window.__driveCardStreamPriority.get(String(site.propId || site.siteId || ''))
+      : null;
+    const binPills = window.buildBinsAtAddress(site, true, false, null, true, shownStreamsSet, priorityStreamKey);
     hasAnyBins = Boolean(binPills);
     // Folder-style tabs (one per stream with bins here) so any stream can be
     // expanded/collapsed on this card, same as the map's Next Bin Box.
@@ -11805,8 +11826,8 @@ window.addEventListener('DOMContentLoaded', async () => {
       <div class="address-card" onclick="window.openUPropInline('${driveCardPropId}', '${uPropInitialTab}')">
         <div class="address-header-row">
           <div>
-            <div class="address-line1">${esc(clean(site.addressText) || cleanStreetOnly)}</div>
-            ${runBadgesHtml ? `<div class="address-run-badges">${runBadgesHtml}</div>` : ''}
+            <div class="address-line1">${esc(cleanStreetOnly)}</div>
+            <div class="drive-card-suburb">${esc(getAddressSuburb(site))}</div>
           </div>
           <div class="prop-header-actions">
             <button type="button" class="single-nav-btn" onclick="event.stopPropagation(); showPropertyOnMap('${site.propId || site.siteId}')">🗺️</button>
