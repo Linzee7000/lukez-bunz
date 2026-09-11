@@ -898,16 +898,52 @@
     /* Panel picks up the same colour as whichever tab opened it - a
        folder-tab's body matches its tab, same idea as the coloured
        hud-bin-item rows under the Map screen's own stream tabs. */
-    .street-group-body.panel-houses { border-top-color: var(--slate-600); background: #eef1f4; }
+    .street-group-body.panel-houses { border-top-color: var(--slate-600); background: var(--slate-900, #0f1620); }
     .street-group-body.panel-gar { border-top-color: var(--red-600); background: #fdecec; }
     .street-group-body.panel-rec { border-top-color: var(--yellow-400); background: #fefaeb; }
     .street-group-body.panel-fog { border-top-color: var(--green-600); background: #eafaf1; }
+    /* Houses-panel address cards: fully dark and edge-to-edge like the
+       map's Next Bin Box, not the plain light note-card look — no white
+       background left anywhere. Side padding moves from the card itself
+       onto just the header/flag-banner/tabs (kept below), so the coloured
+       bin rows in .hud-bin-container can stretch flush to the card's own
+       edges instead of floating inset inside extra light padding. */
     .street-group-body .address-card {
       margin-top: 8px;
+      background: var(--slate-800);
+      border: none;
+      border-radius: 10px;
+      box-shadow: 0 3px 10px rgba(0,0,0,.35);
+      padding: 12px 0 0;
     }
     .street-group-body .address-card:first-child {
       margin-top: 0;
     }
+    .street-group-body .address-card .address-header-row,
+    .street-group-body .address-card .street-mode-flag-banner,
+    .street-group-body .address-card .map-stream-tabs-row {
+      padding-left: 12px;
+      padding-right: 12px;
+    }
+    .street-group-body .address-card .address-line1 { color: #fff; }
+    .street-group-body .address-card .street-mode-flag-banner { margin-bottom: 8px; }
+    .street-group-body .address-card .map-stream-tabs-row { margin-top: 8px; }
+    .street-group-body .address-card .hud-bin-container {
+      background: transparent;
+      border-radius: 0 0 10px 10px;
+      overflow: hidden;
+      gap: 0;
+      margin-top: 8px;
+    }
+    /* Same overrides again, !important, so the separate light/dark-mode
+       toggle (body.dark-mode, which !important-overrides .address-card
+       elsewhere) can't put the light gradient back on these cards. */
+    body.dark-mode .street-group-body .address-card {
+      background: var(--slate-800) !important;
+      border-color: transparent !important;
+    }
+    body.dark-mode .street-group-body .address-card .address-line1 { color: #fff !important; }
+    body.dark-mode .street-group-body .address-card .hud-bin-container { background: transparent !important; }
     /* Per-run breakdown shown inside a stream's tab panel - same coloured
        strip / dark info bar / action button layout as the Map screen's
        own bin rows (.address-bin-mini), just carrying run number, houses
@@ -3946,7 +3982,7 @@
   const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbwYUYnOa8D5qFiLpWP5RyAmdSg8q7kRTzHWa7HlORxIgcshIyxwLM7HR0jsXGkkjGHfCA/exec";
 
 /* Global Bin Builder (Defined upfront to prevent startup TypeError) */
-  window.buildBinsAtAddress = function(site, filterByActiveStream = true, isMapTelemetry = false, forceStreams = null, showEditPencil = false) {
+  window.buildBinsAtAddress = function(site, filterByActiveStream = true, isMapTelemetry = false, forceStreams = null, showEditPencil = false, explicitShownSet = null) {
     if (!site) return '';
 
     const currentStreamFilter = (typeof activeFilterStream !== 'undefined' && activeFilterStream ? activeFilterStream : '').toLowerCase().trim();
@@ -3963,16 +3999,27 @@
     ];
 
     streams.forEach(st => {
-      // A stream in forceStreams is always shown (used by the Next Bin
-      // Box's per-stream "monkey" toggles), even while a different
-      // stream/run/day filter is active for this address — otherwise
-      // there's no way to peek at, say, a Recycling serial while filtered
-      // to Garbage.
-      const isForced = forceStreams && forceStreams.has && forceStreams.has(st.key);
-      if (typeof hiddenBinStreams !== 'undefined' && hiddenBinStreams.has(st.key)) return;
-      if (!isForced && filterByActiveStream && currentStreamFilter && currentStreamFilter !== 'all') {
-        const targetKey = (currentStreamFilter === 'summerrecycling') ? 'recycling' : currentStreamFilter;
-        if (st.key.toLowerCase() !== targetKey) return;
+      // explicitShownSet is an all-or-nothing override used by callers with
+      // their own per-card show/hide state (see the drive street list's
+      // per-property stream tabs) — when given, it's the ONLY thing that
+      // decides visibility here, bypassing both the active-filter check AND
+      // the global hiddenBinStreams below (which belongs to the single live
+      // Next Bin Box telemetry banner and would otherwise bleed its state
+      // into unrelated cards).
+      if (explicitShownSet) {
+        if (!explicitShownSet.has(st.key)) return;
+      } else {
+        // A stream in forceStreams is always shown (used by the Next Bin
+        // Box's per-stream "monkey" toggles), even while a different
+        // stream/run/day filter is active for this address — otherwise
+        // there's no way to peek at, say, a Recycling serial while filtered
+        // to Garbage.
+        const isForced = forceStreams && forceStreams.has && forceStreams.has(st.key);
+        if (typeof hiddenBinStreams !== 'undefined' && hiddenBinStreams.has(st.key)) return;
+        if (!isForced && filterByActiveStream && currentStreamFilter && currentStreamFilter !== 'all') {
+          const targetKey = (currentStreamFilter === 'summerrecycling') ? 'recycling' : currentStreamFilter;
+          if (st.key.toLowerCase() !== targetKey) return;
+        }
       }
 
       const bins = displaySources[st.key] || [];
@@ -8556,6 +8603,84 @@ let siteReminders = JSON.parse(localStorage.getItem('siteReminders') || '{}');
     }).join('')}</div>`;
   }
 
+  // Per-property version of the stream tabs above, for the drive street
+  // list: the map's tabs (toggleMapStreamTab/forcedBinStreams/
+  // hiddenBinStreams) all key off the single lastTelemetrySite, which is
+  // fine for one live GPS-tracked address but wrong here since the street
+  // list shows many property cards at once — toggling one card's tab would
+  // otherwise flip every card's tabs together. These keep separate,
+  // per-propId show/hide state instead, so each card's tabs are independent.
+  window.__driveCardStreamHidden = window.__driveCardStreamHidden || new Map(); // propId -> Set of streamKeys explicitly hidden
+  window.__driveCardStreamForced = window.__driveCardStreamForced || new Map(); // propId -> Set of streamKeys explicitly forced on
+
+  function driveCardShownStreams(site) {
+    const propId = String(site.propId || site.siteId || '');
+    const displaySources = (typeof activeFilterDataSource !== 'undefined' && activeFilterDataSource === 'council')
+      ? (site.councilStreams || {})
+      : (site.soloStreams || {});
+    const currentStreamFilter = (typeof activeFilterStream !== 'undefined' && activeFilterStream ? activeFilterStream : '').toLowerCase().trim();
+    const targetKey = (currentStreamFilter === 'summerrecycling') ? 'recycling' : currentStreamFilter;
+    const hiddenSet = window.__driveCardStreamHidden.get(propId);
+    const forcedSet = window.__driveCardStreamForced.get(propId);
+    const shown = new Set();
+    STREAM_TAB_DEFS.forEach(sd => {
+      if ((displaySources[sd.key] || []).length === 0) return;
+      if (hiddenSet && hiddenSet.has(sd.key)) return;
+      if (forcedSet && forcedSet.has(sd.key)) { shown.add(sd.key); return; }
+      if (!targetKey || targetKey === 'all') { shown.add(sd.key); return; }
+      if (sd.key.toLowerCase() === targetKey) shown.add(sd.key);
+    });
+    return shown;
+  }
+
+  window.toggleDriveCardStreamTab = function(propId, streamKey) {
+    const site = siteRecords.find(s => String(s.propId || s.siteId) === String(propId));
+    if (!site) return;
+    const shown = driveCardShownStreams(site);
+    if (!window.__driveCardStreamHidden.has(propId)) window.__driveCardStreamHidden.set(propId, new Set());
+    if (!window.__driveCardStreamForced.has(propId)) window.__driveCardStreamForced.set(propId, new Set());
+    const hiddenSet = window.__driveCardStreamHidden.get(propId);
+    const forcedSet = window.__driveCardStreamForced.get(propId);
+    if (shown.has(streamKey)) {
+      hiddenSet.add(streamKey);
+      forcedSet.delete(streamKey);
+    } else {
+      hiddenSet.delete(streamKey);
+      forcedSet.add(streamKey);
+    }
+    if (typeof updateDriverHud === 'function') updateDriverHud();
+  };
+
+  function buildDriveCardStreamTabsRow(site) {
+    if (!site) return '';
+    const propId = String(site.propId || site.siteId || '');
+    const displaySources = (typeof activeFilterDataSource !== 'undefined' && activeFilterDataSource === 'council')
+      ? (site.councilStreams || {})
+      : (site.soloStreams || {});
+    const eligible = STREAM_TAB_DEFS.filter(sd => (displaySources[sd.key] || []).length > 0);
+    if (!eligible.length) return '';
+    const currentStreamFilter = (typeof activeFilterStream !== 'undefined' && activeFilterStream ? activeFilterStream : '').toLowerCase().trim();
+    const filterTargetKey = (currentStreamFilter === 'summerrecycling') ? 'recycling' : currentStreamFilter;
+    const ordered = (filterTargetKey && filterTargetKey !== 'all')
+      ? [...eligible.filter(sd => sd.key.toLowerCase() === filterTargetKey), ...eligible.filter(sd => sd.key.toLowerCase() !== filterTargetKey)]
+      : eligible;
+    const shown = driveCardShownStreams(site);
+    const shownCount = ordered.filter(sd => shown.has(sd.key)).length;
+    return `<div class="map-stream-tabs-row">${ordered.map(sd => {
+      const run = clean(site.soloSchedule && site.soloSchedule[sd.runField]) || '—';
+      const isShown = shown.has(sd.key);
+      const frontCls = ((shownCount === 1 && isShown) || (filterTargetKey && filterTargetKey !== 'all' && sd.key.toLowerCase() === filterTargetKey)) ? ' tab-front' : '';
+      const arrow = isShown ? '▼' : '▲';
+      const title = isShown ? `Hide ${sd.key} serials` : `Show ${sd.key} serials`;
+      return `
+        <button type="button" class="map-stream-tab${frontCls}" style="background:${sd.bg};" onclick="event.stopPropagation(); window.toggleDriveCardStreamTab('${propId}', '${sd.key}')" title="${title}">
+          <img class="icon-img" src="${sd.icon}" alt="" style="width:14px;height:14px;">
+          <span class="map-stream-tab-run">${esc(run)}</span>
+          <span class="map-stream-tab-arrow">${arrow}</span>
+        </button>`;
+    }).join('')}</div>`;
+  }
+
   // Toggle Bin Issue Dropdown
   window.toggleBinIssueMenu = function(event, menuId) {
     if (event) event.stopPropagation();
@@ -11639,12 +11764,18 @@ window.addEventListener('DOMContentLoaded', async () => {
     // Bin rows: reuse the exact same builder/markup as the Next Bin Box on
     // the map screen (same coloured stream chip + gradient serial row,
     // reminder/hazard buttons) instead of the old white hud-bin-item pills,
-    // so this list card looks identical to that widget. `true` at the end
-    // turns on the ✏️ edit pencil per row (off by default so the live map
-    // telemetry banner, which calls buildBinsAtAddress elsewhere, is
-    // unaffected).
-    const binPills = window.buildBinsAtAddress(site, true, false, null, true);
+    // so this list card looks identical to that widget. `true` turns on the
+    // ✏️ edit pencil per row (off by default so the live map telemetry
+    // banner, which calls buildBinsAtAddress elsewhere, is unaffected).
+    // The last argument is this card's own show/hide set (see
+    // driveCardShownStreams) so its stream tabs below control exactly
+    // which stream rows render here, independent of every other card.
+    const shownStreamsSet = driveCardShownStreams(site);
+    const binPills = window.buildBinsAtAddress(site, true, false, null, true, shownStreamsSet);
     hasAnyBins = Boolean(binPills);
+    // Folder-style tabs (one per stream with bins here) so any stream can be
+    // expanded/collapsed on this card, same as the map's Next Bin Box.
+    const streamTabsHtml = buildDriveCardStreamTabsRow(site);
 
     const streetMode = activeStreetModeForSite(site);
     const cp = activeCollectionPointForSite(site);
@@ -11683,6 +11814,7 @@ window.addEventListener('DOMContentLoaded', async () => {
           </div>
         </div>
         ${flagBannerHtml}
+        ${streamTabsHtml}
         <div class="hud-bin-container">
           ${hasAnyBins ? binPills : '<span style="display:block; padding:8px 10px; color:#94a3b8; font-style:italic; font-size:13px;">no bins</span>'}
         </div>
