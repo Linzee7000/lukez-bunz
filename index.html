@@ -4430,6 +4430,11 @@
   let geofenceDrawColor = '#f97316';
   let geofenceDrawRuns = ['ALL'];
   let geofenceEditId = null;
+  // When set, the in-progress tap-to-draw shape (geofenceDrawPoints) is a
+  // single property's boundary rather than a run geofence — finishGeofenceDraw
+  // saves straight onto that site's `boundary` field instead of pushing a
+  // new entry into the geofences[] list. See startPropertyBoundaryDraw.
+  let propertyBoundaryDrawPropId = null;
   const GEOFENCE_PALETTE = ['#f97316','#0ea5e9','#a855f7','#16a34a','#e11d48','#ca8a04'];
   function nextGeofenceColor(){ return GEOFENCE_PALETTE[geofences.length % GEOFENCE_PALETTE.length]; }
   function genGeofenceId(){ return 'gf_'+Date.now().toString(36)+Math.random().toString(36).slice(2,7); }
@@ -6330,6 +6335,25 @@
       customAlert('Add at least 3 points before finishing.');
       return;
     }
+    if(propertyBoundaryDrawPropId){
+      const site = siteRecords.find(s => String(s.propId || s.siteId) === String(propertyBoundaryDrawPropId));
+      if(site){
+        site.boundary = geofenceDrawPoints.map(p=>[p.lat,p.lng]);
+        hasUnsyncedChanges = true; updateSyncButtonIcon();
+        logEdit({
+          timestamp: new Date().toISOString(), editType: "PROPERTY_BOUNDARY",
+          propId: site.propId, siteId: site.siteId, address: site.addressText,
+          boundary: JSON.stringify(site.boundary)
+        });
+        await saveToDB("masterRecords", siteRecords);
+        await saveToDB("masterEditsLog", masterEditsLog);
+      }
+      const finishedPropId = propertyBoundaryDrawPropId;
+      exitGeofenceDrawMode();
+      refreshUPropViews();
+      triggerUniversalDataRefresh();
+      return;
+    }
     geofences.push({
       id: genGeofenceId(),
       name: geofenceDrawName,
@@ -6345,6 +6369,11 @@
   };
 
   window.cancelGeofenceDraw = function(){
+    if(propertyBoundaryDrawPropId){
+      exitGeofenceDrawMode();
+      refreshUPropViews();
+      return;
+    }
     if(geofenceEditId){
       // Cancel an in-progress shape edit without saving the change.
       exitGeofenceDrawMode();
@@ -6360,6 +6389,7 @@
     geofenceDrawActive=false;
     geofenceDrawPoints=[];
     geofenceEditId=null;
+    propertyBoundaryDrawPropId=null;
     setGeofenceEditingState(false);
   }
 
@@ -7458,13 +7488,24 @@
   window.__uPropTab = 'Property';
   window.__uPropOpenBinKey = null;
   window.__uPropPendingCouncilBin = null;
+  // When true, the panel is embedded inline in a list card (search list /
+  // drive street list) in place of the summary "white card" — see
+  // openUPropInline / closeUPropInline / refreshUPropViews below. When
+  // false, it opens in the old floating #propInspectModal (still used by
+  // map-marker popups and other non-list contexts, which have no card to
+  // replace it with).
+  window.__uPropInline = false;
 
+  // Tabs are icon-only now (no text label) — Property uses house.png,
+  // Settings uses settings.png, and each stream shows its own icon plus
+  // that property's run number for that stream when one is assigned
+  // (just the icon, with no badge, when it isn't).
   const UPROP_TAB_DEFS = [
-    { key: 'Property',  label: 'Property', cls: 'uprop-tab-property' },
-    { key: 'Garbage',   label: 'Garbage',  cls: 'uprop-tab-garbage',   icon: '<img class="icon-img" src="garbage.png" alt="">', runField: 'garRun' },
-    { key: 'Recycling', label: 'Recycle',  cls: 'uprop-tab-recycling', icon: '<img class="icon-img" src="recycle.png" alt="">', runField: 'recRun' },
-    { key: 'FOGO',      label: 'FOGO',     cls: 'uprop-tab-fogo',      icon: '<img class="icon-img" src="fogo.png" alt="">', runField: 'fogRun' },
-    { key: 'Settings',  label: 'Settings', cls: 'uprop-tab-settings',  icon: '⚙️' }
+    { key: 'Property',  label: '', cls: 'uprop-tab-property',  icon: '<img class="icon-img" src="house.png" alt="Property">' },
+    { key: 'Garbage',   label: '', cls: 'uprop-tab-garbage',   icon: '<img class="icon-img" src="garbage.png" alt="Garbage">', runField: 'garRun' },
+    { key: 'Recycling', label: '', cls: 'uprop-tab-recycling', icon: '<img class="icon-img" src="recycle.png" alt="Recycle">', runField: 'recRun' },
+    { key: 'FOGO',      label: '', cls: 'uprop-tab-fogo',      icon: '<img class="icon-img" src="fogo.png" alt="FOGO">', runField: 'fogRun' },
+    { key: 'Settings',  label: '', cls: 'uprop-tab-settings',  icon: '<img class="icon-img" src="settings.png" alt="Settings">' }
   ];
 
   function uPropEligibleTabs(site) {
@@ -7485,15 +7526,81 @@
         const run = clean(site.soloSchedule && site.soloSchedule[t.runField]);
         if (run) runBadge = `<span class="uprop-tab-run">${esc(run)}</span>`;
       }
-      return `<button type="button" class="uprop-tab ${t.cls}${active}" onclick="window.switchUPropTab('${t.key}')">${t.icon || ''} ${t.label} ${runBadge}</button>`;
+      return `<button type="button" class="uprop-tab ${t.cls}${active}" title="${t.key}" onclick="window.switchUPropTab('${t.key}')">${t.icon || ''}${runBadge}</button>`;
     }).join('');
   }
 
   window.switchUPropTab = function(tabKey) {
     window.__uPropTab = tabKey;
     window.__uPropOpenBinKey = null;
-    renderUnifiedPropertyPanel();
+    refreshUPropViews();
   };
+
+  // Builds just the active tab's content — shared by the inline panel and
+  // the (still modal-based) map-marker entry point, so both always show
+  // exactly the same tab markup.
+  function buildUPropTabContentHtml(site) {
+    const tab = window.__uPropTab;
+    if (tab === 'Settings') return renderUPropSettingsTab(site);
+    if (tab === 'Garbage' || tab === 'Recycling' || tab === 'FOGO') return renderUPropStreamTab(site, tab);
+    return renderUPropPropertyTab(site);
+  }
+
+  // Inline embed: replaces the address-card entirely at its spot in
+  // whichever list it lives in (search results / drive street list) —
+  // called from those list-builder functions instead of ever opening
+  // #propInspectModal.
+  function buildUPropInlinePanelHtml(site) {
+    const addr = esc((site.baseStreetLine || site.addressText.split(',')[0]).trim());
+    const suburb = esc(site.suburbLine || '');
+    return `
+      <div class="uprop-inline-panel">
+        <div class="uprop-inline-header">
+          <div style="min-width:0;">
+            <h3 class="uprop-inline-title">${addr}</h3>
+            <div class="uprop-suburb">${suburb}</div>
+          </div>
+          <button type="button" class="modal-close-btn" onclick="window.closeUPropInline(event)">&times;</button>
+        </div>
+        <div class="uprop-tabs-row">${buildUPropTabsRow(site)}</div>
+        <div class="uprop-content">${buildUPropTabContentHtml(site)}</div>
+      </div>
+    `;
+  }
+
+  // Opens straight into the inline panel in place of a list card — this is
+  // what search-list / drive-list address cards call now instead of
+  // openPropertyInspectModal.
+  window.openUPropInline = function(propId, tab) {
+    window.__uPropId = propId;
+    window.__uPropTab = tab || 'Property';
+    window.__uPropOpenBinKey = null;
+    window.__uPropPendingCouncilBin = null;
+    window.__uPropInline = true;
+    refreshUPropViews();
+  };
+
+  window.closeUPropInline = function(event) {
+    if (event) event.stopPropagation();
+    window.__uPropId = null;
+    // Re-render the lists first (while still "inline") so the card
+    // collapses back to its normal summary — only then drop the flag.
+    refreshUPropViews();
+    window.__uPropInline = false;
+  };
+
+  // Re-renders whichever presentation is currently active: rebuilds the
+  // search/drive lists (which embed the inline panel themselves wherever
+  // window.__uPropId matches) when inline, or just the modal's own DOM
+  // when it's open the old way.
+  function refreshUPropViews() {
+    if (window.__uPropInline) {
+      if (typeof handleSearch === 'function') handleSearch();
+      if (typeof updateDriverHud === 'function') updateDriverHud();
+    } else {
+      renderUnifiedPropertyPanel();
+    }
+  }
 
   // Rebuilds the header, tab row and active tab's content for whichever
   // property/tab is currently open (window.__uPropId / __uPropTab) —
@@ -7506,14 +7613,7 @@
     document.getElementById('inspectPropAddress').innerText = (site.baseStreetLine || site.addressText.split(',')[0]).trim();
     document.getElementById('inspectPropSuburb').innerText = site.suburbLine || '';
     document.getElementById('inspectTabsRow').innerHTML = buildUPropTabsRow(site);
-
-    const tab = window.__uPropTab;
-    let html = '';
-    if (tab === 'Settings') html = renderUPropSettingsTab(site);
-    else if (tab === 'Garbage' || tab === 'Recycling' || tab === 'FOGO') html = renderUPropStreamTab(site, tab);
-    else html = renderUPropPropertyTab(site);
-
-    document.getElementById('inspectPropContent').innerHTML = html;
+    document.getElementById('inspectPropContent').innerHTML = buildUPropTabContentHtml(site);
   }
 
   function renderUPropPropertyTab(site) {
@@ -7604,7 +7704,7 @@
       const isOpen = window.__uPropOpenBinKey === key;
       const isSoloNotInMpsc = councilBinsList.length > 0 && !councilSerialsSet.has(b.serial.toUpperCase());
       return `
-        <div class="uprop-bin-row">
+        <div class="uprop-bin-row${isOpen ? ' uprop-bin-row-editing' : ''}">
           <div class="uprop-bin-row-top">
             <div class="uprop-bin-left">
               ${b.unitLabel ? `<span class="unit-pill">${esc(b.unitLabel)}</span>` : ''}
@@ -7621,12 +7721,16 @@
 
     const newKey = `${streamKey}_new`;
     const addingNew = window.__uPropOpenBinKey === newKey;
+    // Add button is hidden whenever a bin (existing or new) is already
+    // being edited for this stream — no need for a second way in while
+    // that editor is already open.
+    const anyEditorOpenForStream = window.__uPropOpenBinKey && window.__uPropOpenBinKey.indexOf(streamKey + '_') === 0;
 
     return `
       ${rowsHtml || '<div style="color:var(--uprop-text-dim); font-style:italic; padding:6px 0;">No bins registered</div>'}
-      ${addingNew ? `<div class="uprop-bin-row">${renderUPropBinEditor(site, streamKey, -1, window.__uPropPendingCouncilBin || {})}</div>` : `
+      ${addingNew ? `<div class="uprop-bin-row uprop-bin-row-editing">${renderUPropBinEditor(site, streamKey, -1, window.__uPropPendingCouncilBin || {})}</div>` : (anyEditorOpenForStream ? '' : `
         <button type="button" class="uprop-add-btn" onclick="window.addUPropBin('${streamKey}')">+ Add New Bin</button>
-      `}
+      `)}
       ${missingCouncilBins.length > 0 ? `
         <div class="stream-council-section" style="margin-top:10px;">
           <div class="stream-council-title">🏛️ MPSC Data</div>
@@ -7645,6 +7749,22 @@
   // fields (serial, make, size, lid colour, GPS) plus a Notes/Alert field
   // and Add/Delete, all reachable from the pencil on each bin row instead
   // of a separate warning-triangle icon and info drawer.
+  function uPropStreamIcon(key) {
+    return key === 'Garbage' ? 'garbage.png' : key === 'Recycling' ? 'recycle.png' : 'fogo.png';
+  }
+  function uPropStreamCls(key) {
+    return key === 'Garbage' ? 'uprop-stream-sel-gar' : key === 'Recycling' ? 'uprop-stream-sel-rec' : 'uprop-stream-sel-fog';
+  }
+
+  // Re-colours the Stream select (and its icon) live as the user switches
+  // it, instead of needing a full re-render.
+  window.uPropBinStreamChanged = function(sel) {
+    sel.classList.remove('uprop-stream-sel-gar', 'uprop-stream-sel-rec', 'uprop-stream-sel-fog');
+    sel.classList.add(uPropStreamCls(sel.value));
+    const icon = document.getElementById('modalBinStreamIcon');
+    if (icon) icon.src = uPropStreamIcon(sel.value);
+  };
+
   function renderUPropBinEditor(site, streamKey, idx, b) {
     b = b || {};
     const isNew = idx < 0;
@@ -7655,37 +7775,41 @@
         <input type="hidden" id="modalSitePropId" value="${esc(site.propId || site.siteId)}">
         <input type="hidden" id="modalOrigStreamKey" value="${streamKey}">
         <input type="hidden" id="modalBinIdx" value="${idx}">
-        <div class="form-group">
-          <label>Stream</label>
-          <select id="modalBinStreamSelect" class="main-search-input" style="font-size:14px; height:40px;">
-            <option value="Garbage" ${streamKey==='Garbage'?'selected':''}>🗑️ Garbage</option>
-            <option value="Recycling" ${streamKey==='Recycling'?'selected':''}>♻️ Recycling</option>
-            <option value="FOGO" ${streamKey==='FOGO'?'selected':''}>🌳 FOGO</option>
-          </select>
-        </div>
-        <div class="form-group">
-          <label>Bin Size</label>
-          <select id="modalBinSizeSelect" class="main-search-input" style="font-size:14px; height:40px;">
-            <option value="80L" ${sizeDefault==='80L'?'selected':''}>80L</option>
-            <option value="120L" ${sizeDefault==='120L'?'selected':''}>120L</option>
-            <option value="240L" ${sizeDefault==='240L'?'selected':''}>240L</option>
-          </select>
-        </div>
-        <div class="form-group">
-          <label>Bin Type / Make</label>
-          <select id="modalBinTypeSelect" class="main-search-input" style="font-size:14px; height:40px;">
-            ${['Sulo','Mastec','Nylex','Other'].map(m => `<option value="${m}" ${(b.make||'Sulo')===m?'selected':''}>${m}</option>`).join('')}
-          </select>
-        </div>
-        <div class="form-group">
-          <label>Lid Colour</label>
-          <select id="modalBinLidSelect" class="main-search-input" style="font-size:14px; height:40px;">
-            ${[['Red','🔴'],['Green','🟢'],['Yellow','🟡'],['Blue','🔵'],['Dark Green','🌲'],['Missing','⚠️']].map(([c,i]) => `<option value="${c}" ${lidDefault===c?'selected':''}>${i} ${c}</option>`).join('')}
-          </select>
+        <div class="form-group uprop-bin-two-col">
+          <div>
+            <label><img class="icon-img" id="modalBinStreamIcon" src="${uPropStreamIcon(streamKey)}" alt="">Stream</label>
+            <select id="modalBinStreamSelect" class="main-search-input ${uPropStreamCls(streamKey)}" style="font-size:14px; height:40px;" onchange="window.uPropBinStreamChanged(this)">
+              <option value="Garbage" ${streamKey==='Garbage'?'selected':''}>Garbage</option>
+              <option value="Recycling" ${streamKey==='Recycling'?'selected':''}>Recycling</option>
+              <option value="FOGO" ${streamKey==='FOGO'?'selected':''}>FOGO</option>
+            </select>
+          </div>
+          <div>
+            <label>Bin Size</label>
+            <select id="modalBinSizeSelect" class="main-search-input" style="font-size:14px; height:40px;">
+              <option value="80L" ${sizeDefault==='80L'?'selected':''}>80L</option>
+              <option value="120L" ${sizeDefault==='120L'?'selected':''}>120L</option>
+              <option value="240L" ${sizeDefault==='240L'?'selected':''}>240L</option>
+            </select>
+          </div>
         </div>
         <div class="form-group">
           <label>Bin Serial Number *</label>
           <input type="text" id="modalBinSerial" required style="text-transform:uppercase;" value="${esc(b.serial||'')}">
+        </div>
+        <div class="form-group uprop-bin-two-col">
+          <div>
+            <label>Bin Type / Make</label>
+            <select id="modalBinTypeSelect" class="main-search-input" style="font-size:14px; height:40px;">
+              ${['Sulo','Mastec','Nylex','Other'].map(m => `<option value="${m}" ${(b.make||'Sulo')===m?'selected':''}>${m}</option>`).join('')}
+            </select>
+          </div>
+          <div>
+            <label>Lid Colour</label>
+            <select id="modalBinLidSelect" class="main-search-input" style="font-size:14px; height:40px;">
+              ${[['Red','🔴'],['Green','🟢'],['Yellow','🟡'],['Blue','🔵'],['Dark Green','🌲'],['Missing','⚠️']].map(([c,i]) => `<option value="${c}" ${lidDefault===c?'selected':''}>${i} ${c}</option>`).join('')}
+            </select>
+          </div>
         </div>
         <div class="form-group">
           <label>Notes / Alert</label>
@@ -7697,9 +7821,9 @@
             <input type="text" id="modalBinLat" placeholder="Latitude" value="${esc(b.lat||'')}">
             <input type="text" id="modalBinLng" placeholder="Longitude" value="${esc(b.lng||'')}">
           </div>
-          <div style="display:flex; gap:6px; margin-top:6px;">
-            <button type="button" class="stray-fix-btn" style="flex:1;" onclick="useCurrentGpsForBin()">📍 Use Live GPS</button>
-            <button type="button" class="stray-fix-btn" style="flex:1; background:#0284c7;" onclick="openLocationPickerModal('bin')"><img class="icon-img" src="route.png" alt=""> Choose on Map</button>
+          <div class="uprop-flat-btn-row">
+            <button type="button" class="uprop-flat-btn" onclick="useCurrentGpsForBin()">📍 Use Live GPS</button>
+            <button type="button" class="uprop-flat-btn" onclick="openLocationPickerModal('bin')"><img class="icon-img" src="route.png" alt=""> Choose on Map</button>
           </div>
         </div>
         <div class="modal-actions">
@@ -7715,13 +7839,13 @@
     const key = `${streamKey}_${idx}`;
     window.__uPropOpenBinKey = (!forceClose && window.__uPropOpenBinKey !== key) ? key : null;
     window.__uPropPendingCouncilBin = null;
-    renderUnifiedPropertyPanel();
+    refreshUPropViews();
   };
 
   window.addUPropBin = function(streamKey) {
     window.__uPropOpenBinKey = `${streamKey}_new`;
     window.__uPropPendingCouncilBin = null;
-    renderUnifiedPropertyPanel();
+    refreshUPropViews();
   };
 
   window.saveUPropBin = async function() {
@@ -7771,7 +7895,7 @@
     window.__uPropOpenBinKey = null;
     window.__uPropPendingCouncilBin = null;
     window.__uPropTab = newStreamKey;
-    renderUnifiedPropertyPanel();
+    refreshUPropViews();
     triggerUniversalDataRefresh();
   };
 
@@ -7795,7 +7919,7 @@
     await saveToDB("masterRecords", siteRecords);
     await saveToDB("masterEditsLog", masterEditsLog);
     window.__uPropOpenBinKey = null;
-    renderUnifiedPropertyPanel();
+    refreshUPropViews();
     triggerUniversalDataRefresh();
   };
 
@@ -7817,51 +7941,11 @@
       return '<option value="">None / Unassigned</option>' + sorted.map(r => `<option value="${esc(r)}" ${r.toLowerCase() === (currentVal || '').toLowerCase() ? 'selected' : ''}>${esc(r)}</option>`).join('');
     };
     const stars = site.ratingStars || 5;
+    const boundaryPts = Array.isArray(site.boundary) ? site.boundary.length : 0;
+    const propIdEsc = esc(site.propId || site.siteId);
 
     return `
       <input type="hidden" id="modalPropTargetId" value="${esc(site.propId || site.siteId)}">
-      <div class="form-group">
-        <label>Address</label>
-        <input type="text" id="modalPropAddress" readonly value="${esc((site.baseStreetLine || site.addressText.split(',')[0]).trim())}">
-      </div>
-      <div class="form-group">
-        <label>Collection Day</label>
-        <select id="modalPropDay" class="main-search-input" style="font-size:14px; height:40px;">
-          ${['Monday','Tuesday','Wednesday','Thursday','Friday'].map(d => `<option value="${d}" ${(sch.day||'Monday')===d?'selected':''}>${d.slice(0,3)}</option>`).join('')}
-        </select>
-      </div>
-      <div class="form-group">
-        <label>Garbage Run</label>
-        <select id="modalPropGarRun" class="main-search-input" style="font-size:14px; height:40px;">${opt(garRuns, sch.garRun)}</select>
-      </div>
-      <div class="form-group">
-        <label>Recycling Run & Week</label>
-        <div style="display:flex; gap:6px;">
-          <select id="modalPropRecRun" class="main-search-input" style="font-size:14px; height:40px; flex:2;">${opt(recRuns, sch.recRun)}</select>
-          <select id="modalPropRecWeek" class="main-search-input" style="font-size:14px; height:40px; flex:1;">
-            <option value="A" ${(sch.weekLetter||'A').toUpperCase()==='A'?'selected':''}>Week A</option>
-            <option value="B" ${(sch.weekLetter||'A').toUpperCase()==='B'?'selected':''}>Week B</option>
-          </select>
-        </div>
-      </div>
-      <div class="form-group">
-        <label>☀️ Summer Recycling Run</label>
-        <select id="modalPropRecSummerRun" class="main-search-input" style="font-size:14px; height:40px;">${opt(recSummerRuns, sch.recSummerRun)}</select>
-      </div>
-      <div class="form-group">
-        <label>FOGO Run & Week</label>
-        <div style="display:flex; gap:6px;">
-          <select id="modalPropFogRun" class="main-search-input" style="font-size:14px; height:40px; flex:2;">${opt(fogRuns, sch.fogRun)}</select>
-          <select id="modalPropFogWeek" class="main-search-input" style="font-size:14px; height:40px; flex:1;">
-            <option value="A" ${(sch.weekLetter||'A').toUpperCase()==='A'?'selected':''}>Week A</option>
-            <option value="B" ${(sch.weekLetter||'A').toUpperCase()==='B'?'selected':''}>Week B</option>
-          </select>
-        </div>
-      </div>
-      <div class="form-group">
-        <label>Property Flags / Notes (e.g. Locked gate)</label>
-        <input type="text" id="modalPropFlags" placeholder="e.g. Steep driveway..." value="${esc(site.runFlags || '')}">
-      </div>
       <div class="form-group">
         <label>Star Rating</label>
         <div class="star-rating-row" id="starContainer">
@@ -7871,14 +7955,59 @@
         <input type="text" id="modalRatingComment" placeholder="e.g. Steep driveway, dog on premises..." value="${esc(site.ratingComment || '')}">
       </div>
       <div class="form-group">
+        <label>Collection Day &amp; Week</label>
+        <div style="display:flex; gap:6px;">
+          <select id="modalPropDay" class="main-search-input" style="font-size:14px; height:40px; flex:2;">
+            ${['Monday','Tuesday','Wednesday','Thursday','Friday'].map(d => `<option value="${d}" ${(sch.day||'Monday')===d?'selected':''}>${d}</option>`).join('')}
+          </select>
+          <select id="modalPropWeek" class="main-search-input" style="font-size:14px; height:40px; flex:1;">
+            <option value="A" ${(sch.weekLetter||'A').toUpperCase()==='A'?'selected':''}>Week A</option>
+            <option value="B" ${(sch.weekLetter||'A').toUpperCase()==='B'?'selected':''}>Week B</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-group uprop-run-field uprop-run-field-gar">
+        <label><img class="icon-img" src="garbage.png" alt="">Garbage Run</label>
+        <select id="modalPropGarRun" class="main-search-input" style="font-size:14px; height:40px;">${opt(garRuns, sch.garRun)}</select>
+        <input type="text" id="modalPropGarFlag" class="uprop-flag-input" placeholder="Flag (e.g. Locked gate)" value="${esc(sch.garFlag || '')}">
+      </div>
+      <div class="form-group uprop-run-field uprop-run-field-rec">
+        <label><img class="icon-img" src="recycle.png" alt="">Recycling Run</label>
+        <select id="modalPropRecRun" class="main-search-input" style="font-size:14px; height:40px;">${opt(recRuns, sch.recRun)}</select>
+        <input type="text" id="modalPropRecFlag" class="uprop-flag-input" placeholder="Flag (e.g. Locked gate)" value="${esc(sch.recFlag || '')}">
+      </div>
+      <div class="form-group uprop-run-field uprop-run-field-summer">
+        <label>☀️ Summer Recycling Run</label>
+        <select id="modalPropRecSummerRun" class="main-search-input" style="font-size:14px; height:40px;">${opt(recSummerRuns, sch.recSummerRun)}</select>
+      </div>
+      <div class="form-group uprop-run-field uprop-run-field-fog">
+        <label><img class="icon-img" src="fogo.png" alt="">FOGO Run</label>
+        <select id="modalPropFogRun" class="main-search-input" style="font-size:14px; height:40px;">${opt(fogRuns, sch.fogRun)}</select>
+        <input type="text" id="modalPropFogFlag" class="uprop-flag-input" placeholder="Flag (e.g. Locked gate)" value="${esc(sch.fogFlag || '')}">
+      </div>
+      <div class="form-group">
+        <label>Property Flags / Notes (e.g. Locked gate)</label>
+        <input type="text" id="modalPropFlags" placeholder="e.g. Steep driveway..." value="${esc(site.runFlags || '')}">
+      </div>
+      <div class="form-group">
         <label>Property GPS Coordinates (House Location)</label>
         <div style="display:flex; gap:6px;">
           <input type="text" id="modalPropLat" placeholder="Latitude" value="${esc(site.lat || '')}">
           <input type="text" id="modalPropLng" placeholder="Longitude" value="${esc(site.lng || '')}">
         </div>
-        <div style="display:flex; gap:6px; margin-top:6px;">
-          <button type="button" class="stray-fix-btn" style="flex:1;" onclick="useCurrentGpsForProp()">📍 Use Live GPS</button>
-          <button type="button" class="stray-fix-btn" style="flex:1; background:#0284c7;" onclick="openLocationPickerModal('prop')"><img class="icon-img" src="route.png" alt=""> Choose on Map</button>
+        <div class="uprop-flat-btn-row">
+          <button type="button" class="uprop-flat-btn" onclick="useCurrentGpsForProp()">📍 Use Live GPS</button>
+          <button type="button" class="uprop-flat-btn" onclick="openLocationPickerModal('prop')"><img class="icon-img" src="route.png" alt=""> Choose on Map</button>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Property Boundary</label>
+        <div class="uprop-flat-btn-row">
+          <button type="button" class="uprop-flat-btn" onclick="window.startPropertyBoundaryDraw('${propIdEsc}')"><img class="icon-img" src="boundary.png" alt="">${boundaryPts ? 'Redraw' : 'Draw'} Boundary</button>
+          <button type="button" class="uprop-flat-btn" onclick="window.autoDetectPropertyBoundary('${propIdEsc}')">🌐 Auto-Detect (OSM)</button>
+        </div>
+        <div class="uprop-meta-line" style="margin-top:6px;">
+          ${boundaryPts ? `${boundaryPts}-point boundary saved. <a href="#" onclick="event.preventDefault(); window.clearPropertyBoundary('${propIdEsc}')" style="color:#ff6b6b;">Clear</a>` : 'No boundary drawn yet.'}
         </div>
       </div>
       <div class="modal-actions">
@@ -7893,11 +8022,14 @@
     if (!site) return;
 
     const chosenDay = document.getElementById('modalPropDay').value.trim();
-    const chosenRecWeek = document.getElementById('modalPropRecWeek').value.trim().toUpperCase();
+    const chosenWeek = document.getElementById('modalPropWeek').value.trim().toUpperCase();
     const chosenGarRun = document.getElementById('modalPropGarRun').value.trim();
+    const chosenGarFlag = document.getElementById('modalPropGarFlag').value.trim();
     const chosenRecRun = document.getElementById('modalPropRecRun').value.trim();
+    const chosenRecFlag = document.getElementById('modalPropRecFlag').value.trim();
     const chosenRecSummerRun = document.getElementById('modalPropRecSummerRun').value.trim();
     const chosenFogRun = document.getElementById('modalPropFogRun').value.trim();
+    const chosenFogFlag = document.getElementById('modalPropFogFlag').value.trim();
     const chosenFlags = document.getElementById('modalPropFlags').value.trim();
     const chosenLat = document.getElementById('modalPropLat').value.trim();
     const chosenLng = document.getElementById('modalPropLng').value.trim();
@@ -7905,12 +8037,15 @@
     const chosenComment = document.getElementById('modalRatingComment').value.trim();
 
     site.soloSchedule.day = chosenDay;
-    site.soloSchedule.weekLetter = chosenRecWeek;
-    site.soloSchedule.weekFormatted = `Week ${chosenRecWeek}`;
+    site.soloSchedule.weekLetter = chosenWeek;
+    site.soloSchedule.weekFormatted = `Week ${chosenWeek}`;
     site.soloSchedule.garRun = chosenGarRun;
+    site.soloSchedule.garFlag = chosenGarFlag;
     site.soloSchedule.recRun = chosenRecRun;
+    site.soloSchedule.recFlag = chosenRecFlag;
     site.soloSchedule.recSummerRun = chosenRecSummerRun;
     site.soloSchedule.fogRun = chosenFogRun;
+    site.soloSchedule.fogFlag = chosenFogFlag;
     site.runFlags = chosenFlags;
     site.lat = chosenLat;
     site.lng = chosenLng;
@@ -7920,8 +8055,10 @@
     logEdit({
       timestamp: new Date().toISOString(), editType: "PROPERTY_UPDATE",
       propId: site.propId, siteId: site.siteId, address: site.addressText,
-      day: chosenDay, weekLetter: chosenRecWeek, garRun: chosenGarRun, recRun: chosenRecRun,
-      recSummerRun: chosenRecSummerRun, fogRun: chosenFogRun, runFlags: chosenFlags, lat: chosenLat, lng: chosenLng
+      day: chosenDay, weekLetter: chosenWeek, garRun: chosenGarRun, garFlag: chosenGarFlag,
+      recRun: chosenRecRun, recFlag: chosenRecFlag,
+      recSummerRun: chosenRecSummerRun, fogRun: chosenFogRun, fogFlag: chosenFogFlag,
+      runFlags: chosenFlags, lat: chosenLat, lng: chosenLng
     });
     logEdit({
       timestamp: new Date().toISOString(), editType: "PROPERTY_RATING",
@@ -7933,7 +8070,7 @@
     await saveToDB("masterRecords", siteRecords);
     await saveToDB("masterEditsLog", masterEditsLog);
     window.__uPropTab = 'Property';
-    renderUnifiedPropertyPanel();
+    refreshUPropViews();
     triggerUniversalDataRefresh();
   };
 
@@ -7955,6 +8092,7 @@
   function openPropertyInspectModal(propId, tab) {
     const site = siteRecords.find(s => String(s.propId || s.siteId) === String(propId));
     if (!site) return;
+    window.__uPropInline = false;
     window.__uPropId = propId;
     window.__uPropTab = tab || 'Property';
     window.__uPropOpenBinKey = null;
@@ -7965,6 +8103,7 @@
   function promptEditBin(propId, streamKey, binIdx) {
     const site = siteRecords.find(s => String(s.propId || s.siteId) === String(propId));
     if (!site) return;
+    window.__uPropInline = false;
     window.__uPropId = propId;
     window.__uPropTab = streamKey;
     window.__uPropOpenBinKey = `${streamKey}_${binIdx}`;
@@ -7979,6 +8118,7 @@
     if (!site.soloStreams[streamKey]) site.soloStreams[streamKey] = [];
     // Stage the council bin as a pending "new" bin, pre-filled, so Save
     // just needs a tap rather than retyping the serial/size.
+    window.__uPropInline = false;
     window.__uPropId = propId;
     window.__uPropTab = streamKey;
     window.__uPropOpenBinKey = `${streamKey}_new`;
@@ -8221,15 +8361,20 @@
           site.soloSchedule.weekFormatted = `Week ${ed.weekLetter}`;
         }
         if (ed.garRun !== undefined) site.soloSchedule.garRun = ed.garRun;
+        if (ed.garFlag !== undefined) site.soloSchedule.garFlag = ed.garFlag;
         if (ed.recRun !== undefined) site.soloSchedule.recRun = ed.recRun;
+        if (ed.recFlag !== undefined) site.soloSchedule.recFlag = ed.recFlag;
         if (ed.recSummerRun !== undefined) site.soloSchedule.recSummerRun = ed.recSummerRun;
         if (ed.fogRun !== undefined) site.soloSchedule.fogRun = ed.fogRun;
+        if (ed.fogFlag !== undefined) site.soloSchedule.fogFlag = ed.fogFlag;
         if (ed.runFlags !== undefined) site.runFlags = ed.runFlags;
         if (ed.lat !== undefined) site.lat = ed.lat;
         if (ed.lng !== undefined) site.lng = ed.lng;
       } else if (ed.editType === "PROPERTY_RATING") {
         site.ratingStars = ed.ratingStars;
         site.ratingComment = ed.ratingComment;
+      } else if (ed.editType === "PROPERTY_BOUNDARY") {
+        site.boundary = ed.boundary ? JSON.parse(ed.boundary) : null;
       } else if (ed.editType === "STRAY_RESOLVED") {
         site.soloSchedule.garRun = ed.garRun;
         site.soloSchedule.recRun = ed.recRun;
@@ -8562,7 +8707,15 @@ window.addEventListener('DOMContentLoaded', async () => {
           garRun: r[7] || '',
           recRun: r[8] || '',
           recSummerRun: r[9] || '',
-          fogRun: r[10] || ''
+          fogRun: r[10] || '',
+          // ASSUMPTION: columns 11-13 were unused by the app until now — the
+          // master spreadsheet keeps per-stream flags separate from the
+          // general Property Flags/Notes column (18), so they're read from
+          // here. If these land in the wrong column for your sheet, just
+          // change the index below.
+          garFlag: r[11] || '',
+          recFlag: r[12] || '',
+          fogFlag: r[13] || ''
         },
         soloStreams: soloStreams,
         councilStreams: councilStreams,
@@ -8867,6 +9020,102 @@ window.addEventListener('DOMContentLoaded', async () => {
       renderMapData();
     }));
   }
+
+  // Property boundary: jumps to the map, zooms into this one property, and
+  // starts the same tap-to-draw flow the run Geofences use — see
+  // propertyBoundaryDrawPropId / finishGeofenceDraw's branch for it.
+  window.startPropertyBoundaryDraw = function(propId) {
+    const site = siteRecords.find(s => String(s.propId || s.siteId) === String(propId));
+    if (!site) return;
+    const p = gps(site.lat, site.lng);
+    if (!p) { customAlert('This property needs GPS coordinates set before you can draw a boundary.'); return; }
+    mapFocusPropId = String(propId);
+    switchMainTab('map');
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      if (leafletMap) leafletMap.setView([p.lat, p.lng], 21);
+      propertyBoundaryDrawPropId = String(propId);
+      geofenceDrawActive = true;
+      geofenceDrawPoints = [];
+      geofenceDrawName = (site.baseStreetLine || site.addressText || 'Property').trim();
+      geofenceDrawColor = '#38bdf8';
+      geofenceDrawRuns = ['ALL'];
+      setGeofenceEditingState(true);
+      window.setMapTopBarContext(
+        `${geofenceDrawName} boundary · 0 pts`,
+        [
+          {label:'Undo', icon:'↩️', onClick:()=>window.undoGeofenceDrawPoint()},
+          {label:'Finish', icon:'✔️', onClick:()=>window.finishGeofenceDraw(), variant:'primary'}
+        ],
+        ()=>window.cancelGeofenceDraw()
+      );
+      redrawGeofenceDraftLayer();
+    }));
+  };
+
+  // Best-effort auto-fill from OpenStreetMap: looks up the building
+  // footprint nearest this property's GPS pin via the public Overpass API
+  // and, if one's found, saves it straight in as the boundary (no drawing
+  // needed). Falls back to a plain message if OSM has nothing nearby or
+  // the request fails (e.g. no network).
+  window.autoDetectPropertyBoundary = async function(propId) {
+    const site = siteRecords.find(s => String(s.propId || s.siteId) === String(propId));
+    if (!site) return;
+    const p = gps(site.lat, site.lng);
+    if (!p) { customAlert('This property needs GPS coordinates set before boundary lookup will work.'); return; }
+
+    try {
+      const query = `[out:json][timeout:15];way(around:25,${p.lat},${p.lng})["building"];out geom;`;
+      const resp = await fetch('https://overpass-api.de/api/interpreter', {
+        method: 'POST',
+        body: query
+      });
+      if (!resp.ok) throw new Error('Overpass request failed');
+      const data = await resp.json();
+      const ways = (data.elements || []).filter(el => el.geometry && el.geometry.length >= 3);
+      if (!ways.length) { customAlert('No building outline found on OpenStreetMap near this property.'); return; }
+
+      let best = null, bestDist = Infinity;
+      ways.forEach(w => {
+        const clat = w.geometry.reduce((a, pt) => a + pt.lat, 0) / w.geometry.length;
+        const clng = w.geometry.reduce((a, pt) => a + pt.lon, 0) / w.geometry.length;
+        const d = getDistanceMeters(p.lat, p.lng, clat, clng);
+        if (d < bestDist) { bestDist = d; best = w; }
+      });
+
+      site.boundary = best.geometry.map(pt => [pt.lat, pt.lon]);
+      hasUnsyncedChanges = true; updateSyncButtonIcon();
+      logEdit({
+        timestamp: new Date().toISOString(), editType: "PROPERTY_BOUNDARY",
+        propId: site.propId, siteId: site.siteId, address: site.addressText,
+        boundary: JSON.stringify(site.boundary)
+      });
+      await saveToDB("masterRecords", siteRecords);
+      await saveToDB("masterEditsLog", masterEditsLog);
+      refreshUPropViews();
+      triggerUniversalDataRefresh();
+      customAlert(`Found a building outline (${site.boundary.length} points) on OpenStreetMap and saved it as this property's boundary.`);
+    } catch (err) {
+      console.error('OSM boundary lookup failed:', err);
+      customAlert("Couldn't reach OpenStreetMap to look up a boundary — check your connection, or use Draw Boundary instead.");
+    }
+  };
+
+  window.clearPropertyBoundary = async function(propId) {
+    const site = siteRecords.find(s => String(s.propId || s.siteId) === String(propId));
+    if (!site) return;
+    const ok = await customConfirm('Remove this property\'s saved boundary?');
+    if (!ok) return;
+    site.boundary = null;
+    hasUnsyncedChanges = true; updateSyncButtonIcon();
+    logEdit({
+      timestamp: new Date().toISOString(), editType: "PROPERTY_BOUNDARY",
+      propId: site.propId, siteId: site.siteId, address: site.addressText, boundary: ''
+    });
+    await saveToDB("masterRecords", siteRecords);
+    await saveToDB("masterEditsLog", masterEditsLog);
+    refreshUPropViews();
+    triggerUniversalDataRefresh();
+  };
 
   // Entry point from the Drive page's street card map button: narrows the
   // map to every property on that street (all streams, ignoring the
@@ -11279,9 +11528,17 @@ window.addEventListener('DOMContentLoaded', async () => {
       }).join('');
 
       const cleanStreetOnly = (site.baseStreetLine || site.addressText?.split(',')[0] || '').trim();
+      const cardPropId = String(site.propId || site.siteId);
+
+      // Tapping this card opens the property inspector inline, right where
+      // this card sits, instead of a floating popup — see
+      // buildUPropInlinePanelHtml / openUPropInline.
+      if (window.__uPropInline && window.__uPropId === cardPropId) {
+        return buildUPropInlinePanelHtml(site);
+      }
 
       return `
-        <div class="address-card" onclick="openPropertyInspectModal('${site.propId || site.siteId}')">
+        <div class="address-card" onclick="window.openUPropInline('${cardPropId}')">
           <div class="address-header-row">
             <div>
               <div class="address-line1">${cleanStreetOnly}</div>
@@ -11378,8 +11635,13 @@ window.addEventListener('DOMContentLoaded', async () => {
       flagBannerHtml = `<div class="street-mode-flag-banner mode-flag-cp">🚩 📍 COLLECTION POINT HOUSE</div>`;
     }
 
+    const driveCardPropId = String(site.propId || site.siteId);
+    if (window.__uPropInline && window.__uPropId === driveCardPropId) {
+      return buildUPropInlinePanelHtml(site);
+    }
+
     return `
-      <div class="address-card" onclick="openPropertyInspectModal('${site.propId || site.siteId}')">
+      <div class="address-card" onclick="window.openUPropInline('${driveCardPropId}')">
         <div class="address-header-row">
           <div>
             <div class="address-line1">${esc(clean(site.addressText) || cleanStreetOnly)}</div>
@@ -11614,27 +11876,18 @@ window.addEventListener('DOMContentLoaded', async () => {
     // active rather than only when sorting by distance.
     const streetDistanceCache = new Map();
     const nearestDistanceForStreet = (key) => {
-      const entry = nearestSiteForStreet(key);
-      return entry.dist;
-    };
-    // Same idea as nearestDistanceForStreet, but also keeps hold of which
-    // site was nearest - used so tapping a street's Houses tab can jump
-    // straight into that property's unified panel instead of making the
-    // driver pick it out of a full list of every house on the street.
-    const nearestSiteForStreet = (key) => {
       if (streetDistanceCache.has(key)) return streetDistanceCache.get(key);
-      let nearest = Infinity, nearestSite = null;
+      let nearest = Infinity;
       if (userCurrentLocation) {
         streetGroups.get(key).sites.forEach(site => {
           if (site.lat && site.lng && Number(site.lat) !== 0) {
             const d = getDistanceMeters(userCurrentLocation.lat, userCurrentLocation.lng, Number(site.lat), Number(site.lng));
-            if (d < nearest) { nearest = d; nearestSite = site; }
+            if (d < nearest) nearest = d;
           }
         });
       }
-      const entry = { dist: nearest, site: nearestSite };
-      streetDistanceCache.set(key, entry);
-      return entry;
+      streetDistanceCache.set(key, nearest);
+      return nearest;
     };
     if (driveStreetSortMode === 'nearby' && userCurrentLocation) {
       streetKeys.sort((a, b) => nearestDistanceForStreet(a) - nearestDistanceForStreet(b));
@@ -11654,9 +11907,7 @@ window.addEventListener('DOMContentLoaded', async () => {
       });
 
       const suburbLabel = getAddressSuburb(group.sites[0]);
-      const nearestEntry = nearestSiteForStreet(key);
-      const distM = nearestEntry.dist;
-      const nearestSitePropId = nearestEntry.site ? String(nearestEntry.site.propId || nearestEntry.site.siteId) : '';
+      const distM = nearestDistanceForStreet(key);
       const distLabel = Number.isFinite(distM)
         ? (distM > 999 ? `${(distM / 1000).toFixed(1)}km` : `${Math.round(distM)}m`)
         : '';
@@ -11713,17 +11964,7 @@ window.addEventListener('DOMContentLoaded', async () => {
 
       const tabsHtml = tabDefs.map(t => {
         const isOpen = openTab === t.key;
-        // Houses jumps straight to the nearest property's unified dark
-        // panel instead of expanding a pick-list of every house on the
-        // street (see nearestSitePropId above) - falls back to the old
-        // pick-list behaviour (with its expand/collapse arrow) if there's
-        // no GPS fix yet to know which house is nearest.
-        const isDirectHousesJump = t.key === 'houses' && !!nearestSitePropId;
-        const onClickAction = isDirectHousesJump
-          ? `openPropertyInspectModal('${nearestSitePropId}')`
-          : `window.toggleStreetTab('${key}', '${t.key}')`;
-        const arrowHtml = isDirectHousesJump ? '' : `<span class="street-tab-arrow">${isOpen ? '▲' : '▼'}</span>`;
-        return `<button type="button" class="street-tab-btn ${t.cls}${isOpen ? ' tab-open' : ''}" onclick="event.stopPropagation(); ${onClickAction}"><img class="icon-img" src="${t.icon}" alt=""><span class="street-tab-count">${t.count}</span>${arrowHtml}</button>`;
+        return `<button type="button" class="street-tab-btn ${t.cls}${isOpen ? ' tab-open' : ''}" onclick="event.stopPropagation(); window.toggleStreetTab('${key}', '${t.key}')"><img class="icon-img" src="${t.icon}" alt=""><span class="street-tab-count">${t.count}</span><span class="street-tab-arrow">${isOpen ? '▲' : '▼'}</span></button>`;
       }).join('');
 
       const panelsHtml = tabDefs.map(t => {
@@ -13553,18 +13794,42 @@ window.addEventListener('DOMContentLoaded', async () => {
     line-height:1.25;
   }
   .uprop-suburb{ font-size:12.5px; color:var(--uprop-text-dim); margin-top:1px; }
+
+  /* Inline embed: replaces the white .address-card entirely at its spot in
+     the search/drive list — same look as the old modal box, minus the
+     floating overlay chrome (no backdrop, no centring, sits in document
+     flow like any other list card). */
+  .uprop-inline-panel{
+    background:var(--uprop-bg); color:var(--uprop-text);
+    border:1px solid var(--uprop-border); border-radius:10px;
+    padding:14px 14px 16px; margin-bottom:10px;
+    box-shadow:0 5px 14px rgba(0,0,0,.35);
+  }
+  .uprop-inline-header{ display:flex; align-items:flex-start; justify-content:space-between; gap:10px; }
+  .uprop-inline-title{ color:var(--uprop-text); font-size:17px; line-height:1.25; margin:0; font-weight:800; }
+  .uprop-inline-panel .modal-close-btn{ color:var(--uprop-text-dim); }
+
   .uprop-tabs-row{ display:flex; align-items:flex-end; gap:3px; margin-top:10px; flex-wrap:wrap; }
   .uprop-tab{
-    display:inline-flex; align-items:center; gap:5px;
+    display:inline-flex; align-items:center; justify-content:center; gap:4px;
     border:none; border-radius:8px 8px 0 0;
-    padding:7px 10px; font-size:12.5px; font-weight:800; color:#fff;
+    padding:8px 13px; font-size:12.5px; font-weight:800; color:#fff;
     cursor:pointer; opacity:.62; filter:brightness(.82);
     box-shadow:0 -1px 4px rgba(0,0,0,.3);
     position:relative; z-index:2;
     transition:transform .15s ease, box-shadow .15s ease, opacity .15s ease, filter .15s ease;
     font-family:inherit;
   }
-  .uprop-tab .uprop-tab-run{ font-family:monospace; letter-spacing:.02em; font-size:11.5px; opacity:.9; margin-left:2px; }
+  /* Tabs are icon-only now (house.png / garbage.png / recycle.png /
+     fogo.png / settings.png) — bigger than the normal inline .icon-img use
+     and no right-margin since there's no label text following it.
+     Coloured tab backgrounds get a white-recoloured icon via the same
+     brightness(0) invert(1) trick used elsewhere in the app, except the
+     Recycling tab (yellow bg) which keeps the icon's natural colours so it
+     doesn't wash out against yellow, matching .street-tab-rec. */
+  .uprop-tab .icon-img{ width:19px; height:19px; margin-right:0; filter:brightness(0) invert(1); }
+  .uprop-tab-recycling .icon-img{ filter:none; }
+  .uprop-tab .uprop-tab-run{ font-family:monospace; letter-spacing:.02em; font-size:11.5px; opacity:.9; margin-left:1px; }
   .uprop-tab.uprop-tab-active{ opacity:1; filter:none; transform:scale(1.06); z-index:3; box-shadow:0 -3px 10px rgba(0,0,0,.5); }
   .uprop-tab-property{ background:#2563eb; }
   .uprop-tab-garbage{ background:#dc2626; }
@@ -13602,14 +13867,31 @@ window.addEventListener('DOMContentLoaded', async () => {
     padding:2px 6px; border-radius:6px; flex-shrink:0;
   }
   .uprop-pencil-btn:hover{ background:var(--uprop-bg); color:var(--uprop-text); }
-  .uprop-bin-edit{ margin-top:8px; padding-top:8px; border-top:1px dashed var(--uprop-border); }
+  /* Bin editor: side padding is intentionally dropped (padding-left/right:0)
+     so the fields run edge-to-edge inside the row — only the summary row
+     above (badge/serial/pencil) keeps the row's normal inset. */
+  .uprop-bin-edit{ margin-top:8px; padding:8px 0 0; border-top:1px dashed var(--uprop-border); }
+  .uprop-bin-row-editing{ padding-left:0; padding-right:0; }
+  .uprop-bin-row-editing .uprop-bin-row-top{ padding:0 10px; }
+  .uprop-bin-edit .form-group,
+  .uprop-bin-edit .modal-actions{ padding-left:10px; padding-right:10px; }
+  /* Two fields sharing one row (Stream+Size, Make+Lid) with no wasted gap. */
+  .uprop-bin-two-col{ display:flex; gap:8px; }
+  .uprop-bin-two-col > div{ flex:1; min-width:0; }
+  /* Stream select is colour-coded to match its stream, live-updated on
+     change (see window.uPropBinStreamChanged) rather than needing a
+     full re-render. */
+  .uprop-stream-sel-gar{ border-color:#dc2626 !important; box-shadow:inset 3px 0 0 #dc2626; }
+  .uprop-stream-sel-rec{ border-color:#ca8a04 !important; box-shadow:inset 3px 0 0 #ca8a04; }
+  .uprop-stream-sel-fog{ border-color:#16a34a !important; box-shadow:inset 3px 0 0 #16a34a; }
   .uprop-add-btn{
     width:100%; background:var(--uprop-bg); border:1px dashed var(--uprop-border); color:var(--uprop-text-dim);
     border-radius:8px; padding:9px; font-size:13px; font-weight:700; cursor:pointer; margin-top:2px;
   }
   .uprop-delete-btn{ background:#7f1d1d !important; color:#fff !important; border:1px solid #991b1b !important; }
   .uprop-content .form-group{ margin-bottom:8px; }
-  .uprop-content .form-group label{ color:var(--uprop-text-dim); font-size:12.5px; }
+  .uprop-content .form-group label{ color:var(--uprop-text-dim); font-size:12.5px; display:flex; align-items:center; gap:5px; }
+  .uprop-content .form-group label .icon-img{ margin-right:0; width:14px; height:14px; }
   .uprop-content .form-group input,
   .uprop-content .form-group select,
   .uprop-content .form-group textarea{
@@ -13621,8 +13903,32 @@ window.addEventListener('DOMContentLoaded', async () => {
   .uprop-content .stream-council-section{ border-top-color:var(--uprop-border); }
   .uprop-content .stream-council-title{ color:var(--uprop-text-dim); }
   .uprop-content .modal-actions{ border-top:none !important; padding-top:4px !important; margin-top:6px !important; }
+
+  /* Settings tab: run fields carry a left accent stripe in their stream's
+     colour, plus a per-run Flag input (separate from the general Property
+     Flags/Notes field, since the master spreadsheet keeps these split). */
+  .uprop-run-field{ border-left:4px solid var(--uprop-border); padding-left:8px; }
+  .uprop-run-field-gar{ border-left-color:#dc2626; }
+  .uprop-run-field-rec{ border-left-color:#ca8a04; }
+  .uprop-run-field-summer{ border-left-color:#f59e0b; }
+  .uprop-run-field-fog{ border-left-color:#16a34a; }
+  .uprop-flag-input{ margin-top:6px; }
+
+  /* Flat, edge-to-edge action buttons (GPS "Use Live GPS" / "Choose on
+     Map", boundary draw/auto-detect) — no side padding, and a pressed-in
+     look on tap instead of the old amber .stray-fix-btn pill style. */
+  .uprop-flat-btn-row{ display:flex; gap:6px; margin-top:6px; }
+  .uprop-flat-btn{
+    flex:1; display:flex; align-items:center; justify-content:center; gap:5px;
+    background:var(--uprop-surface-2); border:1px solid var(--uprop-border); color:var(--uprop-text);
+    border-radius:6px; padding:9px 0; font-size:12.5px; font-weight:700; cursor:pointer;
+    transition:transform .08s ease, background .08s ease;
+  }
+  .uprop-flat-btn:active{ transform:translateY(2px); background:var(--uprop-bg); }
+  .uprop-flat-btn .icon-img{ margin-right:0; }
+
   @media (max-width:420px){
-    .uprop-tab{ padding:6px 8px; font-size:11.5px; }
+    .uprop-tab{ padding:7px 10px; }
   }
 
 </style>
