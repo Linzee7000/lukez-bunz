@@ -11614,18 +11614,27 @@ window.addEventListener('DOMContentLoaded', async () => {
     // active rather than only when sorting by distance.
     const streetDistanceCache = new Map();
     const nearestDistanceForStreet = (key) => {
+      const entry = nearestSiteForStreet(key);
+      return entry.dist;
+    };
+    // Same idea as nearestDistanceForStreet, but also keeps hold of which
+    // site was nearest - used so tapping a street's Houses tab can jump
+    // straight into that property's unified panel instead of making the
+    // driver pick it out of a full list of every house on the street.
+    const nearestSiteForStreet = (key) => {
       if (streetDistanceCache.has(key)) return streetDistanceCache.get(key);
-      let nearest = Infinity;
+      let nearest = Infinity, nearestSite = null;
       if (userCurrentLocation) {
         streetGroups.get(key).sites.forEach(site => {
           if (site.lat && site.lng && Number(site.lat) !== 0) {
             const d = getDistanceMeters(userCurrentLocation.lat, userCurrentLocation.lng, Number(site.lat), Number(site.lng));
-            if (d < nearest) nearest = d;
+            if (d < nearest) { nearest = d; nearestSite = site; }
           }
         });
       }
-      streetDistanceCache.set(key, nearest);
-      return nearest;
+      const entry = { dist: nearest, site: nearestSite };
+      streetDistanceCache.set(key, entry);
+      return entry;
     };
     if (driveStreetSortMode === 'nearby' && userCurrentLocation) {
       streetKeys.sort((a, b) => nearestDistanceForStreet(a) - nearestDistanceForStreet(b));
@@ -11645,7 +11654,9 @@ window.addEventListener('DOMContentLoaded', async () => {
       });
 
       const suburbLabel = getAddressSuburb(group.sites[0]);
-      const distM = nearestDistanceForStreet(key);
+      const nearestEntry = nearestSiteForStreet(key);
+      const distM = nearestEntry.dist;
+      const nearestSitePropId = nearestEntry.site ? String(nearestEntry.site.propId || nearestEntry.site.siteId) : '';
       const distLabel = Number.isFinite(distM)
         ? (distM > 999 ? `${(distM / 1000).toFixed(1)}km` : `${Math.round(distM)}m`)
         : '';
@@ -11702,7 +11713,17 @@ window.addEventListener('DOMContentLoaded', async () => {
 
       const tabsHtml = tabDefs.map(t => {
         const isOpen = openTab === t.key;
-        return `<button type="button" class="street-tab-btn ${t.cls}${isOpen ? ' tab-open' : ''}" onclick="event.stopPropagation(); window.toggleStreetTab('${key}', '${t.key}')"><img class="icon-img" src="${t.icon}" alt=""><span class="street-tab-count">${t.count}</span><span class="street-tab-arrow">${isOpen ? '▲' : '▼'}</span></button>`;
+        // Houses jumps straight to the nearest property's unified dark
+        // panel instead of expanding a pick-list of every house on the
+        // street (see nearestSitePropId above) - falls back to the old
+        // pick-list behaviour (with its expand/collapse arrow) if there's
+        // no GPS fix yet to know which house is nearest.
+        const isDirectHousesJump = t.key === 'houses' && !!nearestSitePropId;
+        const onClickAction = isDirectHousesJump
+          ? `openPropertyInspectModal('${nearestSitePropId}')`
+          : `window.toggleStreetTab('${key}', '${t.key}')`;
+        const arrowHtml = isDirectHousesJump ? '' : `<span class="street-tab-arrow">${isOpen ? '▲' : '▼'}</span>`;
+        return `<button type="button" class="street-tab-btn ${t.cls}${isOpen ? ' tab-open' : ''}" onclick="event.stopPropagation(); ${onClickAction}"><img class="icon-img" src="${t.icon}" alt=""><span class="street-tab-count">${t.count}</span>${arrowHtml}</button>`;
       }).join('');
 
       const panelsHtml = tabDefs.map(t => {
