@@ -1448,6 +1448,20 @@
         0 5px 10px rgba(15,23,42,0.2);
       cursor: pointer;
     }
+    /* Bin rows inside the drive/search .address-card now reuse the map's
+       Next Bin Box markup (buildBinsAtAddress / .next-bin-row), which is
+       designed to sit on a dark surface — wrap it in one so the coloured
+       rows read the same here as they do on the map, even though the card
+       itself is still the light address-card frame. gap:0 so the rows sit
+       flush against each other (only the rows' own border-bottom divides
+       them), matching the map widget instead of leaving light gaps between
+       them from the base .hud-bin-container's flex gap. */
+    .address-card .hud-bin-container {
+      background: var(--slate-800, #1e293b);
+      border-radius: 8px;
+      overflow: hidden;
+      gap: 0;
+    }
     .address-card.flagged-purple {
       background: linear-gradient(180deg, #faf5ff 0%, #ecdcfc 100%);
       border: 1px solid #c084fc;
@@ -3932,7 +3946,7 @@
   const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbwYUYnOa8D5qFiLpWP5RyAmdSg8q7kRTzHWa7HlORxIgcshIyxwLM7HR0jsXGkkjGHfCA/exec";
 
 /* Global Bin Builder (Defined upfront to prevent startup TypeError) */
-  window.buildBinsAtAddress = function(site, filterByActiveStream = true, isMapTelemetry = false, forceStreams = null) {
+  window.buildBinsAtAddress = function(site, filterByActiveStream = true, isMapTelemetry = false, forceStreams = null, showEditPencil = false) {
     if (!site) return '';
 
     const currentStreamFilter = (typeof activeFilterStream !== 'undefined' && activeFilterStream ? activeFilterStream : '').toLowerCase().trim();
@@ -3997,6 +4011,20 @@
               const serialLabel = b.serial || '—';
               const addrForModal = escape(site.addressText || '');
 
+              // Edit pencil: only offered when displaySources is actually the
+              // solo (editable) dataset — the uProp bin editor always edits
+              // soloStreams, so a bin only being shown from councilStreams
+              // (activeFilterDataSource === 'council') has nothing to open
+              // straight into. Matched by serial rather than assumed to share
+              // the same array index, since solo/council bin lists for a
+              // stream aren't guaranteed to be in the same order.
+              const soloBinsForPencil = (site.soloStreams && site.soloStreams[st.key]) || [];
+              const soloIdxForPencil = soloBinsForPencil.findIndex(sb => String(sb.serial || '').toUpperCase() === String(b.serial || '').toUpperCase());
+              const canEditPencil = showEditPencil && soloIdxForPencil > -1;
+              const pencilHtml = canEditPencil
+                ? `<button type="button" onclick="event.stopPropagation(); window.openUPropBinInline('${propId}', '${st.key}', ${soloIdxForPencil})" style="background:none; border:none; font-size:16px; cursor:pointer; padding:0 2px;" title="Edit bin">✏️</button>`
+                : '';
+
               return `
                 <div style="display:flex; align-items:center; justify-content:space-between; ${idx < bins.length - 1 ? 'border-bottom:1px solid rgba(255,255,255,0.2);' : ''} padding:3px 6px; position:relative; ${hasRem ? `background:rgba(147,51,234,0.5); border-radius:6px; ${isDue ? 'animation: rec-light-pulse 1.6s ease-in-out infinite;' : ''}` : ''}">
                   <span class="bin-serial-tap-target" style="display:flex; align-items:center; gap:6px; min-width:0; flex:1 1 auto; overflow:hidden; ${hasRem ? 'cursor:pointer;' : ''}" title="${esc(remTitle)}" ${hasRem ? `onclick="event.stopPropagation(); window.toggleBinReminderMenu(event, '${remMenuId}')"` : ''}>
@@ -4011,6 +4039,7 @@
                       ⏰
                     </button>
                     <button type="button" onclick="event.stopPropagation(); window.toggleBinIssueMenu(event, '${menuId}')" style="background:none; border:none; font-size:17px; cursor:pointer; padding:0 2px;">⚠️</button>
+                    ${pencilHtml}
                   </div>
 
                   ${hasRem ? `
@@ -7575,6 +7604,20 @@
     window.__uPropId = propId;
     window.__uPropTab = tab || 'Property';
     window.__uPropOpenBinKey = null;
+    window.__uPropPendingCouncilBin = null;
+    window.__uPropInline = true;
+    refreshUPropViews();
+  };
+
+  // Same idea as openUPropInline, but jumps straight past the tab AND into
+  // that specific bin's editor already open — used by the ✏️ pencil next to
+  // a serial in the coloured bin rows (see buildBinsAtAddress's
+  // showEditPencil), so tapping it goes address -> serial fields in one tap
+  // instead of address -> tab -> pencil -> fields.
+  window.openUPropBinInline = function(propId, streamKey, idx) {
+    window.__uPropId = propId;
+    window.__uPropTab = streamKey;
+    window.__uPropOpenBinKey = `${streamKey}_${idx}`;
     window.__uPropPendingCouncilBin = null;
     window.__uPropInline = true;
     refreshUPropViews();
@@ -11570,8 +11613,6 @@ window.addEventListener('DOMContentLoaded', async () => {
 
     let hasAnyBins = false;
     const eligibleStreamsList = getDriveEligibleStreams(site);
-    const eligibleDriveStreams = new Set(eligibleStreamsList.map(x => x.binStream));
-    const displaySources = activeFilterDataSource === 'council' ? (site.councilStreams || {}) : (site.soloStreams || {});
 
     // Run-number badges - same hdr-run-badge style/colours used on the Map
     // page (property inspect modal, live telemetry), so a driver sees the
@@ -11595,34 +11636,15 @@ window.addEventListener('DOMContentLoaded', async () => {
       return '';
     }).join('');
 
-    const binPills = SOLO_STREAMS.map(st => {
-      if (!eligibleDriveStreams.has(st.key)) return '';
-      const bins = displaySources[st.key] || [];
-      if (bins.length === 0) return '';
-      hasAnyBins = true;
-
-      const themeClass = st.key === 'Garbage' ? 'hud-bin-gar' : (st.key === 'Recycling' ? 'hud-bin-rec' : 'hud-bin-fog');
-
-      return bins.map((b, binIndex) => {
-        const menuId = `binIssue_${site.propId || site.siteId}_${st.key}_${binIndex}`.replace(/[^a-zA-Z0-9_]/g, '_');
-        return `
-          <div class="hud-bin-item ${themeClass}">
-            <div class="hud-bin-stream">
-              <span class="hud-bin-icon">${st.icon}</span>
-              <span class="hud-bin-size">${b.size || '240L'}</span>
-            </div>
-            <div class="hud-bin-main">
-              <span class="hud-serial-large">${b.serial || '—'}</span>
-              <button class="bin-face-btn" title="Bin options" onclick="toggleBinIssueMenu(event, '${menuId}')">🙂</button>
-            </div>
-            <div class="bin-issue-menu" id="${menuId}">
-              ${['Contaminated','Heavy','Overfull','Prior spill','Jammed'].map(issue =>
-                `<button data-issue="${issue}" onclick="setBinIssue(event, '${menuId}', '${issue}')">${issue}</button>`
-              ).join('')}
-            </div>
-          </div>`;
-      }).join('');
-    }).join('');
+    // Bin rows: reuse the exact same builder/markup as the Next Bin Box on
+    // the map screen (same coloured stream chip + gradient serial row,
+    // reminder/hazard buttons) instead of the old white hud-bin-item pills,
+    // so this list card looks identical to that widget. `true` at the end
+    // turns on the ✏️ edit pencil per row (off by default so the live map
+    // telemetry banner, which calls buildBinsAtAddress elsewhere, is
+    // unaffected).
+    const binPills = window.buildBinsAtAddress(site, true, false, null, true);
+    hasAnyBins = Boolean(binPills);
 
     const streetMode = activeStreetModeForSite(site);
     const cp = activeCollectionPointForSite(site);
@@ -11662,7 +11684,7 @@ window.addEventListener('DOMContentLoaded', async () => {
         </div>
         ${flagBannerHtml}
         <div class="hud-bin-container">
-          ${hasAnyBins ? binPills : '<span style="color:#94a3b8; font-style:italic; font-size:13px;">no bins</span>'}
+          ${hasAnyBins ? binPills : '<span style="display:block; padding:8px 10px; color:#94a3b8; font-style:italic; font-size:13px;">no bins</span>'}
         </div>
       </div>
     `;
