@@ -966,7 +966,7 @@
       border-radius: 0 0 10px 10px;
       overflow: hidden;
       gap: 0;
-      margin-top: -4px;
+      margin-top: 0;
     }
     /* Same overrides again, !important, so the separate light/dark-mode
        toggle (body.dark-mode, which !important-overrides .address-card
@@ -8233,10 +8233,20 @@
   function renderUPropSettingsTab(site) {
     const sch = site.soloSchedule || {};
     const garRuns = new Set(), recRuns = new Set(), recSummerRuns = new Set(), fogRuns = new Set();
+    // Normal (non-summer) Recycling runs never go above 228 - anything
+    // higher stored in the recRun field is actually a Summer Recycling run
+    // (the two only get told apart by run number, not always by the word
+    // "summer" being present), so it belongs in the Summer picklist, not
+    // this one. Without this numeric check those stray high run numbers
+    // were leaking into the regular Recycling dropdown.
+    const isGenuineRecRun = (v) => {
+      const n = parseInt(v, 10);
+      return isNaN(n) || n <= 228;
+    };
     siteRecords.forEach(s => {
       const ss = s.soloSchedule;
       if (ss.garRun && !ss.garRun.toLowerCase().includes('summer')) garRuns.add(ss.garRun.trim());
-      if (ss.recRun && !ss.recRun.toLowerCase().includes('summer')) recRuns.add(ss.recRun.trim());
+      if (ss.recRun && !ss.recRun.toLowerCase().includes('summer') && isGenuineRecRun(ss.recRun)) recRuns.add(ss.recRun.trim());
       if (ss.recSummerRun) recSummerRuns.add(ss.recSummerRun.trim());
       if (ss.fogRun && !ss.fogRun.toLowerCase().includes('summer')) fogRuns.add(ss.fogRun.trim());
     });
@@ -8281,7 +8291,7 @@
           <div class="uprop-run-box uprop-run-box-rec" title="Recycling run - tap to change">
             <img class="icon-img" src="recycle.png" alt="Recycling">
             <select id="modalPropRecRun" class="uprop-run-box-select">${opt(recRuns, sch.recRun)}</select>
-            <span class="uprop-run-box-week">${esc((sch.weekLetter || 'A').toUpperCase())}</span>
+            <span class="uprop-run-box-week">(${esc((sch.weekLetter || 'A').toUpperCase())})</span>
           </div>
           <div class="uprop-run-box uprop-run-box-summer" title="Summer Recycling run - tap to change">
             <img class="icon-img" src="summer.png" alt="Summer Recycling">
@@ -8847,7 +8857,14 @@ let siteReminders = JSON.parse(localStorage.getItem('siteReminders') || '{}');
     if (window.__driveCardSettingsOpen.has(propId)) {
       window.__driveCardSettingsOpen.delete(propId);
     } else {
+      // Opening Settings closes every other stream tab on this card first,
+      // so the settings panel is the only thing showing below the tabs row
+      // - right at the top of the card's content - instead of appearing
+      // underneath whichever serial lists were already expanded.
       window.__driveCardSettingsOpen.add(propId);
+      window.__driveCardStreamHidden.set(propId, new Set(STREAM_TAB_DEFS.map(sd => sd.key)));
+      window.__driveCardStreamForced.set(propId, new Set());
+      window.__driveCardStreamPriority.delete(propId);
     }
     if (typeof updateDriverHud === 'function') updateDriverHud();
   };
@@ -14364,30 +14381,40 @@ window.addEventListener('DOMContentLoaded', async () => {
      which is exactly where past filter bugs came from. */
   .uprop-run-boxes{ display:grid; grid-template-columns:repeat(4, 1fr); gap:6px; }
   .uprop-run-box{
-    position:relative; display:flex; flex-direction:column; align-items:center; justify-content:center;
-    gap:4px; border-radius:8px; padding:8px 2px 7px;
+    position:relative; display:flex; flex-direction:row; flex-wrap:nowrap; align-items:center; justify-content:center;
+    gap:3px; border-radius:8px; padding:9px 3px;
     box-shadow:0 2px 6px rgba(0,0,0,.3);
+    min-width:0;
   }
-  .uprop-run-box .icon-img{ width:18px; height:18px; filter:brightness(0) invert(1); pointer-events:none; }
+  .uprop-run-box .icon-img{ width:15px; height:15px; flex:0 0 auto; filter:brightness(0) invert(1); pointer-events:none; }
   .uprop-run-box-gar{ background:#dc2626; }
   .uprop-run-box-rec{ background:#eab308; }
   .uprop-run-box-rec .icon-img{ filter:none; }
   .uprop-run-box-summer{ background:#f59e0b; }
   .uprop-run-box-fog{ background:#16a34a; }
+  /* !important throughout: this sits inside a .form-group, and the
+     generic .form-group select / .uprop-content .form-group select rules
+     above (which give every other field its dark navy fill + border) are
+     more specific than a single class selector and were winning over this
+     one - the run number was rendering inside its own dark pill instead
+     of directly on the coloured box. */
   .uprop-run-box-select{
-    appearance:none; -webkit-appearance:none; -moz-appearance:none;
-    background:transparent; border:none; outline:none; margin:0; padding:0 4px;
-    width:100%; color:#fff; font-weight:800; font-size:14px; font-family:inherit;
+    appearance:none !important; -webkit-appearance:none !important; -moz-appearance:none !important;
+    color-scheme:light;
+    background:transparent !important; border:none !important; outline:none !important; margin:0 !important; padding:0 !important;
+    width:auto !important; min-width:0; flex:0 1 auto; color:#fff !important; font-weight:800; font-size:13px; font-family:inherit;
     text-align:center; text-align-last:center; cursor:pointer;
   }
-  .uprop-run-box-rec .uprop-run-box-select{ color:#111; }
+  .uprop-run-box-rec .uprop-run-box-select{ color:#111 !important; }
   /* The dropdown's own popup list is native chrome (not styled by the box
      colours above) - force dark text on it explicitly so options stay
      legible regardless of the OS/browser's default popup theme. */
   .uprop-run-box-select option{ color:#111; background:#fff; }
+  /* Week-letter suffix now sits inline after the run number, on the same
+     line as the icon and the run - e.g. "220 (A)" - instead of floating
+     as a separate corner badge over the top of the box. */
   .uprop-run-box-week{
-    position:absolute; top:3px; right:4px; font-size:10px; font-weight:800; color:#111;
-    background:rgba(255,255,255,.6); border-radius:4px; padding:0 3px; line-height:1.4;
+    flex:0 0 auto; font-size:11px; font-weight:800; color:#111; opacity:.85;
   }
 
   /* Flat, edge-to-edge action buttons (GPS "Use Live GPS" / "Choose on
