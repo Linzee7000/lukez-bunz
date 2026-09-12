@@ -8767,6 +8767,25 @@ let siteReminders = JSON.parse(localStorage.getItem('siteReminders') || '{}');
   // that card, so its serial rows can be sorted to the top of the list
   // (see renderDriveAddressCard / buildBinsAtAddress's priorityStreamKey).
   window.__driveCardStreamPriority = window.__driveCardStreamPriority || new Map();
+  // propId -> whether this card's Settings tab (property info, collection
+  // day/week, runs, rating, GPS, boundary - see renderUPropSettingsTab) is
+  // currently expanded inline below the tabs row. This is now the ONLY
+  // place that content is ever shown - tapping the address used to open a
+  // separate full-panel popup (openUPropInline) with a different look;
+  // that's no longer wired up from this card so there's one single
+  // presentation of property settings, matching the same inline-under-the-
+  // tabs style already used for editing an individual bin (see
+  // toggleDriveBinEditorInline / openBinEditorHtml above).
+  window.__driveCardSettingsOpen = window.__driveCardSettingsOpen || new Set();
+
+  window.toggleDriveCardSettings = function(propId) {
+    if (window.__driveCardSettingsOpen.has(propId)) {
+      window.__driveCardSettingsOpen.delete(propId);
+    } else {
+      window.__driveCardSettingsOpen.add(propId);
+    }
+    if (typeof updateDriverHud === 'function') updateDriverHud();
+  };
 
   function driveCardShownStreams(site) {
     const propId = String(site.propId || site.siteId || '');
@@ -8816,7 +8835,15 @@ let siteReminders = JSON.parse(localStorage.getItem('siteReminders') || '{}');
       ? (site.councilStreams || {})
       : (site.soloStreams || {});
     const eligible = STREAM_TAB_DEFS.filter(sd => (displaySources[sd.key] || []).length > 0);
-    if (!eligible.length) return '';
+    // Settings is always offered (every property has PID/SID, collection
+    // day, runs, rating, GPS etc. even with no bins loaded yet), so the
+    // row never disappears entirely the way the old stream-only row did.
+    const settingsOpen = window.__driveCardSettingsOpen && window.__driveCardSettingsOpen.has(propId);
+    const settingsTabHtml = `
+        <button type="button" class="map-stream-tab${settingsOpen ? ' tab-front' : ''}" style="background:#475569;" onclick="event.stopPropagation(); window.toggleDriveCardSettings('${propId}')" title="${settingsOpen ? 'Hide property settings' : 'Show property settings'}">
+          <img class="icon-img" src="settings.png" alt="">
+        </button>`;
+    if (!eligible.length) return `<div class="map-stream-tabs-row">${settingsTabHtml}</div>`;
     const currentStreamFilter = (typeof activeFilterStream !== 'undefined' && activeFilterStream ? activeFilterStream : '').toLowerCase().trim();
     const filterTargetKey = (currentStreamFilter === 'summerrecycling') ? 'recycling' : currentStreamFilter;
     // Whichever tab was tapped most recently on THIS card wins over the
@@ -8843,7 +8870,7 @@ let siteReminders = JSON.parse(localStorage.getItem('siteReminders') || '{}');
           <span class="map-stream-tab-run">${esc(run)}</span>
           <span class="map-stream-tab-arrow">${arrow}</span>
         </button>`;
-    }).join('')}</div>`;
+    }).join('')}${settingsTabHtml}</div>`;
   }
 
   // Toggle Bin Issue Dropdown
@@ -11939,20 +11966,21 @@ window.addEventListener('DOMContentLoaded', async () => {
     }
 
     const driveCardPropId = String(site.propId || site.siteId);
-    if (window.__uPropInline && window.__uPropId === driveCardPropId) {
-      return buildUPropInlinePanelHtml(site);
-    }
 
-    // Land straight on the bin-stream tab that's already filtered (whatever
-    // stream the driver is currently running) instead of the generic
-    // Property tab, so tapping the card goes address -> serial + pencil in
-    // one step. SummerRecycling shares the uProp Recycling tab (there's no
-    // separate uProp tab for it). Falls back to the Property tab when no
-    // single stream is active (activeFilterStream === '' / "All").
-    const uPropInitialTab = activeFilterStream === 'SummerRecycling' ? 'Recycling' : (activeFilterStream || '');
+    // Property settings (PID/SID, collection day & week, runs, rating,
+    // GPS, boundary - see renderUPropSettingsTab) now render inline right
+    // here under this same card's tabs row, toggled by the gear tab (see
+    // buildDriveCardStreamTabsRow / toggleDriveCardSettings) - the exact
+    // same content and markup the old separate openUPropInline popup used
+    // to show in a completely different-looking panel. There's only ever
+    // one place this shows now.
+    const settingsOpen = window.__driveCardSettingsOpen && window.__driveCardSettingsOpen.has(driveCardPropId);
+    const settingsPanelHtml = settingsOpen
+      ? `<div class="uprop-content uprop-content-settings" style="margin:0; border-top-width:1px; border-radius:0;" onclick="event.stopPropagation();">${renderUPropSettingsTab(site)}</div>`
+      : '';
 
     return `
-      <div class="address-card" onclick="window.openUPropInline('${driveCardPropId}', '${uPropInitialTab}')">
+      <div class="address-card" onclick="window.toggleDriveCardSettings('${driveCardPropId}')">
         <div class="address-header-row">
           <div>
             <div class="address-line1">${esc(cleanStreetOnly)}</div>
@@ -11968,6 +11996,7 @@ window.addEventListener('DOMContentLoaded', async () => {
         <div class="hud-bin-container">
           ${hasAnyBins ? binPills : '<span style="display:block; padding:8px 10px; color:#94a3b8; font-style:italic; font-size:13px;">no bins</span>'}
         </div>
+        ${settingsPanelHtml}
       </div>
     `;
   }
@@ -14173,6 +14202,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   .uprop-content-gar{ border-top-color:#dc2626; }
   .uprop-content-rec{ border-top-color:#eab308; }
   .uprop-content-fog{ border-top-color:#16a34a; }
+  .uprop-content-settings{ border-top-color:#475569; }
   .uprop-row{ display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:8px; }
   .uprop-meta-line{ color:var(--uprop-text-dim); font-size:12.5px; }
   .uprop-map-btn{
