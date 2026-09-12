@@ -955,7 +955,7 @@
        instead of sitting inset while the rows run edge-to-edge. */
     .street-group-body .address-card .map-stream-tabs-row {
       margin-top: 8px;
-      padding-left: 0;
+      padding-left: 6px;
       padding-right: 0;
     }
     /* Tuck the serial list up under the tabs' bottom edge instead of
@@ -4665,6 +4665,42 @@
     return `Next: ${nextDate.toLocaleDateString('en-AU', options)} ${streams.join(' ')}`;
   }
 
+  // "Next collection" label for one specific stream on the condensed
+  // Settings tab (see renderUPropSettingsTab) - "Garbage" collects every
+  // week on sch.day; Recycling/Summer Recycling/FOGO run fortnightly,
+  // alternating weeks the same way buildNextBinDaySummaryHtml works out
+  // which of Recycling/FOGO is on for a given date (Summer Recycling
+  // shares Recycling's parity - it's the same truck's seasonal name).
+  function nextStreamCollectionLabel(streamKey, sch) {
+    if (!sch || !sch.day) return '—';
+    const daysMap = { 'sunday': 0, 'monday': 1, 'tuesday': 2, 'wednesday': 3, 'thursday': 4, 'friday': 5, 'saturday': 6 };
+    const targetDay = daysMap[String(sch.day).toLowerCase()];
+    if (targetDay === undefined) return '—';
+
+    const today = new Date();
+    const currentDay = today.getDay();
+    let daysAhead = (targetDay - currentDay + 7) % 7;
+    if (daysAhead === 0) daysAhead = 7;
+    let candidate = new Date(today);
+    candidate.setDate(today.getDate() + daysAhead);
+
+    const pad = n => String(n).padStart(2, '0');
+    const fmt = d => `${d.toLocaleDateString('en-AU', { weekday: 'short' })} ${pad(d.getDate())}/${pad(d.getMonth() + 1)}`;
+
+    if (streamKey === 'Garbage') return fmt(candidate);
+
+    const cleanSiteWeek = (sch.weekLetter || 'A').toUpperCase();
+    const activeRecycleWeek = getActiveRecycleWeekForDate(candidate);
+    const activeFogoWeek = activeRecycleWeek === 'A' ? 'B' : 'A';
+    const targetWeek = streamKey === 'FOGO' ? activeFogoWeek : activeRecycleWeek;
+    if (cleanSiteWeek !== targetWeek) {
+      candidate = new Date(candidate);
+      candidate.setDate(candidate.getDate() + 7);
+    }
+    return fmt(candidate);
+  }
+
+
   // "Next bin day" summary for a property's search-result card: the next
   // Garbage day/date (ddd dd/mm), plus — only when the site has both
   // Recycling and FOGO — the OTHER of the two the following week (they
@@ -8005,11 +8041,19 @@
     if (icon) icon.src = uPropStreamIcon(sel.value);
   };
 
+  // Which site.soloSchedule field holds the access/run flag (e.g. "Locked
+  // gate") for a given stream - shared by the bin editor (where it's now
+  // edited, see renderUPropBinEditor/saveUPropBin) since the flag itself
+  // is still a per-run property, not a per-bin one.
+  const UPROP_STREAM_FLAG_FIELD = { Garbage: 'garFlag', Recycling: 'recFlag', FOGO: 'fogFlag' };
+
   function renderUPropBinEditor(site, streamKey, idx, b) {
     b = b || {};
     const isNew = idx < 0;
     const lidDefault = b.lidColour || (streamKey === 'Garbage' ? 'Red' : streamKey === 'Recycling' ? 'Yellow' : 'Green');
     const sizeDefault = b.size || (streamKey === 'Garbage' ? '120L' : '240L');
+    const flagField = UPROP_STREAM_FLAG_FIELD[streamKey];
+    const runFlagVal = (flagField && site.soloSchedule && site.soloSchedule[flagField]) || '';
     return `
       <div class="uprop-bin-edit">
         <input type="hidden" id="modalSitePropId" value="${esc(site.propId || site.siteId)}">
@@ -8056,6 +8100,10 @@
           <input type="text" id="modalBinNotes" placeholder="e.g. Cracked lid, ask for replacement..." value="${esc(b.notes||'')}">
         </div>
         <div class="form-group">
+          <label>Run Flag (e.g. Locked gate)</label>
+          <input type="text" id="modalBinRunFlag" placeholder="e.g. Locked gate" value="${esc(runFlagVal)}">
+        </div>
+        <div class="form-group">
           <label>Kerbside Bin Flip GPS Coordinates</label>
           <div style="display:flex; gap:6px;">
             <input type="text" id="modalBinLat" placeholder="Latitude" value="${esc(b.lat||'')}">
@@ -8099,6 +8147,8 @@
     const newLid = document.getElementById('modalBinLidSelect').value;
     const newSerial = document.getElementById('modalBinSerial').value.trim().toUpperCase();
     const newNotes = document.getElementById('modalBinNotes').value.trim();
+    const newRunFlagEl = document.getElementById('modalBinRunFlag');
+    const newRunFlag = newRunFlagEl ? newRunFlagEl.value.trim() : '';
     const newLat = document.getElementById('modalBinLat').value.trim();
     const newLng = document.getElementById('modalBinLng').value.trim();
     const site = siteRecords.find(s => String(s.propId || s.siteId) === String(propId));
@@ -8121,12 +8171,21 @@
       site.soloStreams[newStreamKey].push(updatedBinData);
     }
 
+    // The run flag (e.g. "Locked gate") lives on the property's schedule,
+    // one per stream - not per individual bin - so it's saved against
+    // whichever stream the bin now belongs to (see UPROP_STREAM_FLAG_FIELD),
+    // same field the old Settings-tab flag input used to write to.
+    const newFlagField = UPROP_STREAM_FLAG_FIELD[newStreamKey];
+    if (newFlagField && site.soloSchedule) {
+      site.soloSchedule[newFlagField] = newRunFlag;
+    }
+
     logEdit({
       timestamp: new Date().toISOString(),
       editType: binIdx >= 0 ? "BIN_EDIT" : "BIN_ADDED",
       propId: site.propId, siteId: site.siteId, address: site.addressText,
       origStream: origStreamKey, stream: newStreamKey, serial: newSerial,
-      size: newSize, make: newType, lidColour: newLid, notes: newNotes, lat: newLat, lng: newLng
+      size: newSize, make: newType, lidColour: newLid, notes: newNotes, runFlag: newRunFlag, lat: newLat, lng: newLng
     });
     hasUnsyncedChanges = true; updateSyncButtonIcon();
 
@@ -8165,7 +8224,12 @@
 
   // Inline replacement for the old separate "Edit Property & Runs" modal
   // and the old separate "Rate Property" modal — collection day, every
-  // run + week, flags, star rating and GPS all together on one Settings tab.
+  // run + a next-collection date, star rating and GPS all together on one
+  // condensed Settings tab. Per-run access flags (e.g. "Locked gate") used
+  // to live here too, one flag input per stream - they've moved to the
+  // bin editor instead (see renderUPropBinEditor / saveUPropBin), since
+  // that's the screen a driver is actually in when they need to note gate
+  // access for a stream's bin.
   function renderUPropSettingsTab(site) {
     const sch = site.soloSchedule || {};
     const garRuns = new Set(), recRuns = new Set(), recSummerRuns = new Set(), fogRuns = new Set();
@@ -8207,24 +8271,30 @@
           </select>
         </div>
       </div>
-      <div class="form-group uprop-run-field uprop-run-field-gar">
-        <label><img class="icon-img" src="garbage.png" alt="">Garbage Run</label>
-        <select id="modalPropGarRun" class="main-search-input" style="font-size:14px; height:40px;">${opt(garRuns, sch.garRun)}</select>
-        <input type="text" id="modalPropGarFlag" class="uprop-flag-input" placeholder="Flag (e.g. Locked gate)" value="${esc(sch.garFlag || '')}">
-      </div>
-      <div class="form-group uprop-run-field uprop-run-field-rec">
-        <label><img class="icon-img" src="recycle.png" alt="">Recycling Run</label>
-        <select id="modalPropRecRun" class="main-search-input" style="font-size:14px; height:40px;">${opt(recRuns, sch.recRun)}</select>
-        <input type="text" id="modalPropRecFlag" class="uprop-flag-input" placeholder="Flag (e.g. Locked gate)" value="${esc(sch.recFlag || '')}">
-      </div>
-      <div class="form-group uprop-run-field uprop-run-field-summer">
-        <label>☀️ Summer Recycling Run</label>
-        <select id="modalPropRecSummerRun" class="main-search-input" style="font-size:14px; height:40px;">${opt(recSummerRuns, sch.recSummerRun)}</select>
-      </div>
-      <div class="form-group uprop-run-field uprop-run-field-fog">
-        <label><img class="icon-img" src="fogo.png" alt="">FOGO Run</label>
-        <select id="modalPropFogRun" class="main-search-input" style="font-size:14px; height:40px;">${opt(fogRuns, sch.fogRun)}</select>
-        <input type="text" id="modalPropFogFlag" class="uprop-flag-input" placeholder="Flag (e.g. Locked gate)" value="${esc(sch.fogFlag || '')}">
+      <div class="form-group">
+        <label>Bin Runs &amp; Next Collection</label>
+        <div class="uprop-run-condensed">
+          <div class="uprop-run-row uprop-run-row-gar">
+            <img class="icon-img" src="garbage.png" alt="">
+            <select id="modalPropGarRun" class="main-search-input uprop-run-select">${opt(garRuns, sch.garRun)}</select>
+            <span class="uprop-run-next">${nextStreamCollectionLabel('Garbage', sch)}</span>
+          </div>
+          <div class="uprop-run-row uprop-run-row-rec">
+            <img class="icon-img" src="recycle.png" alt="">
+            <select id="modalPropRecRun" class="main-search-input uprop-run-select">${opt(recRuns, sch.recRun)}</select>
+            <span class="uprop-run-next">${nextStreamCollectionLabel('Recycling', sch)}</span>
+          </div>
+          <div class="uprop-run-row uprop-run-row-summer">
+            <span class="uprop-run-emoji-icon">☀️</span>
+            <select id="modalPropRecSummerRun" class="main-search-input uprop-run-select">${opt(recSummerRuns, sch.recSummerRun)}</select>
+            <span class="uprop-run-next">${nextStreamCollectionLabel('SummerRecycling', sch)}</span>
+          </div>
+          <div class="uprop-run-row uprop-run-row-fog">
+            <img class="icon-img" src="fogo.png" alt="">
+            <select id="modalPropFogRun" class="main-search-input uprop-run-select">${opt(fogRuns, sch.fogRun)}</select>
+            <span class="uprop-run-next">${nextStreamCollectionLabel('FOGO', sch)}</span>
+          </div>
+        </div>
       </div>
       <div class="form-group">
         <label>Property Flags / Notes (e.g. Locked gate)</label>
@@ -8265,12 +8335,9 @@
     const chosenDay = document.getElementById('modalPropDay').value.trim();
     const chosenWeek = document.getElementById('modalPropWeek').value.trim().toUpperCase();
     const chosenGarRun = document.getElementById('modalPropGarRun').value.trim();
-    const chosenGarFlag = document.getElementById('modalPropGarFlag').value.trim();
     const chosenRecRun = document.getElementById('modalPropRecRun').value.trim();
-    const chosenRecFlag = document.getElementById('modalPropRecFlag').value.trim();
     const chosenRecSummerRun = document.getElementById('modalPropRecSummerRun').value.trim();
     const chosenFogRun = document.getElementById('modalPropFogRun').value.trim();
-    const chosenFogFlag = document.getElementById('modalPropFogFlag').value.trim();
     const chosenFlags = document.getElementById('modalPropFlags').value.trim();
     const chosenLat = document.getElementById('modalPropLat').value.trim();
     const chosenLng = document.getElementById('modalPropLng').value.trim();
@@ -8281,12 +8348,13 @@
     site.soloSchedule.weekLetter = chosenWeek;
     site.soloSchedule.weekFormatted = `Week ${chosenWeek}`;
     site.soloSchedule.garRun = chosenGarRun;
-    site.soloSchedule.garFlag = chosenGarFlag;
     site.soloSchedule.recRun = chosenRecRun;
-    site.soloSchedule.recFlag = chosenRecFlag;
     site.soloSchedule.recSummerRun = chosenRecSummerRun;
     site.soloSchedule.fogRun = chosenFogRun;
-    site.soloSchedule.fogFlag = chosenFogFlag;
+    // Per-stream access flags (garFlag/recFlag/fogFlag) are no longer
+    // edited here - they moved to the bin editor (see saveUPropBin) -
+    // so this save leaves whatever values are already on soloSchedule
+    // untouched instead of reading/re-writing them from this tab.
     site.runFlags = chosenFlags;
     site.lat = chosenLat;
     site.lng = chosenLng;
@@ -8296,9 +8364,9 @@
     logEdit({
       timestamp: new Date().toISOString(), editType: "PROPERTY_UPDATE",
       propId: site.propId, siteId: site.siteId, address: site.addressText,
-      day: chosenDay, weekLetter: chosenWeek, garRun: chosenGarRun, garFlag: chosenGarFlag,
-      recRun: chosenRecRun, recFlag: chosenRecFlag,
-      recSummerRun: chosenRecSummerRun, fogRun: chosenFogRun, fogFlag: chosenFogFlag,
+      day: chosenDay, weekLetter: chosenWeek, garRun: chosenGarRun,
+      recRun: chosenRecRun,
+      recSummerRun: chosenRecSummerRun, fogRun: chosenFogRun,
       runFlags: chosenFlags, lat: chosenLat, lng: chosenLng
     });
     logEdit({
@@ -8815,16 +8883,35 @@ let siteReminders = JSON.parse(localStorage.getItem('siteReminders') || '{}');
     if (!window.__driveCardStreamForced.has(propId)) window.__driveCardStreamForced.set(propId, new Set());
     const hiddenSet = window.__driveCardStreamHidden.get(propId);
     const forcedSet = window.__driveCardStreamForced.get(propId);
-    if (shown.has(streamKey)) {
+    const wasShown = shown.has(streamKey);
+    if (wasShown) {
       hiddenSet.add(streamKey);
       forcedSet.delete(streamKey);
     } else {
       hiddenSet.delete(streamKey);
       forcedSet.add(streamKey);
     }
-    // Whichever tab was just tapped becomes this card's "priority" stream,
-    // so its serial rows land at the top of the list on the next render.
-    window.__driveCardStreamPriority.set(propId, streamKey);
+    if (!wasShown) {
+      // Revealing a tab makes it this card's "priority" stream, so its
+      // serial rows land at the top of the list and it's the one marked
+      // active/front on the next render.
+      window.__driveCardStreamPriority.set(propId, streamKey);
+    } else {
+      // Minimising a tab that WAS the active one should hand "active" off
+      // to whichever other stream is still expanded (whichever now has its
+      // data showing at the top), instead of leaving the just-collapsed
+      // tab looking active while nothing is open under it.
+      const currentPriority = window.__driveCardStreamPriority.get(propId);
+      if (currentPriority === streamKey) {
+        const stillShown = driveCardShownStreams(site);
+        const nextActive = STREAM_TAB_DEFS.find(sd => sd.key !== streamKey && stillShown.has(sd.key));
+        if (nextActive) {
+          window.__driveCardStreamPriority.set(propId, nextActive.key);
+        } else {
+          window.__driveCardStreamPriority.delete(propId);
+        }
+      }
+    }
     if (typeof updateDriverHud === 'function') updateDriverHud();
   };
 
@@ -14265,12 +14352,28 @@ window.addEventListener('DOMContentLoaded', async () => {
   /* Settings tab: run fields carry a left accent stripe in their stream's
      colour, plus a per-run Flag input (separate from the general Property
      Flags/Notes field, since the master spreadsheet keeps these split). */
-  .uprop-run-field{ border-left:4px solid var(--uprop-border); padding-left:8px; }
-  .uprop-run-field-gar{ border-left-color:#dc2626; }
-  .uprop-run-field-rec{ border-left-color:#ca8a04; }
-  .uprop-run-field-summer{ border-left-color:#f59e0b; }
-  .uprop-run-field-fog{ border-left-color:#16a34a; }
-  .uprop-flag-input{ margin-top:6px; }
+  /* Condensed per-stream run row on the Settings tab (see
+     renderUPropSettingsTab): icon | run select | next-collection date,
+     replacing the old taller stacked run+flag blocks (flags moved to the
+     bin editor - see renderUPropBinEditor). Each stream keeps its own
+     left-accent colour so Recycling and Summer Recycling read as two
+     distinct rows rather than one nested under the other. */
+  .uprop-run-condensed{ display:flex; flex-direction:column; gap:6px; }
+  .uprop-run-row{
+    display:flex; align-items:center; gap:8px;
+    border-left:4px solid var(--uprop-border); padding-left:8px;
+  }
+  .uprop-run-row .icon-img{ width:18px; height:18px; flex:0 0 auto; }
+  .uprop-run-row-gar{ border-left-color:#dc2626; }
+  .uprop-run-row-rec{ border-left-color:#ca8a04; }
+  .uprop-run-row-summer{ border-left-color:#f59e0b; }
+  .uprop-run-row-fog{ border-left-color:#16a34a; }
+  .uprop-run-emoji-icon{ width:18px; flex:0 0 auto; text-align:center; font-size:14px; }
+  .uprop-run-select{ flex:1 1 auto; min-width:0; font-size:14px; height:36px; margin:0; }
+  .uprop-run-next{
+    flex:0 0 auto; font-size:12px; font-family:monospace; letter-spacing:0.02em;
+    color:var(--uprop-text-dim); white-space:nowrap;
+  }
 
   /* Flat, edge-to-edge action buttons (GPS "Use Live GPS" / "Choose on
      Map", boundary draw/auto-detect) — no side padding, and a pressed-in
