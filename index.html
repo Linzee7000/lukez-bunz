@@ -1983,6 +1983,16 @@
     .uprop-run-picker-btn.active{
       background: var(--sky-600); border-color: var(--sky-400); color: #fff;
     }
+    /* A touch of that run's stream colour on every button in the picker
+       grid (not just the active one) - same inset-stripe convention as
+       .uprop-stream-sel-gar etc, just lighter since these buttons are
+       small and there are many of them on screen at once. Skipped on
+       .active so the selected button's own highlight isn't muddied. */
+    .uprop-run-picker-btn-gar:not(.active){ box-shadow: inset 3px 0 0 #dc2626; }
+    .uprop-run-picker-btn-rec:not(.active){ box-shadow: inset 3px 0 0 #eab308; }
+    .uprop-run-picker-btn-summer:not(.active){ box-shadow: inset 3px 0 0 #f59e0b; }
+    .uprop-run-picker-btn-fog:not(.active){ box-shadow: inset 3px 0 0 #16a34a; }
+    .uprop-run-picker-btn-word{ font-family: inherit; letter-spacing: normal; font-size: 15px; }
     
     .form-group {
       margin-bottom: 10px;
@@ -7785,7 +7795,7 @@
     if (tab === 'Garbage') return ' uprop-content-gar';
     if (tab === 'Recycling') return ' uprop-content-rec';
     if (tab === 'FOGO') return ' uprop-content-fog';
-    return '';
+    return ' uprop-content-settings';
   }
 
   // Builds just the active tab's content — shared by the inline panel and
@@ -8293,13 +8303,27 @@
       const n = parseInt(v, 10);
       return isNaN(n) || n <= 228;
     };
+    // Also index every run by which Collection Day it actually runs on, so
+    // the Bin Run picker (window.openBinRunPicker) can hide runs that don't
+    // run on whichever day is currently selected above - see the day-aware
+    // filtering there. Kept as a separate day-keyed map rather than folding
+    // into the plain Sets above so the existing <select> options (used by
+    // saveUPropSettings) are completely unaffected.
+    const garRunsByDay = {}, recRunsByDay = {}, recSummerRunsByDay = {}, fogRunsByDay = {};
+    const addByDay = (map, day, run) => {
+      const d = (day || '').trim();
+      if (!map[d]) map[d] = new Set();
+      map[d].add(run);
+    };
     siteRecords.forEach(s => {
       const ss = s.soloSchedule;
-      if (ss.garRun && !ss.garRun.toLowerCase().includes('summer')) garRuns.add(ss.garRun.trim());
-      if (ss.recRun && !ss.recRun.toLowerCase().includes('summer') && isGenuineRecRun(ss.recRun)) recRuns.add(ss.recRun.trim());
-      if (ss.recSummerRun) recSummerRuns.add(ss.recSummerRun.trim());
-      if (ss.fogRun && !ss.fogRun.toLowerCase().includes('summer')) fogRuns.add(ss.fogRun.trim());
+      const day = ss.day || '';
+      if (ss.garRun && !ss.garRun.toLowerCase().includes('summer')) { garRuns.add(ss.garRun.trim()); addByDay(garRunsByDay, day, ss.garRun.trim()); }
+      if (ss.recRun && !ss.recRun.toLowerCase().includes('summer') && isGenuineRecRun(ss.recRun)) { recRuns.add(ss.recRun.trim()); addByDay(recRunsByDay, day, ss.recRun.trim()); }
+      if (ss.recSummerRun) { recSummerRuns.add(ss.recSummerRun.trim()); addByDay(recSummerRunsByDay, day, ss.recSummerRun.trim()); }
+      if (ss.fogRun && !ss.fogRun.toLowerCase().includes('summer')) { fogRuns.add(ss.fogRun.trim()); addByDay(fogRunsByDay, day, ss.fogRun.trim()); }
     });
+    window.__uPropRunsByDay = { gar: garRunsByDay, rec: recRunsByDay, summer: recSummerRunsByDay, fog: fogRunsByDay };
     const opt = (runsSet, currentVal) => {
       const sorted = Array.from(runsSet).sort();
       return '<option value="">None / Unassigned</option>' + sorted.map(r => `<option value="${esc(r)}" ${r.toLowerCase() === (currentVal || '').toLowerCase() ? 'selected' : ''}>${esc(r)}</option>`).join('');
@@ -8322,38 +8346,40 @@
       <div class="form-group">
         <label>Collection Day &amp; Week</label>
         <div style="display:flex; gap:6px;">
-          <select id="modalPropDay" class="main-search-input" style="font-size:14px; height:40px; flex:2;">
+          <select id="modalPropDay" style="display:none;">
             ${['Monday','Tuesday','Wednesday','Thursday','Friday'].map(d => `<option value="${d}" ${(sch.day||'Monday')===d?'selected':''}>${d}</option>`).join('')}
           </select>
-          <select id="modalPropWeek" class="main-search-input" style="font-size:14px; height:40px; flex:1;" onchange="const _w=this.value; const _r=document.getElementById('modalPropRecWeekLabel'); const _f=document.getElementById('modalPropFogWeekLabel'); if(_r) _r.textContent=_w; if(_f) _f.textContent=_w;">
+          <button type="button" class="uprop-daywk-btn" id="modalPropDayDisplay" style="flex:2;" onclick="window.openBinRunPicker('modalPropDay','modalPropDayDisplay','Collection Day','day')">${esc(sch.day || 'Monday')}</button>
+          <select id="modalPropWeek" style="display:none;">
             <option value="A" ${(sch.weekLetter||'A').toUpperCase()==='A'?'selected':''}>Week A</option>
             <option value="B" ${(sch.weekLetter||'A').toUpperCase()==='B'?'selected':''}>Week B</option>
           </select>
+          <button type="button" class="uprop-daywk-btn" id="modalPropWeekDisplay" style="flex:1;" onclick="window.openBinRunPicker('modalPropWeek','modalPropWeekDisplay','Collection Week','week')">Week ${esc((sch.weekLetter || 'A').toUpperCase())}</button>
         </div>
       </div>
       <div class="form-group">
         <label>Bin Runs</label>
         <div class="uprop-run-boxes">
-          <div class="uprop-run-box uprop-run-box-gar" title="Garbage run - tap to change" onclick="window.openBinRunPicker('modalPropGarRun','modalPropGarRunDisplay','Garbage Run')">
+          <div class="uprop-run-box uprop-run-box-gar" title="Garbage run - tap to change" onclick="window.openBinRunPicker('modalPropGarRun','modalPropGarRunDisplay','Garbage Run','gar')">
             <img class="icon-img" src="garbage.png" alt="Garbage">
             <select id="modalPropGarRun" style="display:none;">${opt(garRuns, sch.garRun)}</select>
-            <button type="button" class="uprop-run-box-select" id="modalPropGarRunDisplay" onclick="event.stopPropagation(); window.openBinRunPicker('modalPropGarRun','modalPropGarRunDisplay','Garbage Run')">${esc((sch.garRun || '').trim() || 'None')}</button>
+            <button type="button" class="uprop-run-box-select" id="modalPropGarRunDisplay" onclick="event.stopPropagation(); window.openBinRunPicker('modalPropGarRun','modalPropGarRunDisplay','Garbage Run','gar')">${esc((sch.garRun || '').trim() || 'None')}</button>
           </div>
-          <div class="uprop-run-box uprop-run-box-rec" title="Recycling run - tap to change" onclick="window.openBinRunPicker('modalPropRecRun','modalPropRecRunDisplay','Recycling Run')">
+          <div class="uprop-run-box uprop-run-box-rec" title="Recycling run - tap to change" onclick="window.openBinRunPicker('modalPropRecRun','modalPropRecRunDisplay','Recycling Run','rec')">
             <img class="icon-img" src="recycle.png" alt="Recycling">
             <span class="uprop-run-box-runweek">
-              <select id="modalPropRecRun" style="display:none;">${opt(recRuns, sch.recRun)}</select><button type="button" class="uprop-run-box-select" id="modalPropRecRunDisplay" onclick="event.stopPropagation(); window.openBinRunPicker('modalPropRecRun','modalPropRecRunDisplay','Recycling Run')">${esc((sch.recRun || '').trim() || 'None')}</button><span class="uprop-run-box-week" id="modalPropRecWeekLabel">${esc((sch.weekLetter || 'A').toUpperCase())}</span>
+              <select id="modalPropRecRun" style="display:none;">${opt(recRuns, sch.recRun)}</select><button type="button" class="uprop-run-box-select" id="modalPropRecRunDisplay" onclick="event.stopPropagation(); window.openBinRunPicker('modalPropRecRun','modalPropRecRunDisplay','Recycling Run','rec')">${esc((sch.recRun || '').trim() || 'None')}</button><span class="uprop-run-box-week" id="modalPropRecWeekLabel">${esc((sch.weekLetter || 'A').toUpperCase())}</span>
             </span>
           </div>
-          <div class="uprop-run-box uprop-run-box-summer" title="Summer Recycling run - tap to change" onclick="window.openBinRunPicker('modalPropRecSummerRun','modalPropRecSummerRunDisplay','Summer Recycling Run')">
+          <div class="uprop-run-box uprop-run-box-summer" title="Summer Recycling run - tap to change" onclick="window.openBinRunPicker('modalPropRecSummerRun','modalPropRecSummerRunDisplay','Summer Recycling Run','summer')">
             <img class="icon-img" src="summer.png" alt="Summer Recycling">
             <select id="modalPropRecSummerRun" style="display:none;">${opt(recSummerRuns, sch.recSummerRun)}</select>
-            <button type="button" class="uprop-run-box-select" id="modalPropRecSummerRunDisplay" onclick="event.stopPropagation(); window.openBinRunPicker('modalPropRecSummerRun','modalPropRecSummerRunDisplay','Summer Recycling Run')">${esc((sch.recSummerRun || '').trim() || 'None')}</button>
+            <button type="button" class="uprop-run-box-select" id="modalPropRecSummerRunDisplay" onclick="event.stopPropagation(); window.openBinRunPicker('modalPropRecSummerRun','modalPropRecSummerRunDisplay','Summer Recycling Run','summer')">${esc((sch.recSummerRun || '').trim() || 'None')}</button>
           </div>
-          <div class="uprop-run-box uprop-run-box-fog" title="FOGO run - tap to change" onclick="window.openBinRunPicker('modalPropFogRun','modalPropFogRunDisplay','FOGO Run')">
+          <div class="uprop-run-box uprop-run-box-fog" title="FOGO run - tap to change" onclick="window.openBinRunPicker('modalPropFogRun','modalPropFogRunDisplay','FOGO Run','fog')">
             <img class="icon-img" src="fogo.png" alt="FOGO">
             <span class="uprop-run-box-runweek">
-              <select id="modalPropFogRun" style="display:none;">${opt(fogRuns, sch.fogRun)}</select><button type="button" class="uprop-run-box-select" id="modalPropFogRunDisplay" onclick="event.stopPropagation(); window.openBinRunPicker('modalPropFogRun','modalPropFogRunDisplay','FOGO Run')">${esc((sch.fogRun || '').trim() || 'None')}</button><span class="uprop-run-box-week" id="modalPropFogWeekLabel">${esc((sch.weekLetter || 'A').toUpperCase())}</span>
+              <select id="modalPropFogRun" style="display:none;">${opt(fogRuns, sch.fogRun)}</select><button type="button" class="uprop-run-box-select" id="modalPropFogRunDisplay" onclick="event.stopPropagation(); window.openBinRunPicker('modalPropFogRun','modalPropFogRunDisplay','FOGO Run','fog')">${esc((sch.fogRun || '').trim() || 'None')}</button><span class="uprop-run-box-week" id="modalPropFogWeekLabel">${esc((sch.weekLetter || 'A').toUpperCase())}</span>
             </span>
           </div>
         </div>
@@ -8455,21 +8481,46 @@
   function openModal(id) { const el = document.getElementById(id); if (el) el.classList.add('open'); }
   function closeModal(id) { const el = document.getElementById(id); if (el) el.classList.remove('open'); }
 
-  // Bin Run picker - opened by tapping a run-number box in the property
-  // Settings tab instead of letting the underlying native <select> pop
-  // open the browser/OS's own full-screen picker. selectId is the hidden
-  // <select> that still holds the real value (read by the existing save
-  // code untouched); displayId is the tappable button showing it.
+  // Bin Run picker - opened by tapping a run-number box (or, now, the
+  // Collection Day/Week fields) in the property Settings tab instead of
+  // letting the underlying native <select> pop open the browser/OS's own
+  // full-screen picker. selectId is the hidden <select> that still holds
+  // the real value (read by the existing save code untouched); displayId
+  // is the tappable button showing it. kind identifies which field this
+  // is - 'gar'/'rec'/'summer'/'fog' for the run boxes, 'day'/'week' for
+  // the Collection Day & Week fields - and drives two things: which runs
+  // get shown (see the day-filter below) and the little bit of stream
+  // accent colour on the run-picker buttons.
   let __binRunPickerTarget = null;
-  window.openBinRunPicker = function(selectId, displayId, label) {
+  window.openBinRunPicker = function(selectId, displayId, label, kind) {
     const sel = document.getElementById(selectId);
     const grid = document.getElementById('binRunPickerGrid');
     if (!sel || !grid) return;
-    __binRunPickerTarget = { selectId, displayId };
+    __binRunPickerTarget = { selectId, displayId, kind };
     document.getElementById('binRunPickerTitle').textContent = label || 'Run';
-    grid.innerHTML = Array.from(sel.options).map(o => {
+
+    let options = Array.from(sel.options);
+
+    // Run pickers only: hide any run that doesn't actually run on whichever
+    // Collection Day is currently selected above (see the *RunsByDay maps
+    // built in renderUPropSettingsTab). "None" always stays available.
+    const dayMap = window.__uPropRunsByDay && window.__uPropRunsByDay[kind];
+    if (dayMap) {
+      const dayEl = document.getElementById('modalPropDay');
+      const currentDay = dayEl ? dayEl.value : '';
+      const allowed = dayMap[currentDay];
+      if (allowed) options = options.filter(o => o.value === '' || allowed.has(o.value));
+    }
+
+    const streamAccentCls = { gar: ' uprop-run-picker-btn-gar', rec: ' uprop-run-picker-btn-rec', summer: ' uprop-run-picker-btn-summer', fog: ' uprop-run-picker-btn-fog' }[kind] || '';
+    // Day/Week are words, not run numbers - drop the monospace/uppercase
+    // run-number styling for just those two so "Monday"/"Week A" read
+    // normally instead of looking like a run code.
+    const wordCls = (kind === 'day' || kind === 'week') ? ' uprop-run-picker-btn-word' : '';
+
+    grid.innerHTML = options.map(o => {
       const optLabel = o.value === '' ? 'None' : o.textContent;
-      return `<button type="button" class="uprop-run-picker-btn${o.selected ? ' active' : ''}" data-val="${o.value.replace(/"/g, '&quot;')}">${optLabel}</button>`;
+      return `<button type="button" class="uprop-run-picker-btn${o.selected ? ' active' : ''}${streamAccentCls}${wordCls}" data-val="${o.value.replace(/"/g, '&quot;')}">${optLabel}</button>`;
     }).join('');
     openModal('binRunPickerModal');
   };
@@ -8479,11 +8530,21 @@
     grid.addEventListener('click', e => {
       const btn = e.target.closest('.uprop-run-picker-btn');
       if (!btn || !__binRunPickerTarget) return;
-      const { selectId, displayId } = __binRunPickerTarget;
+      const { selectId, displayId, kind } = __binRunPickerTarget;
       const sel = document.getElementById(selectId);
       if (sel) sel.value = btn.dataset.val;
       const disp = document.getElementById(displayId);
-      if (disp) disp.textContent = btn.dataset.val || 'None';
+      if (disp) disp.textContent = kind === 'week' ? `Week ${btn.dataset.val || 'A'}` : (btn.dataset.val || 'None');
+      // Week affects the little week-letter badges on the Recycling/FOGO
+      // run boxes elsewhere on this same tab - mirrors what the old native
+      // <select>'s onchange used to do.
+      if (kind === 'week') {
+        const w = btn.dataset.val || 'A';
+        const rLbl = document.getElementById('modalPropRecWeekLabel');
+        const fLbl = document.getElementById('modalPropFogWeekLabel');
+        if (rLbl) rLbl.textContent = w;
+        if (fLbl) fLbl.textContent = w;
+      }
       closeModal('binRunPickerModal');
     });
   });
@@ -14384,15 +14445,15 @@ window.addEventListener('DOMContentLoaded', async () => {
      panel, stays exactly as it was before you tapped the pencil. */
   .uprop-content{
     background:var(--uprop-surface); border:1px solid var(--uprop-border);
-    border-top:3px solid var(--uprop-border);
+    border-top:3px solid var(--uprop-border); border-right:3px solid var(--uprop-border);
     border-radius:0 8px 8px 8px; padding:12px; margin-top:-1px; position:relative; z-index:1;
     font-size:13.5px; line-height:1.45; color:var(--uprop-text);
     max-height:62vh; overflow-y:auto;
   }
-  .uprop-content-gar{ border-top-color:#dc2626; }
-  .uprop-content-rec{ border-top-color:#eab308; }
-  .uprop-content-fog{ border-top-color:#16a34a; }
-  .uprop-content-settings{ border-top-color:#2563eb; }
+  .uprop-content-gar{ border-top-color:#dc2626; border-right-color:#dc2626; }
+  .uprop-content-rec{ border-top-color:#eab308; border-right-color:#eab308; }
+  .uprop-content-fog{ border-top-color:#16a34a; border-right-color:#16a34a; }
+  .uprop-content-settings{ border-top-color:#2563eb; border-right-color:#2563eb; }
   .uprop-row{ display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:8px; }
   .uprop-meta-line{ color:var(--uprop-text-dim); font-size:12.5px; }
   .uprop-map-btn{
@@ -14500,6 +14561,14 @@ window.addEventListener('DOMContentLoaded', async () => {
   }
   .uprop-run-box-rec .uprop-run-box-select{ color:#111 !important; }
   .uprop-run-box-rec .uprop-run-box-week{ color:#111; }
+  /* Collection Day/Week fields - a hidden <select> holds the real value
+     (untouched by saveUPropSettings) with this button as the tappable
+     face, opening the same dark run-picker popup as the Bin Run boxes
+     above (window.openBinRunPicker) instead of the native OS picker. */
+  .uprop-daywk-btn{
+    background:var(--uprop-bg); border:1px solid var(--uprop-border); color:var(--uprop-text);
+    border-radius:8px; font-size:14px; height:40px; font-weight:700; cursor:pointer;
+  }
   /* The dropdown's own popup list is native chrome (not styled by the box
      colours above) - force dark text on it explicitly so options stay
      legible regardless of the OS/browser's default popup theme. */
