@@ -4115,13 +4115,25 @@
               const soloBinsForPencil = (site.soloStreams && site.soloStreams[st.key]) || [];
               const soloIdxForPencil = soloBinsForPencil.findIndex(sb => String(sb.serial || '').toUpperCase() === String(b.serial || '').toUpperCase());
               const canEditPencil = showEditPencil && soloIdxForPencil > -1;
+              // Arrow toggle: expands/collapses this bin's editor directly
+              // beneath its own serial row (see editorHtml below) instead of
+              // jumping away to the separate folder-tab uProp panel — same
+              // __uPropId/__uPropTab/__uPropOpenBinKey globals as that panel
+              // (so Save/Cancel/Delete keep working unchanged) but without
+              // setting __uPropInline, so this card stays put and just
+              // re-renders in place (see toggleDriveBinEditorInline).
+              const isRowOpen = canEditPencil && window.__uPropId === propId && window.__uPropTab === st.key && window.__uPropOpenBinKey === `${st.key}_${soloIdxForPencil}`;
               const pencilHtml = canEditPencil
-                ? `<button type="button" onclick="event.stopPropagation(); window.openUPropBinInline('${propId}', '${st.key}', ${soloIdxForPencil})" style="background:none; border:none; font-size:16px; cursor:pointer; padding:0 2px;" title="Edit bin">✏️</button>`
+                ? `<button type="button" onclick="event.stopPropagation(); window.toggleDriveBinEditorInline('${propId}', '${st.key}', ${soloIdxForPencil})" style="background:none; border:none; font-size:16px; cursor:pointer; padding:0 2px;" title="Edit bin">${isRowOpen ? '▲' : '▼'}</button>`
+                : '';
+              const editorHtml = isRowOpen
+                ? `<div class="uprop-content${st.key === 'Garbage' ? ' uprop-content-gar' : st.key === 'Recycling' ? ' uprop-content-rec' : ' uprop-content-fog'}" style="margin:4px 6px 8px;" onclick="event.stopPropagation();">${renderUPropBinEditor(site, st.key, soloIdxForPencil, soloBinsForPencil[soloIdxForPencil])}</div>`
                 : '';
 
               return `
+                <div>
                 <div style="display:flex; align-items:center; justify-content:space-between; ${idx < bins.length - 1 ? 'border-bottom:1px solid rgba(255,255,255,0.2);' : ''} padding:3px 6px; position:relative; ${hasRem ? `background:rgba(147,51,234,0.5); border-radius:6px; ${isDue ? 'animation: rec-light-pulse 1.6s ease-in-out infinite;' : ''}` : ''}">
-                  <span class="bin-serial-tap-target" style="display:flex; align-items:center; gap:6px; min-width:0; flex:1 1 auto; overflow:hidden; ${(hasRem || canEditPencil) ? 'cursor:pointer;' : ''}" title="${hasRem ? esc(remTitle) : (canEditPencil ? 'Edit bin' : '')}" ${hasRem ? `onclick="event.stopPropagation(); window.toggleBinReminderMenu(event, '${remMenuId}')"` : (canEditPencil ? `onclick="event.stopPropagation(); window.openUPropBinInline('${propId}', '${st.key}', ${soloIdxForPencil})"` : '')}>
+                  <span class="bin-serial-tap-target" style="display:flex; align-items:center; gap:6px; min-width:0; flex:1 1 auto; overflow:hidden; ${(hasRem || canEditPencil) ? 'cursor:pointer;' : ''}" title="${hasRem ? esc(remTitle) : (canEditPencil ? 'Edit bin' : '')}" ${hasRem ? `onclick="event.stopPropagation(); window.toggleBinReminderMenu(event, '${remMenuId}')"` : (canEditPencil ? `onclick="event.stopPropagation(); window.toggleDriveBinEditorInline('${propId}', '${st.key}', ${soloIdxForPencil})"` : '')}>
                     <span class="bin-serial-text" data-serial="${esc(serialLabel)}" data-msg="${hasRem && rem.message ? esc(rem.message) : ''}" style="font-size:17px; font-family:monospace; letter-spacing:0.5px; max-width:170px; flex:0 1 auto; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#fff; font-weight:${hasRem ? '700' : '400'};">
                       ${esc(serialLabel)}
                     </span>
@@ -4147,6 +4159,8 @@
                       `<button type="button" onclick="event.stopPropagation(); window.setBinIssue(event, '${menuId}', '${issue}')" style="display:block; width:100%; text-align:left; background:none; border:none; padding:5px 8px; font-size:13px; font-weight:400; color:#1e293b; cursor:pointer; border-radius:4px;">${issue}</button>`
                     ).join('')}
                   </div>
+                </div>
+                ${editorHtml}
                 </div>
               `;
             }).join('')}
@@ -7772,6 +7786,25 @@
     refreshUPropViews();
   };
 
+  // Same idea as openUPropBinInline (jump straight into a specific bin's
+  // editor) but for the drive page's own coloured serial rows — instead of
+  // swapping the whole card out for the separate folder-tab panel, the
+  // editor just expands in place directly under the tapped serial (see
+  // buildBinsAtAddress's isRowOpen/editorHtml). Reuses the same
+  // __uPropId/__uPropTab/__uPropOpenBinKey globals as openUPropBinInline
+  // (so Save/Cancel/Delete keep working with zero changes) but deliberately
+  // leaves __uPropInline off, so refreshUPropViews's updateDriverHud() call
+  // is what redraws it, rather than the card being replaced outright.
+  window.toggleDriveBinEditorInline = function(propId, streamKey, idx) {
+    const key = `${streamKey}_${idx}`;
+    const alreadyOpen = window.__uPropId === propId && window.__uPropTab === streamKey && window.__uPropOpenBinKey === key;
+    window.__uPropId = propId;
+    window.__uPropTab = streamKey;
+    window.__uPropOpenBinKey = alreadyOpen ? null : key;
+    window.__uPropPendingCouncilBin = null;
+    if (typeof updateDriverHud === 'function') updateDriverHud();
+  };
+
   window.closeUPropInline = function(event) {
     if (event) event.stopPropagation();
     window.__uPropId = null;
@@ -7788,10 +7821,15 @@
   function refreshUPropViews() {
     if (window.__uPropInline) {
       if (typeof handleSearch === 'function') handleSearch();
-      if (typeof updateDriverHud === 'function') updateDriverHud();
     } else {
       renderUnifiedPropertyPanel();
     }
+    // The drive page's own coloured serial rows can also have a bin editor
+    // expanded inline (see toggleDriveBinEditorInline) using these same
+    // globals but without __uPropInline set, so it needs redrawing here too
+    // — not just in the __uPropInline branch above. updateDriverHud() is a
+    // safe no-op whenever the drive page isn't the active screen.
+    if (typeof updateDriverHud === 'function') updateDriverHud();
   }
 
   // Rebuilds the header, tab row and active tab's content for whichever
