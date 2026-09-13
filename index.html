@@ -1991,19 +1991,27 @@
        spans the full width of the 4-column .uprop-run-boxes grid it lives
        in, rather than squeezing into a single column. */
     #uPropInlineRunGrid{ grid-column: 1 / -1; margin-top: 6px; }
-    /* Collection Day & Week and Bin Runs use the identical clickable-
-       label-with-chevron pattern (.uprop-section-toggle-label /
-       .uprop-chevron) so the two accordion openers on this tab look and
-       behave the same, rather than one being a plain unlabeled arrow. */
-    .uprop-section-toggle-label{ cursor: pointer; }
-    .uprop-content .form-group label.uprop-section-toggle-label{ justify-content: space-between; }
-    .uprop-chevron{ font-size: 20px; line-height: 1; color: var(--uprop-text-dim); }
+    /* Every editable section in Settings (Rating, Day&Week, Flags, GPS,
+       and each Bin Run picker) is collapsed by default showing only a
+       one-line summary of its current value - "expand" is purely for
+       editing, never required just to see what's already set. Opening
+       one closes whichever other section was open (.uprop-accordion-panel
+       / .uprop-accordion-chevron), so only one thing is ever mid-edit. */
+    .uprop-section-toggle-label{ cursor: pointer; gap: 8px; }
+    .uprop-content .form-group label.uprop-section-toggle-label{ justify-content: flex-start; }
+    .uprop-section-label-text{ flex: 0 0 auto; }
+    .uprop-summary{
+      flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+      white-space: nowrap; text-align: right; color: var(--uprop-text-dim);
+      font-weight: 400; font-size: 12.5px;
+    }
+    .uprop-chevron{ flex: 0 0 auto; font-size: 20px; line-height: 1; color: var(--uprop-text-dim); }
     .uprop-daywk-panel{ margin-top: 4px; }
-    /* Collapsible sections (Day&Week panel, Bin Runs grid, and the inline
-       Run grid inside it) toggle this class rather than an inline display
+    .uprop-accordion-panel{ margin-top: 8px; }
+    /* Collapsible sections toggle this class rather than an inline display
        style, so each section keeps its own natural display type (grid for
-       the run boxes, block for the day/week panel) instead of being
-       forced to display:block. */
+       the run boxes, block for everything else) instead of being forced
+       to display:block. */
     .uprop-collapsible.uprop-collapsed{ display: none; }
     
     .form-group {
@@ -5585,6 +5593,7 @@
       if (pickerTargetType === 'prop') {
         document.getElementById('modalPropLat').value = pickedCoordinates.lat.toFixed(6);
         document.getElementById('modalPropLng').value = pickedCoordinates.lng.toFixed(6);
+        if (window.updateUPropGpsSummary) window.updateUPropGpsSummary();
       } else {
         document.getElementById('modalBinLat').value = pickedCoordinates.lat.toFixed(6);
         document.getElementById('modalBinLng').value = pickedCoordinates.lng.toFixed(6);
@@ -8314,36 +8323,46 @@
       ${renderUPropPropertyTab(site)}
       <input type="hidden" id="modalPropTargetId" value="${esc(site.propId || site.siteId)}">
       <div class="form-group">
-        <label>Star Rating</label>
-        <div class="star-rating-row" id="starContainer">
-          ${[1,2,3,4,5].map(n => `<span class="${n<=stars?'selected':''}" onclick="setRatingStars(${n})">★</span>`).join('')}
-        </div>
-        <input type="hidden" id="modalRatingValue" value="${stars}">
-        <input type="text" id="modalRatingComment" placeholder="e.g. Steep driveway, dog on premises..." value="${esc(site.ratingComment || '')}">
-      </div>
-      <div class="form-group">
-        <label class="uprop-section-toggle-label" onclick="window.toggleUPropSection('uPropDayWeekPanel','uPropDayWeekChevron','uPropBinRunsGrid','uPropBinRunsChevron')">Collection Day &amp; Week <span id="uPropDayWeekChevron" class="uprop-chevron">▾</span></label>
-      </div>
-      <div class="form-group uprop-daywk-panel uprop-collapsible uprop-collapsed" id="uPropDayWeekPanel">
-        <select id="modalPropDay" style="display:none;">
-          ${['Monday','Tuesday','Wednesday','Thursday','Friday'].map(d => `<option value="${d}" ${(sch.day||'Monday')===d?'selected':''}>${d}</option>`).join('')}
-        </select>
-        <select id="modalPropWeek" style="display:none;">
-          <option value="A" ${(sch.weekLetter||'A').toUpperCase()==='A'?'selected':''}>Week A</option>
-          <option value="B" ${(sch.weekLetter||'A').toUpperCase()==='B'?'selected':''}>Week B</option>
-        </select>
-        <div class="uprop-picker-section-label">Day</div>
-        <div class="uprop-run-picker-grid">
-          ${[['Monday','MON'],['Tuesday','TUE'],['Wednesday','WED'],['Thursday','THU'],['Friday','FRI']].map(([full,short]) => `<button type="button" class="uprop-run-picker-btn${(sch.day||'Monday')===full?' active':''}" onclick="window.selectUPropDay(this,'${full}')">${short}</button>`).join('')}
-        </div>
-        <div class="uprop-picker-section-label">Week</div>
-        <div class="uprop-run-picker-grid uprop-run-picker-grid-2col">
-          ${['A','B'].map(w => `<button type="button" class="uprop-run-picker-btn${(sch.weekLetter||'A').toUpperCase()===w?' active':''}" onclick="window.selectUPropWeek(this,'${w}')">Week ${w}</button>`).join('')}
+        <label class="uprop-section-toggle-label" onclick="window.toggleUPropSection('uPropRatingPanel','uPropRatingChevron')">
+          <span class="uprop-section-label-text">Star Rating</span>
+          <span class="uprop-summary" id="uPropRatingSummary">${'★'.repeat(stars)}${'☆'.repeat(5 - stars)}${site.ratingComment ? ' · ' + esc(site.ratingComment) : ''}</span>
+          <span id="uPropRatingChevron" class="uprop-chevron uprop-accordion-chevron">▾</span>
+        </label>
+        <div class="uprop-accordion-panel uprop-collapsible uprop-collapsed" id="uPropRatingPanel">
+          <div class="star-rating-row" id="starContainer">
+            ${[1,2,3,4,5].map(n => `<span class="${n<=stars?'selected':''}" onclick="setRatingStars(${n})">★</span>`).join('')}
+          </div>
+          <input type="hidden" id="modalRatingValue" value="${stars}">
+          <input type="text" id="modalRatingComment" placeholder="e.g. Steep driveway, dog on premises..." value="${esc(site.ratingComment || '')}" oninput="window.updateUPropRatingSummary()">
         </div>
       </div>
       <div class="form-group">
-        <label class="uprop-section-toggle-label" onclick="window.toggleUPropSection('uPropBinRunsGrid','uPropBinRunsChevron','uPropDayWeekPanel','uPropDayWeekChevron')">Bin Runs <span id="uPropBinRunsChevron" class="uprop-chevron">▾</span></label>
-        <div class="uprop-run-boxes uprop-collapsible uprop-collapsed" id="uPropBinRunsGrid">
+        <label class="uprop-section-toggle-label" onclick="window.toggleUPropSection('uPropDayWeekPanel','uPropDayWeekChevron')">
+          <span class="uprop-section-label-text">Collection Day &amp; Week</span>
+          <span class="uprop-summary" id="uPropDayWeekSummary">${esc(sch.day || 'Monday')} · Week ${esc((sch.weekLetter || 'A').toUpperCase())}</span>
+          <span id="uPropDayWeekChevron" class="uprop-chevron uprop-accordion-chevron">▾</span>
+        </label>
+        <div class="uprop-daywk-panel uprop-accordion-panel uprop-collapsible uprop-collapsed" id="uPropDayWeekPanel">
+          <select id="modalPropDay" style="display:none;">
+            ${['Monday','Tuesday','Wednesday','Thursday','Friday'].map(d => `<option value="${d}" ${(sch.day||'Monday')===d?'selected':''}>${d}</option>`).join('')}
+          </select>
+          <select id="modalPropWeek" style="display:none;">
+            <option value="A" ${(sch.weekLetter||'A').toUpperCase()==='A'?'selected':''}>Week A</option>
+            <option value="B" ${(sch.weekLetter||'A').toUpperCase()==='B'?'selected':''}>Week B</option>
+          </select>
+          <div class="uprop-picker-section-label">Day</div>
+          <div class="uprop-run-picker-grid">
+            ${[['Monday','MON'],['Tuesday','TUE'],['Wednesday','WED'],['Thursday','THU'],['Friday','FRI']].map(([full,short]) => `<button type="button" class="uprop-run-picker-btn${(sch.day||'Monday')===full?' active':''}" onclick="window.selectUPropDay(this,'${full}')">${short}</button>`).join('')}
+          </div>
+          <div class="uprop-picker-section-label">Week</div>
+          <div class="uprop-run-picker-grid uprop-run-picker-grid-2col">
+            ${['A','B'].map(w => `<button type="button" class="uprop-run-picker-btn${(sch.weekLetter||'A').toUpperCase()===w?' active':''}" onclick="window.selectUPropWeek(this,'${w}')">Week ${w}</button>`).join('')}
+          </div>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Bin Runs</label>
+        <div class="uprop-run-boxes" id="uPropBinRunsGrid">
           <div class="uprop-run-box uprop-run-box-gar" title="Garbage run - tap to change" onclick="window.toggleUPropRunInline(this,'modalPropGarRun','modalPropGarRunDisplay','garRun')">
             <img class="icon-img" src="garbage.png" alt="Garbage">
             <select id="modalPropGarRun" style="display:none;">${opt(garRuns, sch.garRun)}</select>
@@ -8366,22 +8385,34 @@
               <select id="modalPropFogRun" style="display:none;">${opt(fogRuns, sch.fogRun)}</select><button type="button" class="uprop-run-box-select" id="modalPropFogRunDisplay" onclick="event.stopPropagation(); window.toggleUPropRunInline(this,'modalPropFogRun','modalPropFogRunDisplay','fogRun')">${esc((sch.fogRun || '').trim() || 'None')}</button><span class="uprop-run-box-week" id="modalPropFogWeekLabel">${esc((sch.weekLetter || 'A').toUpperCase())}</span>
             </span>
           </div>
-          <div class="uprop-run-picker-grid uprop-collapsible uprop-collapsed" id="uPropInlineRunGrid"></div>
+          <div class="uprop-run-picker-grid uprop-accordion-panel uprop-collapsible uprop-collapsed" id="uPropInlineRunGrid"></div>
         </div>
       </div>
       <div class="form-group">
-        <label>Property Flags / Notes (e.g. Locked gate)</label>
-        <input type="text" id="modalPropFlags" placeholder="e.g. Steep driveway..." value="${esc(site.runFlags || '')}">
+        <label class="uprop-section-toggle-label" onclick="window.toggleUPropSection('uPropFlagsPanel','uPropFlagsChevron')">
+          <span class="uprop-section-label-text">Property Flags / Notes</span>
+          <span class="uprop-summary" id="uPropFlagsSummary">${esc(site.runFlags || 'None set')}</span>
+          <span id="uPropFlagsChevron" class="uprop-chevron uprop-accordion-chevron">▾</span>
+        </label>
+        <div class="uprop-accordion-panel uprop-collapsible uprop-collapsed" id="uPropFlagsPanel">
+          <input type="text" id="modalPropFlags" placeholder="e.g. Steep driveway, locked gate..." value="${esc(site.runFlags || '')}" oninput="window.updateUPropFlagsSummary()">
+        </div>
       </div>
       <div class="form-group">
-        <label>Property GPS Coordinates (House Location)</label>
-        <div style="display:flex; gap:6px;">
-          <input type="text" id="modalPropLat" placeholder="Latitude" value="${esc(site.lat || '')}">
-          <input type="text" id="modalPropLng" placeholder="Longitude" value="${esc(site.lng || '')}">
-        </div>
-        <div class="uprop-flat-btn-row">
-          <button type="button" class="uprop-flat-btn" onclick="useCurrentGpsForProp()">📍 Use Live GPS</button>
-          <button type="button" class="uprop-flat-btn" onclick="openLocationPickerModal('prop')"><img class="icon-img" src="route.png" alt=""> Choose on Map</button>
+        <label class="uprop-section-toggle-label" onclick="window.toggleUPropSection('uPropGpsPanel','uPropGpsChevron')">
+          <span class="uprop-section-label-text">Property GPS Coordinates</span>
+          <span class="uprop-summary" id="uPropGpsSummary">${(site.lat && site.lng) ? esc(site.lat) + ', ' + esc(site.lng) : 'Not set'}</span>
+          <span id="uPropGpsChevron" class="uprop-chevron uprop-accordion-chevron">▾</span>
+        </label>
+        <div class="uprop-accordion-panel uprop-collapsible uprop-collapsed" id="uPropGpsPanel">
+          <div style="display:flex; gap:6px;">
+            <input type="text" id="modalPropLat" placeholder="Latitude" value="${esc(site.lat || '')}" oninput="window.updateUPropGpsSummary()">
+            <input type="text" id="modalPropLng" placeholder="Longitude" value="${esc(site.lng || '')}" oninput="window.updateUPropGpsSummary()">
+          </div>
+          <div class="uprop-flat-btn-row">
+            <button type="button" class="uprop-flat-btn" onclick="useCurrentGpsForProp()">📍 Use Live GPS</button>
+            <button type="button" class="uprop-flat-btn" onclick="openLocationPickerModal('prop')"><img class="icon-img" src="route.png" alt=""> Choose on Map</button>
+          </div>
         </div>
       </div>
       <div class="form-group">
@@ -8461,38 +8492,57 @@
     document.getElementById('starContainer').querySelectorAll('span').forEach((star, idx) => {
       star.classList.toggle('selected', idx < val);
     });
+    window.updateUPropRatingSummary();
   }
+  window.updateUPropRatingSummary = function() {
+    const summary = document.getElementById('uPropRatingSummary');
+    if (!summary) return;
+    const val = Number((document.getElementById('modalRatingValue') || {}).value || 0);
+    const comment = ((document.getElementById('modalRatingComment') || {}).value || '').trim();
+    summary.textContent = '★'.repeat(val) + '☆'.repeat(5 - val) + (comment ? ' · ' + comment : '');
+  };
+  window.updateUPropFlagsSummary = function() {
+    const summary = document.getElementById('uPropFlagsSummary');
+    if (!summary) return;
+    const val = ((document.getElementById('modalPropFlags') || {}).value || '').trim();
+    summary.textContent = val || 'None set';
+  };
+  window.updateUPropGpsSummary = function() {
+    const summary = document.getElementById('uPropGpsSummary');
+    if (!summary) return;
+    const lat = ((document.getElementById('modalPropLat') || {}).value || '').trim();
+    const lng = ((document.getElementById('modalPropLng') || {}).value || '').trim();
+    summary.textContent = (lat && lng) ? `${lat}, ${lng}` : 'Not set';
+  };
 
   function openModal(id) { const el = document.getElementById(id); if (el) el.classList.add('open'); }
   function closeModal(id) { const el = document.getElementById(id); if (el) el.classList.remove('open'); }
 
-  // Generic accordion toggle used by the Settings tab's Day&Week and Bin
-  // Runs sections - shows/hides the panel and flips its chevron. Panels
-  // start collapsed (uprop-collapsed class in the template) so everything
-  // below the star rating stays minimised until asked for. otherPanelId/
-  // otherChevronId (optional) is the sibling section to close first, so
-  // opening one collapses whichever of the two was already open.
-  window.toggleUPropSection = function(panelId, chevronId, otherPanelId, otherChevronId) {
+  // Generic accordion toggle used by every editable section in the
+  // Settings tab (Rating, Day&Week, Flags, GPS) - shows/hides the panel
+  // and flips its chevron. Panels start collapsed (uprop-collapsed class
+  // in the template) showing only their one-line summary, so nothing is
+  // ever forced open just to see the current value - expanding is purely
+  // for editing. Opening one closes every other .uprop-accordion-panel
+  // (including any open Bin Run picker), so only one section is ever
+  // mid-edit at a time.
+  window.toggleUPropSection = function(panelId, chevronId) {
     const panel = document.getElementById(panelId);
     const chevron = document.getElementById(chevronId);
     if (!panel) return;
     const opening = panel.classList.contains('uprop-collapsed');
-    if (opening && otherPanelId) {
-      const otherPanel = document.getElementById(otherPanelId);
-      const otherChevron = document.getElementById(otherChevronId);
-      if (otherPanel) otherPanel.classList.add('uprop-collapsed');
-      if (otherChevron) otherChevron.textContent = '▾';
+    if (opening) {
+      document.querySelectorAll('.uprop-accordion-panel').forEach(p => {
+        if (p !== panel) p.classList.add('uprop-collapsed');
+      });
+      document.querySelectorAll('.uprop-accordion-chevron').forEach(c => {
+        if (c !== chevron) c.textContent = '▾';
+      });
+      const runGrid = document.getElementById('uPropInlineRunGrid');
+      if (runGrid && panel !== runGrid) { runGrid.classList.add('uprop-collapsed'); runGrid.dataset.forSelect = ''; }
     }
     panel.classList.toggle('uprop-collapsed', !opening);
     if (chevron) chevron.textContent = opening ? '▴' : '▾';
-    // Whenever Bin Runs ends up collapsed - whether directly, or as the
-    // sibling section closed above - tuck its inline run-number grid away
-    // too, so it doesn't reappear mid-air next time Bin Runs reopens.
-    const binRuns = document.getElementById('uPropBinRunsGrid');
-    if (binRuns && binRuns.classList.contains('uprop-collapsed')) {
-      const runGrid = document.getElementById('uPropInlineRunGrid');
-      if (runGrid) { runGrid.classList.add('uprop-collapsed'); runGrid.dataset.forSelect = ''; }
-    }
   };
 
   // Inline Day/Week buttons in the Settings tab's collapsible panel (see
@@ -8504,6 +8554,7 @@
     if (sel) sel.value = day;
     const grid = btn.closest('.uprop-run-picker-grid');
     if (grid) grid.querySelectorAll('.uprop-run-picker-btn').forEach(b => b.classList.toggle('active', b === btn));
+    window.updateUPropDayWeekSummary();
   };
   window.selectUPropWeek = function(btn, week) {
     const sel = document.getElementById('modalPropWeek');
@@ -8514,6 +8565,14 @@
     // the Recycling/FOGO run numbers updates instantly.
     const r = document.getElementById('modalPropRecWeekLabel'); if (r) r.textContent = week;
     const f = document.getElementById('modalPropFogWeekLabel'); if (f) f.textContent = week;
+    window.updateUPropDayWeekSummary();
+  };
+  window.updateUPropDayWeekSummary = function() {
+    const summary = document.getElementById('uPropDayWeekSummary');
+    if (!summary) return;
+    const day = (document.getElementById('modalPropDay') || {}).value || '';
+    const week = (document.getElementById('modalPropWeek') || {}).value || '';
+    summary.textContent = [day, week ? 'Week ' + week : ''].filter(Boolean).join(' · ');
   };
 
   // Builds the list of run numbers that actually occur on the given day
@@ -8564,6 +8623,11 @@
       grid.dataset.forSelect = '';
       return;
     }
+
+    // Close every other accordion section first - only one thing on this
+    // tab is ever being edited at a time.
+    document.querySelectorAll('.uprop-accordion-panel').forEach(p => p.classList.add('uprop-collapsed'));
+    document.querySelectorAll('.uprop-accordion-chevron').forEach(c => c.textContent = '▾');
 
     __uPropRunTarget = { selectId, displayId };
     const dayVal = (document.getElementById('modalPropDay') || {}).value || '';
@@ -8716,6 +8780,7 @@
     if (userCurrentLocation && userCurrentLocation.lat && userCurrentLocation.lng) {
       document.getElementById('modalPropLat').value = userCurrentLocation.lat.toFixed(6);
       document.getElementById('modalPropLng').value = userCurrentLocation.lng.toFixed(6);
+      window.updateUPropGpsSummary();
     } else {
       customAlert("GPS not ready.");
     }
