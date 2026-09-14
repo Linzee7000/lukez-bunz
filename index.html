@@ -3721,6 +3721,13 @@
                 <button type="button" id="btnSnailTrailPause" class="map-context-btn map-settings-opt-btn map-settings-action" onclick="toggleSnailTrailPause()">⏸ Pause Trail</button>
                 <button type="button" class="map-context-btn map-settings-opt-btn map-settings-action" onclick="exportSnailTrailKml()"><img class="icon-img" src="export.png" alt=""> Export Trail</button>
                 <button type="button" class="map-context-btn map-settings-opt-btn map-settings-action danger" onclick="confirmClearSnailTrail()"><img class="icon-img" src="minus.png" alt=""> Clear Trail</button>
+                <!-- Saves the current snail trail into the selected run's
+                     own KML data as a "Truck route" (same shape as an
+                     imported KML route - see saveSnailTrailAsRoute), so it
+                     draws and can be managed from Edit/Delete just like
+                     any imported route, without needing to export/re-
+                     import a file. -->
+                <button type="button" class="map-context-btn map-settings-opt-btn map-settings-action" onclick="saveSnailTrailAsRoute()"><img class="icon-img" src="route.png" alt=""> Save as Route</button>
                 <!-- Trail appearance settings: fade the trail from green to
                      red the older it gets, and/or drop a time label every
                      15 minutes along it. Both toggles apply live on-screen
@@ -6714,6 +6721,52 @@
   window.saveKmlEditsFromSettings = async function() {
     await persistKmzDataByRun();
     customAlert('Imported KML/KMZ data saved.');
+  };
+
+  // Saves the currently recorded snail trail into the selected run's own
+  // KML data as a "Truck route" - the exact same shape a route gets when
+  // imported from a real KML/KMZ file (see extractKmzKml), so it draws
+  // with renderKmzEvidence and can be reviewed/removed from the KML Edit
+  // modal like any other imported route. Kept in its own file entry
+  // (flagged __isSnailTrail) so it never gets mixed into an actually
+  // imported KMZ file, and re-saving replaces that entry's route rather
+  // than piling up duplicates every time you tap the button.
+  window.saveSnailTrailAsRoute = async function() {
+    if (!gpsTrailPoints || gpsTrailPoints.length < 2) {
+      customAlert("No snail trail recorded yet. Drive or move with GPS active to create a trail before saving it as a route.");
+      return;
+    }
+    const run = selectedSingleMapRun();
+    if (!run) {
+      customAlert('Select exactly one run before saving the snail trail as its route.');
+      return;
+    }
+    const runLabel = run.toUpperCase();
+    const ok = typeof customConfirm === 'function'
+      ? await customConfirm(`Save the current snail trail (${gpsTrailPoints.length} points) as the truck route for run ${runLabel}? This replaces any snail-trail route already saved for it.`)
+      : confirm(`Save the current snail trail as the truck route for run ${runLabel}? This replaces any snail-trail route already saved for it.`);
+    if (!ok) return;
+
+    const key = mapKey(run);
+    const existing = kmzDataByRun.get(key) || { run, files: [] };
+    const savedAt = new Date();
+    const route = {
+      name: `Snail Trail Route - ${runLabel} (${savedAt.toLocaleString([], { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })})`,
+      coordinates: gpsTrailPoints.map(p => ({ lat: p[0], lng: p[1] }))
+    };
+
+    let trailFile = existing.files.find(f => f.__isSnailTrail);
+    if (!trailFile) {
+      trailFile = { fileName: `Snail Trail Route - ${runLabel}.kml`, routes: [], lifts: [], importedAt: savedAt.toISOString(), __isSnailTrail: true };
+      existing.files.push(trailFile);
+    }
+    trailFile.routes = [route];
+    trailFile.importedAt = savedAt.toISOString();
+
+    kmzDataByRun.set(key, existing);
+    await persistKmzDataByRun();
+    renderMapData();
+    customAlert(`Snail trail saved as the truck route for run ${runLabel}.`);
   };
 
   // ---- Geofences ----------------------------------------------------
