@@ -10211,6 +10211,48 @@ window.addEventListener('DOMContentLoaded', async () => {
     }));
   }
 
+  // Clears the single-property map filter (see mapFocusPropId /
+  // showPropertyOnMap) and hands the top bar back to the normal run
+  // summary - the map then falls back to whatever run/stream filters
+  // were already selected, i.e. "other runs" become visible again. Safe
+  // to call any time: if bin-tools (mapSelectMode) is also open, that's
+  // closed the same way it always was, via closeMapToolsPanel.
+  window.exitPropertyFocus = function() {
+    if (mapSelectMode) { closeMapToolsPanel(); return; }
+    mapFocusPropId = null;
+    renderMapData();
+  };
+
+  // Keeps the map's top-bar "filter" chip (address or street name + a
+  // close button) in sync with mapFocusPropId / mapFocusStreetKey on
+  // every redraw - not just at the moment the focus was first entered.
+  // Without this, leaving the Map tab and coming back (or any other
+  // renderMapData() call) would silently keep the property/street filter
+  // active on the map while the top bar quietly reverted to the normal
+  // "Select run" bar, leaving no sign of what was filtering the map or
+  // how to clear it. mapFocusContextOwnedByUs tracks whether *we* are the
+  // ones currently driving the context bar, so this never stomps on some
+  // other feature's own context bar (geofence draw, boundary editing,
+  // etc.) and only hands the bar back to normal once it was us who set it.
+  let mapFocusContextOwnedByUs = false;
+  function ensureMapFocusTopBarContext() {
+    if (mapSelectMode) { mapFocusContextOwnedByUs = false; return; } // bin-tools panel owns the bar while it's open
+    if (mapFocusPropId) {
+      const site = siteRecords.find(s => String(s.propId || s.siteId) === mapFocusPropId);
+      const label = site ? (site.baseStreetLine || site.addressText || 'Property').split(',')[0] : 'Property';
+      window.setMapTopBarContext(`📍 ${label}`, [], () => window.exitPropertyFocus());
+      mapFocusContextOwnedByUs = true;
+    } else if (mapFocusStreetKey) {
+      const site = siteRecords.find(s => siteStreetKey(s) === mapFocusStreetKey);
+      const streetLabel = site ? toSentenceCaseLabel(streetNameOnly((site.baseStreetLine || cleanStreetAddress(site.addressText) || '').trim()) || site.baseStreetLine || 'Street') : 'Street';
+      window.setMapTopBarContext(`🛣️ ${streetLabel}`, [], () => window.exitStreetFocus());
+      mapFocusContextOwnedByUs = true;
+    } else if (mapFocusContextOwnedByUs) {
+      window.clearMapTopBarContext();
+      mapFocusContextOwnedByUs = false;
+    }
+  }
+
   // Property boundary: jumps to the map, zooms into this one property, and
   // starts the same tap-to-draw flow the run Geofences use — see
   // propertyBoundaryDrawPropId / finishGeofenceDraw's branch for it.
@@ -13946,6 +13988,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     if (userCurrentLocation && typeof updateMapTruckPosition === 'function') updateMapTruckPosition();
     requestAnimationFrame(() => leafletMap && leafletMap.invalidateSize());
     if (typeof wireBinSelectionClicks === 'function') wireBinSelectionClicks();
+    ensureMapFocusTopBarContext();
   };
 
   window.updateMapHeaderInfo = function(sites, groups) {
