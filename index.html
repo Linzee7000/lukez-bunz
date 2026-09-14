@@ -4642,6 +4642,15 @@
   let gpsTrailLiveSegment = null;
   let gpsTrailPendingBreak = false;
   let gpsTrailLastFixAt = 0;
+  // Small direction-arrow markers dropped along the trail every ~30m so the
+  // recorded path shows which way the truck was travelling, not just where
+  // it went. Kept as a flat array (same pattern as gpsTrailLines) rather
+  // than a dedicated layer group, capped the same way segments are capped
+  // so a very long recording session can't pile up unbounded DOM nodes.
+  let gpsTrailArrows = [];
+  let gpsTrailDistSinceArrow = 0;
+  const GPS_TRAIL_ARROW_SPACING_METERS = 30;
+  const GPS_TRAIL_MAX_ARROWS = 4000;
   // Pausing stops new points being recorded (and stops the live tip above)
   // without touching anything already drawn/saved - see the Pause Trail
   // button under Map Settings > KML (toggleSnailTrailPause).
@@ -4680,6 +4689,48 @@
     if (!leafletMap || !gpsTrailLines.length) return;
     const w = currentGpsTrailWeight();
     gpsTrailLines.forEach(seg => seg.setStyle({ weight: w }));
+  }
+
+  // A small filled chevron pointing "up" (north) at rest, rotated clockwise
+  // by the given compass bearing (0-360, same convention as getBearing()/
+  // CSS transform:rotate()) so it points the direction the truck was
+  // actually travelling at that point in the trail. Colour matches the
+  // trail line itself (#22c55e) so it reads as part of the same trail.
+  function makeGpsTrailArrowMarker(lat, lng, bearingDeg) {
+    return L.marker([lat, lng], {
+      icon: L.divIcon({
+        className: 'gps-trail-arrow-icon',
+        html: `
+          <div style="width:16px; height:16px; display:flex; align-items:center; justify-content:center; transform:rotate(${bearingDeg}deg);">
+            <div style="
+              width: 0; height: 0;
+              border-left: 5px solid transparent;
+              border-right: 5px solid transparent;
+              border-bottom: 9px solid #22c55e;
+              filter: drop-shadow(0 0 1.5px rgba(255,255,255,0.9)) drop-shadow(0 1px 2px rgba(0,0,0,0.4));
+            "></div>
+          </div>
+        `,
+        iconSize: [16, 16],
+        iconAnchor: [8, 8]
+      }),
+      interactive: false,
+      keyboard: false
+    });
+  }
+
+  // Adds one trail-direction arrow at `pt`, pointing from `fromPt` towards
+  // it, then enforces GPS_TRAIL_MAX_ARROWS the same way gpsTrailLines caps
+  // itself - oldest arrow removed once the cap is hit.
+  function dropGpsTrailArrow(fromPt, pt) {
+    if (!leafletMap) return;
+    const brg = getBearing(fromPt[0], fromPt[1], pt[0], pt[1]);
+    const arrow = makeGpsTrailArrowMarker(pt[0], pt[1], brg).addTo(leafletMap);
+    gpsTrailArrows.push(arrow);
+    if (gpsTrailArrows.length > GPS_TRAIL_MAX_ARROWS) {
+      const old = gpsTrailArrows.shift();
+      if (old) leafletMap.removeLayer(old);
+    }
   }
 
   let leafletMap = null;
@@ -5314,11 +5365,14 @@
     gpsTrailPendingBreak = false;
     gpsTrailLastFixAt = 0;
     gpsTrailPointsSinceSave = 0;
+    gpsTrailDistSinceArrow = 0;
     if (leafletMap) {
       gpsTrailLines.forEach(seg => leafletMap.removeLayer(seg));
+      gpsTrailArrows.forEach(a => leafletMap.removeLayer(a));
       if (gpsTrailLiveSegment) leafletMap.removeLayer(gpsTrailLiveSegment);
     }
     gpsTrailLines = [];
+    gpsTrailArrows = [];
     gpsTrailLiveSegment = null;
     saveToDB('gpsTrailPoints', gpsTrailPoints).catch(() => {});
     saveToDB('gpsTrailBreaks', gpsTrailBreaks).catch(() => {});
@@ -5373,8 +5427,15 @@
           const old = gpsTrailLines.shift();
           if (old) leafletMap.removeLayer(old);
         }
+        // Fresh segment - no direction to show yet until the next point.
+        gpsTrailDistSinceArrow = 0;
       } else {
         gpsTrailLines[gpsTrailLines.length - 1].addLatLng(pos);
+        gpsTrailDistSinceArrow += moved;
+        if (gpsTrailDistSinceArrow >= GPS_TRAIL_ARROW_SPACING_METERS) {
+          gpsTrailDistSinceArrow = 0;
+          dropGpsTrailArrow(previous, pos);
+        }
       }
     }
 
@@ -5397,7 +5458,11 @@
     if (!leafletMap) return;
     gpsTrailLines.forEach(seg => leafletMap.removeLayer(seg));
     gpsTrailLines = [];
+    gpsTrailArrows.forEach(a => leafletMap.removeLayer(a));
+    gpsTrailArrows = [];
+    gpsTrailDistSinceArrow = 0;
     let currentSeg = null;
+    let prevPt = null;
     gpsTrailPoints.forEach((pt, i) => {
       const isBreak = gpsTrailBreaks[i] || !currentSeg;
       if (isBreak) {
@@ -5405,9 +5470,16 @@
           color: '#22c55e', weight: currentGpsTrailWeight(), opacity: 0.8, lineCap: 'round', lineJoin: 'round'
         }).addTo(leafletMap);
         gpsTrailLines.push(currentSeg);
+        gpsTrailDistSinceArrow = 0;
       } else {
         currentSeg.addLatLng(pt);
+        gpsTrailDistSinceArrow += getDistanceMeters(prevPt[0], prevPt[1], pt[0], pt[1]);
+        if (gpsTrailDistSinceArrow >= GPS_TRAIL_ARROW_SPACING_METERS) {
+          gpsTrailDistSinceArrow = 0;
+          dropGpsTrailArrow(prevPt, pt);
+        }
       }
+      prevPt = pt;
     });
   }
 
