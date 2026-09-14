@@ -3721,6 +3721,14 @@
                 <button type="button" id="btnSnailTrailPause" class="map-context-btn map-settings-opt-btn map-settings-action" onclick="toggleSnailTrailPause()">⏸ Pause Trail</button>
                 <button type="button" class="map-context-btn map-settings-opt-btn map-settings-action" onclick="exportSnailTrailKml()"><img class="icon-img" src="export.png" alt=""> Export Trail</button>
                 <button type="button" class="map-context-btn map-settings-opt-btn map-settings-action danger" onclick="confirmClearSnailTrail()"><img class="icon-img" src="minus.png" alt=""> Clear Trail</button>
+                <!-- Trail appearance settings: fade the trail from green to
+                     red the older it gets, and/or drop a time label every
+                     15 minutes along it. Both toggles apply live on-screen
+                     and are honoured by Export Trail's KML too (see
+                     toggleSnailTrailColorByAge / toggleSnailTrailTimeLabels
+                     and exportSnailTrailKml). -->
+                <button type="button" id="btnSnailTrailColorMode" class="map-context-btn map-settings-opt-btn map-settings-action" onclick="toggleSnailTrailColorByAge()">🎨 Age Colour: Off</button>
+                <button type="button" id="btnSnailTrailTimeLabels" class="map-context-btn map-settings-opt-btn map-settings-action" onclick="toggleSnailTrailTimeLabels()">🕒 Time Labels: On</button>
               </div>
               <div class="map-settings-option-group" id="mapSettingsGroupCustomize" data-group="customize">
                 <button type="button" class="map-context-btn map-settings-opt-btn map-settings-action" onclick="openRunStyleModal()">🎨 Colours</button>
@@ -4668,6 +4676,41 @@
   let gpsTrailPointsSinceSave = 0;
   let gpsTrailRestoredFromDB = false;
 
+  // Parallel array to gpsTrailPoints: the Date.now() timestamp each point
+  // was recorded at. Used purely for the "age colour" and 15-minute time
+  // label features below - nothing else reads it, so old saved trails
+  // without this data (see startup restore) just get backfilled with the
+  // current time and read as "fresh" until new points age them naturally.
+  let gpsTrailTimes = [];
+
+  // ===== Snail Trail settings: age colour + 15-minute time labels =====
+  // Both are toggles under Map Settings > KML (see the KML options group
+  // markup and toggleSnailTrailColorByAge/toggleSnailTrailTimeLabels
+  // below), persisted the same way as the app's other simple on/off
+  // settings (localStorage, not the IndexedDB trail data itself).
+  let snailTrailColorByAge = localStorage.getItem('lukezBunzSnailTrailColorByAge') === '1';
+  let snailTrailShowTimeLabels = localStorage.getItem('lukezBunzSnailTrailTimeLabels') !== '0';
+  // Colour-by-age fades the trail from green (just recorded) to red over
+  // this many ms, then holds solid red beyond it.
+  const GPS_TRAIL_AGE_MAX_MS = 60 * 60 * 1000; // 60 minutes = fully red
+  // Age-coloured segments are only re-cut this often (not per-point) so a
+  // long recording doesn't turn into thousands of 1-point polylines -
+  // colour within a bucket is refreshed in place instead (see
+  // refreshGpsTrailAgeColors) so it still reads as continuously aging.
+  const GPS_TRAIL_AGE_BUCKET_MS = 5 * 60 * 1000; // 5 minutes per colour segment
+  const GPS_TRAIL_TIME_LABEL_INTERVAL_MS = 15 * 60 * 1000; // one time label every 15 minutes of recording
+  const GPS_TRAIL_MAX_TIME_LABELS = 2000;
+  // Per-segment metadata parallel to gpsTrailLines: the timestamp the
+  // segment started at, so refreshGpsTrailAgeColors() knows how old each
+  // already-drawn segment is without re-walking every point.
+  let gpsTrailLineMeta = [];
+  let gpsTrailTimeLabels = []; // small "HH:MM" markers dropped every 15 min
+  // Tracks which age-colour bucket / time-label bucket the trail is
+  // currently in, so a new drawn segment / label only starts when the
+  // bucket actually changes rather than on every single point.
+  let gpsTrailLastColorBucket = null;
+  let gpsTrailLastLabelBucket = null;
+
   // Converts the fixed real-world trail width (GPS_TRAIL_WIDTH_METERS) into
   // the Leaflet pixel "weight" that represents it at the map's current zoom
   // and latitude, so the trail always reads as the same width on the ground
@@ -4717,6 +4760,89 @@
       interactive: false,
       keyboard: false
     });
+  }
+
+  // ===== Snail trail age colour + 15-minute time labels =====
+  // Fades a trail segment from green (just recorded) to red as it ages,
+  // holding solid red once it passes GPS_TRAIL_AGE_MAX_MS old. Returns an
+  // [r,g,b] triple so both the on-screen CSS colour and the exported KML's
+  // aabbggrr colour can be built from the same numbers.
+  function gpsTrailAgeColorRGB(ageMs) {
+    const t = Math.max(0, Math.min(1, ageMs / GPS_TRAIL_AGE_MAX_MS));
+    const from = [34, 197, 94];  // #22c55e - fresh
+    const to   = [220, 38, 38];  // #dc2626 - old
+    return [
+      Math.round(from[0] + (to[0] - from[0]) * t),
+      Math.round(from[1] + (to[1] - from[1]) * t),
+      Math.round(from[2] + (to[2] - from[2]) * t)
+    ];
+  }
+  function gpsTrailAgeColorCss(ageMs) {
+    const [r, g, b] = gpsTrailAgeColorRGB(ageMs);
+    return `rgb(${r},${g},${b})`;
+  }
+  // The colour a trail segment/point should currently be drawn in - plain
+  // green when the "Age Colour" setting is off, otherwise faded by how
+  // long ago `ts` was recorded.
+  function gpsTrailPointColor(ts) {
+    if (!snailTrailColorByAge || !ts) return '#22c55e';
+    return gpsTrailAgeColorCss(Date.now() - ts);
+  }
+  function gpsTrailAgeBucket(ts) {
+    return Math.floor(ts / GPS_TRAIL_AGE_BUCKET_MS);
+  }
+
+  // Re-applies age colour to every already-drawn trail segment based on
+  // how old it now is. Segments don't repaint themselves as time passes,
+  // so this is run on an interval (see setInterval below) while the Age
+  // Colour setting is on - that's what actually makes older stretches of
+  // the trail visibly drift towards red while you keep driving.
+  function refreshGpsTrailAgeColors() {
+    if (!snailTrailColorByAge || !leafletMap || !gpsTrailLines.length) return;
+    const now = Date.now();
+    gpsTrailLines.forEach((seg, i) => {
+      const meta = gpsTrailLineMeta[i];
+      if (!meta) return;
+      seg.setStyle({ color: gpsTrailAgeColorCss(now - meta.time) });
+    });
+  }
+  setInterval(refreshGpsTrailAgeColors, 60 * 1000);
+
+  // Small "HH:MM" pill dropped along the trail every 15 minutes of
+  // recording (see GPS_TRAIL_TIME_LABEL_INTERVAL_MS), so you can see how
+  // long ago a given stretch was driven without needing Age Colour on.
+  function makeGpsTrailTimeLabelMarker(lat, lng, ts) {
+    const label = new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    return L.marker([lat, lng], {
+      icon: L.divIcon({
+        className: 'gps-trail-time-label-icon',
+        html: `
+          <div style="
+            background: rgba(0,0,0,0.68); color:#fff; font-size:10px; font-weight:700;
+            padding:1px 5px; border-radius:5px; white-space:nowrap;
+            transform: translate(-50%, -160%);
+            box-shadow: 0 1px 3px rgba(0,0,0,0.45);
+          ">${label}</div>
+        `,
+        iconSize: [0, 0],
+        iconAnchor: [0, 0]
+      }),
+      interactive: false,
+      keyboard: false
+    });
+  }
+
+  // Adds one time label at `pt` (only when the Time Labels setting is on),
+  // then enforces GPS_TRAIL_MAX_TIME_LABELS the same way trail arrows cap
+  // themselves - oldest label removed once the cap is hit.
+  function dropGpsTrailTimeLabel(pt, ts) {
+    if (!leafletMap || !snailTrailShowTimeLabels) return;
+    const label = makeGpsTrailTimeLabelMarker(pt[0], pt[1], ts).addTo(leafletMap);
+    gpsTrailTimeLabels.push(label);
+    if (gpsTrailTimeLabels.length > GPS_TRAIL_MAX_TIME_LABELS) {
+      const old = gpsTrailTimeLabels.shift();
+      if (old) leafletMap.removeLayer(old);
+    }
   }
 
   // Adds one trail-direction arrow at `pt`, pointing from `fromPt` towards
@@ -5334,7 +5460,35 @@
     if (pauseBtn) {
       pauseBtn.innerHTML = snailTrailPaused ? '▶️ Resume Trail' : '⏸ Pause Trail';
     }
+    const colorBtn = document.getElementById('btnSnailTrailColorMode');
+    if (colorBtn) {
+      colorBtn.innerHTML = `🎨 Age Colour: ${snailTrailColorByAge ? 'On' : 'Off'}`;
+    }
+    const labelBtn = document.getElementById('btnSnailTrailTimeLabels');
+    if (labelBtn) {
+      labelBtn.innerHTML = `🕒 Time Labels: ${snailTrailShowTimeLabels ? 'On' : 'Off'}`;
+    }
   }
+
+  // Toggles fading the trail from green (fresh) to red (old) - see
+  // gpsTrailAgeColorRGB / refreshGpsTrailAgeColors. Redraws the whole
+  // trail immediately so the switch is visible right away instead of only
+  // affecting points recorded from here on.
+  window.toggleSnailTrailColorByAge = function() {
+    snailTrailColorByAge = !snailTrailColorByAge;
+    localStorage.setItem('lukezBunzSnailTrailColorByAge', snailTrailColorByAge ? '1' : '0');
+    updateSnailTrailButtonUI();
+    renderStoredGpsTrail();
+  };
+
+  // Toggles the "HH:MM" labels dropped every 15 minutes along the trail
+  // (see dropGpsTrailTimeLabel). Redraws immediately, same as above.
+  window.toggleSnailTrailTimeLabels = function() {
+    snailTrailShowTimeLabels = !snailTrailShowTimeLabels;
+    localStorage.setItem('lukezBunzSnailTrailTimeLabels', snailTrailShowTimeLabels ? '1' : '0');
+    updateSnailTrailButtonUI();
+    renderStoredGpsTrail();
+  };
 
   // Pause/resume trail recording - now a plain tap under Map Settings >
   // KML instead of a short-tap gesture on the old side-control button.
@@ -5362,20 +5516,27 @@
   function clearSnailTrail() {
     gpsTrailPoints = [];
     gpsTrailBreaks = [];
+    gpsTrailTimes = [];
     gpsTrailPendingBreak = false;
     gpsTrailLastFixAt = 0;
     gpsTrailPointsSinceSave = 0;
     gpsTrailDistSinceArrow = 0;
+    gpsTrailLastColorBucket = null;
+    gpsTrailLastLabelBucket = null;
     if (leafletMap) {
       gpsTrailLines.forEach(seg => leafletMap.removeLayer(seg));
       gpsTrailArrows.forEach(a => leafletMap.removeLayer(a));
+      gpsTrailTimeLabels.forEach(l => leafletMap.removeLayer(l));
       if (gpsTrailLiveSegment) leafletMap.removeLayer(gpsTrailLiveSegment);
     }
     gpsTrailLines = [];
+    gpsTrailLineMeta = [];
     gpsTrailArrows = [];
+    gpsTrailTimeLabels = [];
     gpsTrailLiveSegment = null;
     saveToDB('gpsTrailPoints', gpsTrailPoints).catch(() => {});
     saveToDB('gpsTrailBreaks', gpsTrailBreaks).catch(() => {});
+    saveToDB('gpsTrailTimes', gpsTrailTimes).catch(() => {});
   }
 
   function recordSnailTrailPoint(lat, lng) {
@@ -5412,19 +5573,33 @@
 
     gpsTrailPoints.push(pos);
     gpsTrailBreaks.push(isBreak);
+    gpsTrailTimes.push(now);
     if (gpsTrailPoints.length > GPS_TRAIL_MAX_POINTS) {
       gpsTrailPoints.shift();
       gpsTrailBreaks.shift();
+      gpsTrailTimes.shift();
     }
 
+    // When Age Colour is on, also start a fresh (freshly-coloured) segment
+    // whenever the point lands in a new colour bucket - otherwise a
+    // segment drawn green at commit time would just sit there and never
+    // visibly age (refreshGpsTrailAgeColors repaints buckets in place, but
+    // only once they exist as their own segment).
+    const colorBucket = snailTrailColorByAge ? gpsTrailAgeBucket(now) : null;
+    const bucketChanged = snailTrailColorByAge && gpsTrailLastColorBucket !== null && colorBucket !== gpsTrailLastColorBucket;
+    const drawBreak = isBreak || bucketChanged;
+    gpsTrailLastColorBucket = colorBucket;
+
     if (leafletMap) {
-      if (isBreak || gpsTrailLines.length === 0) {
+      if (drawBreak || gpsTrailLines.length === 0) {
         const seg = L.polyline([pos], {
-          color: '#22c55e', weight: currentGpsTrailWeight(), opacity: 0.8, lineCap: 'round', lineJoin: 'round'
+          color: gpsTrailPointColor(now), weight: currentGpsTrailWeight(), opacity: 0.8, lineCap: 'round', lineJoin: 'round'
         }).addTo(leafletMap);
         gpsTrailLines.push(seg);
+        gpsTrailLineMeta.push({ time: now });
         if (gpsTrailLines.length > GPS_TRAIL_MAX_SEGMENTS) {
           const old = gpsTrailLines.shift();
+          gpsTrailLineMeta.shift();
           if (old) leafletMap.removeLayer(old);
         }
         // Fresh segment - no direction to show yet until the next point.
@@ -5439,6 +5614,14 @@
       }
     }
 
+    // Drop a "HH:MM" label the first time a point lands in a new 15-minute
+    // bucket, so the trail carries readable timestamps along its length.
+    const labelBucket = Math.floor(now / GPS_TRAIL_TIME_LABEL_INTERVAL_MS);
+    if (gpsTrailLastLabelBucket !== null && labelBucket !== gpsTrailLastLabelBucket) {
+      dropGpsTrailTimeLabel(pos, now);
+    }
+    gpsTrailLastLabelBucket = labelBucket;
+
     // Throttled persistence so a killed/backgrounded tab doesn't lose the
     // whole trail - only the last few points since the last save.
     gpsTrailPointsSinceSave++;
@@ -5446,6 +5629,7 @@
       gpsTrailPointsSinceSave = 0;
       saveToDB('gpsTrailPoints', gpsTrailPoints).catch(() => {});
       saveToDB('gpsTrailBreaks', gpsTrailBreaks).catch(() => {});
+      saveToDB('gpsTrailTimes', gpsTrailTimes).catch(() => {});
     }
   }
 
@@ -5458,18 +5642,28 @@
     if (!leafletMap) return;
     gpsTrailLines.forEach(seg => leafletMap.removeLayer(seg));
     gpsTrailLines = [];
+    gpsTrailLineMeta = [];
     gpsTrailArrows.forEach(a => leafletMap.removeLayer(a));
     gpsTrailArrows = [];
+    gpsTrailTimeLabels.forEach(l => leafletMap.removeLayer(l));
+    gpsTrailTimeLabels = [];
     gpsTrailDistSinceArrow = 0;
+    gpsTrailLastColorBucket = null;
+    gpsTrailLastLabelBucket = null;
     let currentSeg = null;
     let prevPt = null;
     gpsTrailPoints.forEach((pt, i) => {
-      const isBreak = gpsTrailBreaks[i] || !currentSeg;
+      const ts = gpsTrailTimes[i] || Date.now();
+      const colorBucket = snailTrailColorByAge ? gpsTrailAgeBucket(ts) : null;
+      const bucketChanged = snailTrailColorByAge && gpsTrailLastColorBucket !== null && colorBucket !== gpsTrailLastColorBucket;
+      const isBreak = gpsTrailBreaks[i] || !currentSeg || bucketChanged;
+      gpsTrailLastColorBucket = colorBucket;
       if (isBreak) {
         currentSeg = L.polyline([pt], {
-          color: '#22c55e', weight: currentGpsTrailWeight(), opacity: 0.8, lineCap: 'round', lineJoin: 'round'
+          color: gpsTrailPointColor(ts), weight: currentGpsTrailWeight(), opacity: 0.8, lineCap: 'round', lineJoin: 'round'
         }).addTo(leafletMap);
         gpsTrailLines.push(currentSeg);
+        gpsTrailLineMeta.push({ time: ts });
         gpsTrailDistSinceArrow = 0;
       } else {
         currentSeg.addLatLng(pt);
@@ -5479,6 +5673,11 @@
           dropGpsTrailArrow(prevPt, pt);
         }
       }
+      const labelBucket = Math.floor(ts / GPS_TRAIL_TIME_LABEL_INTERVAL_MS);
+      if (gpsTrailLastLabelBucket !== null && labelBucket !== gpsTrailLastLabelBucket) {
+        dropGpsTrailTimeLabel(pt, ts);
+      }
+      gpsTrailLastLabelBucket = labelBucket;
       prevPt = pt;
     });
   }
@@ -9526,13 +9725,14 @@ window.addEventListener('DOMContentLoaded', async () => {
       }
       startLiveLocationWatcher();
 
-      let cached = null, cachedEdits = null, cachedBorders = null, cachedTrail = null, cachedTrailBreaks = null, cachedSyncCount = null, cachedKmzData = null, cachedGeofences = null;
+      let cached = null, cachedEdits = null, cachedBorders = null, cachedTrail = null, cachedTrailBreaks = null, cachedTrailTimes = null, cachedSyncCount = null, cachedKmzData = null, cachedGeofences = null;
       try {
         cached = await loadFromDB("masterRecords");
         cachedEdits = await loadFromDB("masterEditsLog");
         cachedBorders = await loadFromDB("customRunBorders");
         cachedTrail = await loadFromDB("gpsTrailPoints");
         cachedTrailBreaks = await loadFromDB("gpsTrailBreaks");
+        cachedTrailTimes = await loadFromDB("gpsTrailTimes");
         cachedSyncCount = await loadFromDB("lastSyncedEditCount");
         cachedKmzData = await loadFromDB("kmzDataByRun");
         cachedGeofences = await loadFromDB("geofences");
@@ -9561,6 +9761,14 @@ window.addEventListener('DOMContentLoaded', async () => {
           ? cachedTrailBreaks.slice(-GPS_TRAIL_MAX_POINTS)
           : gpsTrailPoints.map((_, i) => i === 0); // older saves had no break data - treat as one continuous segment
         while (gpsTrailBreaks.length < gpsTrailPoints.length) gpsTrailBreaks.unshift(false);
+        // Older saves had no per-point timestamps at all - backfill with
+        // "now" so they just read as freshly-recorded (green) until new
+        // points age them naturally, instead of throwing off the age
+        // colour / time label math with missing data.
+        gpsTrailTimes = Array.isArray(cachedTrailTimes)
+          ? cachedTrailTimes.slice(-GPS_TRAIL_MAX_POINTS)
+          : [];
+        while (gpsTrailTimes.length < gpsTrailPoints.length) gpsTrailTimes.unshift(Date.now());
         gpsTrailRestoredFromDB = true;
         gpsTrailPendingBreak = true;
       }
@@ -10840,6 +11048,14 @@ window.addEventListener('DOMContentLoaded', async () => {
   }
 
   // Export Recorded Snail Trail as KML
+  // aabbggrr hex string KML wants for <color>, built from the same [r,g,b]
+  // triple the on-screen Age Colour styling uses (gpsTrailAgeColorRGB), so
+  // the exported file matches what you saw on the map.
+  function rgbToKmlColor(r, g, b, alpha = 'ff') {
+    const h = n => Math.max(0, Math.min(255, Math.round(n))).toString(16).padStart(2, '0');
+    return `${alpha}${h(b)}${h(g)}${h(r)}`;
+  }
+
   window.exportSnailTrailKml = function() {
     if (!gpsTrailPoints || gpsTrailPoints.length < 2) {
       customAlert("No snail trail recorded yet. Drive or move with GPS active to create a trail before exporting.");
@@ -10848,23 +11064,76 @@ window.addEventListener('DOMContentLoaded', async () => {
 
     const runs = Array.from(selectedMapRuns());
     const runName = runs.length === 1 ? runs[0].toUpperCase() : 'ALL_RUNS';
-    const now = new Date();
-    const dateStr = now.toISOString().replace(/[:.]/g, '-').slice(0, 16);
+    const nowDate = new Date();
+    const exportNow = nowDate.getTime();
+    const dateStr = nowDate.toISOString().replace(/[:.]/g, '-').slice(0, 16);
     const fileName = `LukezBunz_Trail_${runName}_${dateStr}.kml`;
 
-    const coordsStr = gpsTrailPoints.map(p => `${Number(p[1]).toFixed(7)},${Number(p[0]).toFixed(7)},0`).join(' ');
+    const coordStr = p => `${Number(p[1]).toFixed(7)},${Number(p[0]).toFixed(7)},0`;
 
-    const kmlContent = `<?xml version="1.0" encoding="UTF-8"?>
-<kml xmlns="http://www.opengis.net/kml/2.2">
-  <Document>
-    <name>${esc(fileName)}</name>
-    <description>Lukez Bunz Snail Trail for Run ${esc(runName)}</description>
+    let styleBlocks = '';
+    let placemarkBlocks = '';
+
+    if (snailTrailColorByAge) {
+      // One Placemark per continuous, same-age-bucket stretch, each with
+      // its own colour - mirrors how the on-screen trail is segmented
+      // (see renderStoredGpsTrail), so the file looks like what you saw.
+      const usedBuckets = new Set();
+      let currentCoords = [];
+      let currentBucket = null;
+      let segIndex = 0;
+      const flushSegment = () => {
+        if (currentCoords.length < 2 || currentBucket === null) { currentCoords = []; return; }
+        const styleId = `trailAge${currentBucket}`;
+        if (!usedBuckets.has(currentBucket)) {
+          usedBuckets.add(currentBucket);
+          const ageMs = Math.max(0, exportNow - currentBucket * GPS_TRAIL_AGE_BUCKET_MS);
+          const [r, g, b] = gpsTrailAgeColorRGB(ageMs);
+          styleBlocks += `
+    <Style id="${styleId}">
+      <LineStyle>
+        <color>${rgbToKmlColor(r, g, b)}</color>
+        <width>4</width>
+      </LineStyle>
+    </Style>`;
+        }
+        placemarkBlocks += `
+    <Placemark>
+      <name>Snail Trail Route - ${esc(runName)} (segment ${++segIndex})</name>
+      <styleUrl>#${styleId}</styleUrl>
+      <LineString>
+        <extrude>1</extrude>
+        <tessellate>1</tessellate>
+        <altitudeMode>clampToGround</altitudeMode>
+        <coordinates>
+          ${currentCoords.join(' ')}
+        </coordinates>
+      </LineString>
+    </Placemark>`;
+        currentCoords = [];
+      };
+      gpsTrailPoints.forEach((pt, i) => {
+        const ts = gpsTrailTimes[i] || exportNow;
+        const bucket = gpsTrailAgeBucket(ts);
+        const isBreak = gpsTrailBreaks[i] || currentBucket === null || bucket !== currentBucket;
+        if (isBreak) {
+          flushSegment();
+          currentBucket = bucket;
+          currentCoords.push(coordStr(pt));
+        } else {
+          currentCoords.push(coordStr(pt));
+        }
+      });
+      flushSegment();
+    } else {
+      styleBlocks += `
     <Style id="trailStyle">
       <LineStyle>
         <color>ff2563eb</color>
         <width>4</width>
       </LineStyle>
-    </Style>
+    </Style>`;
+      placemarkBlocks += `
     <Placemark>
       <name>Snail Trail Route - ${esc(runName)}</name>
       <styleUrl>#trailStyle</styleUrl>
@@ -10873,10 +11142,44 @@ window.addEventListener('DOMContentLoaded', async () => {
         <tessellate>1</tessellate>
         <altitudeMode>clampToGround</altitudeMode>
         <coordinates>
-          ${coordsStr}
+          ${gpsTrailPoints.map(coordStr).join(' ')}
         </coordinates>
       </LineString>
-    </Placemark>
+    </Placemark>`;
+    }
+
+    let timeLabelBlocks = '';
+    if (snailTrailShowTimeLabels) {
+      styleBlocks += `
+    <Style id="trailTimeLabel">
+      <IconStyle>
+        <scale>0.7</scale>
+        <Icon><href>http://maps.google.com/mapfiles/kml/shapes/placemark_circle.png</href></Icon>
+      </IconStyle>
+      <LabelStyle><scale>0.8</scale></LabelStyle>
+    </Style>`;
+      let lastLabelBucket = null;
+      gpsTrailPoints.forEach((pt, i) => {
+        const ts = gpsTrailTimes[i] || exportNow;
+        const labelBucket = Math.floor(ts / GPS_TRAIL_TIME_LABEL_INTERVAL_MS);
+        if (lastLabelBucket !== null && labelBucket !== lastLabelBucket) {
+          const label = new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+          timeLabelBlocks += `
+    <Placemark>
+      <name>${esc(label)}</name>
+      <styleUrl>#trailTimeLabel</styleUrl>
+      <Point><coordinates>${coordStr(pt)}</coordinates></Point>
+    </Placemark>`;
+        }
+        lastLabelBucket = labelBucket;
+      });
+    }
+
+    const kmlContent = `<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+  <Document>
+    <name>${esc(fileName)}</name>
+    <description>Lukez Bunz Snail Trail for Run ${esc(runName)}</description>${styleBlocks}${placemarkBlocks}${timeLabelBlocks}
   </Document>
 </kml>`;
 
