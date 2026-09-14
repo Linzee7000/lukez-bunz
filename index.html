@@ -1987,6 +1987,13 @@
     }
     .uprop-picker-section-label:first-of-type{ margin-top: 4px; }
     .uprop-run-picker-grid-2col{ grid-template-columns: repeat(2, 1fr); }
+    /* Day & Week button rows specifically run full-bleed to the card's own
+       edges - cancelling out .uprop-content's side padding - rather than
+       sitting inset like the rest of the form. Square corners throughout
+       since the grid wraps to a second row (5 days over 3 columns), so
+       there's no single pair of "outer" buttons to round instead. */
+    .uprop-daywk-grid{ margin-left: -12px; margin-right: -12px; }
+    .uprop-daywk-grid .uprop-run-picker-btn{ border-radius: 0; }
     /* The Bin Run number grid that expands beneath the tapped run box -
        spans the full width of the 4-column .uprop-run-boxes grid it lives
        in, rather than squeezing into a single column. */
@@ -3218,6 +3225,15 @@
   }
   .bin-map-marker-icon:active {
     cursor: grabbing !important;
+  }
+
+  .run-square-marker-icon {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    background: transparent !important;
+    border: none !important;
+    cursor: pointer !important;
   }
 
   /* Boundary Handles */
@@ -4485,6 +4501,17 @@
   let showBinGpsDots = true;
   let showHouseGpsDots = false;
   let isSatelliteView = false;
+  // Three "Run Square" layers - one per stream (Garbage, Recycling, FOGO).
+  // Each draws a small square at every house serviced by that stream's
+  // currently visible run(s): outline = the stream's own colour (same hex
+  // as getStreamFillColor, matching the Bins layer's fill colour), fill =
+  // the run's own colour (same mapColor()/runOutlineColor used to border
+  // the Bins layer's dots) - i.e. the identical colour *values* the Bins
+  // layer already uses, just swapped between outline/fill. All default
+  // off so turning one on is an explicit, deliberate choice.
+  let showGarbageRunSquares = false;
+  let showRecyclingRunSquares = false;
+  let showFogoRunSquares = false;
 
   let isTruckFollowEnabled = true;
   let isNextBinBoxVisible = localStorage.getItem('lukezBunzNextBinBoxVisible') !== 'false';
@@ -4627,6 +4654,9 @@
   let mapMarkersLayer = null;
   let mapHullsLayer = null;
   let mapGeofenceLayer = null;
+  let mapGarbageSquaresLayer = null;
+  let mapRecyclingSquaresLayer = null;
+  let mapFogoSquaresLayer = null;
   let geofences = [];
   let geofencesVisible = true;
   let geofenceDrawActive = false;
@@ -5095,6 +5125,24 @@
   function toggleHouseGpsDots() {
     showHouseGpsDots = !showHouseGpsDots;
     const b=document.getElementById('btnHouseGpsToggle'); if(b)b.classList.toggle('active', showHouseGpsDots);
+    renderMapData();
+    updateMapSideLayersUI();
+  }
+
+  function toggleGarbageRunSquares() {
+    showGarbageRunSquares = !showGarbageRunSquares;
+    renderMapData();
+    updateMapSideLayersUI();
+  }
+
+  function toggleRecyclingRunSquares() {
+    showRecyclingRunSquares = !showRecyclingRunSquares;
+    renderMapData();
+    updateMapSideLayersUI();
+  }
+
+  function toggleFogoRunSquares() {
+    showFogoRunSquares = !showFogoRunSquares;
     renderMapData();
     updateMapSideLayersUI();
   }
@@ -5810,6 +5858,9 @@
     mapKmzRouteLayer=L.layerGroup().addTo(leafletMap);
     mapKmzLiftLayer=L.layerGroup().addTo(leafletMap);
     mapGeofenceLayer=L.layerGroup().addTo(leafletMap);
+    mapGarbageSquaresLayer=L.layerGroup().addTo(leafletMap);
+    mapRecyclingSquaresLayer=L.layerGroup().addTo(leafletMap);
+    mapFogoSquaresLayer=L.layerGroup().addTo(leafletMap);
     updateMapSideViewUI();
     if (typeof updateSnailTrailButtonUI === 'function') updateSnailTrailButtonUI();
     applyHeadingUpMap();
@@ -7659,7 +7710,7 @@
   }
 
   function updateMapSideLayersUI(){
-    const pairs=[['btnSideBins',showBinGpsDots],['btnSideHouses',showHouseGpsDots],['btnSideKmz',kmzLayersVisible],['btnSideNextBin',isNextBinBoxVisible],['btnSideGeofence',geofencesVisible],['btnSatelliteLayer',isSatelliteView]];
+    const pairs=[['btnSideBins',showBinGpsDots],['btnSideHouses',showHouseGpsDots],['btnSideGarbageSq',showGarbageRunSquares],['btnSideRecyclingSq',showRecyclingRunSquares],['btnSideFogoSq',showFogoRunSquares],['btnSideKmz',kmzLayersVisible],['btnSideNextBin',isNextBinBoxVisible],['btnSideGeofence',geofencesVisible],['btnSatelliteLayer',isSatelliteView]];
     pairs.forEach(([id,on])=>{const b=document.getElementById(id);if(!b)return;b.classList.toggle('active',!!on);const c=b.querySelector('.layer-check');if(c)c.textContent=on?'✓':'';});
   }
   function closeMapSideLayers(){const c=document.getElementById('mapSideLayersControl');if(c)c.classList.remove('open');}
@@ -8337,8 +8388,18 @@
         </div>
       </div>
       <div class="form-group">
+        <label class="uprop-section-toggle-label" onclick="window.toggleUPropSection('uPropFlagsPanel','uPropFlagsChevron')">
+          <span class="uprop-section-label-text">Property Flags / Notes</span>
+          <span class="uprop-summary" id="uPropFlagsSummary">${esc(site.runFlags || 'None set')}</span>
+          <span id="uPropFlagsChevron" class="uprop-chevron uprop-accordion-chevron">▾</span>
+        </label>
+        <div class="uprop-accordion-panel uprop-collapsible uprop-collapsed" id="uPropFlagsPanel">
+          <input type="text" id="modalPropFlags" placeholder="e.g. Steep driveway, locked gate..." value="${esc(site.runFlags || '')}" oninput="window.updateUPropFlagsSummary()">
+        </div>
+      </div>
+      <div class="form-group">
         <label class="uprop-section-toggle-label" onclick="window.toggleUPropSection('uPropDayWeekPanel','uPropDayWeekChevron')">
-          <span class="uprop-section-label-text">Collection Day &amp; Week</span>
+          <span class="uprop-section-label-text">Collection Details</span>
           <span class="uprop-summary" id="uPropDayWeekSummary">${esc(sch.day || 'Monday')} · Week ${esc((sch.weekLetter || 'A').toUpperCase())}</span>
           <span id="uPropDayWeekChevron" class="uprop-chevron uprop-accordion-chevron">▾</span>
         </label>
@@ -8351,57 +8412,45 @@
             <option value="B" ${(sch.weekLetter||'A').toUpperCase()==='B'?'selected':''}>Week B</option>
           </select>
           <div class="uprop-picker-section-label">Day</div>
-          <div class="uprop-run-picker-grid">
+          <div class="uprop-run-picker-grid uprop-daywk-grid">
             ${[['Monday','MON'],['Tuesday','TUE'],['Wednesday','WED'],['Thursday','THU'],['Friday','FRI']].map(([full,short]) => `<button type="button" class="uprop-run-picker-btn${(sch.day||'Monday')===full?' active':''}" onclick="window.selectUPropDay(this,'${full}')">${short}</button>`).join('')}
           </div>
           <div class="uprop-picker-section-label">Week</div>
-          <div class="uprop-run-picker-grid uprop-run-picker-grid-2col">
+          <div class="uprop-run-picker-grid uprop-run-picker-grid-2col uprop-daywk-grid">
             ${['A','B'].map(w => `<button type="button" class="uprop-run-picker-btn${(sch.weekLetter||'A').toUpperCase()===w?' active':''}" onclick="window.selectUPropWeek(this,'${w}')">Week ${w}</button>`).join('')}
           </div>
-        </div>
-      </div>
-      <div class="form-group">
-        <label>Bin Runs</label>
-        <div class="uprop-run-boxes" id="uPropBinRunsGrid">
-          <div class="uprop-run-box uprop-run-box-gar" title="Garbage run - tap to change" onclick="window.toggleUPropRunInline(this,'modalPropGarRun','modalPropGarRunDisplay','garRun')">
-            <img class="icon-img" src="garbage.png" alt="Garbage">
-            <select id="modalPropGarRun" style="display:none;">${opt(garRuns, sch.garRun)}</select>
-            <button type="button" class="uprop-run-box-select" id="modalPropGarRunDisplay" onclick="event.stopPropagation(); window.toggleUPropRunInline(this,'modalPropGarRun','modalPropGarRunDisplay','garRun')">${esc((sch.garRun || '').trim() || 'None')}</button>
+          <div class="uprop-picker-section-label">Bin Runs</div>
+          <div class="uprop-run-boxes" id="uPropBinRunsGrid">
+            <div class="uprop-run-box uprop-run-box-gar" title="Garbage run - tap to change" onclick="window.toggleUPropRunInline(this,'modalPropGarRun','modalPropGarRunDisplay','garRun')">
+              <img class="icon-img" src="garbage.png" alt="Garbage">
+              <select id="modalPropGarRun" style="display:none;">${opt(garRuns, sch.garRun)}</select>
+              <button type="button" class="uprop-run-box-select" id="modalPropGarRunDisplay" onclick="event.stopPropagation(); window.toggleUPropRunInline(this,'modalPropGarRun','modalPropGarRunDisplay','garRun')">${esc((sch.garRun || '').trim() || 'None')}</button>
+            </div>
+            <div class="uprop-run-box uprop-run-box-rec" title="Recycling run - tap to change" onclick="window.toggleUPropRunInline(this,'modalPropRecRun','modalPropRecRunDisplay','recRun')">
+              <img class="icon-img" src="recycle.png" alt="Recycling">
+              <span class="uprop-run-box-runweek">
+                <select id="modalPropRecRun" style="display:none;">${opt(recRuns, sch.recRun)}</select><button type="button" class="uprop-run-box-select" id="modalPropRecRunDisplay" onclick="event.stopPropagation(); window.toggleUPropRunInline(this,'modalPropRecRun','modalPropRecRunDisplay','recRun')">${esc((sch.recRun || '').trim() || 'None')}</button><span class="uprop-run-box-week" id="modalPropRecWeekLabel">${esc((sch.weekLetter || 'A').toUpperCase())}</span>
+              </span>
+            </div>
+            <div class="uprop-run-box uprop-run-box-summer" title="Summer Recycling run - tap to change" onclick="window.toggleUPropRunInline(this,'modalPropRecSummerRun','modalPropRecSummerRunDisplay','recSummerRun')">
+              <img class="icon-img" src="summer.png" alt="Summer Recycling">
+              <select id="modalPropRecSummerRun" style="display:none;">${opt(recSummerRuns, sch.recSummerRun)}</select>
+              <button type="button" class="uprop-run-box-select" id="modalPropRecSummerRunDisplay" onclick="event.stopPropagation(); window.toggleUPropRunInline(this,'modalPropRecSummerRun','modalPropRecSummerRunDisplay','recSummerRun')">${esc((sch.recSummerRun || '').trim() || 'None')}</button>
+            </div>
+            <div class="uprop-run-box uprop-run-box-fog" title="FOGO run - tap to change" onclick="window.toggleUPropRunInline(this,'modalPropFogRun','modalPropFogRunDisplay','fogRun')">
+              <img class="icon-img" src="fogo.png" alt="FOGO">
+              <span class="uprop-run-box-runweek">
+                <select id="modalPropFogRun" style="display:none;">${opt(fogRuns, sch.fogRun)}</select><button type="button" class="uprop-run-box-select" id="modalPropFogRunDisplay" onclick="event.stopPropagation(); window.toggleUPropRunInline(this,'modalPropFogRun','modalPropFogRunDisplay','fogRun')">${esc((sch.fogRun || '').trim() || 'None')}</button><span class="uprop-run-box-week" id="modalPropFogWeekLabel">${esc((sch.weekLetter || 'A').toUpperCase())}</span>
+              </span>
+            </div>
+            <div class="uprop-run-picker-grid uprop-accordion-panel uprop-collapsible uprop-collapsed" id="uPropInlineRunGrid"></div>
           </div>
-          <div class="uprop-run-box uprop-run-box-rec" title="Recycling run - tap to change" onclick="window.toggleUPropRunInline(this,'modalPropRecRun','modalPropRecRunDisplay','recRun')">
-            <img class="icon-img" src="recycle.png" alt="Recycling">
-            <span class="uprop-run-box-runweek">
-              <select id="modalPropRecRun" style="display:none;">${opt(recRuns, sch.recRun)}</select><button type="button" class="uprop-run-box-select" id="modalPropRecRunDisplay" onclick="event.stopPropagation(); window.toggleUPropRunInline(this,'modalPropRecRun','modalPropRecRunDisplay','recRun')">${esc((sch.recRun || '').trim() || 'None')}</button><span class="uprop-run-box-week" id="modalPropRecWeekLabel">${esc((sch.weekLetter || 'A').toUpperCase())}</span>
-            </span>
-          </div>
-          <div class="uprop-run-box uprop-run-box-summer" title="Summer Recycling run - tap to change" onclick="window.toggleUPropRunInline(this,'modalPropRecSummerRun','modalPropRecSummerRunDisplay','recSummerRun')">
-            <img class="icon-img" src="summer.png" alt="Summer Recycling">
-            <select id="modalPropRecSummerRun" style="display:none;">${opt(recSummerRuns, sch.recSummerRun)}</select>
-            <button type="button" class="uprop-run-box-select" id="modalPropRecSummerRunDisplay" onclick="event.stopPropagation(); window.toggleUPropRunInline(this,'modalPropRecSummerRun','modalPropRecSummerRunDisplay','recSummerRun')">${esc((sch.recSummerRun || '').trim() || 'None')}</button>
-          </div>
-          <div class="uprop-run-box uprop-run-box-fog" title="FOGO run - tap to change" onclick="window.toggleUPropRunInline(this,'modalPropFogRun','modalPropFogRunDisplay','fogRun')">
-            <img class="icon-img" src="fogo.png" alt="FOGO">
-            <span class="uprop-run-box-runweek">
-              <select id="modalPropFogRun" style="display:none;">${opt(fogRuns, sch.fogRun)}</select><button type="button" class="uprop-run-box-select" id="modalPropFogRunDisplay" onclick="event.stopPropagation(); window.toggleUPropRunInline(this,'modalPropFogRun','modalPropFogRunDisplay','fogRun')">${esc((sch.fogRun || '').trim() || 'None')}</button><span class="uprop-run-box-week" id="modalPropFogWeekLabel">${esc((sch.weekLetter || 'A').toUpperCase())}</span>
-            </span>
-          </div>
-          <div class="uprop-run-picker-grid uprop-accordion-panel uprop-collapsible uprop-collapsed" id="uPropInlineRunGrid"></div>
-        </div>
-      </div>
-      <div class="form-group">
-        <label class="uprop-section-toggle-label" onclick="window.toggleUPropSection('uPropFlagsPanel','uPropFlagsChevron')">
-          <span class="uprop-section-label-text">Property Flags / Notes</span>
-          <span class="uprop-summary" id="uPropFlagsSummary">${esc(site.runFlags || 'None set')}</span>
-          <span id="uPropFlagsChevron" class="uprop-chevron uprop-accordion-chevron">▾</span>
-        </label>
-        <div class="uprop-accordion-panel uprop-collapsible uprop-collapsed" id="uPropFlagsPanel">
-          <input type="text" id="modalPropFlags" placeholder="e.g. Steep driveway, locked gate..." value="${esc(site.runFlags || '')}" oninput="window.updateUPropFlagsSummary()">
         </div>
       </div>
       <div class="form-group">
         <label class="uprop-section-toggle-label" onclick="window.toggleUPropSection('uPropGpsPanel','uPropGpsChevron')">
-          <span class="uprop-section-label-text">Property GPS Coordinates</span>
-          <span class="uprop-summary" id="uPropGpsSummary">${(site.lat && site.lng) ? esc(site.lat) + ', ' + esc(site.lng) : 'Not set'}</span>
+          <span class="uprop-section-label-text">Property Location</span>
+          <span class="uprop-summary" id="uPropGpsSummary">${(site.lat && site.lng) ? esc(site.lat) + ', ' + esc(site.lng) : 'Not set'}${boundaryPts ? ' · Boundary set' : ' · No boundary'}</span>
           <span id="uPropGpsChevron" class="uprop-chevron uprop-accordion-chevron">▾</span>
         </label>
         <div class="uprop-accordion-panel uprop-collapsible uprop-collapsed" id="uPropGpsPanel">
@@ -8413,23 +8462,34 @@
             <button type="button" class="uprop-flat-btn" onclick="useCurrentGpsForProp()">📍 Use Live GPS</button>
             <button type="button" class="uprop-flat-btn" onclick="openLocationPickerModal('prop')"><img class="icon-img" src="route.png" alt=""> Choose on Map</button>
           </div>
-        </div>
-      </div>
-      <div class="form-group">
-        <label>Property Boundary</label>
-        <div class="uprop-flat-btn-row">
-          <button type="button" class="uprop-flat-btn" onclick="window.startPropertyBoundaryDraw('${propIdEsc}')"><img class="icon-img" src="boundary.png" alt="">${boundaryPts ? 'Redraw' : 'Draw'} Boundary</button>
-          <button type="button" class="uprop-flat-btn" onclick="window.autoDetectPropertyBoundary('${propIdEsc}')">🌐 Auto-Detect (OSM)</button>
-        </div>
-        <div class="uprop-meta-line" style="margin-top:6px;">
-          ${boundaryPts ? `${boundaryPts}-point boundary saved. <a href="#" onclick="event.preventDefault(); window.clearPropertyBoundary('${propIdEsc}')" style="color:#ff6b6b;">Clear</a>` : 'No boundary drawn yet.'}
+          <div class="uprop-picker-section-label">Boundary</div>
+          <div class="uprop-flat-btn-row">
+            <button type="button" class="uprop-flat-btn" onclick="window.startPropertyBoundaryDraw('${propIdEsc}')"><img class="icon-img" src="boundary.png" alt="">${boundaryPts ? 'Redraw' : 'Draw'} Boundary</button>
+            <button type="button" class="uprop-flat-btn" onclick="window.autoDetectPropertyBoundary('${propIdEsc}')">🌐 Auto-Detect (OSM)</button>
+          </div>
+          <div class="uprop-meta-line" style="margin-top:6px;">
+            ${boundaryPts ? `${boundaryPts}-point boundary saved. <a href="#" onclick="event.preventDefault(); window.clearPropertyBoundary('${propIdEsc}')" style="color:#ff6b6b;">Clear</a>` : 'No boundary drawn yet.'}
+          </div>
         </div>
       </div>
       <div class="modal-actions">
-        <button type="button" class="btn-save" style="width:100%;" onclick="window.saveUPropSettings()">Save Changes</button>
+        <button type="button" class="btn-cancel" onclick="window.cancelUPropSettings('${propIdEsc}')">Cancel</button>
+        <button type="button" class="btn-save" style="flex:1;" onclick="window.saveUPropSettings()">Save Changes</button>
       </div>
     `;
   }
+
+  window.cancelUPropSettings = function(propId) {
+    // Nothing is written to the site record until Save runs, so
+    // "cancel" just needs to back out of the editing view - whichever
+    // context Settings was opened from.
+    if (window.__driveCardSettingsOpen && window.__driveCardSettingsOpen.has(propId)) {
+      window.toggleDriveCardSettings(propId);
+    } else if (typeof window.switchUPropTab === 'function' && window.__uPropTab === 'Settings') {
+      window.switchUPropTab('Garbage');
+    }
+  };
+
 
   window.saveUPropSettings = async function() {
     const propId = document.getElementById('modalPropTargetId').value;
@@ -8625,9 +8685,19 @@
     }
 
     // Close every other accordion section first - only one thing on this
-    // tab is ever being edited at a time.
-    document.querySelectorAll('.uprop-accordion-panel').forEach(p => p.classList.add('uprop-collapsed'));
-    document.querySelectorAll('.uprop-accordion-chevron').forEach(c => c.textContent = '▾');
+    // tab is ever being edited at a time. Bin Runs (and this grid) now
+    // live inside the Collection Details panel, so skip any panel that's
+    // an ancestor of this grid - otherwise opening it would immediately
+    // collapse the very section it's nested in.
+    document.querySelectorAll('.uprop-accordion-panel').forEach(p => {
+      if (p.contains(grid)) return;
+      p.classList.add('uprop-collapsed');
+    });
+    document.querySelectorAll('.uprop-accordion-chevron').forEach(c => {
+      const panel = document.getElementById((c.id || '').replace('Chevron', 'Panel'));
+      if (panel && panel.contains(grid)) return;
+      c.textContent = '▾';
+    });
 
     __uPropRunTarget = { selectId, displayId };
     const dayVal = (document.getElementById('modalPropDay') || {}).value || '';
@@ -12071,6 +12141,9 @@ window.addEventListener('DOMContentLoaded', async () => {
           <div class="map-side-layers-menu">
             <button type="button" id="btnSideBins" class="map-side-layer-option" onclick="toggleBinGpsDots()"><img class="icon-img" src="bin.png" alt=""> Bins <span class="layer-check"></span></button>
             <button type="button" id="btnSideHouses" class="map-side-layer-option" onclick="toggleHouseGpsDots()"><img class="icon-img" src="houses.png" alt=""> Houses <span class="layer-check"></span></button>
+            <button type="button" id="btnSideGarbageSq" class="map-side-layer-option" onclick="toggleGarbageRunSquares()"><img class="icon-img" src="garbage.png" alt=""> Garbage Squares <span class="layer-check"></span></button>
+            <button type="button" id="btnSideRecyclingSq" class="map-side-layer-option" onclick="toggleRecyclingRunSquares()"><img class="icon-img" src="recycle.png" alt=""> Recycling Squares <span class="layer-check"></span></button>
+            <button type="button" id="btnSideFogoSq" class="map-side-layer-option" onclick="toggleFogoRunSquares()"><img class="icon-img" src="fogo.png" alt=""> FOGO Squares <span class="layer-check"></span></button>
             <button type="button" id="btnSideKmz" class="map-side-layer-option" onclick="toggleKmzLayers()">🚛 KMZ <span class="layer-check"></span></button>
             <button type="button" id="btnSideNextBin" class="map-side-layer-option" onclick="toggleNextBinBox()">📍 Next bin box <span class="layer-check"></span></button>
             <button type="button" id="btnSideGeofence" class="map-side-layer-option" onclick="toggleGeofenceLayerVisibility()">🚧 Geofences <span class="layer-check"></span></button>
@@ -13060,6 +13133,71 @@ window.addEventListener('DOMContentLoaded', async () => {
     marker.addTo(mapMarkersLayer);
   };
 
+  /* Run Square layers (Garbage / Recycling / FOGO) - one small square per
+     house per stream, shown only when that stream's layer is switched on
+     in the Layers menu. Colour values are lifted straight from the Bins
+     layer (getStreamFillColor for the stream, mapColor()/runOutlineColor
+     for the run) - here the pairing is just flipped: outline = stream
+     colour, fill = run colour, vs. the Bins dots' fill = stream colour,
+     outline = run colour. When more than one of the three layers is on
+     at once each stream's square is nudged sideways a few px so they sit
+     next to each other at the house instead of fully overlapping. */
+  const RUN_SQUARE_STREAM_META = {
+    Garbage:   { layerGetter: () => mapGarbageSquaresLayer,   flagGetter: () => showGarbageRunSquares,   offsetX: -9 },
+    Recycling: { layerGetter: () => mapRecyclingSquaresLayer, flagGetter: () => showRecyclingRunSquares, offsetX: 0 },
+    FOGO:      { layerGetter: () => mapFogoSquaresLayer,      flagGetter: () => showFogoRunSquares,      offsetX: 9 }
+  };
+
+  window.drawStreamRunSquare = function(site, stream, runVal, runFillColor) {
+    const squareStream = stream === 'SummerRecycling' ? 'Recycling' : stream;
+    const meta = RUN_SQUARE_STREAM_META[squareStream];
+    if (!meta) return;
+    if (!meta.flagGetter()) return;
+    const layer = meta.layerGetter();
+    if (!layer) return;
+
+    const p = gps(site.lat, site.lng);
+    if (!p) return;
+
+    const outlineColor = getStreamFillColor(squareStream);
+    const id = String(site.propId || site.siteId || '');
+
+    const icon = L.divIcon({
+      className: 'run-square-marker-icon',
+      html: `
+        <div style="width:24px; height:24px; display:flex; align-items:center; justify-content:center; transform:translateX(${meta.offsetX}px); pointer-events:auto;">
+          <div style="
+            width: 13px;
+            height: 13px;
+            background-color: ${esc(runFillColor)};
+            border: 2.5px solid ${esc(outlineColor)};
+            box-shadow: 0 1px 3px rgba(0,0,0,0.4);
+            box-sizing: border-box;
+          "></div>
+        </div>
+      `,
+      iconSize: [24, 24],
+      iconAnchor: [12, 12]
+    });
+
+    const marker = L.marker([p.lat, p.lng], {
+      icon,
+      keyboard: false,
+      pane: 'lukez-house-pane',
+      interactive: true
+    });
+
+    marker.bindPopup(mapPopupHTML({
+      badge: '⬛', title: `${squareStream} · Run ${esc(String(runVal || ''))}`,
+      lines: [esc(site.addressText || '')],
+      actions: [
+        { label: 'Property', onclick: `openPropertyInspectModal('${esc(id)}')`, primary: true }
+      ]
+    }));
+
+    marker.addTo(layer);
+  };
+
   /* Render Map Data (Zero Crash Scaling) */
   window.renderMapData = function() {
     if (typeof updateMapLiveRun === 'function') updateMapLiveRun();
@@ -13079,6 +13217,9 @@ window.addEventListener('DOMContentLoaded', async () => {
     mapMarkersLayer.clearLayers();
     mapHullsLayer.clearLayers();
     mapSeqLayer.clearLayers();
+    if (mapGarbageSquaresLayer) mapGarbageSquaresLayer.clearLayers();
+    if (mapRecyclingSquaresLayer) mapRecyclingSquaresLayer.clearLayers();
+    if (mapFogoSquaresLayer) mapFogoSquaresLayer.clearLayers();
     activeMapCircleMarkers.clear();
 
     const st = clean(activeFilterStream);
@@ -13166,6 +13307,7 @@ window.addEventListener('DOMContentLoaded', async () => {
         if (!shouldDrawIndividualMarkers) return;
 
         window.drawHouseTriangle(site);
+        window.drawStreamRunSquare(site, g.stream, g.run, runOutlineColor);
 
         if (!showBinGpsDots) return;
 
@@ -14636,6 +14778,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   .uprop-content .stream-council-section{ border-top-color:var(--uprop-border); }
   .uprop-content .stream-council-title{ color:var(--uprop-text-dim); }
   .uprop-content .modal-actions{ border-top:none !important; padding-top:4px !important; margin-top:6px !important; }
+  .uprop-content .btn-save, .uprop-content .btn-cancel{ padding:8px 10px !important; }
 
   /* Settings tab: run fields carry a left accent stripe in their stream's
      colour, plus a per-run Flag input (separate from the general Property
