@@ -4163,6 +4163,65 @@
   </div>
 </div>
 
+<!-- Street Litter site editor: run(s), GPS, address. See
+     openStreetLitterEditModal / saveStreetLitterEdit (JS). Edits are kept
+     as small per-site patches (streetLitterOverrides) rather than
+     rewriting the embedded STREET_LITTER_SITES array - see that variable's
+     comment for why. -->
+<div id="slEditModal" class="modal-overlay">
+  <div class="modal-box">
+    <div class="modal-header">
+      <h3>Edit Street Litter Site</h3>
+      <button type="button" class="modal-close-btn" onclick="closeModal('slEditModal')">&times;</button>
+    </div>
+
+    <input type="hidden" id="slEditSiteId">
+
+    <div class="form-group">
+      <label>Address</label>
+      <input type="text" id="slEditAddr" class="main-search-input" style="font-size:14px; height:40px;">
+    </div>
+    <div class="form-group" style="display:flex; gap:8px;">
+      <div style="flex:2;">
+        <label>Suburb</label>
+        <input type="text" id="slEditSuburb" class="main-search-input" style="font-size:14px; height:40px;">
+      </div>
+      <div style="flex:1;">
+        <label>Postcode</label>
+        <input type="text" id="slEditPostcode" class="main-search-input" style="font-size:14px; height:40px;">
+      </div>
+    </div>
+
+    <div class="form-group" style="display:flex; gap:8px; align-items:flex-end;">
+      <div style="flex:1;">
+        <label>Lat</label>
+        <input type="text" id="slEditLat" class="main-search-input" style="font-size:14px; height:40px;">
+      </div>
+      <div style="flex:1;">
+        <label>Lng</label>
+        <input type="text" id="slEditLng" class="main-search-input" style="font-size:14px; height:40px;">
+      </div>
+      <button type="button" class="btn-cancel" style="height:40px; white-space:nowrap;" onclick="useSlEditCurrentGps()">📍 Use my GPS</button>
+    </div>
+
+    <div class="form-group">
+      <label><img class="icon-img" src="garbage.png" alt=""> Street Garbage run(s)</label>
+      <input type="text" id="slEditRl" class="main-search-input" style="font-size:14px; height:40px;" placeholder="e.g. 240 - NORTH, Blairgowie Cat 2">
+      <div style="font-size:12px; color:#94a3b8; margin-top:4px;">Comma-separated. Leave blank for no dedicated run (7-day Street Garbage).</div>
+    </div>
+    <div class="form-group">
+      <label><img class="icon-img" src="recycle.png" alt=""> Street Recycle run(s)</label>
+      <input type="text" id="slEditRr" class="main-search-input" style="font-size:14px; height:40px;" placeholder="e.g. 246 - RECYCLE (AM)">
+      <div style="font-size:12px; color:#94a3b8; margin-top:4px;">Comma-separated. Leave blank if this site has no recycling run.</div>
+    </div>
+
+    <div class="modal-actions">
+      <button type="button" class="btn-cancel" onclick="closeModal('slEditModal')">Cancel</button>
+      <button type="button" class="btn-save" onclick="saveStreetLitterEdit()">Save</button>
+    </div>
+  </div>
+</div>
+
 <!-- CUSTOM DIALOG: in-app replacement for the browser's native
      alert()/confirm()/prompt(), which render with the hosting domain
      ("linzee7000.github.io says") in their title bar. This card looks
@@ -8017,6 +8076,97 @@
      Area Runs Bar - no property editor / settings-tab integration. */
   let showStreetLitter = (localStorage.getItem('lukezBunzShowStreetLitter') === 'true');
   let streetLitterRunFilter = null; // null = every run; otherwise e.g. "240 - NORTH"
+
+  /* ---- Street Litter site editing --------------------------------------
+     STREET_LITTER_SITES above is the embedded base dataset (regenerated
+     from the KMZ/CSV imports), so edits are never written into it
+     directly - that would make every edit vanish next time the file is
+     regenerated. Instead each edit is kept as a small per-site "patch"
+     in streetLitterOverrides (keyed by site.id), applied on top of the
+     base data at load time (applyStreetLitterOverrides) and again
+     immediately after every save. This is the same reason boundaries
+     live in their own customRunBorders map rather than being baked into
+     siteRecords. */
+  let streetLitterOverrides = {};
+
+  function applyStreetLitterOverrides() {
+    if (typeof STREET_LITTER_SITES === 'undefined') return;
+    STREET_LITTER_SITES.forEach(s => {
+      const patch = streetLitterOverrides[s.id];
+      if (patch) Object.assign(s, patch);
+    });
+  }
+
+  async function saveStreetLitterOverride(siteId, patch) {
+    streetLitterOverrides[siteId] = { ...(streetLitterOverrides[siteId] || {}), ...patch };
+    applyStreetLitterOverrides();
+    await saveToDB('streetLitterOverrides', streetLitterOverrides);
+  }
+
+  // Turns "240 - NORTH, Blairgowie Cat 2" into [{run, num, days}], reusing
+  // whichever `days`/`num` the site already had for a run name that isn't
+  // changing, and defaulting a brand-new run name to 7-day (days: []) -
+  // per-entry day editing isn't exposed in this modal, only the run list.
+  function parseSlRunInput(text, existingEntries) {
+    const byName = new Map((existingEntries || []).map(e => [clean(e.run).toLowerCase(), e]));
+    return clean(text).split(',').map(s => s.trim()).filter(Boolean).map(run => {
+      const prev = byName.get(run.toLowerCase());
+      return prev ? { run, num: prev.num || '', days: prev.days || [] } : { run, num: '', days: [] };
+    });
+  }
+
+  window.openStreetLitterEditModal = function(siteId) {
+    const site = (typeof STREET_LITTER_SITES !== 'undefined' ? STREET_LITTER_SITES : []).find(s => String(s.id) === String(siteId));
+    if (!site) return;
+    document.getElementById('slEditSiteId').value = site.id;
+    document.getElementById('slEditAddr').value = site.addr || '';
+    document.getElementById('slEditSuburb').value = site.suburb || '';
+    document.getElementById('slEditPostcode').value = site.postcode || '';
+    document.getElementById('slEditLat').value = site.lat || '';
+    document.getElementById('slEditLng').value = site.lng || '';
+    document.getElementById('slEditRl').value = (site.rl || []).map(r => r.run).join(', ');
+    document.getElementById('slEditRr').value = (site.rr || []).map(r => r.run).join(', ');
+    openModal('slEditModal');
+  };
+
+  window.useSlEditCurrentGps = function() {
+    if (!userCurrentLocation) { customAlert('No live GPS fix yet.'); return; }
+    document.getElementById('slEditLat').value = userCurrentLocation.lat;
+    document.getElementById('slEditLng').value = userCurrentLocation.lng;
+  };
+
+  window.saveStreetLitterEdit = async function() {
+    const siteId = document.getElementById('slEditSiteId').value;
+    const site = (typeof STREET_LITTER_SITES !== 'undefined' ? STREET_LITTER_SITES : []).find(s => String(s.id) === String(siteId));
+    if (!site) return;
+
+    const patch = {
+      addr: document.getElementById('slEditAddr').value.trim(),
+      suburb: document.getElementById('slEditSuburb').value.trim(),
+      postcode: document.getElementById('slEditPostcode').value.trim(),
+      lat: Number(document.getElementById('slEditLat').value) || site.lat,
+      lng: Number(document.getElementById('slEditLng').value) || site.lng,
+      rl: parseSlRunInput(document.getElementById('slEditRl').value, site.rl),
+      rr: parseSlRunInput(document.getElementById('slEditRr').value, site.rr)
+    };
+
+    await saveStreetLitterOverride(siteId, patch);
+
+    logEdit({
+      timestamp: new Date().toISOString(), editType: 'SL_SITE_EDIT',
+      siteId, pid: site.pid, address: patch.addr,
+      lat: patch.lat, lng: patch.lng,
+      rl: patch.rl.map(r => r.run).join('|'),
+      rr: patch.rr.map(r => r.run).join('|')
+    });
+    hasUnsyncedChanges = true; updateSyncButtonIcon();
+    await saveToDB('masterEditsLog', masterEditsLog);
+
+    closeModal('slEditModal');
+    if (activeTab === 'search') handleSearch();
+    if (activeTab === 'map' && typeof renderStreetLitterLayer === 'function') renderStreetLitterLayer();
+    if (typeof updateDriverHud === 'function') updateDriverHud();
+  };
   // Which half of the Street Litter data is showing: 'rl' = Street
   // Garbage (blue), 'rr' = Street Recycle (light blue), null = both.
   // Set from the stream filter (see syncStreetLitterFilterState).
@@ -8236,7 +8386,8 @@
     return mapPopupHTML({
       badge: '🗑️',
       title: esc(s.addr || 'Street Litter site'),
-      lines: [esc([s.suburb, s.postcode].filter(Boolean).join(' ')), ...runLines, stopLine, ...binLines, catLine].filter(Boolean)
+      lines: [esc([s.suburb, s.postcode].filter(Boolean).join(' ')), ...runLines, stopLine, ...binLines, catLine].filter(Boolean),
+      actions: [{ label: '✏️ Edit site', onclick: `openStreetLitterEditModal('${esc(String(s.id))}')` }]
     });
   }
 
@@ -10416,7 +10567,7 @@ window.addEventListener('DOMContentLoaded', async () => {
       }
       startLiveLocationWatcher();
 
-      let cached = null, cachedEdits = null, cachedBorders = null, cachedTrail = null, cachedTrailBreaks = null, cachedTrailTimes = null, cachedSyncCount = null, cachedKmzData = null, cachedGeofences = null;
+      let cached = null, cachedEdits = null, cachedBorders = null, cachedTrail = null, cachedTrailBreaks = null, cachedTrailTimes = null, cachedSyncCount = null, cachedKmzData = null, cachedGeofences = null, cachedSLOverrides = null;
       try {
         cached = await loadFromDB("masterRecords");
         cachedEdits = await loadFromDB("masterEditsLog");
@@ -10427,11 +10578,17 @@ window.addEventListener('DOMContentLoaded', async () => {
         cachedSyncCount = await loadFromDB("lastSyncedEditCount");
         cachedKmzData = await loadFromDB("kmzDataByRun");
         cachedGeofences = await loadFromDB("geofences");
+        cachedSLOverrides = await loadFromDB("streetLitterOverrides");
       } catch (dbErr) {
         console.warn("DB load warning:", dbErr);
       }
 
       if (Array.isArray(cachedGeofences)) geofences = cachedGeofences;
+
+      if (cachedSLOverrides && typeof cachedSLOverrides === 'object') {
+        streetLitterOverrides = cachedSLOverrides;
+        applyStreetLitterOverrides();
+      }
 
       if (cachedKmzData && typeof cachedKmzData === 'object') {
         kmzDataByRun = new Map(Object.entries(cachedKmzData));
@@ -10612,12 +10769,33 @@ window.addEventListener('DOMContentLoaded', async () => {
           body: 'payload=' + encodeURIComponent(JSON.stringify({ 
             edits: editsPayload,
             boundaries: customRunBorders || {},
-            reminders: typeof siteReminders !== 'undefined' ? siteReminders : {}
+            reminders: typeof siteReminders !== 'undefined' ? siteReminders : {},
+            streetLitterEdits: streetLitterOverrides || {}
           }))
         });
         lastSyncedEditCount = masterEditsLog.length;
         await saveToDB('lastSyncedEditCount', lastSyncedEditCount);
         hasUnsyncedChanges = false;
+
+        // Street Litter edits (run/GPS/address changes) are small,
+        // per-site patches keyed by site id - unlike boundaries/reminders
+        // (still local-only pending a merge-policy decision), it's safe
+        // to pull these back down and merge them right after the upload
+        // above, since this device's own edits just landed on the sheet
+        // a moment ago. Last download wins per site id.
+        try {
+          const stateRes = await fetch(SCRIPT_URL);
+          const state = await stateRes.json();
+          if (state && state.streetLitterEdits && typeof state.streetLitterEdits === 'object') {
+            streetLitterOverrides = { ...streetLitterOverrides, ...state.streetLitterEdits };
+            applyStreetLitterOverrides();
+            await saveToDB('streetLitterOverrides', streetLitterOverrides);
+            if (activeTab === 'search') handleSearch();
+            if (activeTab === 'map' && typeof renderStreetLitterLayer === 'function') renderStreetLitterLayer();
+          }
+        } catch (slErr) {
+          console.warn('Street Litter edit pull failed, will retry next sync:', slErr);
+        }
       } catch (e) {
         console.warn('Edit sync failed, will retry on next sync:', e);
         // Leave hasUnsyncedChanges as-is (true if there were pending
@@ -13444,6 +13622,7 @@ window.addEventListener('DOMContentLoaded', async () => {
           </div>
           <div class="prop-header-actions">
             <a href="${navUrl}" target="_blank" class="single-nav-btn" onclick="event.stopPropagation()">📍 Nav</a>
+            <button type="button" class="single-nav-btn" onclick="event.stopPropagation(); openStreetLitterEditModal('${esc(String(s.id))}')" title="Edit this site">✏️</button>
             ${dist !== null ? `<span class="distance-pill">${Math.round(dist)}m</span>` : ''}
           </div>
         </div>
@@ -13875,6 +14054,7 @@ window.addEventListener('DOMContentLoaded', async () => {
             </div>
             <div class="prop-header-actions">
               <a href="${navUrl}" target="_blank" class="single-nav-btn" onclick="event.stopPropagation()">📍 Nav</a>
+              <button type="button" class="single-nav-btn" onclick="event.stopPropagation(); openStreetLitterEditModal('${esc(String(s.id))}')" title="Edit this site">✏️</button>
             </div>
           </div>
         </div>`;
