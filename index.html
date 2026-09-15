@@ -5298,6 +5298,12 @@
     activeFilterDay = document.getElementById('modalDaySelect').value.trim();
     activeFilterWeek = document.getElementById('modalWeekSelect').value.trim();
     closeModal('filterOptionsModal');
+    // Pre-existing gap: only removeFilter() kept the separate Street
+    // Litter overlay (showStreetLitter/streetLitterRunFilter/mode) in
+    // sync - Apply never did, so picking Street Garbage/Recycle here and
+    // hitting Apply left the map/search/drive Street Litter views on
+    // whatever stream was active before. Sync it here too.
+    syncStreetLitterFilterState();
     renderActiveFilterChips();
     triggerUniversalDataRefresh();
   }
@@ -8387,6 +8393,54 @@
     if (typeof updateMapSideLayersUI === 'function') updateMapSideLayersUI();
     if (typeof activeTab !== 'undefined' && activeTab !== 'map' && typeof switchMainTab === 'function') switchMainTab('map');
   };
+
+  // Same pattern as openRunDirectlyOnMap (residential), but for a Street
+  // Garbage/Recycle run: sets the explicit stream + run + mode, jumps to
+  // the Map tab, and frames every site on that run (or just the tapped
+  // site if no run is known, e.g. an unallocated 7-day site).
+  window.openStreetLitterRunOnMap = function(runLabel, mode, lat, lng) {
+    showStreetLitter = true;
+    streetLitterStreamMode = mode === 'rr' ? 'rr' : 'rl';
+    streetLitterRunFilter = runLabel || null;
+    streetLitterDayFilter = null;
+    activeFilterStream = mode === 'rr' ? 'StreetRecycling' : 'StreetGarbage';
+    activeFilterDay = '';
+    activeFilterWeek = '';
+    localStorage.setItem('lukezBunzShowStreetLitter', 'true');
+    renderActiveFilterChips();
+    renderStreetLitterLayer();
+    if (typeof updateMapSideLayersUI === 'function') updateMapSideLayersUI();
+    switchMainTab('map');
+    disableTrackUpOrientation();
+    disableGpsFollow();
+    setTimeout(() => {
+      if (!leafletMap) return;
+      const pts = runLabel
+        ? streetLitterSitesForRun(runLabel, null, streetLitterStreamMode)
+            .map(s => [s.lat, s.lng]).filter(p => p[0] && p[1])
+        : [];
+      if (pts.length > 1) {
+        leafletMap.fitBounds(pts, { padding: [90, 90], maxZoom: 17, animate: true });
+      } else if (lat && lng && Number.isFinite(Number(lat))) {
+        leafletMap.setView([Number(lat), Number(lng)], 17, { animate: true });
+      }
+    }, 150);
+  };
+
+  // Does a Street Litter site belong under the given search-page stream
+  // filter/day? Mirrors siteMatchesAllActiveFilters' day handling but
+  // against rl/rr rather than a residential soloSchedule, and folds in
+  // the "no run at all -> Street Garbage, 7-day" rule.
+  function streetLitterMatchesSearchFilters(s, streamFilter, dayCode) {
+    if (streamFilter === 'StreetGarbage') return streetLitterInMode(s, 'rl') &&
+      (!dayCode || streetLitterEntriesFor(s, 'rl').length === 0 || streetLitterEntriesFor(s, 'rl').some(r => streetLitterRunMatchesDay(r.days, dayCode)));
+    if (streamFilter === 'StreetRecycling') return streetLitterInMode(s, 'rr') &&
+      (!dayCode || streetLitterEntriesFor(s, 'rr').some(r => streetLitterRunMatchesDay(r.days, dayCode)));
+    if (streamFilter) return false; // some other residential-only stream is active
+    if (!dayCode) return true;
+    const entries = streetLitterEntriesFor(s, null);
+    return entries.length === 0 || entries.some(r => streetLitterRunMatchesDay(r.days, dayCode));
+  }
 
   function nearestStreetLitterSite(maxDistMeters) {
     const all = (typeof STREET_LITTER_SITES !== 'undefined') ? STREET_LITTER_SITES : [];
@@ -13363,6 +13417,41 @@ window.addEventListener('DOMContentLoaded', async () => {
     return true;
   }
   /* Search Page Handler */
+  // Search-page card for a Street Litter / Street Recycle site. Kept
+  // separate from the residential card above since these sites have no
+  // soloSchedule/soloStreams/bins in the usual sense - just rl/rr run
+  // entries - so it reuses the same .address-card look with its own
+  // simpler body (run badges instead of bin serial lists).
+  function renderStreetLitterSearchCard(s, dist) {
+    const navUrl = `https://www.google.com/maps/dir/?api=1&destination=${s.lat},${s.lng}&travelmode=driving`;
+    const badge = (r, mode) => {
+      const cls = mode === 'rr' ? 'hdr-run-slr' : 'hdr-run-slg';
+      const icon = mode === 'rr' ? 'recycle.png' : 'garbage.png';
+      const dayLabel = r.days && r.days.length ? r.days.join(', ') : '7 days';
+      return `<span class="hdr-run-badge ${cls}" onclick="event.stopPropagation(); openStreetLitterRunOnMap('${esc(r.run)}', '${mode}', ${s.lat || 0}, ${s.lng || 0})"><img class="icon-img" src="${icon}" alt="">${esc(r.run)} · ${esc(dayLabel)}</span>`;
+    };
+    const runBadgesHtml = [
+      ...(s.rl || []).map(r => badge(r, 'rl')),
+      ...(s.rr || []).map(r => badge(r, 'rr'))
+    ].join('') || badge({ run: 'Street Garbage', days: [] }, 'rl');
+
+    return `
+      <div class="address-card" onclick="openStreetLitterRunOnMap('${esc((s.rl && s.rl[0] && s.rl[0].run) || (s.rr && s.rr[0] && s.rr[0].run) || '')}', '${(s.rr || []).length && !(s.rl || []).length ? 'rr' : 'rl'}', ${s.lat || 0}, ${s.lng || 0})">
+        <div class="address-header-row">
+          <div>
+            <div class="address-line1">${esc(s.addr || 'Street Litter site')}</div>
+            <div class="address-line2">${esc([s.suburb, s.postcode].filter(Boolean).join(' '))}</div>
+          </div>
+          <div class="prop-header-actions">
+            <a href="${navUrl}" target="_blank" class="single-nav-btn" onclick="event.stopPropagation()">📍 Nav</a>
+            ${dist !== null ? `<span class="distance-pill">${Math.round(dist)}m</span>` : ''}
+          </div>
+        </div>
+        <div class="stream-counts-row">${runBadgesHtml}</div>
+      </div>
+    `;
+  }
+
   window.handleSearch = function() {
     const query = clean(q('searchInput')?.value).toLowerCase();
     const resultsContainer = q('resultsList');
@@ -13396,9 +13485,32 @@ window.addEventListener('DOMContentLoaded', async () => {
         if (userCurrentLocation && site.lat && site.lng) {
           d = getDistanceMeters(userCurrentLocation.lat, userCurrentLocation.lng, Number(site.lat), Number(site.lng));
         }
-        matches.push({ site, idx, dist: d });
+        matches.push({ kind: 'res', site, idx, dist: d });
       }
     });
+
+    // Street Litter / Street Recycle sites live in their own array (a
+    // different shape - no soloSchedule/soloStreams), so they're matched
+    // and merged in separately rather than through siteMatchesAllActiveFilters.
+    const dayCode = activeFilterDay ? activeFilterDay.slice(0, 3).toUpperCase() : '';
+    if (activeFilterDataSource !== 'council' && typeof STREET_LITTER_SITES !== 'undefined') {
+      STREET_LITTER_SITES.forEach(s => {
+        if (!streetLitterMatchesSearchFilters(s, streamFilter, dayCode)) return;
+        const runLabels = [...(s.rl || []), ...(s.rr || [])].map(r => r.run);
+        const addrMatch = clean(s.addr).toLowerCase().includes(query) ||
+                          clean(s.suburb).toLowerCase().includes(query) ||
+                          String(s.pid || '').toLowerCase().includes(query) ||
+                          String(s.id || '').toLowerCase().includes(query);
+        const runMatch = query ? runLabels.some(r => clean(r).toLowerCase().includes(query)) : false;
+        if (!query || addrMatch || runMatch) {
+          let d = null;
+          if (userCurrentLocation && s.lat && s.lng) {
+            d = getDistanceMeters(userCurrentLocation.lat, userCurrentLocation.lng, Number(s.lat), Number(s.lng));
+          }
+          matches.push({ kind: 'sl', site: s, dist: d });
+        }
+      });
+    }
 
     if (userCurrentLocation) matches.sort((a, b) => (a.dist || 999999) - (b.dist || 999999));
 
@@ -13407,7 +13519,9 @@ window.addEventListener('DOMContentLoaded', async () => {
       summaryContainer.innerText = `Found ${matches.length} properties:`;
     }
 
-    resultsContainer.innerHTML = matches.slice(0, 30).map(({ site, dist }) => {
+    resultsContainer.innerHTML = matches.slice(0, 30).map(({ kind, site, dist }) => {
+      if (kind === 'sl') return renderStreetLitterSearchCard(site, dist);
+
       const navUrl = `https://www.google.com/maps/dir/?api=1&destination=${site.lat},${site.lng}&travelmode=driving`;
       let hasAnyBins = false;
 
@@ -13631,6 +13745,31 @@ window.addEventListener('DOMContentLoaded', async () => {
     if (sch.recSummerRun) buttons.push(`<button type="button" class="drive-run-pick-btn drive-run-pick-summer" onclick="${go(sch.recSummerRun, 'SummerRecycling', true)}">☀️ Summer Recycling · Run ${esc(String(sch.recSummerRun))}</button>`);
     if (sch.fogRun) buttons.push(`<button type="button" class="drive-run-pick-btn drive-run-pick-fog" onclick="${go(sch.fogRun, 'FOGO', false)}"><img class="icon-img" src="fogo.png" alt="">FOGO · Run ${esc(String(sch.fogRun))}${week ? ' ' + week : ''}</button>`);
 
+    // Street Garbage / Street Recycle runs for whichever Street Litter
+    // site is nearest, alongside the residential buttons above - same
+    // 2km cutoff, same button row.
+    let nearestSL = null, nearestSLDist = Infinity;
+    if (typeof STREET_LITTER_SITES !== 'undefined') {
+      STREET_LITTER_SITES.forEach(sl => {
+        if (sl.lat && sl.lng) {
+          const d = getDistanceMeters(userCurrentLocation.lat, userCurrentLocation.lng, sl.lat, sl.lng);
+          if (d < nearestSLDist) { nearestSLDist = d; nearestSL = sl; }
+        }
+      });
+    }
+    if (nearestSL && nearestSLDist <= 2000) {
+      const goSL = (run, mode) => `selectStreetLitterRunOnDrive('${esc(String(run))}', '${mode}')`;
+      (nearestSL.rl || []).forEach(r => buttons.push(
+        `<button type="button" class="drive-run-pick-btn drive-run-pick-slg" onclick="${goSL(r.run, 'rl')}"><img class="icon-img" src="garbage.png" alt="">Street Garbage · Run ${esc(String(r.run))}</button>`
+      ));
+      (nearestSL.rr || []).forEach(r => buttons.push(
+        `<button type="button" class="drive-run-pick-btn drive-run-pick-slr" onclick="${goSL(r.run, 'rr')}"><img class="icon-img" src="recycle.png" alt="">Street Recycle · Run ${esc(String(r.run))}</button>`
+      ));
+      if (streetLitterIsUnallocated(nearestSL) && !(nearestSL.rl || []).length) {
+        buttons.push(`<button type="button" class="drive-run-pick-btn drive-run-pick-slg" onclick="${goSL('', 'rl')}"><img class="icon-img" src="garbage.png" alt="">Street Garbage · 7 days (no dedicated run)</button>`);
+      }
+    }
+
     if (!buttons.length) {
       return '<div style="text-align:center; padding:30px; color:#64748b; font-weight:700;">No run detected near your current location.<br><span style="font-weight:400; font-size:13px;">Pick a run from the filter menu instead.</span></div>';
     }
@@ -13642,6 +13781,24 @@ window.addEventListener('DOMContentLoaded', async () => {
       </div>
     `;
   }
+
+  // Same idea as selectRunOnDrive (residential) but for a Street Garbage/
+  // Street Recycle run - stays on the Drive tab and renders the run-number
+  // grouped list (see renderStreetLitterDriveList) instead of the
+  // street-grouped list.
+  window.selectStreetLitterRunOnDrive = function(runLabel, mode) {
+    selectedRunsSet.clear();
+    if (runLabel) selectedRunsSet.add(clean(runLabel).toLowerCase());
+    else selectedRunsSet.add('__unallocated_street_garbage__');
+    streetLitterStreamMode = mode === 'rr' ? 'rr' : 'rl';
+    streetLitterRunFilter = runLabel || null;
+    streetLitterDayFilter = null;
+    activeFilterStream = mode === 'rr' ? 'StreetRecycling' : 'StreetGarbage';
+    activeFilterDay = '';
+    activeFilterWeek = '';
+    renderActiveFilterChips();
+    updateDriverHud();
+  };
 
   // Applies the tapped run-picker button's run/stream/day/week as the
   // active filter and renders the street list for it - stays on the
@@ -13656,6 +13813,83 @@ window.addEventListener('DOMContentLoaded', async () => {
     renderActiveFilterChips();
     updateDriverHud();
   };
+
+  // Drive HUD list for Street Garbage / Street Recycle: one screen, all
+  // stops on the selected run, in KMZ pickup order where that's known
+  // (see streetLitterStopForPid) and alphabetically after that - unlike
+  // the residential list below, this is NOT grouped by street.
+  function renderStreetLitterDriveList(listContainer) {
+    const mode = streetLitterStreamMode === 'rr' ? 'rr' : 'rl';
+    const runLabel = streetLitterRunFilter;
+    const isUnallocated = selectedRunsSet.has('__unallocated_street_garbage__');
+    const dayCode = activeFilterDay ? activeFilterDay.slice(0, 3).toUpperCase() : '';
+    const searchQuery = clean(q('searchInput')?.value).toLowerCase();
+
+    let sites = isUnallocated
+      ? (typeof STREET_LITTER_SITES !== 'undefined' ? STREET_LITTER_SITES.filter(streetLitterIsUnallocated) : [])
+      : streetLitterSitesForRun(runLabel, dayCode, mode);
+
+    if (searchQuery) {
+      sites = sites.filter(s =>
+        clean(s.addr).toLowerCase().includes(searchQuery) ||
+        clean(s.suburb).toLowerCase().includes(searchQuery) ||
+        String(s.pid || '').toLowerCase().includes(searchQuery) ||
+        String(s.id || '').toLowerCase().includes(searchQuery)
+      );
+    }
+
+    sites = sites.slice().sort((a, b) => {
+      const sa = streetLitterStopForPid(a.pid), sb = streetLitterStopForPid(b.pid);
+      if (sa && sb) return sa.order - sb.order;
+      if (sa) return -1;
+      if (sb) return 1;
+      return clean(a.addr).localeCompare(clean(b.addr), undefined, { numeric: true });
+    });
+
+    const icon = mode === 'rr' ? 'recycle.png' : 'garbage.png';
+    const headerCls = mode === 'rr' ? 'header-slr' : 'header-slg';
+    // runLabel may be lower-cased (picked via the checkbox filter list -
+    // see toggleModalRunSelection) rather than the original casing (picked
+    // via the drive quick-picker/map) - prefer whatever casing the actual
+    // matched sites carry, so the header never reads e.g. "242 - south".
+    const properRun = !isUnallocated && sites.length
+      ? (streetLitterEntriesFor(sites[0], mode).find(r => clean(r.run).toLowerCase() === clean(runLabel).toLowerCase()) || {}).run
+      : null;
+    const runTitle = isUnallocated
+      ? 'Street Garbage · 7 days (no dedicated run)'
+      : (!runLabel ? `All ${mode === 'rr' ? 'Street Recycle' : 'Street Garbage'} runs` : esc(properRun || runLabel));
+
+    const rowsHtml = sites.map(s => {
+      const navUrl = `https://www.google.com/maps/dir/?api=1&destination=${s.lat},${s.lng}&travelmode=driving`;
+      const stop = streetLitterStopForPid(s.pid);
+      const entries = streetLitterEntriesFor(s, mode);
+      const dayLabel = entries.length && entries.every(e => e.days && e.days.length)
+        ? entries.map(e => e.days.join('/')).join(', ')
+        : '7 days';
+      return `
+        <div class="address-card" onclick="event.stopPropagation();">
+          <div class="address-header-row">
+            <div>
+              <div class="address-line1">${stop ? `<span class="street-run-num" style="display:inline-flex; margin-right:6px;">#${stop.order}</span>` : ''}${esc(s.addr || '')}</div>
+              <div class="address-line2">${esc([s.suburb, s.postcode].filter(Boolean).join(' '))} · ${esc(dayLabel)}</div>
+            </div>
+            <div class="prop-header-actions">
+              <a href="${navUrl}" target="_blank" class="single-nav-btn" onclick="event.stopPropagation()">📍 Nav</a>
+            </div>
+          </div>
+        </div>`;
+    }).join('') || '<div style="text-align:center; padding:30px; color:#64748b;">No stops matched on this run.</div>';
+
+    listContainer.innerHTML = `
+      <div class="street-group-card" style="margin-bottom:10px;">
+        <div class="stream-group-header ${headerCls}">
+          <span><img class="icon-img" src="${icon}" alt=""> ${runTitle}</span>
+          <span>${sites.length} stop${sites.length === 1 ? '' : 's'}</span>
+        </div>
+      </div>
+      ${rowsHtml}
+    `;
+  }
 
   window.updateDriverHud = function() {
     const listContainer = q('hudStreetList');
@@ -13681,6 +13915,16 @@ window.addEventListener('DOMContentLoaded', async () => {
     // until one is tapped (see selectRunOnDrive).
     if (!selectedRunsSet || selectedRunsSet.size === 0) {
       listContainer.innerHTML = buildDriveRunPickerHtml();
+      return;
+    }
+
+    // Street Garbage / Street Recycle: grouped by run number, not by
+    // street - most Street Litter sites are reserves, toilet blocks,
+    // shopping strips etc. rather than a run of house numbers, so a
+    // street-name grouping (built for residential bins below) doesn't
+    // fit them. See renderStreetLitterDriveList.
+    if (activeFilterStream === 'StreetGarbage' || activeFilterStream === 'StreetRecycling') {
+      renderStreetLitterDriveList(listContainer);
       return;
     }
 
