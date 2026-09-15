@@ -5856,6 +5856,7 @@
     const now = Date.now();
     const gapTooLong = gpsTrailLastFixAt > 0 && (now - gpsTrailLastFixAt) > GPS_TRAIL_BREAK_GAP_MS;
     const isBreak = gpsTrailPoints.length === 0 || gpsTrailPendingBreak || gapTooLong;
+    const previousFixAt = gpsTrailLastFixAt; // when `previous` was recorded, before we overwrite it below
     gpsTrailPendingBreak = false;
     gpsTrailLastFixAt = now;
 
@@ -5902,6 +5903,19 @@
       }
     }
 
+    // Always label the end of whichever line just finished and the start
+    // of the new one when a gap actually breaks the trail, on top of the
+    // regular 15-minute labels below - so every unbroken stretch shows
+    // its own start and end time, not just whatever's mid-way through it.
+    if (snailTrailShowTimeLabels && leafletMap) {
+      if (isBreak && previous && previousFixAt) {
+        dropGpsTrailTimeLabel(previous, previousFixAt);
+      }
+      if (isBreak) {
+        dropGpsTrailTimeLabel(pos, now);
+      }
+    }
+
     // Drop a "HH:MM" label the first time a point lands in a new 15-minute
     // bucket, so the trail carries readable timestamps along its length.
     const labelBucket = Math.floor(now / GPS_TRAIL_TIME_LABEL_INTERVAL_MS);
@@ -5940,11 +5954,13 @@
     gpsTrailLastLabelBucket = null;
     let currentSeg = null;
     let prevPt = null;
+    let prevTs = null;
     gpsTrailPoints.forEach((pt, i) => {
       const ts = gpsTrailTimes[i] || Date.now();
+      const realBreak = gpsTrailBreaks[i] || !currentSeg;
       const colorBucket = snailTrailColorByAge ? gpsTrailAgeBucket(ts) : null;
       const bucketChanged = snailTrailColorByAge && gpsTrailLastColorBucket !== null && colorBucket !== gpsTrailLastColorBucket;
-      const isBreak = gpsTrailBreaks[i] || !currentSeg || bucketChanged;
+      const isBreak = realBreak || bucketChanged;
       gpsTrailLastColorBucket = colorBucket;
       if (isBreak) {
         currentSeg = L.polyline([pt], {
@@ -5961,13 +5977,31 @@
           dropGpsTrailArrow(prevPt, pt);
         }
       }
+      // Always label the end of whichever line just finished and the
+      // start of the new one at a genuine recorded gap (not just a
+      // colour-bucket restart), same as the live recording path.
+      if (snailTrailShowTimeLabels) {
+        if (realBreak && prevPt && prevTs) {
+          dropGpsTrailTimeLabel(prevPt, prevTs);
+        }
+        if (realBreak) {
+          dropGpsTrailTimeLabel(pt, ts);
+        }
+      }
       const labelBucket = Math.floor(ts / GPS_TRAIL_TIME_LABEL_INTERVAL_MS);
       if (gpsTrailLastLabelBucket !== null && labelBucket !== gpsTrailLastLabelBucket) {
         dropGpsTrailTimeLabel(pt, ts);
       }
       gpsTrailLastLabelBucket = labelBucket;
       prevPt = pt;
+      prevTs = ts;
     });
+    // The final point is the end of the still-live last line - label it
+    // too so the trail's current end time is always visible, not just
+    // completed earlier segments.
+    if (snailTrailShowTimeLabels && prevPt && prevTs) {
+      dropGpsTrailTimeLabel(prevPt, prevTs);
+    }
   }
 
   // Keeps the right-hand side control cluster (#mapFixedSideControls)
@@ -6971,14 +7005,21 @@
       });
 
       // Timestamp pills at a downsampled set of lifts, oldest-to-newest,
-      // matching the live trail's / Street Litter's time-label toggle.
+      // matching the live trail's / Street Litter's time-label toggle -
+      // plus the very first and last lift always get one, even if the
+      // even spacing above doesn't happen to land on them, so the line's
+      // start and end time are always readable.
       if(snailTrailShowTimeLabels){
         const liftsWithTime=file.lifts.filter(l=>l.timestamp);
-        const labelStep=Math.max(1,Math.ceil(liftsWithTime.length/KMZ_ROUTE_MAX_TIME_LABELS));
-        for(let i=0;i<liftsWithTime.length;i+=labelStep){
-          const l=liftsWithTime[i];
-          const label=l.timestamp.toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' });
-          makeStaticTimeLabelMarker(l.lat,l.lng,label).addTo(mapKmzLiftLayer);
+        if(liftsWithTime.length){
+          const labelStep=Math.max(1,Math.ceil(liftsWithTime.length/KMZ_ROUTE_MAX_TIME_LABELS));
+          const labelIndexes=new Set([0,liftsWithTime.length-1]);
+          for(let i=0;i<liftsWithTime.length;i+=labelStep) labelIndexes.add(i);
+          Array.from(labelIndexes).sort((a,b)=>a-b).forEach(i=>{
+            const l=liftsWithTime[i];
+            const label=l.timestamp.toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' });
+            makeStaticTimeLabelMarker(l.lat,l.lng,label).addTo(mapKmzLiftLayer);
+          });
         }
       }
     });
@@ -7848,6 +7889,22 @@
 
   function fitMapToVisibleRuns() {
     if (!leafletMap) return;
+
+    // If exactly one run is filtered, frame that run's boundary itself
+    // (the drawn polygon) rather than just whatever markers are on
+    // screen - a manually snapped/edited boundary can extend past the
+    // marker points, so this gives a truer "fit to this run" view.
+    const selected = selectedMapRuns();
+    if (selected.size === 1 && mapHullsLayer) {
+      const runKey = Array.from(selected)[0];
+      const runPolys = mapHullsLayer.getLayers().filter(l => l._runGroupKey && mapKey(l._runGroupKey) === runKey);
+      if (runPolys.length > 0) {
+        const group = new L.featureGroup(runPolys);
+        leafletMap.fitBounds(group.getBounds(), { padding: [35, 35] });
+        return;
+      }
+    }
+
     const layers = [];
     if (mapMarkersLayer) layers.push(...mapMarkersLayer.getLayers());
     if (mapHullsLayer) layers.push(...mapHullsLayer.getLayers());
