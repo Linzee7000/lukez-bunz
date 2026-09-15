@@ -8387,27 +8387,8 @@
   }
 
   function updateMapSideLayersUI(){
-    const pairs=[['btnSideBins',showBinGpsDots],['btnSideHouses',showHouseGpsDots],['btnSideBoundaries',showRunBoundaries],['btnSideGarbageSq',showGarbageRunSquares],['btnSideRecyclingSq',showRecyclingRunSquares],['btnSideFogoSq',showFogoRunSquares],['btnSideStreetLitter',showStreetLitter],['btnSideKmz',kmzLayersVisible],['btnSideNextBin',isNextBinBoxVisible],['btnSideGeofence',geofencesVisible],['btnSatelliteLayer',isSatelliteView]];
+    const pairs=[['btnSideBins',showBinGpsDots],['btnSideHouses',showHouseGpsDots],['btnSideBoundaries',showRunBoundaries],['btnSideGarbageSq',showGarbageRunSquares],['btnSideRecyclingSq',showRecyclingRunSquares],['btnSideFogoSq',showFogoRunSquares],['btnSideKmz',kmzLayersVisible],['btnSideNextBin',isNextBinBoxVisible],['btnSideGeofence',geofencesVisible],['btnSatelliteLayer',isSatelliteView]];
     pairs.forEach(([id,on])=>{const b=document.getElementById(id);if(!b)return;b.classList.toggle('active',!!on);const c=b.querySelector('.layer-check');if(c)c.textContent=on?'✓':'';});
-
-    // Street Litter run-filter sub-buttons: highlight whichever run (or
-    // "All runs") is currently active. Only meaningful while the Street
-    // Litter layer itself is on, but kept in sync regardless.
-    const allBtn = document.getElementById('btnSlRunAll');
-    if (allBtn) {
-      const on = showStreetLitter && !streetLitterRunFilter;
-      allBtn.classList.toggle('active', on);
-      const c = allBtn.querySelector('.layer-check');
-      if (c) c.textContent = on ? '✓' : '';
-    }
-    (typeof streetLitterRunOptions === 'function' ? streetLitterRunOptions() : []).forEach((r, i) => {
-      const b = document.getElementById('btnSlRun' + i);
-      if (!b) return;
-      const on = showStreetLitter && streetLitterRunFilter === r.run;
-      b.classList.toggle('active', on);
-      const c = b.querySelector('.layer-check');
-      if (c) c.textContent = on ? '✓' : '';
-    });
   }
   function closeMapSideLayers(){const c=document.getElementById('mapSideLayersControl');if(c)c.classList.remove('open');}
   function toggleMapSideLayers(event){if(event)event.stopPropagation();const c=document.getElementById('mapSideLayersControl');if(c)c.classList.toggle('open');}
@@ -13014,9 +12995,6 @@ window.addEventListener('DOMContentLoaded', async () => {
             <button type="button" id="btnSideGarbageSq" class="map-side-layer-option" onclick="toggleGarbageRunSquares(); closeMapSideLayers();"><img class="icon-img" src="garbage.png" alt=""> Garbage Squares <span class="layer-check"></span></button>
             <button type="button" id="btnSideRecyclingSq" class="map-side-layer-option" onclick="toggleRecyclingRunSquares(); closeMapSideLayers();"><img class="icon-img" src="recycle.png" alt=""> Recycling Squares <span class="layer-check"></span></button>
             <button type="button" id="btnSideFogoSq" class="map-side-layer-option" onclick="toggleFogoRunSquares(); closeMapSideLayers();"><img class="icon-img" src="fogo.png" alt=""> FOGO Squares <span class="layer-check"></span></button>
-            <button type="button" id="btnSideStreetLitter" class="map-side-layer-option" onclick="toggleStreetLitter(); closeMapSideLayers();">🗑️ Street Litter <span class="layer-check"></span></button>
-            <button type="button" id="btnSlRunAll" class="map-side-layer-option map-side-layer-suboption" onclick="filterStreetLitterRun(null); closeMapSideLayers();" style="padding-left:34px; font-size:13px;">↳ All runs <span class="layer-check"></span></button>
-            ${streetLitterRunOptions().map((r, i) => `<button type="button" id="btnSlRun${i}" class="map-side-layer-option map-side-layer-suboption" onclick="filterStreetLitterRun('${esc(r.run)}'); closeMapSideLayers();" style="padding-left:34px; font-size:13px;">↳ ${esc(r.run)} <span class="layer-check"></span></button>`).join('')}
             <button type="button" id="btnSideKmz" class="map-side-layer-option" onclick="toggleKmzLayers(); closeMapSideLayers();">🚛 KMZ <span class="layer-check"></span></button>
             <button type="button" id="btnSideNextBin" class="map-side-layer-option" onclick="toggleNextBinBox(); closeMapSideLayers();">📍 Next bin box <span class="layer-check"></span></button>
             <button type="button" id="btnSideGeofence" class="map-side-layer-option" onclick="toggleGeofenceLayerVisibility(); closeMapSideLayers();">🚧 Geofences <span class="layer-check"></span></button>
@@ -14346,11 +14324,23 @@ window.addEventListener('DOMContentLoaded', async () => {
     const st = clean(activeFilterStream);
 
     if (box) {
-      box.classList.remove('stream-gar', 'stream-rec', 'stream-summer', 'stream-fog', 'stream-none', 'hdr-run-gar', 'hdr-run-rec', 'hdr-run-summer', 'hdr-run-fog');
+      box.classList.remove('stream-gar', 'stream-rec', 'stream-summer', 'stream-fog', 'stream-litter', 'stream-litter-rec', 'stream-none', 'hdr-run-gar', 'hdr-run-rec', 'hdr-run-summer', 'hdr-run-fog');
       if (st === 'Garbage') box.classList.add('stream-gar');
       else if (st === 'Recycling') box.classList.add('stream-rec');
       else if (st === 'SummerRecycling') box.classList.add('stream-summer');
       else if (st === 'FOGO') box.classList.add('stream-fog');
+      else if (st === 'StreetLitter') {
+        // Street Litter and Street Recycling share one "stream" (the
+        // filter drawer doesn't split them out), so which colour the top
+        // bar shows depends on whether the selected run is one of a
+        // site's rr (Street Recycling) entries rather than its rl
+        // (Street Litter) ones - default to the litter colour when no
+        // specific run is selected.
+        const runFilterNorm = streetLitterRunFilter ? String(streetLitterRunFilter).trim().toLowerCase() : '';
+        const isRecyclingRun = runFilterNorm && typeof STREET_LITTER_SITES !== 'undefined' &&
+          STREET_LITTER_SITES.some(s => (s.rr || []).some(r => String(r.run || '').trim().toLowerCase() === runFilterNorm));
+        box.classList.add(isRecyclingRun ? 'stream-litter-rec' : 'stream-litter');
+      }
       else box.classList.add('stream-none');
     }
 
@@ -14661,6 +14651,8 @@ window.addEventListener('DOMContentLoaded', async () => {
   .map-run-colored-box.stream-rec { background: linear-gradient(90deg, var(--yellow-400) 0%, var(--yellow-400) calc(85% + 35.7px), #000 calc(90% + 37.8px), #000 100%) !important; border-color: var(--yellow-500) !important; color: var(--slate-800) !important; }
   .map-run-colored-box.stream-summer { background: linear-gradient(90deg, var(--amber-500) 0%, var(--amber-500) calc(85% + 35.7px), #000 calc(90% + 37.8px), #000 100%) !important; border-color: var(--amber-600) !important; color: var(--white) !important; }
   .map-run-colored-box.stream-fog { background: linear-gradient(90deg, var(--green-600) 0%, var(--green-600) calc(85% + 35.7px), #000 calc(90% + 37.8px), #000 100%) !important; border-color: var(--green-700) !important; color: var(--white) !important; }
+  .map-run-colored-box.stream-litter { background: linear-gradient(90deg, var(--blue-600) 0%, var(--blue-600) calc(85% + 35.7px), #000 calc(90% + 37.8px), #000 100%) !important; border-color: var(--blue-700, #1d4ed8) !important; color: var(--white) !important; }
+  .map-run-colored-box.stream-litter-rec { background: linear-gradient(90deg, var(--sky-400) 0%, var(--sky-400) calc(85% + 35.7px), #000 calc(90% + 37.8px), #000 100%) !important; border-color: var(--sky-600) !important; color: var(--white) !important; }
   /* No run selected — the app's normal/default dark green, fading to
      black like every other stream colour, instead of falling back to
      the recycling yellow. */
