@@ -6857,23 +6857,75 @@
 
     const liftColor=kmzColorForActiveStream();
 
+    // Heat colour, direction arrows and time labels mirror the live GPS
+    // snail trail / Street Litter KMZ route treatment (see
+    // gpsTrailAgeColorCss / makeGpsTrailArrowMarker / renderStreetLitterLayer)
+    // so an imported KMZ reads the same way here as it does there. "Newest
+    // to oldest" means earliest-to-latest along the route/lift sequence,
+    // since a KMZ has no live "now". Heat + arrows share the Age Colour
+    // toggle (snailTrailColorByAge); time pills share snailTrailShowTimeLabels.
+    const KMZ_ROUTE_HEAT_SEGMENTS = 40;   // polyline chunks when heat is on
+    const KMZ_ROUTE_MAX_ARROWS = 36;      // direction arrows per route
+    const KMZ_ROUTE_MAX_TIME_LABELS = 20; // lift-time pills per file
+
     data.files.forEach(file=>{
       if(!kmzFileMatchesActiveFilter(file)) return;
+
       file.routes.forEach(route=>{
-        L.polyline(route.coordinates.map(p=>[p.lat,p.lng]),{
-          color:kmzRouteColor, weight:3, opacity:.7, dashArray:'6 6'
-        }).bindPopup(mapPopupHTML({
-          badge:'🚛', title:'Truck route',
-          lines:[esc(file.fileName), esc(route.name)]
-        })).addTo(mapKmzRouteLayer);
+        const coords=route.coordinates.map(p=>[p.lat,p.lng]);
+
+        if(snailTrailColorByAge && coords.length>1){
+          const segLen=Math.max(1,Math.ceil(coords.length/KMZ_ROUTE_HEAT_SEGMENTS));
+          for(let i=0;i<coords.length-1;i+=segLen){
+            const chunk=coords.slice(i,Math.min(coords.length,i+segLen+1));
+            if(chunk.length<2) continue;
+            const frac=i/(coords.length-1);
+            L.polyline(chunk,{
+              color:gpsTrailAgeColorCss(frac*GPS_TRAIL_AGE_MAX_MS), weight:3, opacity:.75
+            }).bindPopup(mapPopupHTML({
+              badge:'🚛', title:'Truck route',
+              lines:[esc(file.fileName), esc(route.name)]
+            })).addTo(mapKmzRouteLayer);
+          }
+        } else {
+          L.polyline(coords,{
+            color:kmzRouteColor, weight:3, opacity:.7, dashArray:'6 6'
+          }).bindPopup(mapPopupHTML({
+            badge:'🚛', title:'Truck route',
+            lines:[esc(file.fileName), esc(route.name)]
+          })).addTo(mapKmzRouteLayer);
+        }
+
+        // Direction arrows, spaced evenly along the route regardless of
+        // its length (same idea as dropGpsTrailArrow / the Street Litter
+        // KMZ route arrows, just laid down all at once).
+        if(coords.length>1){
+          const arrowStep=Math.max(1,Math.floor(coords.length/KMZ_ROUTE_MAX_ARROWS));
+          for(let i=arrowStep;i<coords.length;i+=arrowStep){
+            const [lat1,lng1]=coords[i-arrowStep];
+            const [lat2,lng2]=coords[i];
+            const brg=getBearing(lat1,lng1,lat2,lng2);
+            const frac=i/(coords.length-1);
+            const col=snailTrailColorByAge ? gpsTrailAgeColorCss(frac*GPS_TRAIL_AGE_MAX_MS) : kmzRouteColor;
+            makeGpsTrailArrowMarker(lat2,lng2,brg,col).addTo(mapKmzRouteLayer);
+          }
+        }
       });
 
-      file.lifts.forEach(lift=>{
+      // Bin lifts are already sorted oldest -> newest with previous/next
+      // and bearingFromPrevious computed in extractKmzKml. Colour fades
+      // oldest (green) -> newest (red) when Age Colour is on, and each
+      // lift after the first gets a direction arrow pointing the way the
+      // truck moved into it, instead of a flat colour with no arrow.
+      file.lifts.forEach((lift,i)=>{
+        const frac=file.lifts.length>1 ? i/(file.lifts.length-1) : 0;
+        const dotColor=snailTrailColorByAge ? gpsTrailAgeColorCss(frac*GPS_TRAIL_AGE_MAX_MS) : liftColor;
+
         const marker=L.circleMarker([lift.lat,lift.lng],{
           radius:5.5,
           color:'#ffffff',
           weight:1.5,
-          fillColor:liftColor,
+          fillColor:dotColor,
           fillOpacity:.95
         });
 
@@ -6895,7 +6947,23 @@
           ],
           actions: [{ label:'Find nearby houses', onclick:`inspectKmzLift(${lift.lat},${lift.lng},'${esc(mapKey(runs[0]))}',${Number(lift.sequence)||0})`, primary:true }]
         })).addTo(mapKmzLiftLayer);
+
+        if(Number.isFinite(lift.bearingFromPrevious)){
+          makeGpsTrailArrowMarker(lift.lat,lift.lng,lift.bearingFromPrevious,dotColor).addTo(mapKmzLiftLayer);
+        }
       });
+
+      // Timestamp pills at a downsampled set of lifts, oldest-to-newest,
+      // matching the live trail's / Street Litter's time-label toggle.
+      if(snailTrailShowTimeLabels){
+        const liftsWithTime=file.lifts.filter(l=>l.timestamp);
+        const labelStep=Math.max(1,Math.ceil(liftsWithTime.length/KMZ_ROUTE_MAX_TIME_LABELS));
+        for(let i=0;i<liftsWithTime.length;i+=labelStep){
+          const l=liftsWithTime[i];
+          const label=l.timestamp.toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' });
+          makeStaticTimeLabelMarker(l.lat,l.lng,label).addTo(mapKmzLiftLayer);
+        }
+      }
     });
   }
 
