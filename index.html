@@ -4969,7 +4969,8 @@
   // CSS transform:rotate()) so it points the direction the truck was
   // actually travelling at that point in the trail. Colour matches the
   // trail line itself (#22c55e) so it reads as part of the same trail.
-  function makeGpsTrailArrowMarker(lat, lng, bearingDeg) {
+  function makeGpsTrailArrowMarker(lat, lng, bearingDeg, color) {
+    const c = color || '#22c55e';
     return L.marker([lat, lng], {
       icon: L.divIcon({
         className: 'gps-trail-arrow-icon',
@@ -4979,7 +4980,7 @@
               width: 0; height: 0;
               border-left: 5px solid transparent;
               border-right: 5px solid transparent;
-              border-bottom: 9px solid #22c55e;
+              border-bottom: 9px solid ${c};
               filter: drop-shadow(0 0 1.5px rgba(255,255,255,0.9)) drop-shadow(0 1px 2px rgba(0,0,0,0.4));
             "></div>
           </div>
@@ -5043,6 +5044,13 @@
   // long ago a given stretch was driven without needing Age Colour on.
   function makeGpsTrailTimeLabelMarker(lat, lng, ts) {
     const label = new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    return makeStaticTimeLabelMarker(lat, lng, label);
+  }
+
+  // Same pill, but for a KMZ stop's already-formatted "HH:MM" string
+  // rather than a live epoch timestamp - see renderStreetLitterLayer's
+  // heat/arrow/timestamp treatment of imported KMZ routes.
+  function makeStaticTimeLabelMarker(lat, lng, label) {
     return L.marker([lat, lng], {
       icon: L.divIcon({
         className: 'gps-trail-time-label-icon',
@@ -5052,7 +5060,7 @@
             padding:1px 5px; border-radius:5px; white-space:nowrap;
             transform: translate(-50%, -160%);
             box-shadow: 0 1px 3px rgba(0,0,0,0.45);
-          ">${label}</div>
+          ">${esc(label)}</div>
         `,
         iconSize: [0, 0],
         iconAnchor: [0, 0]
@@ -8474,14 +8482,73 @@
     // instead of pretending it's the bin location. Stops that DID match
     // a site are already shown above via streetLitterPopupHtml's pickup
     // line, not duplicated here.
+    //
+    // Heat colour, direction arrows, and time labels mirror the live GPS
+    // snail trail's look (see gpsTrailAgeColorCss / dropGpsTrailArrow /
+    // dropGpsTrailTimeLabel) so an imported KMZ route reads the same way
+    // a live-recorded one does - except "newest to oldest" here means
+    // earliest-to-latest stop along the run (a KMZ has no live "now"),
+    // and everything is downsampled since a route can carry 2,000+
+    // breadcrumb points where the live trail caps itself as it goes.
+    // Heat + the Age Colour toggle are shared with the live trail
+    // (snailTrailColorByAge) so one switch controls both; time labels
+    // likewise share snailTrailShowTimeLabels.
     const truckR = streetLitterTruckMarkerRadius();
+    const KMZ_ROUTE_HEAT_SEGMENTS = 40;   // polyline chunks when heat is on
+    const KMZ_ROUTE_MAX_ARROWS = 36;      // direction arrows per run
+    const KMZ_ROUTE_MAX_TIME_LABELS = 20; // stop-time pills per run
     activeStreetLitterRunData().forEach(runData => {
-      if (mapStreetLitterRouteLayer && runData.route && runData.route.length > 1) {
-        L.polyline(runData.route, {
-          color: streetLitterLineColor(), weight: 3, opacity: 0.6, dashArray: '6 6'
-        }).bindPopup(mapPopupHTML({ badge: '🚛', title: 'Truck route', lines: [esc(runData.label)] }))
-          .addTo(mapStreetLitterRouteLayer);
+      const route = runData.route;
+      if (mapStreetLitterRouteLayer && route && route.length > 1) {
+        if (snailTrailColorByAge) {
+          // Chunk the breadcrumb into KMZ_ROUTE_HEAT_SEGMENTS pieces,
+          // colouring each green (start of run) fading to red (end of
+          // run) - the same ramp gpsTrailAgeColorCss uses for "just
+          // recorded" -> "old", just driven by position along the route
+          // instead of elapsed time.
+          const segLen = Math.max(1, Math.ceil(route.length / KMZ_ROUTE_HEAT_SEGMENTS));
+          for (let i = 0; i < route.length - 1; i += segLen) {
+            const chunk = route.slice(i, Math.min(route.length, i + segLen + 1));
+            if (chunk.length < 2) continue;
+            const frac = i / (route.length - 1);
+            L.polyline(chunk, {
+              color: gpsTrailAgeColorCss(frac * GPS_TRAIL_AGE_MAX_MS), weight: 3, opacity: 0.75
+            }).bindPopup(mapPopupHTML({ badge: '🚛', title: 'Truck route', lines: [esc(runData.label)] }))
+              .addTo(mapStreetLitterRouteLayer);
+          }
+        } else {
+          L.polyline(route, {
+            color: streetLitterLineColor(), weight: 3, opacity: 0.6, dashArray: '6 6'
+          }).bindPopup(mapPopupHTML({ badge: '🚛', title: 'Truck route', lines: [esc(runData.label)] }))
+            .addTo(mapStreetLitterRouteLayer);
+        }
+
+        // Direction arrows, spaced evenly along the route regardless of
+        // its length (same idea as dropGpsTrailArrow, just laid down all
+        // at once rather than as new GPS fixes arrive).
+        const arrowStep = Math.max(1, Math.floor(route.length / KMZ_ROUTE_MAX_ARROWS));
+        for (let i = arrowStep; i < route.length; i += arrowStep) {
+          const [lat1, lng1] = route[i - arrowStep];
+          const [lat2, lng2] = route[i];
+          const brg = getBearing(lat1, lng1, lat2, lng2);
+          const frac = i / (route.length - 1);
+          const col = snailTrailColorByAge ? gpsTrailAgeColorCss(frac * GPS_TRAIL_AGE_MAX_MS) : '#22c55e';
+          makeGpsTrailArrowMarker(lat2, lng2, brg, col).addTo(mapStreetLitterRouteLayer);
+        }
       }
+
+      // Time-of-day pills at a downsampled set of stops, oldest-to-newest
+      // along the run - only when the Time Labels setting is on, same as
+      // the live trail's 15-minute pills.
+      if (mapStreetLitterRouteLayer && snailTrailShowTimeLabels && (runData.stops || []).length) {
+        const stopsWithTime = runData.stops.filter(s => s.time);
+        const labelStep = Math.max(1, Math.ceil(stopsWithTime.length / KMZ_ROUTE_MAX_TIME_LABELS));
+        for (let i = 0; i < stopsWithTime.length; i += labelStep) {
+          const s = stopsWithTime[i];
+          makeStaticTimeLabelMarker(s.lat, s.lng, s.time).addTo(mapStreetLitterRouteLayer);
+        }
+      }
+
       if (mapStreetLitterTruckLayer) {
         (runData.stops || []).forEach(stop => {
           if (stop.pid) return;
@@ -10712,6 +10779,24 @@ window.addEventListener('DOMContentLoaded', async () => {
       });
     }
 
+    // Safety net: a corrupt/unexpected response (an Apps Script error page
+    // served with HTTP 200, a stray API error, a Google Sheets export
+    // instead of a real CSV) previously sailed straight past the only
+    // check that existed (res.ok + csvText.startsWith("ERROR:")) and wiped
+    // the real dataset - the garbage got parsed into a handful of bogus
+    // "properties" and immediately persisted to IndexedDB, destroying the
+    // real ~57k-row list until it was restored from a backup. Refuse to
+    // apply anything that doesn't look like the real master CSV instead:
+    // wrong/missing header, or drastically fewer usable rows than either
+    // a sane floor or whatever's already loaded.
+    const looksLikeRealHeader = rows[0] && rows[0].some(h => /site\s*id|property\s*id/i.test(String(h || '')));
+    const MIN_SANE_ROWS = 500;
+    if (!looksLikeRealHeader || parsed.length < MIN_SANE_ROWS || (siteRecords.length > 0 && parsed.length < siteRecords.length * 0.5)) {
+      const msg = `Downloaded dataset looks corrupt or incomplete (${parsed.length} usable rows, header ${looksLikeRealHeader ? 'OK' : 'NOT recognised'}) - keeping existing ${siteRecords.length} records untouched.`;
+      console.error('processMasterCsvText: refusing to apply.', { rowCount: rows.length, parsedCount: parsed.length, existing: siteRecords.length, looksLikeRealHeader });
+      throw new Error(msg);
+    }
+
     siteRecords = mergeEditsIntoRecords(parsed, masterEditsLog);
     buildFastStreetIndex();
     await saveToDB("masterRecords", siteRecords);
@@ -10831,11 +10916,18 @@ window.addEventListener('DOMContentLoaded', async () => {
 
     } catch(err) {
       console.warn(err);
-      statusMsg.innerHTML = '⚠️ Dataset not found online. <b>Tap here to select master CSV file</b>';
+      // A network failure and a "the response looked corrupt, refused to
+      // apply it" rejection (see processMasterCsvText) are different
+      // situations - show which one actually happened instead of always
+      // blaming "not found online", so a real corruption event is visible
+      // instead of looking like an offline hiccup.
+      statusMsg.innerHTML = /corrupt|incomplete/i.test(err.message || '')
+        ? `⚠️ ${esc(err.message)}`
+        : '⚠️ Dataset not found online. <b>Tap here to select master CSV file</b>';
       setTimeout(() => {
         pWrap.style.display = 'none';
         statusMsg.style.display = 'none';
-      }, 3000);
+      }, /corrupt|incomplete/i.test(err.message || '') ? 6000 : 3000);
     } finally {
       if (btn) {
         btn.disabled = false;
