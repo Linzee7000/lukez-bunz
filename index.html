@@ -8080,9 +8080,19 @@
   // by at least ROUTE_ARROW_TURN_THRESHOLD_DEG, so a turn always gets an
   // arrow bracketing it even when it falls between two evenly-spaced ones.
   const ROUTE_ARROW_SPACING_M = 220;
-  const ROUTE_ARROW_TURN_THRESHOLD_DEG = 25;
+  const ROUTE_ARROW_TURN_THRESHOLD_DEG = 35;
   const ROUTE_ARROW_TURN_GAP_M = 15;
   const ROUTE_ARROW_MIN_GAP_M = 30; // collapse arrows placed too close together
+  // Recorded KMZ tracks often have a raw GPS point every few metres, so
+  // comparing bearing between two *adjacent* raw points is dominated by
+  // GPS jitter - the truck can look like it's "turning" 25°+ at nearly
+  // every point even on a dead-straight road, which is what was flooding
+  // the map with turn arrows. Instead, bearings are smoothed by looking
+  // this many metres behind/ahead of a spot before comparing them, and
+  // the turn scan itself steps in these increments rather than visiting
+  // every raw point, so only turns that hold up at road-scale count.
+  const ROUTE_ARROW_BEARING_LOOK_M = 20;
+  const ROUTE_ARROW_TURN_STEP_M = 20;
 
   function buildRouteArrowPoints(coords) {
     const points = [];
@@ -8098,21 +8108,24 @@
     if (totalDist <= 0) return points;
 
     function pointAtDistance(targetDist) {
-      if (targetDist <= 0) return { lat: coords[0][0], lng: coords[0][1], idx: 1 };
+      if (targetDist <= 0) return { lat: coords[0][0], lng: coords[0][1] };
       if (targetDist >= totalDist) {
-        return { lat: coords[coords.length - 1][0], lng: coords[coords.length - 1][1], idx: coords.length - 1 };
+        return { lat: coords[coords.length - 1][0], lng: coords[coords.length - 1][1] };
       }
       let i = 1;
       while (i < cumulative.length && cumulative[i] < targetDist) i++;
       const segStart = cumulative[i - 1], segEnd = cumulative[i];
       const segFrac = segEnd > segStart ? (targetDist - segStart) / (segEnd - segStart) : 0;
       const [lat1, lng1] = coords[i - 1], [lat2, lng2] = coords[i];
-      return { lat: lat1 + (lat2 - lat1) * segFrac, lng: lng1 + (lng2 - lng1) * segFrac, idx: i };
+      return { lat: lat1 + (lat2 - lat1) * segFrac, lng: lng1 + (lng2 - lng1) * segFrac };
     }
 
-    function bearingAt(idx) {
-      const a = Math.max(0, idx - 1), b = Math.max(1, idx);
-      return getBearing(coords[a][0], coords[a][1], coords[b][0], coords[b][1]);
+    // Bearing of the route AT a given distance, smoothed by looking
+    // ROUTE_ARROW_BEARING_LOOK_M behind and ahead of it.
+    function bearingAtDistance(d) {
+      const back = pointAtDistance(Math.max(0, d - ROUTE_ARROW_BEARING_LOOK_M));
+      const fwd = pointAtDistance(Math.min(totalDist, d + ROUTE_ARROW_BEARING_LOOK_M));
+      return getBearing(back.lat, back.lng, fwd.lat, fwd.lng);
     }
 
     const placedDistances = [];
@@ -8120,13 +8133,12 @@
       placedDistances.push(d);
     }
 
-    for (let i = 1; i < coords.length - 1; i++) {
-      const bIn = getBearing(coords[i - 1][0], coords[i - 1][1], coords[i][0], coords[i][1]);
-      const bOut = getBearing(coords[i][0], coords[i][1], coords[i + 1][0], coords[i + 1][1]);
+    for (let d = ROUTE_ARROW_TURN_STEP_M; d < totalDist; d += ROUTE_ARROW_TURN_STEP_M) {
+      const bIn = bearingAtDistance(Math.max(0, d - ROUTE_ARROW_BEARING_LOOK_M));
+      const bOut = bearingAtDistance(Math.min(totalDist, d + ROUTE_ARROW_BEARING_LOOK_M));
       if (angularDifference(bIn, bOut) >= ROUTE_ARROW_TURN_THRESHOLD_DEG) {
-        const at = cumulative[i];
-        placedDistances.push(Math.max(0, at - ROUTE_ARROW_TURN_GAP_M));
-        placedDistances.push(Math.min(totalDist, at + ROUTE_ARROW_TURN_GAP_M));
+        placedDistances.push(Math.max(0, d - ROUTE_ARROW_TURN_GAP_M));
+        placedDistances.push(Math.min(totalDist, d + ROUTE_ARROW_TURN_GAP_M));
       }
     }
 
@@ -8137,7 +8149,7 @@
       if (d - lastDist < ROUTE_ARROW_MIN_GAP_M) return;
       lastDist = d;
       const p = pointAtDistance(d);
-      points.push({ lat: p.lat, lng: p.lng, bearing: bearingAt(p.idx), frac: d / totalDist });
+      points.push({ lat: p.lat, lng: p.lng, bearing: bearingAtDistance(d), frac: d / totalDist });
     });
 
     return points;
