@@ -6909,7 +6909,6 @@
     // since a KMZ has no live "now". Heat + arrows share the Age Colour
     // toggle (snailTrailColorByAge); time pills share snailTrailShowTimeLabels.
     const KMZ_ROUTE_HEAT_SEGMENTS = 40;   // polyline chunks when heat is on
-    const KMZ_ROUTE_MAX_ARROWS = 36;      // direction arrows per route
     const KMZ_ROUTE_MAX_TIME_LABELS = 20; // lift-time pills per file
 
     data.files.forEach(file=>{
@@ -6940,44 +6939,34 @@
           })).addTo(mapKmzRouteLayer);
         }
 
-        // Direction arrows, spaced evenly along the route regardless of
-        // its length (same idea as dropGpsTrailArrow / the Street Litter
-        // KMZ route arrows, just laid down all at once).
+        // Direction arrows, spaced every ROUTE_ARROW_SPACING_M of actual
+        // route distance (plus extra ones bracketing any sharp turn) via
+        // buildRouteArrowPoints, instead of every Nth GPS point.
         if(coords.length>1){
-          const arrowStep=Math.max(1,Math.floor(coords.length/KMZ_ROUTE_MAX_ARROWS));
-          for(let i=arrowStep;i<coords.length;i+=arrowStep){
-            const [lat1,lng1]=coords[i-arrowStep];
-            const [lat2,lng2]=coords[i];
-            const brg=getBearing(lat1,lng1,lat2,lng2);
-            const frac=i/(coords.length-1);
-            const col=snailTrailColorByAge ? gpsTrailAgeColorCss(frac*GPS_TRAIL_AGE_MAX_MS) : kmzRouteColor;
-            makeGpsTrailArrowMarker(lat2,lng2,brg,col).addTo(mapKmzRouteLayer);
-          }
+          buildRouteArrowPoints(coords).forEach(pt=>{
+            const col=snailTrailColorByAge ? gpsTrailAgeColorCss(pt.frac*GPS_TRAIL_AGE_MAX_MS) : kmzRouteColor;
+            makeGpsTrailArrowMarker(pt.lat,pt.lng,pt.bearing,col).addTo(mapKmzRouteLayer);
+          });
         }
       });
 
       // Bin lifts are already sorted oldest -> newest with previous/next
       // and bearingFromPrevious computed in extractKmzKml. Colour fades
-      // oldest (green) -> newest (red) when Age Colour is on, and each
-      // lift after the first gets a direction arrow pointing the way the
-      // truck moved into it, instead of a flat colour with no arrow.
+      // oldest (green) -> newest (red) when Age Colour is on. Bins are
+      // always shown as a filled circle in the stream colour - direction
+      // is conveyed by the route's own arrows (buildRouteArrowPoints)
+      // rather than by turning individual bin markers into arrows.
       file.lifts.forEach((lift,i)=>{
         const frac=file.lifts.length>1 ? i/(file.lifts.length-1) : 0;
         const dotColor=snailTrailColorByAge ? gpsTrailAgeColorCss(frac*GPS_TRAIL_AGE_MAX_MS) : liftColor;
-        const hasArrow=Number.isFinite(lift.bearingFromPrevious);
 
-        // Lifts that get a direction arrow don't need the coloured dot
-        // underneath it too - same colour on both made the arrow
-        // disappear into the circle. Keep the circle (invisible) only
-        // as the click/popup target; only the first lift in a file (no
-        // "previous" to point from, so no arrow) still shows it filled.
         const marker=L.circleMarker([lift.lat,lift.lng],{
           radius:5.5,
           color:'#ffffff',
-          weight: hasArrow ? 0 : 1.5,
+          weight:1.5,
           fillColor:dotColor,
-          fillOpacity: hasArrow ? 0 : .95,
-          opacity: hasArrow ? 0 : 1
+          fillOpacity:.95,
+          opacity:1
         });
 
         const previousText=lift.previous
@@ -6998,10 +6987,6 @@
           ],
           actions: [{ label:'Find nearby houses', onclick:`inspectKmzLift(${lift.lat},${lift.lng},'${esc(mapKey(runs[0]))}',${Number(lift.sequence)||0})`, primary:true }]
         })).addTo(mapKmzLiftLayer);
-
-        if(Number.isFinite(lift.bearingFromPrevious)){
-          makeGpsTrailArrowMarker(lift.lat,lift.lng,lift.bearingFromPrevious,dotColor).addTo(mapKmzLiftLayer);
-        }
       });
 
       // Timestamp pills at a downsampled set of lifts, oldest-to-newest,
@@ -8087,6 +8072,77 @@
     return d > 180 ? 360 - d : d;
   }
 
+  // Works out where to drop direction arrows along a route: one every
+  // ROUTE_ARROW_SPACING_M metres of actual distance travelled (not just
+  // every Nth GPS point, which bunches arrows up wherever the recording
+  // happened to sample more often), plus one just before and one just
+  // after any vertex where the route turns sharply (e.g. turning left)
+  // by at least ROUTE_ARROW_TURN_THRESHOLD_DEG, so a turn always gets an
+  // arrow bracketing it even when it falls between two evenly-spaced ones.
+  const ROUTE_ARROW_SPACING_M = 80;
+  const ROUTE_ARROW_TURN_THRESHOLD_DEG = 25;
+  const ROUTE_ARROW_TURN_GAP_M = 15;
+  const ROUTE_ARROW_MIN_GAP_M = 8; // collapse arrows placed too close together
+
+  function buildRouteArrowPoints(coords) {
+    const points = [];
+    if (!coords || coords.length < 2) return points;
+
+    const cumulative = [0];
+    for (let i = 1; i < coords.length; i++) {
+      cumulative.push(cumulative[i - 1] + getDistanceMeters(
+        coords[i - 1][0], coords[i - 1][1], coords[i][0], coords[i][1]
+      ));
+    }
+    const totalDist = cumulative[cumulative.length - 1];
+    if (totalDist <= 0) return points;
+
+    function pointAtDistance(targetDist) {
+      if (targetDist <= 0) return { lat: coords[0][0], lng: coords[0][1], idx: 1 };
+      if (targetDist >= totalDist) {
+        return { lat: coords[coords.length - 1][0], lng: coords[coords.length - 1][1], idx: coords.length - 1 };
+      }
+      let i = 1;
+      while (i < cumulative.length && cumulative[i] < targetDist) i++;
+      const segStart = cumulative[i - 1], segEnd = cumulative[i];
+      const segFrac = segEnd > segStart ? (targetDist - segStart) / (segEnd - segStart) : 0;
+      const [lat1, lng1] = coords[i - 1], [lat2, lng2] = coords[i];
+      return { lat: lat1 + (lat2 - lat1) * segFrac, lng: lng1 + (lng2 - lng1) * segFrac, idx: i };
+    }
+
+    function bearingAt(idx) {
+      const a = Math.max(0, idx - 1), b = Math.max(1, idx);
+      return getBearing(coords[a][0], coords[a][1], coords[b][0], coords[b][1]);
+    }
+
+    const placedDistances = [];
+    for (let d = ROUTE_ARROW_SPACING_M; d < totalDist; d += ROUTE_ARROW_SPACING_M) {
+      placedDistances.push(d);
+    }
+
+    for (let i = 1; i < coords.length - 1; i++) {
+      const bIn = getBearing(coords[i - 1][0], coords[i - 1][1], coords[i][0], coords[i][1]);
+      const bOut = getBearing(coords[i][0], coords[i][1], coords[i + 1][0], coords[i + 1][1]);
+      if (angularDifference(bIn, bOut) >= ROUTE_ARROW_TURN_THRESHOLD_DEG) {
+        const at = cumulative[i];
+        placedDistances.push(Math.max(0, at - ROUTE_ARROW_TURN_GAP_M));
+        placedDistances.push(Math.min(totalDist, at + ROUTE_ARROW_TURN_GAP_M));
+      }
+    }
+
+    placedDistances.sort((a, b) => a - b);
+
+    let lastDist = -Infinity;
+    placedDistances.forEach(d => {
+      if (d - lastDist < ROUTE_ARROW_MIN_GAP_M) return;
+      lastDist = d;
+      const p = pointAtDistance(d);
+      points.push({ lat: p.lat, lng: p.lng, bearing: bearingAt(p.idx), frac: d / totalDist });
+    });
+
+    return points;
+  }
+
   function evaluateTravelDirection(truckLat, truckLng, heading, propLat, propLng, streetName = '') {
     let effectiveHeading = heading;
 
@@ -8637,7 +8693,6 @@
     // likewise share snailTrailShowTimeLabels.
     const truckR = streetLitterTruckMarkerRadius();
     const KMZ_ROUTE_HEAT_SEGMENTS = 40;   // polyline chunks when heat is on
-    const KMZ_ROUTE_MAX_ARROWS = 36;      // direction arrows per run
     const KMZ_ROUTE_MAX_TIME_LABELS = 20; // stop-time pills per run
     activeStreetLitterRunData().forEach(runData => {
       const route = runData.route;
@@ -8665,18 +8720,13 @@
             .addTo(mapStreetLitterRouteLayer);
         }
 
-        // Direction arrows, spaced evenly along the route regardless of
-        // its length (same idea as dropGpsTrailArrow, just laid down all
-        // at once rather than as new GPS fixes arrive).
-        const arrowStep = Math.max(1, Math.floor(route.length / KMZ_ROUTE_MAX_ARROWS));
-        for (let i = arrowStep; i < route.length; i += arrowStep) {
-          const [lat1, lng1] = route[i - arrowStep];
-          const [lat2, lng2] = route[i];
-          const brg = getBearing(lat1, lng1, lat2, lng2);
-          const frac = i / (route.length - 1);
-          const col = snailTrailColorByAge ? gpsTrailAgeColorCss(frac * GPS_TRAIL_AGE_MAX_MS) : '#22c55e';
-          makeGpsTrailArrowMarker(lat2, lng2, brg, col).addTo(mapStreetLitterRouteLayer);
-        }
+        // Direction arrows, spaced every ROUTE_ARROW_SPACING_M of actual
+        // route distance (plus extra ones bracketing any sharp turn) via
+        // buildRouteArrowPoints, instead of every Nth GPS point.
+        buildRouteArrowPoints(route).forEach(pt => {
+          const col = snailTrailColorByAge ? gpsTrailAgeColorCss(pt.frac * GPS_TRAIL_AGE_MAX_MS) : '#22c55e';
+          makeGpsTrailArrowMarker(pt.lat, pt.lng, pt.bearing, col).addTo(mapStreetLitterRouteLayer);
+        });
       }
 
       // Time-of-day pills at a downsampled set of stops, oldest-to-newest
