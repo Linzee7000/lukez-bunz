@@ -18794,15 +18794,44 @@ body.lb-map-screen #lbDrawerTab {
   width: 40px;
   border-radius: 0 8px 8px 0;
 }
+/* The panel itself runs edge to edge so the top bar's coloured
+   background passes UNDER the search tab rather than starting after it.
+   Everything that isn't the top bar row (live street name, area runs
+   rows) then sits hard against the left edge, which is where the run
+   numbers belong. */
 body.lb-map-screen .map-header-panel {
-  left: 48px !important;
+  left: 0 !important;
+  right: 0 !important;
 }
-/* The second tab: same handle, same edge, sitting just under the search
-   one. Pulls out the layer / snail-trail / KML-run controls. */
+/* Only the top-bar row's *contents* are inset - the box's own colour
+   still starts at x=0 and slides under the tab. */
+body.lb-map-screen #mapRunColoredBox,
+body.lb-map-screen .map-context-box,
+body.lb-map-screen #mapSettingsBarBox {
+  padding-left: 50px !important;
+  border-radius: 0 8px 8px 0 !important;
+}
+body.lb-map-screen .map-top-bar { gap: 0 !important; }
+body.lb-map-screen .map-street-info-overlay,
+body.lb-map-screen .area-runs-bar { margin-left: 0 !important; }
+/* Live street name now carries the active theme colour instead of a
+   fixed dark green, and starts hard against the left edge. */
+body.lb-map-screen .map-street-transparent-overlay {
+  background: linear-gradient(90deg, var(--ui-accent) 0%, var(--ui-accent) 55%, rgba(0,0,0,0) 100%) !important;
+  color: var(--ui-accent-ink) !important;
+  padding-left: 12px !important;
+}
+/* The gear and the right-hand layers button are both tabs now. */
+body.lb-map-screen #btnMapSettingsTop { display: none !important; }
+#mapScreenContainer .map-side-layers-control { display: none !important; }
+
+/* The second and third tabs: same handle, same edge, parked halfway
+   down the screen where a thumb falls rather than stacked up in the
+   corner with the search one. */
 #lbLayersTab {
   position: fixed;
   left: 0;
-  top: 58px;
+  top: calc(50% - 46px);
   z-index: 4200;
   width: 40px;
   height: 42px;
@@ -18821,9 +18850,38 @@ body.lb-map-screen .map-header-panel {
   box-shadow: 2px 2px 8px rgba(0,0,0,0.5);
   transition: transform 0.18s ease, opacity 0.18s ease;
 }
-body.lb-map-screen #lbLayersTab { display: flex; }
+#lbSettingsTab {
+  position: fixed;
+  left: 0;
+  top: calc(50% + 4px);
+  z-index: 4200;
+  width: 40px;
+  height: 42px;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid #000;
+  border-left: none;
+  border-radius: 0 8px 8px 0;
+  background: linear-gradient(180deg, var(--bar-black-hi) 0%, var(--bar-black) 100%);
+  color: #fff;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  box-shadow: 2px 2px 8px rgba(0,0,0,0.5);
+  transition: transform 0.18s ease, opacity 0.18s ease;
+}
+#lbSettingsTab .icon-img { width: 20px; height: 20px; filter: brightness(0) invert(1); }
+body.lb-map-screen #lbLayersTab,
+body.lb-map-screen #lbSettingsTab { display: flex; }
+/* Hidden while any panel or the settings bar is out - a tab peeking out
+   from under an open panel just looks broken. */
 body.lb-drawer-open #lbLayersTab,
-body.lb-layers-open #lbLayersTab { transform: translateX(-110%); opacity: 0; }
+body.lb-layers-open #lbLayersTab,
+body.map-settings-open #lbLayersTab,
+body.lb-drawer-open #lbSettingsTab,
+body.lb-layers-open #lbSettingsTab,
+body.map-settings-open #lbSettingsTab { transform: translateX(-110%); opacity: 0; }
 #lbLayersTab .icon-img { width: 20px; height: 20px; filter: brightness(0) invert(1); }
 body.stream-rec #lbLayersTab .icon-img,
 body.stream-summer #lbLayersTab .icon-img,
@@ -18988,6 +19046,13 @@ body.stream-slr .lb-layers-head .icon-img { filter: brightness(0); }
      =================================================================== -->
 <button type="button" id="lbLayersTab" title="Layers, trail and KML runs" aria-label="Open layers">
   <img class="icon-img" src="layers.png" alt="">
+</button>
+
+<!-- Third tab: everything that used to sit behind the top bar's gear.
+     The gear itself is hidden on the Map screen now, so all three of
+     search / layers / settings are reached the same way. -->
+<button type="button" id="lbSettingsTab" title="Map settings" aria-label="Open map settings">
+  <img class="icon-img" src="settings.png" alt="">
 </button>
 
 <div id="lbLayers" role="dialog" aria-label="Layers">
@@ -19583,7 +19648,7 @@ body.stream-slr .lb-layers-head .icon-img { filter: brightness(0); }
   function renderLayers() {
     const body = document.getElementById('lbLayersBody');
     if (!body) return;
-    body.innerHTML = LAYER_ROWS.map(row => {
+    body.innerHTML = timerHtml() + LAYER_ROWS.map(row => {
       if (row[0] === 'sect') return `<div class="lb-layers-sect">${esc(row[1])}</div>`;
       if (row[0] === 'act') {
         const [, fn, icon, label, danger] = row;
@@ -19631,6 +19696,251 @@ body.stream-slr .lb-layers-head .icon-img { filter: brightness(0); }
   document.addEventListener('keydown', function(ev) {
     if (ev.key === 'Escape' && document.body.classList.contains('lb-layers-open')) closeLayers();
   });
+
+  /* ================= RUN TIMER ======================================
+     Started by the Drive wizard's GO button alongside the snail trail,
+     so "how long has this run taken?" is answerable without a separate
+     stopwatch. Survives a reload - the start time and accumulated
+     elapsed are kept in localStorage, not just in memory. */
+  const TKEY = 'lukezBunzRunTimer';
+  let timer = { running: false, startedAt: 0, accrued: 0, label: '' };
+  try {
+    const raw = localStorage.getItem(TKEY);
+    if (raw) timer = Object.assign(timer, JSON.parse(raw));
+  } catch (e) {}
+
+  function saveTimer() {
+    try { localStorage.setItem(TKEY, JSON.stringify(timer)); } catch (e) {}
+  }
+  function elapsedMs() {
+    return timer.accrued + (timer.running ? (Date.now() - timer.startedAt) : 0);
+  }
+  function fmt(ms) {
+    const t = Math.max(0, Math.floor(ms / 1000));
+    const h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), s = t % 60;
+    const pad = n => String(n).padStart(2, '0');
+    return (h ? h + ':' : '') + pad(m) + ':' + pad(s);
+  }
+
+  window.lbRunTimer = {
+    start(label) {
+      timer = { running: true, startedAt: Date.now(), accrued: 0, label: label || '' };
+      saveTimer(); paintTimer();
+    },
+    pause() {
+      if (!timer.running) return;
+      timer.accrued = elapsedMs();
+      timer.running = false;
+      timer.startedAt = 0;
+      saveTimer(); paintTimer();
+    },
+    resume() {
+      if (timer.running) return;
+      timer.running = true;
+      timer.startedAt = Date.now();
+      saveTimer(); paintTimer();
+    },
+    reset() {
+      timer = { running: false, startedAt: 0, accrued: 0, label: timer.label };
+      saveTimer(); paintTimer();
+    },
+    get state() { return { running: timer.running, ms: elapsedMs(), label: timer.label }; }
+  };
+
+  function timerHtml() {
+    const running = timer.running;
+    const sub = timer.label ? esc(timer.label) : (running || timer.accrued ? 'Run timer' : 'Not started');
+    return `
+      <div class="lb-layers-sect">Run timer</div>
+      <div class="lb-timer ${running ? 'running' : ''}">
+        <div class="lb-timer-read" id="lbTimerRead">${fmt(elapsedMs())}</div>
+        <div class="lb-timer-sub">${sub}</div>
+      </div>
+      <button type="button" class="lb-layer-btn" data-lbtimer="${running ? 'pause' : 'resume'}">
+        <span class="lb-ico">${running ? '⏸' : '▶️'}</span>
+        <span class="lb-label">${running ? 'Pause timer' : (timer.accrued ? 'Resume timer' : 'Start timer')}</span>
+      </button>
+      <button type="button" class="lb-layer-btn danger" data-lbtimer="reset">
+        <img class="icon-img" src="minus.png" alt=""><span class="lb-label">Reset timer</span>
+      </button>`;
+  }
+
+  // Only the digits are repainted on the tick - rebuilding the whole
+  // panel every second would fight with a finger already on a toggle.
+  let tick = null;
+  function paintTimer() {
+    const read = document.getElementById('lbTimerRead');
+    if (read) read.textContent = fmt(elapsedMs());
+    const box = read && read.closest('.lb-timer');
+    if (box) box.classList.toggle('running', timer.running);
+  }
+  function startTicking() {
+    if (tick) return;
+    tick = setInterval(() => {
+      if (document.body.classList.contains('lb-layers-open')) paintTimer();
+    }, 1000);
+  }
+  startTicking();
+
+  document.addEventListener('click', function(ev) {
+    const btn = ev.target && ev.target.closest ? ev.target.closest('[data-lbtimer]') : null;
+    if (!btn) return;
+    ev.preventDefault();
+    const act = btn.dataset.lbtimer;
+    if (act === 'pause') window.lbRunTimer.pause();
+    else if (act === 'resume') window.lbRunTimer.resume();
+    else if (act === 'reset') window.lbRunTimer.reset();
+    renderLayers();
+  });
+
+  // GO on the Drive wizard starts the clock (and the trail, which
+  // goDrive() already un-pauses). Captured on the way down so it fires
+  // whatever the wizard does with the event afterwards.
+  document.addEventListener('click', function(ev) {
+    const go = ev.target && ev.target.closest ? ev.target.closest('[data-act="drive-go"]') : null;
+    if (!go || go.disabled) return;
+    const label = (go.textContent || '').replace(/^\s*GO\s*—\s*/, '').trim();
+    window.lbRunTimer.start(label || 'Run');
+  }, true);
+
+  /* ================= SETTINGS TAB =================================== */
+  document.addEventListener('click', function(ev) {
+    const t = ev.target;
+    if (!t || !t.closest) return;
+    if (!t.closest('#lbSettingsTab')) return;
+    ev.preventDefault();
+    closeLayers();
+    if (typeof window.lbCloseDrawer === 'function') window.lbCloseDrawer();
+    if (typeof openMapSettingsModal === 'function') openMapSettingsModal();
+  }, true);
+})();
+</script>
+
+<style id="lb-phase2-style">
+/* ---- Run timer readout in the layers panel ---- */
+.lb-timer {
+  border: 1px solid #000;
+  border-left: 4px solid var(--slate-600);
+  background: #0f1216;
+  padding: 8px 10px;
+}
+.lb-timer.running { border-left-color: var(--bright-green); }
+.lb-timer-read {
+  font-size: 28px;
+  font-weight: 900;
+  line-height: 1.05;
+  letter-spacing: 0.5px;
+  color: #fff;
+  font-variant-numeric: tabular-nums;
+}
+.lb-timer.running .lb-timer-read { color: var(--bright-green); }
+.lb-timer-sub {
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--welcome-ink-faint);
+  margin-top: 2px;
+}
+
+/* ---- Drive / Check-out wizard: title bar carries the colour ----
+   Plain white text on black gave no read on "which stream am I about to
+   drive?" until you looked back at the chips. The title bar is now the
+   interface accent before a stream is picked, and that stream's own
+   colour afterwards. */
+.welcome-step-head.lb-titlebar {
+  gap: 0;
+  margin-bottom: 10px;
+  border: 1px solid #000;
+  background: var(--ui-accent);
+  overflow: hidden;
+}
+.welcome-step-head.lb-titlebar .welcome-back {
+  border: none;
+  border-right: 1px solid rgba(0,0,0,0.45);
+  background: rgba(0,0,0,0.3);
+  box-shadow: none !important;
+}
+.welcome-step-head.lb-titlebar .welcome-step-title {
+  color: var(--ui-accent-ink);
+  padding: 0 14px;
+  font-size: 19px;
+}
+.welcome-step-head.lb-titlebar.stream-gar    { background: var(--red-600); }
+.welcome-step-head.lb-titlebar.stream-rec    { background: var(--yellow-400); }
+.welcome-step-head.lb-titlebar.stream-summer { background: var(--amber-500); }
+.welcome-step-head.lb-titlebar.stream-fog    { background: var(--green-600); }
+.welcome-step-head.lb-titlebar.stream-slg    { background: var(--blue-600); }
+.welcome-step-head.lb-titlebar.stream-slr    { background: var(--sky-400); }
+.welcome-step-head.lb-titlebar.stream-gar .welcome-step-title,
+.welcome-step-head.lb-titlebar.stream-fog .welcome-step-title,
+.welcome-step-head.lb-titlebar.stream-slg .welcome-step-title { color: #fff; }
+.welcome-step-head.lb-titlebar.stream-rec .welcome-step-title,
+.welcome-step-head.lb-titlebar.stream-summer .welcome-step-title,
+.welcome-step-head.lb-titlebar.stream-slr .welcome-step-title { color: #000; }
+.welcome-step-head.lb-titlebar.stream-rec .welcome-back,
+.welcome-step-head.lb-titlebar.stream-summer .welcome-back,
+.welcome-step-head.lb-titlebar.stream-slr .welcome-back { color: #000; }
+
+/* ---- Run numbers pack hard left instead of stretching across ---- */
+.welcome-runs {
+  display: flex !important;
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  align-content: flex-start;
+}
+.welcome-runs .welcome-chip { flex: 0 0 auto; min-width: 84px; }
+.welcome-runs .welcome-empty { width: 100%; text-align: left; }
+</style>
+
+<script id="lb-phase2-script">
+(function(){
+  'use strict';
+
+  /* The Drive / Check-out wizards are rendered by an earlier IIFE that
+     rebuilds #welcomeBody wholesale on every tap, so there's no hook to
+     patch. Watching the element and re-tagging it after each render is
+     the least invasive way in: the title bar gets .lb-titlebar plus the
+     picked stream's class, and the day / week / run chips get that same
+     stream class so "selected" reads in the stream's colour rather than
+     whatever the last map filter left on <body>. */
+  const STREAM_CLASSES = ['stream-gar','stream-rec','stream-summer','stream-fog','stream-slg','stream-slr'];
+
+  function pickedStreamClass(root) {
+    const chip = root.querySelector('.welcome-chip[data-stream].active');
+    if (!chip) return '';
+    return STREAM_CLASSES.find(c => chip.classList.contains(c)) || '';
+  }
+
+  function decorate() {
+    const root = document.getElementById('welcomeBody');
+    if (!root) return;
+    const head = root.querySelector('.welcome-step-head');
+    if (!head) return;
+
+    const cls = pickedStreamClass(root);
+
+    head.classList.add('lb-titlebar');
+    STREAM_CLASSES.forEach(c => head.classList.toggle(c, c === cls));
+
+    // Day, week and run chips follow the picked stream too. Stream chips
+    // themselves already carry their own colour and are left alone.
+    root.querySelectorAll('.welcome-chip:not([data-stream])').forEach(chip => {
+      STREAM_CLASSES.forEach(c => chip.classList.remove(c));
+      if (cls) chip.classList.add(cls);
+    });
+  }
+
+  const target = document.getElementById('welcomeBody');
+  if (target) {
+    // childList fires on the innerHTML swap; the guard stops the
+    // decoration's own class edits from re-triggering it forever.
+    let busy = false;
+    new MutationObserver(() => {
+      if (busy) return;
+      busy = true;
+      try { decorate(); } finally { setTimeout(() => { busy = false; }, 0); }
+    }).observe(target, { childList: true, subtree: true });
+    decorate();
+  }
 })();
 </script>
 
