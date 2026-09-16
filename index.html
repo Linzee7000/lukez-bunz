@@ -18466,9 +18466,19 @@ body.lb-on-welcome #lbDrawerTab { display: none; }
     <div class="lb-drawer-search">
       <input id="lbDrawerInput" type="search" inputmode="search" autocomplete="off"
              placeholder="Bin serial, address or street...">
-      <button type="button" class="lb-drawer-close" id="lbDrawerCloseBtn" aria-label="Close">&times;</button>
+      <!-- Collapse chevron, not a second ×: the search box is a
+           type="search" input, so the browser already draws its own ×
+           inside it to clear the text. Two ×'s side by side meant the
+           "clear what I typed" tap and the "put the sidebar away" tap
+           looked identical. ‹ now unambiguously means "slide it back in". -->
+      <button type="button" class="lb-drawer-close" id="lbDrawerCloseBtn" aria-label="Collapse" title="Collapse">&lsaquo;</button>
     </div>
   </div>
+  <!-- Run chips for whichever street is currently focused - sits directly
+       under the search box so "which runs service this street?" is
+       answered without leaving the results list. Tapping one opens that
+       whole run on the map. Populated by lbRenderStreetRuns(). -->
+  <div id="lbStreetRuns" class="lb-street-runs"></div>
   <div class="lb-drawer-body" id="lbDrawerBody"></div>
 </div>
 
@@ -18767,6 +18777,860 @@ body.lb-on-welcome #lbDrawerTab { display: none; }
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', syncInitialState);
   else syncInitialState();
+})();
+</script>
+
+<style id="lb-map-tools-style">
+/* ===== 1. Tabs out of the Area Runs Bar's way =========================
+   The search tab used to sit at top:96px on the left edge - directly on
+   top of the Area Runs Bar rows, which are flush against the same edge
+   one row under the map's top bar. It now sits level WITH the top bar,
+   and the whole .map-header-panel (run box, gear, live street pill,
+   area runs rows) is pushed across to clear it. Only on the Map screen:
+   on Search/Drive the tab would land on the app header instead. */
+body.lb-map-screen #lbDrawerTab {
+  top: 8px;
+  height: 42px;
+  width: 40px;
+  border-radius: 0 8px 8px 0;
+}
+body.lb-map-screen .map-header-panel {
+  left: 48px !important;
+}
+/* The second tab: same handle, same edge, sitting just under the search
+   one. Pulls out the layer / snail-trail / KML-run controls. */
+#lbLayersTab {
+  position: fixed;
+  left: 0;
+  top: 58px;
+  z-index: 4200;
+  width: 40px;
+  height: 42px;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  padding: 0;
+  border: 1px solid #000;
+  border-left: none;
+  border-radius: 0 8px 8px 0;
+  background: var(--ui-accent);
+  color: var(--ui-accent-ink);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  box-shadow: 2px 2px 8px rgba(0,0,0,0.5);
+  transition: transform 0.18s ease, opacity 0.18s ease;
+}
+body.lb-map-screen #lbLayersTab { display: flex; }
+body.lb-drawer-open #lbLayersTab,
+body.lb-layers-open #lbLayersTab { transform: translateX(-110%); opacity: 0; }
+#lbLayersTab .icon-img { width: 20px; height: 20px; filter: brightness(0) invert(1); }
+body.stream-rec #lbLayersTab .icon-img,
+body.stream-summer #lbLayersTab .icon-img,
+body.stream-slr #lbLayersTab .icon-img { filter: brightness(0); }
+
+/* ===== 2. The layers panel ==========================================
+   Same chrome as the search drawer so the two read as a pair, but it
+   doesn't take the whole screen height - the bottom telemetry card
+   stays readable underneath while layers are being flicked on and off. */
+#lbLayers {
+  position: fixed;
+  left: 0;
+  top: 8px;
+  bottom: 96px;
+  z-index: 4400;
+  width: 292px;
+  max-width: 86vw;
+  display: flex;
+  flex-direction: column;
+  background: linear-gradient(180deg, #14171b 0%, #0b0d10 100%);
+  border: 1px solid #000;
+  border-left: none;
+  border-radius: 0 10px 10px 0;
+  box-shadow: 6px 0 22px rgba(0,0,0,0.6);
+  transform: translateX(-104%);
+  transition: transform 0.24s cubic-bezier(.22,.61,.36,1);
+  overscroll-behavior: contain;
+}
+body.lb-layers-open #lbLayers { transform: translateX(0); }
+/* Only one of the two panels is ever on screen. */
+body.lb-drawer-open.lb-layers-open #lbLayers { transform: translateX(-104%); }
+.lb-layers-head {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid #000;
+  background: var(--ui-accent);
+  color: var(--ui-accent-ink);
+  font-size: 15px;
+  font-weight: 800;
+}
+.lb-layers-head .lb-layers-title { flex: 1; min-width: 0; }
+.lb-layers-head .icon-img { width: 20px; height: 20px; filter: brightness(0) invert(1); }
+body.stream-rec .lb-layers-head .icon-img,
+body.stream-summer .lb-layers-head .icon-img,
+body.stream-slr .lb-layers-head .icon-img { filter: brightness(0); }
+#lbLayersCloseBtn {
+  width: 40px; height: 40px; flex-shrink: 0;
+  border: 1px solid #000; border-radius: 0;
+  background: rgba(0,0,0,0.35);
+  color: #fff; font-size: 26px; font-weight: 900; line-height: 1;
+  cursor: pointer;
+}
+.lb-layers-body {
+  flex: 1;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.lb-layers-sect {
+  color: var(--welcome-ink-faint);
+  font-size: 11px; font-weight: 800; letter-spacing: 0.8px;
+  text-transform: uppercase;
+  padding: 9px 2px 2px;
+}
+.lb-layer-btn {
+  display: flex; align-items: center; gap: 10px;
+  width: 100%; min-height: 42px; padding: 0 10px;
+  border: 1px solid #000; border-radius: 0;
+  background: linear-gradient(180deg, var(--bar-black-hi) 0%, var(--bar-black) 100%);
+  color: #fff; font-size: 14px; font-weight: 700; text-align: left;
+  cursor: pointer; -webkit-tap-highlight-color: transparent;
+}
+.lb-layer-btn .icon-img { width: 18px; height: 18px; filter: brightness(0) invert(1); }
+.lb-layer-btn .lb-ico { width: 20px; text-align: center; font-size: 15px; flex-shrink: 0; }
+.lb-layer-btn .lb-label { flex: 1; min-width: 0; }
+.lb-layer-btn .lb-check { font-size: 15px; font-weight: 900; color: var(--bright-green); width: 16px; text-align: right; }
+.lb-layer-btn.on { border-left: 4px solid var(--ui-accent); background: linear-gradient(180deg, #23272d 0%, #14171b 100%); }
+.lb-layer-btn.danger { color: var(--red-300); }
+
+/* ===== 3. Richer search results ===================================== */
+.lb-street-runs {
+  flex-shrink: 0;
+  display: none;
+  flex-wrap: wrap;
+  gap: 5px;
+  padding: 8px 10px;
+  border-bottom: 1px solid #000;
+  background: #101318;
+}
+.lb-street-runs.has-runs { display: flex; }
+.lb-street-runs .lb-runs-label {
+  width: 100%;
+  color: var(--welcome-ink-faint);
+  font-size: 10.5px; font-weight: 800; letter-spacing: 0.7px;
+  text-transform: uppercase;
+}
+.lb-run-chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 6px 9px; min-height: 32px;
+  border: 1px solid #000; border-radius: 0;
+  font-size: 13px; font-weight: 800; color: #fff;
+  cursor: pointer; -webkit-tap-highlight-color: transparent;
+}
+.lb-run-chip .icon-img { width: 15px; height: 15px; filter: brightness(0) invert(1); }
+.lb-run-chip.run-gar { background: var(--red-600); }
+.lb-run-chip.run-rec { background: var(--yellow-400); color: #000; }
+.lb-run-chip.run-rec .icon-img { filter: none; }
+.lb-run-chip.run-summer { background: var(--amber-500); color: #000; }
+.lb-run-chip.run-summer .icon-img { filter: none; }
+.lb-run-chip.run-fog { background: var(--green-600); }
+.lb-run-chip.run-slg { background: var(--blue-600); }
+.lb-run-chip.run-slr { background: var(--sky-400); color: #000; }
+.lb-run-chip.run-slr .icon-img { filter: none; }
+
+.lb-res-row {
+  display: flex; align-items: center; gap: 9px;
+  width: 100%; text-align: left;
+  padding: 9px 10px;
+  border: 1px solid #000; border-radius: 0;
+  background: #14171b; color: #fff;
+  font-size: 14px; font-weight: 700; cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.lb-res-row .icon-img { width: 18px; height: 18px; filter: brightness(0) invert(1); }
+.lb-res-row .lb-ico { width: 20px; text-align: center; font-size: 15px; flex-shrink: 0; }
+.lb-res-row .lb-res-main { flex: 1; min-width: 0; }
+.lb-res-row small { display: block; color: var(--welcome-ink-faint); font-weight: 600; font-size: 11.5px; margin-top: 2px; }
+.lb-res-row .lb-res-go { color: var(--ui-accent-fg); font-size: 15px; font-weight: 900; flex-shrink: 0; }
+.lb-res-row.is-street { border-left: 4px solid var(--ui-accent); }
+
+/* The "you searched for this" pin dropped on the map when a result is
+   tapped, so the target is obvious even when the current run filter
+   wouldn't normally draw that property. */
+.lb-focus-pulse {
+  width: 34px; height: 34px;
+  border-radius: 50%;
+  border: 3px solid var(--bright-green);
+  background: rgba(57,255,20,0.18);
+  box-shadow: 0 0 0 2px rgba(0,0,0,0.5), 0 0 14px 3px rgba(57,255,20,0.55);
+  animation: lb-focus-pulse 1.4s ease-out infinite;
+}
+@keyframes lb-focus-pulse {
+  0%   { transform: scale(0.7); opacity: 1; }
+  70%  { transform: scale(1.25); opacity: 0.45; }
+  100% { transform: scale(0.7); opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #lbLayers, #lbLayersTab { transition: none !important; }
+  .lb-focus-pulse { animation: none !important; }
+}
+</style>
+
+<!-- ===================================================================
+     LAYERS / TRAIL / KML PULL-OUT — the sibling of the search tab
+     =================================================================== -->
+<button type="button" id="lbLayersTab" title="Layers, trail and KML runs" aria-label="Open layers">
+  <img class="icon-img" src="layers.png" alt="">
+</button>
+
+<div id="lbLayers" role="dialog" aria-label="Layers">
+  <div class="lb-layers-head">
+    <img class="icon-img" src="layers.png" alt="">
+    <span class="lb-layers-title">Layers &amp; Trail</span>
+    <button type="button" id="lbLayersCloseBtn" aria-label="Collapse" title="Collapse">&lsaquo;</button>
+  </div>
+  <div class="lb-layers-body" id="lbLayersBody"></div>
+</div>
+
+<script id="lb-map-tools-script">
+(function(){
+  'use strict';
+
+  const esc = s => String(s == null ? '' : s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+
+  const recs = () => (typeof siteRecords !== 'undefined' && Array.isArray(siteRecords)) ? siteRecords : [];
+  const slSites = () => (typeof STREET_LITTER_SITES !== 'undefined' && Array.isArray(STREET_LITTER_SITES)) ? STREET_LITTER_SITES : [];
+  const map = () => (typeof leafletMap !== 'undefined') ? leafletMap : null;
+  const pt = (a, b) => (typeof gps === 'function') ? gps(a, b) : null;
+
+  function streetKeyOf(s) {
+    if (typeof siteStreetKey === 'function') return siteStreetKey(s);
+    return String(s.baseStreetLine || '').trim().toLowerCase();
+  }
+  function streetLabelOf(s) {
+    const raw = String(s.baseStreetLine || (typeof cleanStreetAddress === 'function' ? cleanStreetAddress(s.addressText) : '') || '').trim();
+    const nameOnly = (typeof streetNameOnly === 'function') ? streetNameOnly(raw) : raw;
+    const label = nameOnly || raw;
+    return (typeof toSentenceCaseLabel === 'function') ? toSentenceCaseLabel(label) : label;
+  }
+
+  /* ---- Which screen are we on -------------------------------------
+     Both tabs only move up into the top bar (and the layers tab only
+     exists at all) on the Map screen - elsewhere the top bar isn't
+     there to line up with. switchMainTab already tells the drawer when
+     the screen changes, so hook that same notification. */
+  function markScreen(tabName) {
+    document.body.classList.toggle('lb-map-screen', tabName === 'map');
+    if (tabName !== 'map') closeLayers();
+  }
+  const prevNotify = window.lbNotifyTabChanged;
+  window.lbNotifyTabChanged = function(tabName) {
+    try { if (typeof prevNotify === 'function') prevNotify(tabName); } catch (e) {}
+    markScreen(tabName);
+  };
+  function syncScreen() { markScreen((typeof activeTab !== 'undefined') ? activeTab : ''); }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', syncScreen);
+  else syncScreen();
+  // switchMainTab isn't the only thing that swaps screens, so re-check
+  // periodically rather than trusting a single notification path.
+  setInterval(syncScreen, 1200);
+
+  /* ---- Map focus helpers ------------------------------------------- */
+  let focusLayer = null;
+  function ensureFocusLayer() {
+    const m = map();
+    if (!m || typeof L === 'undefined') return null;
+    if (!focusLayer || !m.hasLayer(focusLayer)) focusLayer = L.layerGroup().addTo(m);
+    return focusLayer;
+  }
+  window.lbClearMapFocus = function() {
+    if (focusLayer) focusLayer.clearLayers();
+  };
+
+  // GPS follow would drag the map straight back onto the truck on the
+  // next fix, undoing the jump we just made. There's no readable flag
+  // out here, so read the follow button's own on/off state and tap it.
+  function stopFollow() {
+    const btn = document.getElementById('btnTruckFollowTarget');
+    if (btn && btn.classList.contains('active') && typeof window.toggleTruckFollow === 'function') {
+      window.toggleTruckFollow();
+    }
+  }
+
+  function dropPin(lat, lng, label) {
+    const layer = ensureFocusLayer();
+    if (!layer) return;
+    const icon = L.divIcon({
+      className: 'lb-focus-marker',
+      html: '<div class="lb-focus-pulse"></div>',
+      iconSize: [34, 34],
+      iconAnchor: [17, 17]
+    });
+    const mk = L.marker([lat, lng], { icon, interactive: false, zIndexOffset: 900 });
+    mk.addTo(layer);
+    if (label) { try { mk.bindTooltip(label, { permanent: false, direction: 'top' }); } catch (e) {} }
+  }
+
+  function goToMap(then) {
+    if (typeof switchMainTab === 'function' && (typeof activeTab === 'undefined' || activeTab !== 'map')) {
+      switchMainTab('map');
+    }
+    // Two frames plus a beat: Leaflet needs the container laid out and
+    // sized before setView/fitBounds land where they should.
+    requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(then, 140)));
+  }
+
+  /* ---- Fly to one property -----------------------------------------
+     There is a showPropertyOnMap() inside the main app script, but it's
+     trapped in that file's IIFE, so every caller out here (the drawer's
+     result list, the 🗺️ buttons on property cards) was calling a name
+     that didn't exist and silently doing nothing. Publishing it on
+     window fixes all of those at once. */
+  window.showPropertyOnMap = function(propId) {
+    const id = String(propId);
+    const site = recs().find(s => String(s.propId || s.siteId) === id);
+    window.lbClearMapFocus();
+    goToMap(() => {
+      const m = map();
+      const p = site && pt(site.lat, site.lng);
+      if (!m || !p) return;
+      stopFollow();
+      m.setView([p.lat, p.lng], 20, { animate: true });
+      dropPin(p.lat, p.lng, streetLabelOf(site));
+    });
+  };
+
+  /* ---- Fly to one bin ---------------------------------------------- */
+  window.lbFocusBin = function(propId, serial) {
+    const id = String(propId);
+    const site = recs().find(s => String(s.propId || s.siteId) === id);
+    if (!site) return;
+    let target = null;
+    for (const group of [site.soloStreams, site.councilStreams]) {
+      if (!group || target) continue;
+      for (const k of Object.keys(group)) {
+        for (const b of (group[k] || [])) {
+          if (String(b.serial || '') === String(serial)) {
+            target = pt(b.lat, b.lng) || (typeof sourceCoords === 'function' ? sourceCoords(site, b) : null);
+            break;
+          }
+        }
+        if (target) break;
+      }
+    }
+    if (!target) target = pt(site.lat, site.lng);
+    window.lbClearMapFocus();
+    goToMap(() => {
+      const m = map();
+      if (!m || !target) return;
+      stopFollow();
+      m.setView([target.lat, target.lng], 21, { animate: true });
+      dropPin(target.lat, target.lng, 'Bin ' + serial);
+    });
+  };
+
+  /* ---- Fly to a Street Litter site ---------------------------------- */
+  window.lbFocusSlSite = function(id) {
+    const s = slSites().find(x => String(x.id) === String(id));
+    if (!s) return;
+    const p = pt(s.lat, s.lng);
+    window.lbClearMapFocus();
+    goToMap(() => {
+      const m = map();
+      if (!m || !p) return;
+      stopFollow();
+      m.setView([p.lat, p.lng], 20, { animate: true });
+      dropPin(p.lat, p.lng, s.addr || 'Street litter site');
+    });
+  };
+
+  /* ---- Fly to a whole street, with a box round it -------------------
+     showStreetOnMap() already narrows the map to one street's
+     properties and frames them. What it doesn't do is make the extent
+     of the street obvious once you're zoomed in, so a dashed box is
+     drawn round every house AND every bin on it. */
+  function streetPoints(key) {
+    const pts = [];
+    recs().forEach(s => {
+      if (streetKeyOf(s) !== key) return;
+      const p = pt(s.lat, s.lng);
+      if (p) pts.push([p.lat, p.lng]);
+      for (const group of [s.soloStreams, s.councilStreams]) {
+        if (!group) continue;
+        for (const k of Object.keys(group)) {
+          for (const b of (group[k] || [])) {
+            const bp = pt(b.lat, b.lng) || (typeof sourceCoords === 'function' ? sourceCoords(s, b) : null);
+            if (bp) pts.push([bp.lat, bp.lng]);
+          }
+        }
+      }
+    });
+    return pts;
+  }
+
+  window.lbFocusStreet = function(key) {
+    const k = String(key);
+    window.lbClearMapFocus();
+    if (typeof window.showStreetOnMap === 'function') window.showStreetOnMap(k);
+    else if (typeof switchMainTab === 'function') switchMainTab('map');
+
+    goToMap(() => {
+      const m = map();
+      const pts = streetPoints(k);
+      if (!m || !pts.length || typeof L === 'undefined') return;
+      stopFollow();
+      const layer = ensureFocusLayer();
+      // pad() is a ratio of the box's own size, so a one-property street
+      // (zero-size box) would stay zero-size. Give that case a fixed
+      // ~45m square instead.
+      let bounds;
+      if (pts.length === 1) {
+        const [la, ln] = pts[0];
+        bounds = L.latLngBounds([la - 0.0004, ln - 0.0005], [la + 0.0004, ln + 0.0005]);
+      } else {
+        bounds = L.latLngBounds(pts).pad(0.22);
+      }
+      if (layer) {
+        L.rectangle(bounds, {
+          color: '#39ff14', weight: 2, dashArray: '9 6',
+          fill: true, fillColor: '#39ff14', fillOpacity: 0.06,
+          interactive: false
+        }).addTo(layer);
+      }
+      m.fitBounds(bounds, { padding: [34, 34], maxZoom: 18, animate: true });
+    });
+    renderStreetRuns(k);
+  };
+
+  /* ---- Which runs service a street ---------------------------------- */
+  const STREAM_META = {
+    Garbage:         { cls: 'run-gar',    icon: 'bin.png',      label: 'Garbage' },
+    Recycling:       { cls: 'run-rec',    icon: 'recycle.png',  label: 'Recycling' },
+    SummerRecycling: { cls: 'run-summer', icon: 'summer.png',   label: 'Summer' },
+    FOGO:            { cls: 'run-fog',    icon: 'fogo.png',     label: 'FOGO' }
+  };
+
+  function runsForStreet(key) {
+    const out = [];
+    const seen = new Set();
+    recs().forEach(s => {
+      if (streetKeyOf(s) !== key) return;
+      const sch = s.soloSchedule || {};
+      [['garRun', 'Garbage'], ['recRun', 'Recycling'], ['recSummerRun', 'SummerRecycling'], ['fogRun', 'FOGO']].forEach(([field, stream]) => {
+        const run = String(sch[field] || '').trim();
+        if (!run) return;
+        const id = stream + '|' + run.toLowerCase();
+        if (seen.has(id)) return;
+        seen.add(id);
+        out.push({
+          kind: 'run', run, stream,
+          day: String(sch.day || ''), week: String(sch.weekLetter || ''),
+          summer: stream === 'SummerRecycling',
+          lat: s.lat, lng: s.lng, streetKey: key
+        });
+      });
+    });
+    // Street Litter / Street Recycle runs cover the same kerb, so they
+    // belong in the same answer to "what services this street?".
+    const label = key.toLowerCase();
+    slSites().forEach(s => {
+      const addr = String(s.addr || '').toLowerCase();
+      if (!label || !addr.includes(label)) return;
+      [['rl', 'slg'], ['rr', 'slr']].forEach(([field, cls]) => {
+        (s[field] || []).forEach(r => {
+          const id = cls + '|' + String(r.run || '').toLowerCase();
+          if (!r.run || seen.has(id)) return;
+          seen.add(id);
+          out.push({ kind: 'sl', run: r.run, mode: field, cls, lat: s.lat, lng: s.lng });
+        });
+      });
+    });
+    return out;
+  }
+
+  function renderStreetRuns(key) {
+    const box = document.getElementById('lbStreetRuns');
+    if (!box) return;
+    if (!key) { box.className = 'lb-street-runs'; box.innerHTML = ''; return; }
+    const list = runsForStreet(key);
+    if (!list.length) { box.className = 'lb-street-runs'; box.innerHTML = ''; return; }
+
+    const chips = list.map(r => {
+      if (r.kind === 'sl') {
+        const icon = r.mode === 'rr' ? 'recycle.png' : 'garbage.png';
+        return `<button type="button" class="lb-run-chip run-${esc(r.cls)}" data-lbrun="sl"
+                  data-run="${esc(r.run)}" data-mode="${esc(r.mode)}"
+                  data-lat="${esc(r.lat || 0)}" data-lng="${esc(r.lng || 0)}">
+                  <img class="icon-img" src="${icon}" alt="">${esc(r.run)}</button>`;
+      }
+      const meta = STREAM_META[r.stream] || STREAM_META.Garbage;
+      return `<button type="button" class="lb-run-chip ${meta.cls}" data-lbrun="run"
+                data-run="${esc(r.run)}" data-stream="${esc(r.stream)}"
+                data-day="${esc(r.day)}" data-week="${esc(r.week)}" data-summer="${r.summer ? '1' : '0'}"
+                data-lat="${esc(r.lat || 0)}" data-lng="${esc(r.lng || 0)}" data-key="${esc(r.streetKey || '')}">
+                <img class="icon-img" src="${meta.icon}" alt="">${esc(r.run)}</button>`;
+    }).join('');
+
+    box.className = 'lb-street-runs has-runs';
+    box.innerHTML = `<span class="lb-runs-label">Runs servicing this street</span>${chips}`;
+  }
+  window.lbRenderStreetRuns = renderStreetRuns;
+
+  /* ---- Richer result list ------------------------------------------
+     The drawer's own renderBody() already writes a plain list of
+     properties. This runs straight after it and replaces that list with
+     one that also understands streets, bin serials, run numbers and
+     street-litter sites - and, crucially, gives every row something to
+     do when it's tapped. */
+  const CAPS = { street: 8, prop: 20, bin: 15, run: 8, sl: 8 };
+
+  function buildResults(qRaw) {
+    const q = String(qRaw || '').trim().toLowerCase();
+    if (q.length < 2) return null;
+
+    const streets = new Map();
+    const counts = new Map();
+    const props = [];
+    const bins = [];
+    const runs = new Map();
+    const sl = [];
+
+    const all = recs();
+    for (let i = 0; i < all.length; i++) {
+      const s = all[i];
+
+      // Every record contributes to its own street's house count, whether
+      // or not that street ends up in the results - otherwise a street
+      // matched halfway down the list would report only the houses seen
+      // after it was matched.
+      const sk = streetKeyOf(s);
+      counts.set(sk, (counts.get(sk) || 0) + 1);
+
+      if (streets.size < CAPS.street && !streets.has(sk)) {
+        const label = streetLabelOf(s);
+        if (label && label.toLowerCase().includes(q)) {
+          streets.set(sk, { key: sk, label, suburb: s.suburbLine || '', n: 0 });
+        }
+      }
+
+      if (props.length < CAPS.prop) {
+        const addr = String(s.addressText || '').toLowerCase();
+        const pid = String(s.propId || '').toLowerCase();
+        const sid = String(s.siteId || '').toLowerCase();
+        if (addr.includes(q) || pid === q || sid === q) props.push(s);
+      }
+
+      if (bins.length < CAPS.bin) {
+        for (const group of [s.soloStreams, s.councilStreams]) {
+          if (!group) continue;
+          for (const k of Object.keys(group)) {
+            for (const b of (group[k] || [])) {
+              if (b && String(b.serial || '').toLowerCase().includes(q)) {
+                bins.push({ site: s, serial: b.serial, size: b.size || '', stream: k });
+              }
+            }
+          }
+        }
+      }
+
+      if (runs.size < CAPS.run) {
+        const sch = s.soloSchedule || {};
+        [['garRun', 'Garbage'], ['recRun', 'Recycling'], ['recSummerRun', 'SummerRecycling'], ['fogRun', 'FOGO']].forEach(([field, stream]) => {
+          const run = String(sch[field] || '').trim();
+          if (!run || !run.toLowerCase().includes(q)) return;
+          const id = stream + '|' + run.toLowerCase();
+          if (runs.has(id)) return;
+          runs.set(id, {
+            run, stream, day: String(sch.day || ''), week: String(sch.weekLetter || ''),
+            summer: stream === 'SummerRecycling', lat: s.lat, lng: s.lng
+          });
+        });
+      }
+    }
+
+    slSites().forEach(s => {
+      if (sl.length >= CAPS.sl) return;
+      const hay = (String(s.addr || '') + ' ' + String(s.suburb || '')).toLowerCase();
+      if (hay.includes(q)) sl.push(s);
+    });
+
+    const streetList = [...streets.values()].map(s => ({ ...s, n: counts.get(s.key) || 0 }));
+    return { q, streets: streetList, props, bins, runs: [...runs.values()], sl };
+  }
+
+  function resultsHtml(r) {
+    const total = r.streets.length + r.props.length + r.bins.length + r.runs.length + r.sl.length;
+    if (!total) return `<div class="lb-drawer-empty">Nothing found for "${esc(r.q)}".</div>`;
+
+    let html = '';
+
+    if (r.streets.length) {
+      html += `<div class="lb-drawer-sect">Streets</div><div class="lb-drawer-results">` +
+        r.streets.map(s => `
+          <button type="button" class="lb-res-row is-street" data-lbgo="street" data-key="${esc(s.key)}">
+            <img class="icon-img" src="search.png" alt="">
+            <span class="lb-res-main">${esc(s.label)}
+              <small>${esc(s.n)} propert${s.n === 1 ? 'y' : 'ies'}${s.suburb ? ' · ' + esc(s.suburb) : ''}</small>
+            </span>
+            <span class="lb-res-go">›</span>
+          </button>`).join('') + `</div>`;
+    }
+
+    if (r.runs.length) {
+      html += `<div class="lb-drawer-sect">Runs</div><div class="lb-drawer-results">` +
+        r.runs.map(x => {
+          const meta = STREAM_META[x.stream] || STREAM_META.Garbage;
+          const when = [x.day, x.week ? 'Week ' + x.week : ''].filter(Boolean).join(' · ');
+          return `
+          <button type="button" class="lb-res-row" data-lbgo="run" data-run="${esc(x.run)}"
+                  data-stream="${esc(x.stream)}" data-day="${esc(x.day)}" data-week="${esc(x.week)}"
+                  data-summer="${x.summer ? '1' : '0'}" data-lat="${esc(x.lat || 0)}" data-lng="${esc(x.lng || 0)}">
+            <img class="icon-img" src="${meta.icon}" alt="">
+            <span class="lb-res-main">Run ${esc(x.run)}
+              <small>${esc(meta.label)}${when ? ' · ' + esc(when) : ''}</small>
+            </span>
+            <span class="lb-res-go">›</span>
+          </button>`;
+        }).join('') + `</div>`;
+    }
+
+    if (r.bins.length) {
+      html += `<div class="lb-drawer-sect">Bins</div><div class="lb-drawer-results">` +
+        r.bins.map(b => `
+          <button type="button" class="lb-res-row" data-lbgo="bin"
+                  data-pid="${esc(String(b.site.propId || b.site.siteId || ''))}" data-serial="${esc(b.serial)}">
+            <img class="icon-img" src="bin.png" alt="">
+            <span class="lb-res-main">${esc(b.serial)}
+              <small>${esc([b.size, b.stream].filter(Boolean).join(' '))} · ${esc(b.site.baseStreetLine || b.site.addressText || '')}</small>
+            </span>
+            <span class="lb-res-go">›</span>
+          </button>`).join('') + `</div>`;
+    }
+
+    if (r.props.length) {
+      html += `<div class="lb-drawer-sect">Addresses</div><div class="lb-drawer-results">` +
+        r.props.map(s => `
+          <button type="button" class="lb-res-row" data-lbgo="prop"
+                  data-pid="${esc(String(s.propId || s.siteId || ''))}">
+            <img class="icon-img" src="houses.png" alt="">
+            <span class="lb-res-main">${esc(s.baseStreetLine || s.addressText || '')}
+              ${s.suburbLine ? `<small>${esc(s.suburbLine)}</small>` : ''}
+            </span>
+            <span class="lb-res-go">›</span>
+          </button>`).join('') + `</div>`;
+    }
+
+    if (r.sl.length) {
+      html += `<div class="lb-drawer-sect">Street litter</div><div class="lb-drawer-results">` +
+        r.sl.map(s => `
+          <button type="button" class="lb-res-row" data-lbgo="sl" data-id="${esc(String(s.id))}">
+            <img class="icon-img" src="garbage.png" alt="">
+            <span class="lb-res-main">${esc(s.addr || '')}
+              ${s.suburb ? `<small>${esc(s.suburb)}</small>` : ''}
+            </span>
+            <span class="lb-res-go">›</span>
+          </button>`).join('') + `</div>`;
+    }
+
+    return html;
+  }
+
+  function repaintResults() {
+    const body = document.getElementById('lbDrawerBody');
+    const input = document.getElementById('lbDrawerInput');
+    if (!body || !input) return;
+    const r = buildResults(input.value);
+    if (r === null) return;      // under 2 chars: leave the drawer's own menu alone
+    body.innerHTML = resultsHtml(r);
+  }
+
+  // Runs after the drawer's own input listener (added earlier in the
+  // document), so this overwrite always wins.
+  document.addEventListener('input', function(ev) {
+    if (ev.target && ev.target.id === 'lbDrawerInput') repaintResults();
+  });
+
+  /* ---- Result + chip taps ------------------------------------------ */
+  function openRun(d) {
+    if (typeof window.openRunDirectlyOnMap !== 'function') return;
+    window.lbClearMapFocus();
+    window.openRunDirectlyOnMap(
+      d.run, d.stream, d.day, d.week, d.summer === '1',
+      Number(d.lat) || 0, Number(d.lng) || 0, d.key || undefined
+    );
+  }
+
+  document.addEventListener('click', function(ev) {
+    const t = ev.target;
+    if (!t || !t.closest) return;
+
+    if (t.closest('#lbLayersTab'))      { ev.preventDefault(); toggleLayers(); return; }
+    if (t.closest('#lbLayersCloseBtn')) { ev.preventDefault(); closeLayers();  return; }
+
+    const chip = t.closest('.lb-run-chip');
+    if (chip) {
+      ev.preventDefault();
+      if (typeof window.lbCloseDrawer === 'function') window.lbCloseDrawer();
+      if (chip.dataset.lbrun === 'sl') {
+        if (typeof window.openStreetLitterRunOnMap === 'function') {
+          window.lbClearMapFocus();
+          window.openStreetLitterRunOnMap(chip.dataset.run, chip.dataset.mode, Number(chip.dataset.lat) || 0, Number(chip.dataset.lng) || 0);
+        }
+      } else {
+        openRun(chip.dataset);
+      }
+      return;
+    }
+
+    const row = t.closest('.lb-res-row[data-lbgo]');
+    if (!row) return;
+    ev.preventDefault();
+    const d = row.dataset;
+
+    if (d.lbgo === 'street') {
+      // The drawer stays open for a street so the run chips it just
+      // populated are there to tap; everything else closes it.
+      window.lbFocusStreet(d.key);
+      return;
+    }
+
+    if (typeof window.lbCloseDrawer === 'function') window.lbCloseDrawer();
+    if (d.lbgo === 'prop') window.showPropertyOnMap(d.pid);
+    else if (d.lbgo === 'bin') window.lbFocusBin(d.pid, d.serial);
+    else if (d.lbgo === 'sl') window.lbFocusSlSite(d.id);
+    else if (d.lbgo === 'run') openRun(d);
+  }, true);
+
+  // Clearing the box clears the street chips too, so they can't go stale
+  // against a completely different search.
+  document.addEventListener('input', function(ev) {
+    if (ev.target && ev.target.id === 'lbDrawerInput' && !String(ev.target.value || '').trim()) {
+      renderStreetRuns(null);
+    }
+  });
+
+  /* ================= LAYERS / TRAIL / KML PANEL ===================== */
+  function flag(varName) {
+    // The layer flags are top-level `let`s in the main script, so they're
+    // reachable by bare name from here but not as window properties.
+    switch (varName) {
+      case 'bins':      return typeof showBinGpsDots !== 'undefined' && showBinGpsDots;
+      case 'houses':    return typeof showHouseGpsDots !== 'undefined' && showHouseGpsDots;
+      case 'bounds':    return typeof showRunBoundaries !== 'undefined' && showRunBoundaries;
+      case 'garSq':     return typeof showGarbageRunSquares !== 'undefined' && showGarbageRunSquares;
+      case 'recSq':     return typeof showRecyclingRunSquares !== 'undefined' && showRecyclingRunSquares;
+      case 'fogSq':     return typeof showFogoRunSquares !== 'undefined' && showFogoRunSquares;
+      case 'kmz':       return typeof kmzLayersVisible !== 'undefined' && kmzLayersVisible;
+      case 'nextBin':   return typeof isNextBinBoxVisible !== 'undefined' && isNextBinBoxVisible;
+      case 'geofence':  return typeof geofencesVisible !== 'undefined' && geofencesVisible;
+      case 'sat':       return typeof isSatelliteView !== 'undefined' && isSatelliteView;
+      case 'trailAge':  return typeof snailTrailColorByAge !== 'undefined' && snailTrailColorByAge;
+      case 'trailTime': return typeof snailTrailShowTimeLabels !== 'undefined' && snailTrailShowTimeLabels;
+      case 'trailRec':  return !(typeof snailTrailPaused !== 'undefined' && snailTrailPaused);
+      case 'kerbArr':   return typeof kerbsideRouteArrowsOn !== 'undefined' && kerbsideRouteArrowsOn;
+      case 'kerbHeat':  return typeof kerbsideRouteHeatmapOn !== 'undefined' && kerbsideRouteHeatmapOn;
+      case 'slArr':     return typeof streetLitterRouteArrowsOn !== 'undefined' && streetLitterRouteArrowsOn;
+      case 'slHeat':    return typeof streetLitterRouteHeatmapOn !== 'undefined' && streetLitterRouteHeatmapOn;
+      default: return false;
+    }
+  }
+
+  // [flagName, fnName, icon, label, isAction, danger]
+  const LAYER_ROWS = [
+    ['sect', 'Map layers'],
+    ['bins',     'toggleBinGpsDots',              'img:bin.png',      'Bins'],
+    ['houses',   'toggleHouseGpsDots',            'img:houses.png',   'Houses'],
+    ['bounds',   'toggleRunBoundaries',           'img:boundary.png', 'Run boundaries'],
+    ['garSq',    'toggleGarbageRunSquares',       'img:garbage.png',  'Garbage squares'],
+    ['recSq',    'toggleRecyclingRunSquares',     'img:recycle.png',  'Recycling squares'],
+    ['fogSq',    'toggleFogoRunSquares',          'img:fogo.png',     'FOGO squares'],
+    ['geofence', 'toggleGeofenceLayerVisibility', '🚧',               'Geofences'],
+    ['nextBin',  'toggleNextBinBox',              '📍',               'Next bin box'],
+    ['sat',      'toggleSatelliteView',           'img:satellite.png','Satellite'],
+
+    ['sect', 'Snail trail'],
+    ['trailRec',  'toggleSnailTrailPause',        '⏺',                'Recording'],
+    ['trailAge',  'toggleSnailTrailColorByAge',   '🎨',               'Age colour'],
+    ['trailTime', 'toggleSnailTrailTimeLabels',   '🕒',               'Time labels'],
+    ['act', 'exportSnailTrailKml',   'img:export.png', 'Export trail', false],
+    ['act', 'confirmClearSnailTrail','img:minus.png',  'Clear trail',  true],
+
+    ['sect', 'KML runs'],
+    ['kmz',      'toggleKmzLayers',                 '🚛', 'Show KMZ runs'],
+    ['kerbArr',  'toggleKerbsideRouteArrows',       '➡️', 'Kerbside arrows'],
+    ['kerbHeat', 'toggleKerbsideRouteHeatmap',      '🎨', 'Kerbside heatmap'],
+    ['slArr',    'toggleStreetLitterRouteArrows',   '➡️', 'Street litter arrows'],
+    ['slHeat',   'toggleStreetLitterRouteHeatmap',  '🎨', 'Street litter heatmap'],
+    ['act', 'loadKmzForCurrentRun', 'img:add.png',  'Add KML / KMZ', false],
+    ['act', 'openKmlEditModal',     'img:edit.png', 'Edit KML runs', false]
+  ];
+
+  function iconHtml(spec) {
+    return spec.startsWith('img:')
+      ? `<img class="icon-img" src="${spec.slice(4)}" alt="">`
+      : `<span class="lb-ico">${spec}</span>`;
+  }
+
+  function renderLayers() {
+    const body = document.getElementById('lbLayersBody');
+    if (!body) return;
+    body.innerHTML = LAYER_ROWS.map(row => {
+      if (row[0] === 'sect') return `<div class="lb-layers-sect">${esc(row[1])}</div>`;
+      if (row[0] === 'act') {
+        const [, fn, icon, label, danger] = row;
+        return `<button type="button" class="lb-layer-btn${danger ? ' danger' : ''}" data-lbfn="${esc(fn)}" data-act="1">
+          ${iconHtml(icon)}<span class="lb-label">${esc(label)}</span></button>`;
+      }
+      const [key, fn, icon, label] = row;
+      const on = flag(key);
+      return `<button type="button" class="lb-layer-btn${on ? ' on' : ''}" data-lbfn="${esc(fn)}">
+        ${iconHtml(icon)}<span class="lb-label">${esc(label)}</span>
+        <span class="lb-check">${on ? '✓' : ''}</span></button>`;
+    }).join('');
+  }
+
+  function openLayers() {
+    if (typeof window.lbCloseDrawer === 'function') window.lbCloseDrawer();
+    renderLayers();
+    document.body.classList.add('lb-layers-open');
+  }
+  function closeLayers() { document.body.classList.remove('lb-layers-open'); }
+  function toggleLayers() {
+    document.body.classList.contains('lb-layers-open') ? closeLayers() : openLayers();
+  }
+  window.lbOpenLayers = openLayers;
+  window.lbCloseLayers = closeLayers;
+
+  document.addEventListener('click', function(ev) {
+    const btn = ev.target && ev.target.closest ? ev.target.closest('.lb-layer-btn[data-lbfn]') : null;
+    if (!btn) return;
+    ev.preventDefault();
+    const fn = btn.dataset.lbfn;
+    const isAction = btn.dataset.act === '1';
+    try {
+      const f = window[fn];
+      if (typeof f === 'function') f();
+    } catch (e) { console.error('layer toggle failed:', fn, e); }
+    // Actions (export, clear, add, edit) usually open a dialog or a file
+    // picker, so the panel gets out of the way. Toggles stay put so a
+    // few can be flicked in a row.
+    if (isAction) closeLayers();
+    else setTimeout(renderLayers, 60);
+  });
+
+  // Esc closes whichever of the two is showing.
+  document.addEventListener('keydown', function(ev) {
+    if (ev.key === 'Escape' && document.body.classList.contains('lb-layers-open')) closeLayers();
+  });
 })();
 </script>
 
