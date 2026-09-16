@@ -292,6 +292,12 @@
   letter-spacing: 0.5px;
   cursor: pointer;
   -webkit-tap-highlight-color: transparent;
+  /* Play-button silhouette: the right edge tapers to a point instead of
+     a flat end, so the shape itself reads as "go" before the label
+     does. The taper is capped in px (not %) so it stays a consistent
+     point regardless of how wide the button is. */
+  clip-path: polygon(0 0, calc(100% - 34px) 0, 100% 50%, calc(100% - 34px) 100%, 0 100%);
+  padding-right: 34px;
 }
 .welcome-go[disabled] {
   background: var(--dark-surface);
@@ -299,6 +305,8 @@
   cursor: not-allowed;
   box-shadow: none !important;
   transform: none !important;
+  clip-path: none;
+  padding-right: 0;
 }
 .welcome-go-hint {
   color: var(--dark-text-muted);
@@ -2180,7 +2188,12 @@ body:not(.dark-mode) .welcome-go-wrap {
       left: 0;
       right: 0;
       bottom: 0;
-      background: rgba(0, 0, 0, 0.55);
+      /* Faint rather than opaque: even a full-screen modal (Edit bin,
+         KML editor, consolidate) leaves the map dimly visible behind
+         it, same idea as the slide-out panels. */
+      background: rgba(0, 0, 0, 0.28);
+      -webkit-backdrop-filter: blur(3px);
+      backdrop-filter: blur(3px);
       z-index: 20000;
       align-items: center;
       justify-content: center;
@@ -3198,7 +3211,7 @@ body:not(.dark-mode) .welcome-go-wrap {
   }
 
 
-  body.dark-mode .modal-overlay { background: rgba(0,0,0,0.7) !important; }
+  body.dark-mode .modal-overlay { background: rgba(0,0,0,0.34) !important; }
   body.dark-mode .modal-header,
   body.dark-mode .modal-actions { border-color: var(--dark-surface) !important; }
   body.dark-mode .modal-header h3 { color: var(--slate-200-b) !important; }
@@ -7415,6 +7428,146 @@ body:not(.dark-mode) .welcome-go-wrap {
     return recyclingLiftColor;
   }
 
+  // Base colour per stream, independent of whatever the active filter
+  // chip happens to be - needed once more than one run/stream can be on
+  // screen at once, since kmzColorForActiveStream() only ever answers
+  // for the single currently-filtered stream.
+  const KMZ_STREAM_BASE_COLOR = {
+    Garbage: '#dc2626', Recycling: '#facc15', SummerRecycling: '#f59e0b', FOGO: '#16a34a'
+  };
+  // Best guess at which stream a run number belongs to, by finding a
+  // property scheduled to it and reading which field matched. Falls
+  // back to the active filter chip, then to Recycling, so there's
+  // always a colour rather than an empty string breaking CSS.
+  function kmzStreamForRun(run){
+    const key=String(run||'').trim().toLowerCase();
+    if(!key) return activeFilterStream||'Recycling';
+    const all=(typeof siteRecords!=='undefined'&&Array.isArray(siteRecords))?siteRecords:[];
+    for(let i=0;i<all.length;i++){
+      const sch=all[i].soloSchedule||{};
+      if(String(sch.garRun||'').trim().toLowerCase()===key) return 'Garbage';
+      if(String(sch.recSummerRun||'').trim().toLowerCase()===key) return 'SummerRecycling';
+      if(String(sch.recRun||'').trim().toLowerCase()===key) return 'Recycling';
+      if(String(sch.fogRun||'').trim().toLowerCase()===key) return 'FOGO';
+    }
+    return activeFilterStream||'Recycling';
+  }
+  // Slightly varies lightness per run so two runs sharing one stream
+  // (two Garbage runs loaded together, say) are still visually distinct
+  // rather than drawing as one indistinguishable colour.
+  function kmzColorForRun(run, runIndex){
+    const stream=kmzStreamForRun(run);
+    const base=KMZ_STREAM_BASE_COLOR[stream]||kmzRouteColor;
+    if(!runIndex) return base;
+    try{
+      let {h,s,l}=hexToHsl(base);
+      l=Math.max(30,Math.min(78,l+((runIndex%3)-1)*13));
+      return hslToHex(h,s,l);
+    }catch(e){ return base; }
+  }
+  function hexToHsl(hex){
+    const m=/^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex)||[];
+    const r=parseInt(m[1]||'cc',16)/255, g=parseInt(m[2]||'cc',16)/255, b=parseInt(m[3]||'cc',16)/255;
+    const max=Math.max(r,g,b), min=Math.min(r,g,b); let h=0,s=0; const l=(max+min)/2;
+    if(max!==min){
+      const d=max-min; s=l>0.5?d/(2-max-min):d/(max+min);
+      if(max===r) h=((g-b)/d+(g<b?6:0)); else if(max===g) h=(b-r)/d+2; else h=(r-g)/d+4;
+      h*=60;
+    }
+    return {h,s:s*100,l:l*100};
+  }
+  function hslToHex(h,s,l){
+    s/=100; l/=100;
+    const c=(1-Math.abs(2*l-1))*s, x=c*(1-Math.abs((h/60)%2-1)), m=l-c/2;
+    let r=0,g=0,b=0;
+    if(h<60){r=c;g=x;} else if(h<120){r=x;g=c;} else if(h<180){g=c;b=x;}
+    else if(h<240){g=x;b=c;} else if(h<300){r=x;b=c;} else {r=c;b=x;}
+    const to255=v=>Math.round((v+m)*255).toString(16).padStart(2,'0');
+    return '#'+to255(r)+to255(g)+to255(b);
+  }
+
+  // Boundary polygons that name this run (any drawn geofence whose
+  // .runs list includes it). Several can match (overlapping zones), so
+  // "inside" means inside ANY of them.
+  function kmzBoundariesForRun(run){
+    if(typeof geofences==='undefined') return [];
+    return geofences.filter(f=>Array.isArray(f.points)&&f.points.length>=3&&Array.isArray(f.runs)&&f.runs.includes(run));
+  }
+  function insideAnyPolygon(lat,lng,polys){
+    for(let i=0;i<polys.length;i++){
+      if(pointInPolygonLatLng(lat,lng,polys[i].points)) return true;
+    }
+    return false;
+  }
+  // Houses actually allocated to this run, for whichever stream field
+  // the run number showed up under.
+  function kmzHousesForRun(run){
+    const stream=kmzStreamForRun(run);
+    const field=stream==='Garbage'?'garRun':stream==='SummerRecycling'?'recSummerRun':stream==='FOGO'?'fogRun':'recRun';
+    const key=String(run||'').trim().toLowerCase();
+    const all=(typeof siteRecords!=='undefined'&&Array.isArray(siteRecords))?siteRecords:[];
+    const out=[];
+    for(let i=0;i<all.length;i++){
+      const s=all[i];
+      if(String((s.soloSchedule||{})[field]||'').trim().toLowerCase()===key && Number.isFinite(Number(s.lat)) && Number.isFinite(Number(s.lng))){
+        out.push(s);
+      }
+    }
+    return out;
+  }
+  const KMZ_HOUSE_CORRIDOR_M = 45; // how far a house's allocation is trusted to "cover" the road outside its door
+  function nearAnyHouse(lat,lng,houses){
+    for(let i=0;i<houses.length;i++){
+      if(getDistanceMeters(lat,lng,Number(houses[i].lat),Number(houses[i].lng))<=KMZ_HOUSE_CORRIDOR_M) return true;
+    }
+    return false;
+  }
+
+  // Index of the route coordinate nearest a given lift point - used to
+  // clip the drawn line to "from the first bin to the last bin" instead
+  // of the full recorded track (which usually runs from depot to depot).
+  function nearestCoordIndex(coords, lat, lng){
+    let best=0, bestDist=Infinity;
+    for(let i=0;i<coords.length;i++){
+      const d=getDistanceMeters(coords[i][0],coords[i][1],lat,lng);
+      if(d<bestDist){ bestDist=d; best=i; }
+    }
+    return best;
+  }
+
+  // Works out which stretches of a recorded route are allowed to show:
+  // inside the run's boundary AND passing an allocated house, restricted
+  // to the span between the first and last bin lift. Any check that has
+  // no data to work with (no boundary drawn, no houses matched, no
+  // lifts recorded) is skipped rather than treated as a fail, so a run
+  // with incomplete setup still shows its full line instead of nothing.
+  function visibleRouteSegments(coords, run, lifts){
+    if(coords.length<2) return [coords];
+    const polys=kmzBoundariesForRun(run);
+    const houses=kmzHousesForRun(run);
+    let lo=0, hi=coords.length-1;
+    if(lifts && lifts.length>=2){
+      lo=nearestCoordIndex(coords,lifts[0].lat,lifts[0].lng);
+      hi=nearestCoordIndex(coords,lifts[lifts.length-1].lat,lifts[lifts.length-1].lng);
+      if(lo>hi){ const t=lo; lo=hi; hi=t; }
+    }
+    const segments=[];
+    let current=null;
+    for(let i=lo;i<=hi;i++){
+      const [lat,lng]=coords[i];
+      const okBoundary = !polys.length || insideAnyPolygon(lat,lng,polys);
+      const okHouse = !houses.length || nearAnyHouse(lat,lng,houses);
+      const ok = okBoundary && okHouse;
+      if(ok){
+        if(!current){ current=[]; segments.push(current); }
+        current.push(coords[i]);
+      } else {
+        current=null;
+      }
+    }
+    return segments.filter(s=>s.length>1);
+  }
+
   function renderKmzEvidence(){
     if(!mapKmzRouteLayer||!mapKmzLiftLayer) return;
     mapKmzRouteLayer.clearLayers();
@@ -7424,120 +7577,144 @@ body:not(.dark-mode) .welcome-go-wrap {
     if(!kmzLayersVisible) return;
 
     const runs=Array.from(selectedMapRuns());
-    if(runs.length!==1) return;
-
-    const data=kmzDataByRun.get(mapKey(runs[0]));
-    if(!data) return;
-
-    const liftColor=kmzColorForActiveStream();
+    if(!runs.length) return;
+    const multiRun = runs.length>1;
 
     // Heat colour, direction arrows and time labels mirror the live GPS
     // snail trail / Street Litter KMZ route treatment (see
     // gpsTrailAgeColorCss / makeGpsTrailArrowMarker / renderStreetLitterLayer)
-    // so an imported KMZ reads the same way here as it does there. "Newest
-    // to oldest" means earliest-to-latest along the route/lift sequence,
-    // since a KMZ has no live "now". Heat + arrows share the Age Colour
-    // toggle (snailTrailColorByAge); time pills share snailTrailShowTimeLabels.
+    // so an imported KMZ reads the same way here as it does there. With
+    // one run loaded the heat still fades oldest -> newest along the
+    // route/lift sequence (a KMZ has no live "now" to fade against); with
+    // several runs loaded at once that fade would just read as noise
+    // across unrelated routes, so heat instead becomes each run's own
+    // stream/run colour - solid, not graded. Heat + arrows share the Age
+    // Colour toggle (snailTrailColorByAge) in the single-run case; time
+    // pills share snailTrailShowTimeLabels either way.
     const KMZ_ROUTE_HEAT_SEGMENTS = 40;   // polyline chunks when heat is on
     const KMZ_ROUTE_MAX_TIME_LABELS = 20; // lift-time pills per file
 
-    data.files.forEach(file=>{
-      if(!kmzFileMatchesActiveFilter(file)) return;
+    runs.forEach((run, runIndex)=>{
+      const data=kmzDataByRun.get(mapKey(run));
+      if(!data) return;
 
-      file.routes.forEach(route=>{
-        const coords=route.coordinates.map(p=>[p.lat,p.lng]);
+      const runColor = multiRun ? kmzColorForRun(run, runIndex) : kmzColorForActiveStream();
 
-        if(kerbsideRouteHeatmapOn && coords.length>1){
-          const segLen=Math.max(1,Math.ceil(coords.length/KMZ_ROUTE_HEAT_SEGMENTS));
-          for(let i=0;i<coords.length-1;i+=segLen){
-            const chunk=coords.slice(i,Math.min(coords.length,i+segLen+1));
-            if(chunk.length<2) continue;
-            const frac=i/(coords.length-1);
-            L.polyline(chunk,{
-              color:gpsTrailAgeColorCss(frac*GPS_TRAIL_AGE_MAX_MS), weight:3, opacity:.75
-            }).bindPopup(mapPopupHTML({
-              badge:'🚛', title:'Truck route',
-              lines:[esc(file.fileName), esc(route.name)]
-            })).addTo(mapKmzRouteLayer);
-          }
-        } else {
-          L.polyline(coords,{
-            color:kmzRouteColor, weight:3, opacity:.7, dashArray:'6 6'
-          }).bindPopup(mapPopupHTML({
-            badge:'🚛', title:'Truck route',
-            lines:[esc(file.fileName), esc(route.name)]
-          })).addTo(mapKmzRouteLayer);
-        }
+      data.files.forEach(file=>{
+        if(!kmzFileMatchesActiveFilter(file)) return;
 
-        // Direction arrows, spaced every ROUTE_ARROW_SPACING_M of actual
-        // route distance (plus extra ones bracketing any sharp turn) via
-        // buildRouteArrowPoints, instead of every Nth GPS point. Gated by
-        // kerbsideRouteArrowsOn (Map Settings > KML), on by default.
-        if(kerbsideRouteArrowsOn && coords.length>1){
-          buildRouteArrowPoints(coords).forEach(pt=>{
-            const col=kerbsideRouteHeatmapOn ? gpsTrailAgeColorCss(pt.frac*GPS_TRAIL_AGE_MAX_MS) : kmzRouteColor;
-            makeGpsTrailArrowMarker(pt.lat,pt.lng,pt.bearing,col).addTo(mapKmzRouteLayer);
+        file.routes.forEach(route=>{
+          const fullCoords=route.coordinates.map(p=>[p.lat,p.lng]);
+          // Clipped to inside-boundary + passing-allocated-houses +
+          // first-lift-to-last-lift; falls back to the whole recorded
+          // line wherever that data isn't available (see
+          // visibleRouteSegments for exactly what "not available" means
+          // per check).
+          const segments=visibleRouteSegments(fullCoords, run, file.lifts);
+
+          segments.forEach(coords=>{
+            if(coords.length<2) return;
+
+            if(kerbsideRouteHeatmapOn && coords.length>1){
+              const segLen=Math.max(1,Math.ceil(coords.length/KMZ_ROUTE_HEAT_SEGMENTS));
+              for(let i=0;i<coords.length-1;i+=segLen){
+                const chunk=coords.slice(i,Math.min(coords.length,i+segLen+1));
+                if(chunk.length<2) continue;
+                const frac=i/(coords.length-1);
+                const chunkColor = multiRun ? runColor : gpsTrailAgeColorCss(frac*GPS_TRAIL_AGE_MAX_MS);
+                L.polyline(chunk,{
+                  color:chunkColor, weight:3, opacity:.8
+                }).bindPopup(mapPopupHTML({
+                  badge:'🚛', title:'Truck route',
+                  lines:[esc(file.fileName), esc(route.name), 'Run '+esc(run)]
+                })).addTo(mapKmzRouteLayer);
+              }
+            } else {
+              L.polyline(coords,{
+                color:runColor, weight:3, opacity:.75, dashArray:'6 6'
+              }).bindPopup(mapPopupHTML({
+                badge:'🚛', title:'Truck route',
+                lines:[esc(file.fileName), esc(route.name), 'Run '+esc(run)]
+              })).addTo(mapKmzRouteLayer);
+            }
+
+            // Direction arrows. With one run on screen: spaced every
+            // ROUTE_ARROW_SPACING_M plus bracketing any sharp turn, as
+            // before. With several runs on screen at once: turns only -
+            // an arrow every couple hundred metres down N overlapping
+            // routes is just clutter, but a turn is still worth marking
+            // on every one of them. Gated by kerbsideRouteArrowsOn
+            // (Map Settings > KML) either way.
+            if(kerbsideRouteArrowsOn && coords.length>1){
+              buildRouteArrowPoints(coords, multiRun).forEach(pt=>{
+                const col = multiRun ? runColor : (kerbsideRouteHeatmapOn ? gpsTrailAgeColorCss(pt.frac*GPS_TRAIL_AGE_MAX_MS) : runColor);
+                makeGpsTrailArrowMarker(pt.lat,pt.lng,pt.bearing,col).addTo(mapKmzRouteLayer);
+              });
+            }
           });
-        }
-      });
-
-      // Bin lifts are already sorted oldest -> newest with previous/next
-      // and bearingFromPrevious computed in extractKmzKml. Colour fades
-      // oldest (green) -> newest (red) when Age Colour is on. Bins are
-      // always shown as a filled circle in the stream colour - direction
-      // is conveyed by the route's own arrows (buildRouteArrowPoints)
-      // rather than by turning individual bin markers into arrows.
-      file.lifts.forEach((lift,i)=>{
-        const frac=file.lifts.length>1 ? i/(file.lifts.length-1) : 0;
-        const dotColor=snailTrailColorByAge ? gpsTrailAgeColorCss(frac*GPS_TRAIL_AGE_MAX_MS) : liftColor;
-
-        const marker=L.circleMarker([lift.lat,lift.lng],{
-          radius:5.5,
-          color:'#ffffff',
-          weight:1.5,
-          fillColor:dotColor,
-          fillOpacity:.95,
-          opacity:1
         });
 
-        const previousText=lift.previous
-          ? `${lift.distanceFromPrevious ?? '?'} m from previous`
-          : 'First recorded lift';
+        // Bin lifts are already sorted oldest -> newest with previous/next
+        // and bearingFromPrevious computed in extractKmzKml. Colour fades
+        // oldest (green) -> newest (red) when Age Colour is on and only
+        // one run is loaded; with several runs loaded each run's lifts
+        // take that run's own colour instead, same reasoning as the
+        // route heat above. Bins are always shown as a filled circle -
+        // direction is conveyed by the route's own arrows rather than by
+        // turning individual bin markers into arrows.
+        file.lifts.forEach((lift,i)=>{
+          const frac=file.lifts.length>1 ? i/(file.lifts.length-1) : 0;
+          const dotColor = multiRun ? runColor : (snailTrailColorByAge ? gpsTrailAgeColorCss(frac*GPS_TRAIL_AGE_MAX_MS) : runColor);
 
-        const headingText=Number.isFinite(lift.bearingFromPrevious)
-          ? `${Math.round(lift.bearingFromPrevious)}° ${getCardinalDirection(lift.bearingFromPrevious)}`
-          : '—';
-
-        marker.bindPopup(mapPopupHTML({
-          badge: activeFilterStream || 'Bin', badgeClass: mapStreamBadgeClass(activeFilterStream),
-          title: `Lift #${lift.name}`,
-          lines: [
-            `<b>Time:</b> ${esc(lift.timestampRaw||'Not supplied')}`,
-            `<b>Direction:</b> ${esc(headingText)}`,
-            `<b>Sequence:</b> ${esc(previousText)}`
-          ],
-          actions: [{ label:'Find nearby houses', onclick:`inspectKmzLift(${lift.lat},${lift.lng},'${esc(mapKey(runs[0]))}',${Number(lift.sequence)||0})`, primary:true }]
-        })).addTo(mapKmzLiftLayer);
-      });
-
-      // Timestamp pills at a downsampled set of lifts, oldest-to-newest,
-      // matching the live trail's / Street Litter's time-label toggle -
-      // plus the very first and last lift always get one, even if the
-      // even spacing above doesn't happen to land on them, so the line's
-      // start and end time are always readable.
-      if(snailTrailShowTimeLabels){
-        const liftsWithTime=file.lifts.filter(l=>l.timestamp);
-        if(liftsWithTime.length){
-          const labelStep=Math.max(1,Math.ceil(liftsWithTime.length/KMZ_ROUTE_MAX_TIME_LABELS));
-          const labelIndexes=new Set([0,liftsWithTime.length-1]);
-          for(let i=0;i<liftsWithTime.length;i+=labelStep) labelIndexes.add(i);
-          Array.from(labelIndexes).sort((a,b)=>a-b).forEach(i=>{
-            const l=liftsWithTime[i];
-            const label=l.timestamp.toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' });
-            makeStaticTimeLabelMarker(l.lat,l.lng,label).addTo(mapKmzLiftLayer);
+          const marker=L.circleMarker([lift.lat,lift.lng],{
+            radius:5.5,
+            color:'#ffffff',
+            weight:1.5,
+            fillColor:dotColor,
+            fillOpacity:.95,
+            opacity:1
           });
+
+          const previousText=lift.previous
+            ? `${lift.distanceFromPrevious ?? '?'} m from previous`
+            : 'First recorded lift';
+
+          const headingText=Number.isFinite(lift.bearingFromPrevious)
+            ? `${Math.round(lift.bearingFromPrevious)}° ${getCardinalDirection(lift.bearingFromPrevious)}`
+            : '—';
+
+          marker.bindPopup(mapPopupHTML({
+            badge: kmzStreamForRun(run) || 'Bin', badgeClass: mapStreamBadgeClass(kmzStreamForRun(run)),
+            title: `Lift #${lift.name}`,
+            lines: [
+              `<b>Run:</b> ${esc(run)}`,
+              `<b>Time:</b> ${esc(lift.timestampRaw||'Not supplied')}`,
+              `<b>Direction:</b> ${esc(headingText)}`,
+              `<b>Sequence:</b> ${esc(previousText)}`
+            ],
+            actions: [{ label:'Find nearby houses', onclick:`inspectKmzLift(${lift.lat},${lift.lng},'${esc(mapKey(run))}',${Number(lift.sequence)||0})`, primary:true }]
+          })).addTo(mapKmzLiftLayer);
+        });
+
+        // Timestamp pills at a downsampled set of lifts, oldest-to-newest,
+        // matching the live trail's / Street Litter's time-label toggle -
+        // plus the very first and last lift always get one, even if the
+        // even spacing above doesn't happen to land on them, so the line's
+        // start and end time are always readable.
+        if(snailTrailShowTimeLabels){
+          const liftsWithTime=file.lifts.filter(l=>l.timestamp);
+          if(liftsWithTime.length){
+            const labelStep=Math.max(1,Math.ceil(liftsWithTime.length/KMZ_ROUTE_MAX_TIME_LABELS));
+            const labelIndexes=new Set([0,liftsWithTime.length-1]);
+            for(let i=0;i<liftsWithTime.length;i+=labelStep) labelIndexes.add(i);
+            Array.from(labelIndexes).sort((a,b)=>a-b).forEach(i=>{
+              const l=liftsWithTime[i];
+              const label=l.timestamp.toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' });
+              makeStaticTimeLabelMarker(l.lat,l.lng,label).addTo(mapKmzLiftLayer);
+            });
+          }
         }
-      }
+      });
     });
   }
 
@@ -8670,7 +8847,7 @@ body:not(.dark-mode) .welcome-go-wrap {
   const ROUTE_ARROW_BEARING_LOOK_M = 20;
   const ROUTE_ARROW_TURN_STEP_M = 20;
 
-  function buildRouteArrowPoints(coords) {
+  function buildRouteArrowPoints(coords, turnsOnly) {
     const points = [];
     if (!coords || coords.length < 2) return points;
 
@@ -8705,8 +8882,14 @@ body:not(.dark-mode) .welcome-go-wrap {
     }
 
     const placedDistances = [];
-    for (let d = ROUTE_ARROW_SPACING_M; d < totalDist; d += ROUTE_ARROW_SPACING_M) {
-      placedDistances.push(d);
+    // turnsOnly (used when several imported KML runs are shown at once,
+    // where a full spacing grid of arrows across every route gets messy
+    // fast) skips this regular-interval pass entirely - only a change of
+    // direction earns an arrow.
+    if (!turnsOnly) {
+      for (let d = ROUTE_ARROW_SPACING_M; d < totalDist; d += ROUTE_ARROW_SPACING_M) {
+        placedDistances.push(d);
+      }
     }
 
     for (let d = ROUTE_ARROW_TURN_STEP_M; d < totalDist; d += ROUTE_ARROW_TURN_STEP_M) {
@@ -16567,18 +16750,18 @@ window.addEventListener('DOMContentLoaded', async () => {
      button with no fade-to-transparent gap at the end. The already-black
      context bar (.map-context-box, below) keeps its own solid black
      background and needs no fade. */
-  .map-run-colored-box.stream-gar { background: linear-gradient(90deg, var(--red-600) 0%, var(--red-600) calc(85% + 35.7px), #000 calc(90% + 37.8px), #000 100%) !important; border-color: var(--red-700) !important; color: var(--white) !important; }
-  .map-run-colored-box.stream-rec { background: linear-gradient(90deg, var(--yellow-400) 0%, var(--yellow-400) calc(85% + 35.7px), #000 calc(90% + 37.8px), #000 100%) !important; border-color: var(--yellow-500) !important; color: var(--slate-800) !important; }
-  .map-run-colored-box.stream-summer { background: linear-gradient(90deg, var(--amber-500) 0%, var(--amber-500) calc(85% + 35.7px), #000 calc(90% + 37.8px), #000 100%) !important; border-color: var(--amber-600) !important; color: var(--white) !important; }
-  .map-run-colored-box.stream-fog { background: linear-gradient(90deg, var(--green-600) 0%, var(--green-600) calc(85% + 35.7px), #000 calc(90% + 37.8px), #000 100%) !important; border-color: var(--green-700) !important; color: var(--white) !important; }
-  .map-run-colored-box.stream-slg { background: linear-gradient(90deg, var(--blue-600) 0%, var(--blue-600) calc(85% + 35.7px), #000 calc(90% + 37.8px), #000 100%) !important; border-color: #1d4ed8 !important; color: var(--white) !important; }
-  .map-run-colored-box.stream-slr { background: linear-gradient(90deg, var(--sky-400) 0%, var(--sky-400) calc(85% + 35.7px), #000 calc(90% + 37.8px), #000 100%) !important; border-color: var(--sky-600) !important; color: var(--slate-800) !important; }
-  .map-run-colored-box.stream-litter { background: linear-gradient(90deg, var(--blue-600) 0%, var(--blue-600) calc(85% + 35.7px), #000 calc(90% + 37.8px), #000 100%) !important; border-color: var(--blue-700, #1d4ed8) !important; color: var(--white) !important; }
-  .map-run-colored-box.stream-litter-rec { background: linear-gradient(90deg, var(--sky-400) 0%, var(--sky-400) calc(85% + 35.7px), #000 calc(90% + 37.8px), #000 100%) !important; border-color: var(--sky-600) !important; color: var(--white) !important; }
+  .map-run-colored-box.stream-gar { background: linear-gradient(90deg, var(--red-600) 0%, var(--red-600) calc(85% + 35.7px), rgba(0,0,0,0) calc(90% + 37.8px), rgba(0,0,0,0) 100%) !important; border-color: var(--red-700) !important; color: var(--white) !important; }
+  .map-run-colored-box.stream-rec { background: linear-gradient(90deg, var(--yellow-400) 0%, var(--yellow-400) calc(85% + 35.7px), rgba(0,0,0,0) calc(90% + 37.8px), rgba(0,0,0,0) 100%) !important; border-color: var(--yellow-500) !important; color: var(--slate-800) !important; }
+  .map-run-colored-box.stream-summer { background: linear-gradient(90deg, var(--amber-500) 0%, var(--amber-500) calc(85% + 35.7px), rgba(0,0,0,0) calc(90% + 37.8px), rgba(0,0,0,0) 100%) !important; border-color: var(--amber-600) !important; color: var(--white) !important; }
+  .map-run-colored-box.stream-fog { background: linear-gradient(90deg, var(--green-600) 0%, var(--green-600) calc(85% + 35.7px), rgba(0,0,0,0) calc(90% + 37.8px), rgba(0,0,0,0) 100%) !important; border-color: var(--green-700) !important; color: var(--white) !important; }
+  .map-run-colored-box.stream-slg { background: linear-gradient(90deg, var(--blue-600) 0%, var(--blue-600) calc(85% + 35.7px), rgba(0,0,0,0) calc(90% + 37.8px), rgba(0,0,0,0) 100%) !important; border-color: #1d4ed8 !important; color: var(--white) !important; }
+  .map-run-colored-box.stream-slr { background: linear-gradient(90deg, var(--sky-400) 0%, var(--sky-400) calc(85% + 35.7px), rgba(0,0,0,0) calc(90% + 37.8px), rgba(0,0,0,0) 100%) !important; border-color: var(--sky-600) !important; color: var(--slate-800) !important; }
+  .map-run-colored-box.stream-litter { background: linear-gradient(90deg, var(--blue-600) 0%, var(--blue-600) calc(85% + 35.7px), rgba(0,0,0,0) calc(90% + 37.8px), rgba(0,0,0,0) 100%) !important; border-color: var(--blue-700, #1d4ed8) !important; color: var(--white) !important; }
+  .map-run-colored-box.stream-litter-rec { background: linear-gradient(90deg, var(--sky-400) 0%, var(--sky-400) calc(85% + 35.7px), rgba(0,0,0,0) calc(90% + 37.8px), rgba(0,0,0,0) 100%) !important; border-color: var(--sky-600) !important; color: var(--white) !important; }
   /* No run selected — the app's normal/default dark green, fading to
      black like every other stream colour, instead of falling back to
      the recycling yellow. */
-  .map-run-colored-box.stream-none { background: linear-gradient(90deg, var(--brand-dark) 0%, var(--brand-dark) calc(85% + 35.7px), #000 calc(90% + 37.8px), #000 100%) !important; border-color: var(--brand-dark) !important; color: var(--white) !important; }
+  .map-run-colored-box.stream-none { background: linear-gradient(90deg, var(--brand-dark) 0%, var(--brand-dark) calc(85% + 35.7px), rgba(0,0,0,0) calc(90% + 37.8px), rgba(0,0,0,0) 100%) !important; border-color: var(--brand-dark) !important; color: var(--white) !important; }
 
   .map-run-title {
     overflow: hidden !important;
@@ -16666,7 +16849,10 @@ window.addEventListener('DOMContentLoaded', async () => {
     flex-wrap: wrap !important;
   }
   .map-context-box {
-    background: linear-gradient(180deg, var(--bar-black-hi) 0%, var(--bar-black) 100%) !important;
+    /* Fades to transparent at its right edge like the run box and the
+       live-street overlay, instead of sitting as a solid black slab -
+       the map now shows through behind all three. */
+    background: linear-gradient(90deg, var(--bar-black-hi) 0%, var(--bar-black) 55%, rgba(0,0,0,0) 100%) !important;
     border-color: #000 !important;
     color: #fff !important;
     cursor: default !important;
@@ -18897,11 +19083,18 @@ body.stream-slr #lbLayersTab .icon-img { filter: brightness(0); }
   top: 8px;
   bottom: 96px;
   z-index: 4400;
-  width: 292px;
+  width: max-content;
+  min-width: 168px;
   max-width: 86vw;
   display: flex;
   flex-direction: column;
-  background: linear-gradient(180deg, #14171b 0%, #0b0d10 100%);
+  /* Translucent, blurred: the map keeps showing through underneath
+     rather than being blotted out by a solid black slab, since the
+     panel is only ever as wide as its longest label + tick now, not
+     the full column it used to reserve. */
+  background: linear-gradient(180deg, rgba(20,23,27,0.82) 0%, rgba(11,13,16,0.82) 100%);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
   border: 1px solid #000;
   border-left: none;
   border-radius: 0 10px 10px 0;
@@ -18956,14 +19149,15 @@ body.stream-slr .lb-layers-head .icon-img { filter: brightness(0); }
   display: flex; align-items: center; gap: 10px;
   width: 100%; min-height: 42px; padding: 0 10px;
   border: 1px solid #000; border-radius: 0;
-  background: linear-gradient(180deg, var(--bar-black-hi) 0%, var(--bar-black) 100%);
+  background: linear-gradient(180deg, rgba(35,39,45,0.72) 0%, rgba(20,23,27,0.72) 100%);
   color: #fff; font-size: 14px; font-weight: 700; text-align: left;
+  white-space: nowrap;
   cursor: pointer; -webkit-tap-highlight-color: transparent;
 }
 .lb-layer-btn .icon-img { width: 18px; height: 18px; filter: brightness(0) invert(1); }
 .lb-layer-btn .lb-ico { width: 20px; text-align: center; font-size: 15px; flex-shrink: 0; }
 .lb-layer-btn .lb-label { flex: 1; min-width: 0; }
-.lb-layer-btn .lb-check { font-size: 15px; font-weight: 900; color: var(--bright-green); width: 16px; text-align: right; }
+.lb-layer-btn .lb-check { font-size: 15px; font-weight: 900; color: var(--bright-green); width: 16px; text-align: right; flex-shrink: 0; }
 .lb-layer-btn.on { border-left: 4px solid var(--ui-accent); background: linear-gradient(180deg, #23272d 0%, #14171b 100%); }
 .lb-layer-btn.danger { color: var(--red-300); }
 
@@ -19893,6 +20087,29 @@ body.stream-slr .lb-layers-head .icon-img { filter: brightness(0); }
 }
 .welcome-runs .welcome-chip { flex: 0 0 auto; min-width: 84px; }
 .welcome-runs .welcome-empty { width: 100%; text-align: left; }
+
+/* ---- Drive wizard quick-actions row (Load KML + toggles) ---- */
+.lb-drive-extras {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 10px 0 2px;
+}
+.lb-drive-extra-btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 7px 10px; min-height: 34px;
+  border: 1px solid #000; border-radius: 0;
+  background: linear-gradient(180deg, var(--bar-black-hi) 0%, var(--bar-black) 100%);
+  color: var(--welcome-ink-faint); font-size: 12.5px; font-weight: 800;
+  cursor: pointer; -webkit-tap-highlight-color: transparent;
+}
+.lb-drive-extra-btn .icon-img { width: 15px; height: 15px; filter: brightness(0) invert(1); opacity: 0.65; }
+.lb-drive-extra-btn.on {
+  color: #fff;
+  border-left: 3px solid var(--ui-accent);
+  background: linear-gradient(180deg, #23272d 0%, #14171b 100%);
+}
+.lb-drive-extra-btn.on .icon-img { opacity: 1; }
 </style>
 
 <script id="lb-phase2-script">
@@ -19914,6 +20131,15 @@ body.stream-slr .lb-layers-head .icon-img { filter: brightness(0); }
     return STREAM_CLASSES.find(c => chip.classList.contains(c)) || '';
   }
 
+  const STREAM_VARS = {
+    'stream-gar':    ['var(--red-600)',    '#fff'],
+    'stream-rec':    ['var(--yellow-400)', '#000'],
+    'stream-summer': ['var(--amber-500)',  '#000'],
+    'stream-fog':    ['var(--green-600)',  '#fff'],
+    'stream-slg':    ['var(--blue-600)',   '#fff'],
+    'stream-slr':    ['var(--sky-400)',    '#000']
+  };
+
   function decorate() {
     const root = document.getElementById('welcomeBody');
     if (!root) return;
@@ -19931,7 +20157,75 @@ body.stream-slr .lb-layers-head .icon-img { filter: brightness(0); }
       STREAM_CLASSES.forEach(c => chip.classList.remove(c));
       if (cls) chip.classList.add(cls);
     });
+
+    // The GO button reads var(--ui-accent), which is set at <body>
+    // level from whatever stream the MAP screen last had filtered - not
+    // from what's picked in this wizard. Overriding the variable on
+    // #welcomeBody itself means everything inside it (including the GO
+    // button) picks up the wizard's own choice instead, without
+    // touching the real global filter used elsewhere in the app. With
+    // nothing picked yet it's left alone, which falls through to the
+    // app's normal default accent.
+    const pair = STREAM_VARS[cls];
+    if (pair) {
+      root.style.setProperty('--ui-accent', pair[0]);
+      root.style.setProperty('--ui-accent-ink', pair[1]);
+    } else {
+      root.style.removeProperty('--ui-accent');
+      root.style.removeProperty('--ui-accent-ink');
+    }
+
+    addExtrasRow(root);
   }
+
+  /* A small row of quick actions sits above the GO bar on the Drive
+     wizard only (Explore/Check-out don't have a single "current run"
+     to attach a KML load to). Everything here proxies an existing
+     function so behaviour matches the Layers panel exactly - these are
+     just a shortcut to the same switches, not a second set of state. */
+  const EXTRA_BTNS = [
+    { fn: 'loadKmzForCurrentRun',   icon: 'img:add.png',     label: 'Load KML', act: true },
+    { fn: 'toggleKmzLayers',        icon: '🚛',              label: 'KML',       flag: 'kmzLayersVisible' },
+    { fn: 'toggleBinGpsDots',       icon: 'img:bin.png',     label: 'Bins',      flag: 'showBinGpsDots' },
+    { fn: 'toggleHouseGpsDots',     icon: 'img:houses.png',  label: 'Houses',    flag: 'showHouseGpsDots' },
+    { fn: 'toggleSnailTrailPause',  icon: '⏺',               label: 'Trail',     flag: '!snailTrailPaused' },
+    { fn: 'toggleSnailTrailTimeLabels', icon: '🕒',          label: 'Times',     flag: 'snailTrailShowTimeLabels' },
+    { fn: 'toggleNextBinBox',       icon: '📍',              label: 'Next bin',  flag: 'isNextBinBoxVisible' }
+  ];
+
+  function flagOn(expr) {
+    try { return !!(new Function('return (' + expr + ')'))(); } catch (e) { return false; }
+  }
+
+  function extrasHtml() {
+    return `<div class="lb-drive-extras">` + EXTRA_BTNS.map(b => {
+      const on = b.act ? false : flagOn(b.flag);
+      const ico = b.icon.startsWith('img:') ? `<img class="icon-img" src="${b.icon.slice(4)}" alt="">` : `<span>${b.icon}</span>`;
+      return `<button type="button" class="lb-drive-extra-btn${on ? ' on' : ''}" data-lbxfn="${b.fn}">${ico}<span>${b.label}</span></button>`;
+    }).join('') + `</div>`;
+  }
+
+  function addExtrasRow(root) {
+    const goWrap = root.querySelector('.welcome-go-wrap');
+    if (!goWrap) return;
+    let row = root.querySelector('.lb-drive-extras');
+    // Only on the Drive step (the one with a single run and a GO bar
+    // that says "GO — Run …"); Explore/Check-out pick multiple runs and
+    // don't have one current run for Load KML to attach to.
+    const isDrive = /GO\s*—\s*Run\s/.test((goWrap.querySelector('.welcome-go') || {}).textContent || '');
+    if (!isDrive) { if (row) row.remove(); return; }
+    const html = extrasHtml();
+    if (row) { row.outerHTML = html; } else { goWrap.insertAdjacentHTML('beforebegin', html); }
+  }
+
+  document.addEventListener('click', function(ev) {
+    const btn = ev.target && ev.target.closest ? ev.target.closest('.lb-drive-extra-btn') : null;
+    if (!btn) return;
+    ev.preventDefault();
+    const fn = window[btn.dataset.lbxfn];
+    if (typeof fn === 'function') { try { fn(); } catch (e) { console.error(e); } }
+    setTimeout(() => { const root = document.getElementById('welcomeBody'); if (root) addExtrasRow(root); }, 60);
+  });
 
   const target = document.getElementById('welcomeBody');
   if (target) {
@@ -19963,11 +20257,14 @@ body.stream-slr .lb-layers-head .icon-img { filter: brightness(0); }
   top: 8px;
   bottom: 96px;
   z-index: 4400;
-  width: 292px;
+  width: max-content;
+  min-width: 168px;
   max-width: 86vw;
   display: flex;
   flex-direction: column;
-  background: linear-gradient(180deg, #14171b 0%, #0b0d10 100%);
+  background: linear-gradient(180deg, rgba(20,23,27,0.82) 0%, rgba(11,13,16,0.82) 100%);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
   border: 1px solid #000;
   border-left: none;
   border-radius: 0 10px 10px 0;
@@ -20245,6 +20542,43 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
   function syncNextBinTab() {
     const hidden = (typeof isNextBinBoxVisible !== 'undefined') && !isNextBinBoxVisible;
     document.body.classList.toggle('lb-nextbin-hidden', !!hidden);
+    if (!hidden) return;
+
+    // The tab used to just say "Next bin" - it now names the run(s)
+    // actually nearby, so tapping it is informative even before you do.
+    // No sites in range at all means there's nothing useful to jump
+    // back to, so the tab hides itself rather than sitting there as a
+    // dead "Next bin" label with no next bin.
+    const tab = document.getElementById('lbNextBinTab');
+    if (!tab) return;
+    const here = (typeof userCurrentLocation !== 'undefined') ? userCurrentLocation : null;
+    if (!here || !Number.isFinite(here.lat) || !Number.isFinite(here.lng) || typeof getDistanceMeters !== 'function') {
+      tab.style.display = 'none';
+      return;
+    }
+    const NEAR_M = 180;
+    const runs = new Set();
+    const all = (typeof siteRecords !== 'undefined' && Array.isArray(siteRecords)) ? siteRecords : [];
+    for (let i = 0; i < all.length; i++) {
+      const s = all[i];
+      if (!Number.isFinite(Number(s.lat)) || !Number.isFinite(Number(s.lng))) continue;
+      if (getDistanceMeters(here.lat, here.lng, Number(s.lat), Number(s.lng)) > NEAR_M) continue;
+      const sch = s.soloSchedule || {};
+      [sch.garRun, sch.recRun, sch.recSummerRun, sch.fogRun].forEach(r => {
+        r = String(r || '').trim();
+        if (r) runs.add(r);
+      });
+      if (runs.size >= 4) break;
+    }
+    if (!runs.size) {
+      tab.style.display = 'none';
+      return;
+    }
+    tab.style.display = '';
+    tab.innerHTML = '<span aria-hidden="true">▲</span> ' + Array.from(runs).slice(0, 4).map(esc2).join(' · ');
+  }
+  function esc2(s) {
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
   }
   const prevToggle = window.toggleNextBinBox;
   if (typeof prevToggle === 'function') {
@@ -20260,10 +20594,50 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     if (typeof window.toggleNextBinBox === 'function') window.toggleNextBinBox();
     syncNextBinTab();
   });
-  setInterval(syncNextBinTab, 1000);
+  setInterval(syncNextBinTab, 2000);
   syncNextBinTab();
+
+  /* ---- Persistent speed badge --------------------------------------
+     The speed digit lives inside the Next Bin box, so hiding that box
+     used to hide speed along with it. This small chip mirrors the same
+     number independently, and only shows itself while actually moving
+     and while the main box is out of the way - when the box is visible
+     it already shows speed, so a second copy would be redundant. */
+  function syncSpeedBadge() {
+    const hidden = document.body.classList.contains('lb-nextbin-hidden');
+    const kmh = (typeof currentMapSpeedKmh === 'number') ? currentMapSpeedKmh : 0;
+    const badge = document.getElementById('lbSpeedBadge');
+    if (!badge) return;
+    const show = hidden && kmh >= 2 && document.body.classList.contains('lb-map-screen');
+    badge.style.display = show ? 'flex' : 'none';
+    if (show) badge.querySelector('.lb-speed-num').textContent = kmh;
+  }
+  setInterval(syncSpeedBadge, 1000);
+  syncSpeedBadge();
 })();
 </script>
+
+<style id="lb-speed-badge-style">
+#lbSpeedBadge {
+  position: fixed;
+  top: 8px;
+  right: 8px;
+  z-index: 4100;
+  display: none;
+  align-items: baseline;
+  gap: 3px;
+  padding: 6px 10px;
+  border: 1px solid #000;
+  border-radius: 8px;
+  background: linear-gradient(180deg, var(--bar-black-hi) 0%, var(--bar-black) 100%);
+  box-shadow: 2px 2px 8px rgba(0,0,0,0.5);
+  color: var(--ui-accent-fg);
+  pointer-events: none;
+}
+#lbSpeedBadge .lb-speed-num { font-size: 20px; font-weight: 900; line-height: 1; }
+#lbSpeedBadge .lb-speed-unit { font-size: 10px; font-weight: 800; opacity: 0.75; }
+</style>
+<div id="lbSpeedBadge"><span class="lb-speed-num">0</span><span class="lb-speed-unit">km/h</span></div>
 
 </body>
 </html>
