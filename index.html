@@ -5170,6 +5170,48 @@
   function nextGeofenceColor(){ return GEOFENCE_PALETTE[geofences.length % GEOFENCE_PALETTE.length]; }
   function genGeofenceId(){ return 'gf_'+Date.now().toString(36)+Math.random().toString(36).slice(2,7); }
   async function persistGeofences(){ await saveToDB('geofences', geofences); }
+
+  // ---- Street Litter "collection points" ------------------------------
+  // A "driver parked here" black dot (an unmatched Street Litter truck
+  // stop - see renderStreetLitterLayer) can be renamed and given its own
+  // catchment geofence, so every Street Litter bin whose GPS falls inside
+  // that shape is treated as belonging to it - mirroring how houses are
+  // grouped under a collection point elsewhere in the app. Keyed by a
+  // stable id derived from the run + stop coordinates, since a raw stop
+  // has no persistent id of its own.
+  // { [dotId]: { id, name, lat, lng, polygon: [[lat,lng],...]|null } }
+  let streetLitterCollectionPoints = {};
+  // When set, the in-progress tap-to-draw shape (geofenceDrawPoints) is
+  // this collection point's bin catchment rather than a run geofence -
+  // finishGeofenceDraw saves straight onto
+  // streetLitterCollectionPoints[id].polygon instead of pushing a new
+  // entry into geofences[]. See startStreetLitterCollectionDraw.
+  let streetLitterCollectionDrawId = null;
+  function streetLitterDotId(runLabel, lat, lng){
+    return 'slcp_' + String(runLabel || '') + '_' + Number(lat).toFixed(6) + '_' + Number(lng).toFixed(6);
+  }
+  async function persistStreetLitterCollectionPoints(){ await saveToDB('streetLitterCollectionPoints', streetLitterCollectionPoints); }
+  // Simple ray-casting point-in-polygon test; pts is [[lat,lng],...].
+  function pointInPolygonLatLng(lat, lng, pts){
+    let inside = false;
+    for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+      const yi = pts[i][0], xi = pts[i][1], yj = pts[j][0], xj = pts[j][1];
+      const intersect = ((yi > lat) !== (yj > lat)) &&
+        (lng < (xj - xi) * (lat - yi) / (yj - yi) + xi);
+      if (intersect) inside = !inside;
+    }
+    return inside;
+  }
+  // Which (if any) Street Litter collection point a bin site's catchment
+  // geofence covers - used to label bins with the collection point they
+  // now fall under, same idea as collectionPointForSite() for houses.
+  function streetLitterCollectionPointForSite(site){
+    if (!site || !Number.isFinite(Number(site.lat)) || !Number.isFinite(Number(site.lng))) return null;
+    for (const cp of Object.values(streetLitterCollectionPoints)) {
+      if (cp.polygon && cp.polygon.length >= 3 && pointInPolygonLatLng(Number(site.lat), Number(site.lng), cp.polygon)) return cp;
+    }
+    return null;
+  }
   let mapSeqLayer = null;
   let mapEditHandlesLayer = null;
   let mapTruckMarker = null;
@@ -7412,8 +7454,17 @@
       if(geofenceEditId===fence.id) return;
       L.polygon(fence.points,{color:fence.color,weight:2,fillColor:fence.color,fillOpacity:.12}).addTo(mapGeofenceLayer);
     });
+    // Other Street Litter collection-point catchments, shown for context
+    // while drawing/editing (the one currently being drawn is skipped -
+    // it's rendered separately below as the live draft shape).
+    Object.entries(streetLitterCollectionPoints).forEach(([id,cp])=>{
+      if(id===streetLitterCollectionDrawId) return;
+      if(cp.polygon && cp.polygon.length>=3){
+        L.polygon(cp.polygon,{color:'#111111',weight:2,fillColor:'#111111',fillOpacity:.08,dashArray:'4 4'}).addTo(mapGeofenceLayer);
+      }
+    });
     if(geofenceDrawPoints.length){
-      const color = geofenceEditId ? (geofences.find(f=>f.id===geofenceEditId)?.color || geofenceDrawColor) : geofenceDrawColor;
+      const color = geofenceEditId ? (geofences.find(f=>f.id===geofenceEditId)?.color || geofenceDrawColor) : (streetLitterCollectionDrawId ? '#111111' : geofenceDrawColor);
       let shape;
       if(geofenceDrawPoints.length>=3){
         shape=L.polygon(geofenceDrawPoints,{color,weight:2,dashArray:'5 5',fillColor:color,fillOpacity:.12}).addTo(mapGeofenceLayer);
@@ -7443,6 +7494,8 @@
     const n = geofenceDrawPoints.length;
     const label = geofenceEditId
       ? `Editing: ${geofences.find(f=>f.id===geofenceEditId)?.name || ''}`
+      : streetLitterCollectionDrawId
+      ? `${(streetLitterCollectionPoints[streetLitterCollectionDrawId] && streetLitterCollectionPoints[streetLitterCollectionDrawId].name) || geofenceDrawName} catchment`
       : geofenceDrawName;
     window.updateMapTopBarContextTitle(
       n<3 ? `${label} · ${n} pt${n===1?'':'s'}` : `${label} · ${n} pts · ready`
@@ -7486,6 +7539,22 @@
       triggerUniversalDataRefresh();
       return;
     }
+    if(streetLitterCollectionDrawId){
+      const id = streetLitterCollectionDrawId;
+      const existing = streetLitterCollectionPoints[id] || {};
+      streetLitterCollectionPoints[id] = {
+        ...existing,
+        id,
+        name: existing.name || geofenceDrawName,
+        lat: existing.lat,
+        lng: existing.lng,
+        polygon: geofenceDrawPoints.map(p => [p.lat, p.lng])
+      };
+      await persistStreetLitterCollectionPoints();
+      exitGeofenceDrawMode();
+      if (typeof renderStreetLitterLayer === 'function') renderStreetLitterLayer();
+      return;
+    }
     geofences.push({
       id: genGeofenceId(),
       name: geofenceDrawName,
@@ -7506,6 +7575,11 @@
       refreshUPropViews();
       return;
     }
+    if(streetLitterCollectionDrawId){
+      exitGeofenceDrawMode();
+      if (typeof renderStreetLitterLayer === 'function') renderStreetLitterLayer();
+      return;
+    }
     if(geofenceEditId){
       // Cancel an in-progress shape edit without saving the change.
       exitGeofenceDrawMode();
@@ -7522,6 +7596,7 @@
     geofenceDrawPoints=[];
     geofenceEditId=null;
     propertyBoundaryDrawPropId=null;
+    streetLitterCollectionDrawId=null;
     setGeofenceEditingState(false);
   }
 
@@ -8782,10 +8857,12 @@
         `<a href="#" onclick="event.preventDefault();window.openStreetLitterPrecincts('${esc(String(precinct.cat))}'` +
         `${precinct.key ? ",'" + esc(precinct.key) + "'" : ''});">service levels</a>`
       : `Precinct: not set · <a href="#" onclick="event.preventDefault();window.openStreetLitterPrecincts();">browse categories</a>`;
+    const cp = streetLitterCollectionPointForSite(s);
+    const cpLine = cp ? `<b>Collection point:</b> ${esc(cp.name || 'Unnamed')}` : null;
     return mapPopupHTML({
       badge: '🗑️',
       title: esc(s.name || s.addr || 'Street Litter site'),
-      lines: [esc([s.suburb, s.postcode].filter(Boolean).join(' ')), ...runLines, stopLine, ...binLines, catLine].filter(Boolean),
+      lines: [esc([s.suburb, s.postcode].filter(Boolean).join(' ')), ...runLines, stopLine, ...binLines, catLine, cpLine].filter(Boolean),
       actions: [{ label: '✏️ Edit site', onclick: `openStreetLitterEditModal('${esc(String(s.id))}')` }]
     });
   }
@@ -8954,6 +9031,14 @@
       if (mapStreetLitterTruckLayer) {
         (runData.stops || []).forEach(stop => {
           if (stop.pid) return;
+          // Stable id for this black dot so a rename / catchment shape
+          // survives re-renders - see streetLitterDotId.
+          const dotId = streetLitterDotId(runData.label, stop.lat, stop.lng);
+          const cp = streetLitterCollectionPoints[dotId];
+          const hasCatchment = !!(cp && cp.polygon && cp.polygon.length >= 3);
+          const catchmentBinCount = hasCatchment
+            ? streetLitterMarkers.filter(m => m._slSite && pointInPolygonLatLng(Number(m._slSite.lat), Number(m._slSite.lng), cp.polygon)).length
+            : 0;
           const marker = L.circleMarker([stop.lat, stop.lng], {
             radius: truckR,
             color: streetLitterLineColor(),
@@ -8962,21 +9047,32 @@
             fillOpacity: 0.9
           }).bindPopup(mapPopupHTML({
               badge: '🚛',
-              title: `${esc(runData.label)} · stop #${stop.order}`,
+              title: cp && cp.name ? esc(cp.name) : `${esc(runData.label)} · stop #${stop.order}`,
               lines: [
                 stop.time ? `<b>Lift time:</b> ${esc(stop.time)}` : 'No lift time recorded',
                 "Driver parked here and walked to the bin - GPS doesn't line up with a mapped site.",
-                "Nearby bins are ringed in red on the map."
+                hasCatchment
+                  ? `<b>Collection point</b> · ${catchmentBinCount} bin${catchmentBinCount === 1 ? '' : 's'} in its catchment (ringed red)`
+                  : "Nearby bins are ringed in red on the map."
+              ],
+              // Rename this dot, then draw (or redraw) a geofence around it
+              // so every bin inside falls under this collection point, the
+              // same way houses do in streets. See renameStreetLitterDot /
+              // startStreetLitterCollectionDraw / removeStreetLitterCollectionPoint.
+              actions: [
+                { label: cp ? '✏️ Rename' : '✏️ Name this spot', onclick: `renameStreetLitterDot('${dotId}', ${stop.lat}, ${stop.lng})` },
+                { label: hasCatchment ? '🧭 Redraw catchment' : '🧭 Draw catchment (bins)', onclick: `startStreetLitterCollectionDraw('${dotId}', ${stop.lat}, ${stop.lng})`, primary: !hasCatchment },
+                ...(cp ? [{ label: '🗑️ Remove collection point', onclick: `removeStreetLitterCollectionPoint('${dotId}')` }] : [])
               ]
             }))
             // Tapping the black circle rings every bin/site marker near this
             // parked spot in red (see highlightStreetLitterBinsNearStop) -
-            // since the stop has no pid there's no confident single-site
-            // match, so "nearby" is the best available answer. Closing the
-            // popup clears the highlight again.
-            .on('click', () => highlightStreetLitterBinsNearStop(stop.lat, stop.lng))
+            // once it has a hand-drawn catchment that's used instead of the
+            // flat 40m radius. Closing the popup clears the highlight again.
+            .on('click', () => highlightStreetLitterBinsNearStop(stop.lat, stop.lng, dotId))
             .on('popupclose', clearStreetLitterBinHighlight)
             .addTo(mapStreetLitterTruckLayer);
+          marker._slDotId = dotId;
           streetLitterTruckMarkers.push(marker);
         });
       }
@@ -9000,19 +9096,78 @@
   // red, clearing any previous highlight first so only one parked stop's
   // bins are red at a time.
   const PARKED_STOP_BIN_HIGHLIGHT_RADIUS_M = 40;
-  function highlightStreetLitterBinsNearStop(lat, lng) {
+  // dotId is optional: when the tapped black dot has been turned into a
+  // named collection point with its own hand-drawn catchment (see
+  // streetLitterCollectionPoints / startStreetLitterCollectionDraw below),
+  // every bin inside that shape is highlighted instead of just whatever
+  // falls within the flat 40m radius.
+  function highlightStreetLitterBinsNearStop(lat, lng, dotId) {
     clearStreetLitterBinHighlight();
+    const cp = dotId ? streetLitterCollectionPoints[dotId] : null;
+    const usePolygon = !!(cp && cp.polygon && cp.polygon.length >= 3);
     streetLitterMarkers.forEach(m => {
       const site = m._slSite;
       if (!site || !site.lat || !site.lng) return;
-      const d = getDistanceMeters(lat, lng, site.lat, site.lng);
-      if (d <= PARKED_STOP_BIN_HIGHLIGHT_RADIUS_M) {
+      const within = usePolygon
+        ? pointInPolygonLatLng(Number(site.lat), Number(site.lng), cp.polygon)
+        : getDistanceMeters(lat, lng, site.lat, site.lng) <= PARKED_STOP_BIN_HIGHLIGHT_RADIUS_M;
+      if (within) {
         m.setStyle({ color: '#ff0000', fillColor: '#ff0000' });
         streetLitterHighlightedBinMarkers.push(m);
       }
     });
   }
   window.highlightStreetLitterBinsNearStop = highlightStreetLitterBinsNearStop;
+
+  // Rename a "driver parked here" black dot - the first rename turns it
+  // into a proper collection point (created on demand); later renames
+  // just relabel it.
+  window.renameStreetLitterDot = async function(dotId, lat, lng){
+    const existing = streetLitterCollectionPoints[dotId];
+    const name = await customPrompt('Name this collection point:', existing ? existing.name : 'Collection point');
+    if (name === null || !name.trim()) return;
+    streetLitterCollectionPoints[dotId] = {
+      ...(existing || { id: dotId, lat, lng, polygon: null }),
+      id: dotId, lat, lng, name: name.trim()
+    };
+    await persistStreetLitterCollectionPoints();
+    if (typeof renderStreetLitterLayer === 'function') renderStreetLitterLayer();
+  };
+
+  // Hands the shared tap-to-draw geofence engine over to this collection
+  // point (see streetLitterCollectionDrawId / finishGeofenceDraw's branch
+  // for it) so the user can trace a shape around the bins that should
+  // belong to it - same drawing flow as a run geofence, just saved
+  // somewhere else when finished.
+  window.startStreetLitterCollectionDraw = function(dotId, lat, lng){
+    closeMapSettingsModal();
+    const existing = streetLitterCollectionPoints[dotId];
+    streetLitterCollectionDrawId = dotId;
+    geofenceDrawActive = true;
+    geofenceDrawPoints = (existing && existing.polygon && existing.polygon.length)
+      ? existing.polygon.map(p => ({ lat: p[0], lng: p[1] }))
+      : [];
+    geofenceDrawName = (existing && existing.name) || 'Collection point';
+    geofenceDrawColor = '#111111';
+    setGeofenceEditingState(true);
+    window.setMapTopBarContext(
+      `${geofenceDrawName} catchment · ${geofenceDrawPoints.length} pts`,
+      [
+        {label:'Undo', icon:'↩️', onClick:()=>window.undoGeofenceDrawPoint()},
+        {label:'Finish', icon:'✔️', onClick:()=>window.finishGeofenceDraw(), variant:'primary'}
+      ],
+      ()=>window.cancelGeofenceDraw()
+    );
+    redrawGeofenceDraftLayer();
+  };
+
+  window.removeStreetLitterCollectionPoint = async function(dotId){
+    if(!streetLitterCollectionPoints[dotId]) return;
+    if(!(await customConfirm('Remove this collection point? Its bins will no longer be grouped under it.'))) return;
+    delete streetLitterCollectionPoints[dotId];
+    await persistStreetLitterCollectionPoints();
+    if (typeof renderStreetLitterLayer === 'function') renderStreetLitterLayer();
+  };
 
   // Called on every map zoomend - just resizes the existing markers/icons
   // in place rather than rebuilding the whole layer, so panning/popups
@@ -11074,7 +11229,7 @@ window.addEventListener('DOMContentLoaded', async () => {
       }
       startLiveLocationWatcher();
 
-      let cached = null, cachedEdits = null, cachedBorders = null, cachedTrail = null, cachedTrailBreaks = null, cachedTrailTimes = null, cachedSyncCount = null, cachedKmzData = null, cachedGeofences = null, cachedSLOverrides = null;
+      let cached = null, cachedEdits = null, cachedBorders = null, cachedTrail = null, cachedTrailBreaks = null, cachedTrailTimes = null, cachedSyncCount = null, cachedKmzData = null, cachedGeofences = null, cachedSLOverrides = null, cachedSLCollectionPoints = null;
       try {
         cached = await loadFromDB("masterRecords");
         cachedEdits = await loadFromDB("masterEditsLog");
@@ -11086,6 +11241,7 @@ window.addEventListener('DOMContentLoaded', async () => {
         cachedKmzData = await loadFromDB("kmzDataByRun");
         cachedGeofences = await loadFromDB("geofences");
         cachedSLOverrides = await loadFromDB("streetLitterOverrides");
+        cachedSLCollectionPoints = await loadFromDB("streetLitterCollectionPoints");
       } catch (dbErr) {
         console.warn("DB load warning:", dbErr);
       }
@@ -11095,6 +11251,10 @@ window.addEventListener('DOMContentLoaded', async () => {
       if (cachedSLOverrides && typeof cachedSLOverrides === 'object') {
         streetLitterOverrides = cachedSLOverrides;
         applyStreetLitterOverrides();
+      }
+
+      if (cachedSLCollectionPoints && typeof cachedSLCollectionPoints === 'object') {
+        streetLitterCollectionPoints = cachedSLCollectionPoints;
       }
 
       if (cachedKmzData && typeof cachedKmzData === 'object') {
