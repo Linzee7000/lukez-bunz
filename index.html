@@ -19803,7 +19803,10 @@ body.stream-slr .lb-layers-head .icon-img { filter: brightness(0); }
     window.lbRunTimer.start(label || 'Run');
   }, true);
 
-  /* ================= SETTINGS TAB =================================== */
+  /* ================= SETTINGS TAB ===================================
+     Opens the slide-out settings panel (see the phase-3 block below)
+     rather than the old top-bar strip, so all three tabs behave the
+     same way. */
   document.addEventListener('click', function(ev) {
     const t = ev.target;
     if (!t || !t.closest) return;
@@ -19811,7 +19814,8 @@ body.stream-slr .lb-layers-head .icon-img { filter: brightness(0); }
     ev.preventDefault();
     closeLayers();
     if (typeof window.lbCloseDrawer === 'function') window.lbCloseDrawer();
-    if (typeof openMapSettingsModal === 'function') openMapSettingsModal();
+    if (typeof window.lbOpenSettings === 'function') window.lbOpenSettings();
+    else if (typeof openMapSettingsModal === 'function') openMapSettingsModal();
   }, true);
 })();
 </script>
@@ -19941,6 +19945,323 @@ body.stream-slr .lb-layers-head .icon-img { filter: brightness(0); }
     }).observe(target, { childList: true, subtree: true });
     decorate();
   }
+})();
+</script>
+
+<style id="lb-phase3-style">
+/* ===== Settings slide-out — same chrome as the layers panel ===== */
+#lbSettingsCloseBtn {
+  width: 40px; height: 40px; flex-shrink: 0;
+  border: 1px solid #000; border-radius: 0;
+  background: rgba(0,0,0,0.35);
+  color: #fff; font-size: 26px; font-weight: 900; line-height: 1;
+  cursor: pointer;
+}
+#lbSettings {
+  position: fixed;
+  left: 0;
+  top: 8px;
+  bottom: 96px;
+  z-index: 4400;
+  width: 292px;
+  max-width: 86vw;
+  display: flex;
+  flex-direction: column;
+  background: linear-gradient(180deg, #14171b 0%, #0b0d10 100%);
+  border: 1px solid #000;
+  border-left: none;
+  border-radius: 0 10px 10px 0;
+  box-shadow: 6px 0 22px rgba(0,0,0,0.6);
+  transform: translateX(-104%);
+  transition: transform 0.24s cubic-bezier(.22,.61,.36,1);
+  overscroll-behavior: contain;
+}
+body.lb-settings-open #lbSettings { transform: translateX(0); }
+body.lb-drawer-open.lb-settings-open #lbSettings,
+body.lb-layers-open.lb-settings-open #lbSettings { transform: translateX(-104%); }
+body.lb-settings-open #lbDrawerTab,
+body.lb-settings-open #lbLayersTab,
+body.lb-settings-open #lbSettingsTab { transform: translateX(-110%); opacity: 0; }
+
+/* ===== Zoom / fit / follow cluster =====================================
+   Moved off the top-right corner down to the vertical middle of the
+   right edge, directly opposite the three tabs, and restyled to match
+   them: flat black button, icon in the active theme colour. The two
+   mode toggles (Follow and Track-up) read grey while they're off so
+   "is this on?" is answerable at a glance without reading the icon. */
+body.lb-map-screen #mapScreenContainer .map-fixed-side-overlay {
+  top: 50% !important;
+  right: 0 !important;
+  transform: translateY(-50%) !important;
+  gap: 4px !important;
+}
+body.lb-map-screen #mapScreenContainer .map-fixed-side-overlay > button,
+body.lb-map-screen #mapScreenContainer .map-side-follow-toggle,
+body.lb-map-screen #mapScreenContainer .map-side-track-toggle {
+  background: linear-gradient(180deg, var(--bar-black-hi) 0%, var(--bar-black) 100%) !important;
+  border: 1px solid #000 !important;
+  border-right: none !important;
+  border-radius: 8px 0 0 8px !important;
+  color: var(--ui-accent-fg) !important;
+  box-shadow: -2px 2px 8px rgba(0,0,0,0.5) !important;
+}
+/* The accent-coloured "on" fills are dropped - colour now lives in the
+   icon, not the button, so the cluster stays visually quiet. */
+body.lb-map-screen #mapScreenContainer .map-side-follow-toggle.active,
+body.lb-map-screen #mapScreenContainer .map-side-track-toggle.active {
+  background: linear-gradient(180deg, var(--bar-black-hi) 0%, var(--bar-black) 100%) !important;
+  border-color: #000 !important;
+}
+/* Icons are re-drawn as masked shapes (see lbMaskSideIcons) so they can
+   take an arbitrary colour - an <img> can only be filtered to white or
+   black, which is why the theme colour couldn't be applied directly. */
+.lb-mask-ico {
+  display: block;
+  width: 22px;
+  height: 22px;
+  background-color: var(--ui-accent-fg);
+  -webkit-mask-position: center; mask-position: center;
+  -webkit-mask-repeat: no-repeat; mask-repeat: no-repeat;
+  -webkit-mask-size: contain;     mask-size: contain;
+}
+.map-side-follow-toggle:not(.active) .lb-mask-ico,
+.map-side-track-toggle:not(.active) .lb-mask-ico { background-color: var(--slate-500); }
+
+/* ===== Pull-up tab for a hidden Next Bin box ===== */
+#lbNextBinTab {
+  position: fixed;
+  left: 50%;
+  bottom: 0;
+  transform: translateX(-50%);
+  z-index: 4200;
+  min-width: 96px;
+  height: 30px;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 14px;
+  border: 1px solid #000;
+  border-bottom: none;
+  border-radius: 10px 10px 0 0;
+  background: var(--ui-accent);
+  color: var(--ui-accent-ink);
+  font-size: 13px;
+  font-weight: 800;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  box-shadow: 0 -2px 10px rgba(0,0,0,0.5);
+}
+body.lb-map-screen.lb-nextbin-hidden #lbNextBinTab { display: flex; }
+body.lb-drawer-open #lbNextBinTab,
+body.lb-layers-open #lbNextBinTab,
+body.lb-settings-open #lbNextBinTab { display: none !important; }
+</style>
+
+<div id="lbSettings" role="dialog" aria-label="Map settings">
+  <div class="lb-layers-head">
+    <img class="icon-img" src="settings.png" alt="">
+    <span class="lb-layers-title">Map settings</span>
+    <button type="button" id="lbSettingsCloseBtn" aria-label="Collapse" title="Collapse">&lsaquo;</button>
+  </div>
+  <div class="lb-layers-body" id="lbSettingsBody"></div>
+</div>
+
+<button type="button" id="lbNextBinTab" title="Show the next bin box" aria-label="Show next bin box">
+  <span aria-hidden="true">▲</span> Next bin
+</button>
+
+<script id="lb-phase3-script">
+(function(){
+  'use strict';
+
+  const esc = s => String(s == null ? '' : s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+
+  /* ================= SETTINGS PANEL ==================================
+     Rather than re-typing every setting (and having the two drift apart
+     the moment one is added), the panel is built from the settings bar
+     that already exists in the markup: each row proxies its tap straight
+     back to the original button, so behaviour, enabled state and any
+     future additions come along for free.
+
+     The two "category" buttons (Boundary / Geofence) are dropped - they
+     only exist to slide a third row out of the old bar - and their
+     sub-options are lifted up into sections of their own instead. */
+  const SECTIONS = [
+    { title: 'Edit',            sel: '#mapSettingsGroupEdit .map-settings-opt-btn',      drop: b => !!b.dataset.subcat },
+    { title: 'Run boundary',    sel: '#mapSettingsSubGroupBoundary .map-settings-opt-btn' },
+    { title: 'Geofences',       sel: '#mapSettingsSubGroupGeofence .map-settings-opt-btn' },
+    // The trail and route toggles in the KML group already have a home in
+    // the Layers panel, so only the file actions are lifted here.
+    { title: 'KML / KMZ files', sel: '#mapSettingsGroupKml .map-settings-opt-btn',
+      drop: b => !/loadKmzForCurrentRun|openKmlEditModal/.test(b.getAttribute('onclick') || '') },
+    { title: 'Colours & icons', sel: '#mapSettingsGroupCustomize .map-settings-opt-btn' },
+    { title: 'Which side to collect', sel: '#mapSettingsGroupBins .map-settings-opt-btn' }
+  ];
+
+  let sources = [];
+
+  function rowHtml(btn, i) {
+    const img = btn.querySelector('img.icon-img');
+    const label = (btn.textContent || '').replace(/\s+/g, ' ').trim();
+    // Emoji-only buttons keep their glyph; the rest get their icon file.
+    const leading = label.match(/^([\p{Extended_Pictographic}\u2190-\u21FF\u25A0-\u25FF]+)\s*/u);
+    const text = leading ? label.slice(leading[0].length) : label;
+    const ico = img
+      ? `<img class="icon-img" src="${esc(img.getAttribute('src'))}" alt="">`
+      : `<span class="lb-ico">${esc(leading ? leading[1] : '•')}</span>`;
+    const on = btn.classList.contains('active');
+    const danger = btn.classList.contains('danger');
+    return `<button type="button" class="lb-layer-btn${on ? ' on' : ''}${danger ? ' danger' : ''}" data-lbset="${i}">
+      ${ico}<span class="lb-label">${esc(text || label)}</span>
+      <span class="lb-check">${on ? '✓' : ''}</span></button>`;
+  }
+
+  function renderSettings() {
+    const body = document.getElementById('lbSettingsBody');
+    if (!body) return;
+    sources = [];
+    let html = '';
+    SECTIONS.forEach(sec => {
+      const btns = Array.from(document.querySelectorAll(sec.sel))
+        .filter(b => !(sec.drop && sec.drop(b)));
+      if (!btns.length) return;
+      html += `<div class="lb-layers-sect">${esc(sec.title)}</div>`;
+      btns.forEach(b => { html += rowHtml(b, sources.length); sources.push(b); });
+    });
+    body.innerHTML = html || `<div class="lb-drawer-empty">No map settings available yet.</div>`;
+  }
+
+  function openSettings() {
+    if (typeof window.lbCloseDrawer === 'function') window.lbCloseDrawer();
+    if (typeof window.lbCloseLayers === 'function') window.lbCloseLayers();
+    renderSettings();
+    document.body.classList.add('lb-settings-open');
+  }
+  function closeSettings() { document.body.classList.remove('lb-settings-open'); }
+  window.lbOpenSettings = openSettings;
+  window.lbCloseSettings = closeSettings;
+
+  document.addEventListener('click', function(ev) {
+    const t = ev.target;
+    if (!t || !t.closest) return;
+    if (t.closest('#lbSettingsCloseBtn')) { ev.preventDefault(); closeSettings(); return; }
+    const row = t.closest('.lb-layer-btn[data-lbset]');
+    if (!row) return;
+    ev.preventDefault();
+    const src = sources[Number(row.dataset.lbset)];
+    if (!src) return;
+    // Anything that takes over the map (draw a boundary, pick houses,
+    // open a modal) needs the panel out of the way; the side toggles
+    // don't, so those just repaint.
+    const isSideToggle = src.closest('#mapSettingsGroupBins');
+    if (!isSideToggle) closeSettings();
+    try { src.click(); } catch (e) { console.error('settings proxy failed', e); }
+    if (isSideToggle) setTimeout(renderSettings, 60);
+  });
+
+  document.addEventListener('keydown', function(ev) {
+    if (ev.key === 'Escape' && document.body.classList.contains('lb-settings-open')) closeSettings();
+  });
+
+  /* ================= SIDE CONTROL ICONS ==============================
+     Swap each <img> in the zoom/fit/follow cluster for a masked span so
+     the glyph can take the theme colour. Re-runs whenever that cluster
+     is rebuilt (renderMapSideControls writes its innerHTML wholesale on
+     every map init). */
+  function maskSideIcons() {
+    const overlay = document.getElementById('mapFixedSideControls');
+    if (!overlay) return;
+    overlay.querySelectorAll('img.icon-img').forEach(img => {
+      const src = img.getAttribute('src');
+      if (!src) return;
+      const span = document.createElement('span');
+      span.className = 'lb-mask-ico';
+      span.style.webkitMaskImage = 'url("' + src + '")';
+      span.style.maskImage = 'url("' + src + '")';
+      span.dataset.src = src;
+      img.replaceWith(span);
+    });
+    // The follow button swaps its icon between target.png and
+    // navigation.png as it toggles; the mask has to follow suit.
+    const follow = document.getElementById('btnTruckFollowTarget');
+    if (follow) {
+      const span = follow.querySelector('.lb-mask-ico');
+      const want = follow.classList.contains('active') ? 'navigation.png' : 'target.png';
+      if (span && span.dataset.src !== want) {
+        span.dataset.src = want;
+        span.style.webkitMaskImage = 'url("' + want + '")';
+        span.style.maskImage = 'url("' + want + '")';
+      }
+    }
+  }
+
+  // The cluster's own code writes an inline top with `important` on it,
+  // which no stylesheet can beat - so the value is corrected right back
+  // whenever it's written, rather than fought with CSS.
+  function pinSideOverlay() {
+    const overlay = document.getElementById('mapFixedSideControls');
+    if (!overlay) return;
+    if (!document.body.classList.contains('lb-map-screen')) return;
+    if (overlay.style.top !== '50%') overlay.style.setProperty('top', '50%', 'important');
+  }
+
+  const overlayEl = document.getElementById('mapFixedSideControls');
+  if (overlayEl) {
+    new MutationObserver(() => { pinSideOverlay(); maskSideIcons(); })
+      .observe(overlayEl, { childList: true, subtree: true, attributes: true, attributeFilter: ['style', 'class'] });
+  }
+  setInterval(() => { pinSideOverlay(); maskSideIcons(); }, 700);
+  maskSideIcons();
+
+  /* ================= NEXT BIN BOX ====================================
+     1. When there's no property in range the card used to read "Scanning
+        Street..." / "Scanning suburb..." - three lines of nothing. It now
+        falls back to the live GPS street name instead, which is always
+        available. Speed is written by a different path and is untouched.
+     2. When the box is switched off entirely, a tab pulls up from the
+        bottom edge to bring it back - otherwise the only way back was to
+        remember it lives in the Layers panel. */
+  const prevRender = window.renderCurrentAddressTelemetry;
+  if (typeof prevRender === 'function') {
+    window.renderCurrentAddressTelemetry = function(site) {
+      const out = prevRender.apply(this, arguments);
+      if (!site) {
+        const gpsStreet = (document.getElementById('mapStreetOverlay') || {}).innerText || '';
+        const street = String(gpsStreet).trim();
+        const el = document.getElementById('mapLiveStreet');
+        if (el && street) {
+          el.innerText = (typeof toSentenceCaseLabel === 'function') ? toSentenceCaseLabel(street) : street;
+        }
+        const meta = document.getElementById('mapAddressMeta');
+        if (meta && street) meta.innerHTML = 'No bins in range · current street';
+      }
+      return out;
+    };
+  }
+
+  function syncNextBinTab() {
+    const hidden = (typeof isNextBinBoxVisible !== 'undefined') && !isNextBinBoxVisible;
+    document.body.classList.toggle('lb-nextbin-hidden', !!hidden);
+  }
+  const prevToggle = window.toggleNextBinBox;
+  if (typeof prevToggle === 'function') {
+    window.toggleNextBinBox = function() {
+      const r = prevToggle.apply(this, arguments);
+      syncNextBinTab();
+      return r;
+    };
+  }
+  document.addEventListener('click', function(ev) {
+    if (!ev.target || !ev.target.closest || !ev.target.closest('#lbNextBinTab')) return;
+    ev.preventDefault();
+    if (typeof window.toggleNextBinBox === 'function') window.toggleNextBinBox();
+    syncNextBinTab();
+  });
+  setInterval(syncNextBinTab, 1000);
+  syncNextBinTab();
 })();
 </script>
 
