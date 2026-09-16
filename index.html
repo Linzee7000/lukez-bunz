@@ -8842,6 +8842,11 @@
 
   let streetLitterMarkers = [];
   let streetLitterTruckMarkers = [];
+  // Bin/site markers currently ringed red because a "driver parked here"
+  // black-circle stop was tapped - see highlightStreetLitterBinsNearStop
+  // below. Tracked separately so a fresh tap (or a full re-render) can put
+  // them back to their normal stream colour instead of staying red forever.
+  let streetLitterHighlightedBinMarkers = [];
 
   function renderStreetLitterLayer() {
     if (!mapStreetLitterLayer) return;
@@ -8850,6 +8855,7 @@
     if (mapStreetLitterTruckLayer) mapStreetLitterTruckLayer.clearLayers();
     streetLitterMarkers = [];
     streetLitterTruckMarkers = [];
+    streetLitterHighlightedBinMarkers = [];
     if (!showStreetLitter) return;
 
     const r = streetLitterMarkerRadius();
@@ -8863,6 +8869,12 @@
         fillColor: cols.fill,
         fillOpacity: 0.9
       }).bindPopup(streetLitterPopupHtml(s)).addTo(mapStreetLitterLayer);
+      // Stash the site + its normal colours on the marker itself so a
+      // "driver parked here" truck-stop click can flip it red and later
+      // restore it exactly as it was (see highlightStreetLitterBinsNearStop).
+      marker._slSite = s;
+      marker._slNormalColor = cols.stroke;
+      marker._slNormalFill = cols.fill;
       streetLitterMarkers.push(marker);
     });
 
@@ -8953,9 +8965,17 @@
               title: `${esc(runData.label)} · stop #${stop.order}`,
               lines: [
                 stop.time ? `<b>Lift time:</b> ${esc(stop.time)}` : 'No lift time recorded',
-                "Driver parked here and walked to the bin - GPS doesn't line up with a mapped site."
+                "Driver parked here and walked to the bin - GPS doesn't line up with a mapped site.",
+                "Nearby bins are ringed in red on the map."
               ]
             }))
+            // Tapping the black circle rings every bin/site marker near this
+            // parked spot in red (see highlightStreetLitterBinsNearStop) -
+            // since the stop has no pid there's no confident single-site
+            // match, so "nearby" is the best available answer. Closing the
+            // popup clears the highlight again.
+            .on('click', () => highlightStreetLitterBinsNearStop(stop.lat, stop.lng))
+            .on('popupclose', clearStreetLitterBinHighlight)
             .addTo(mapStreetLitterTruckLayer);
           streetLitterTruckMarkers.push(marker);
         });
@@ -8963,6 +8983,36 @@
     });
   }
   window.renderStreetLitterLayer = renderStreetLitterLayer;
+
+  // Puts every highlighted bin/site marker back to its normal stream
+  // colour (see marker._slNormalColor/_slNormalFill set in
+  // renderStreetLitterLayer above) and empties the tracking list.
+  function clearStreetLitterBinHighlight() {
+    streetLitterHighlightedBinMarkers.forEach(m => {
+      m.setStyle({ color: m._slNormalColor, fillColor: m._slNormalFill });
+    });
+    streetLitterHighlightedBinMarkers = [];
+  }
+  window.clearStreetLitterBinHighlight = clearStreetLitterBinHighlight;
+
+  // "Driver parked here" black-circle click handler: rings every bin/site
+  // marker within PARKED_STOP_BIN_HIGHLIGHT_RADIUS_M of the parked spot in
+  // red, clearing any previous highlight first so only one parked stop's
+  // bins are red at a time.
+  const PARKED_STOP_BIN_HIGHLIGHT_RADIUS_M = 40;
+  function highlightStreetLitterBinsNearStop(lat, lng) {
+    clearStreetLitterBinHighlight();
+    streetLitterMarkers.forEach(m => {
+      const site = m._slSite;
+      if (!site || !site.lat || !site.lng) return;
+      const d = getDistanceMeters(lat, lng, site.lat, site.lng);
+      if (d <= PARKED_STOP_BIN_HIGHLIGHT_RADIUS_M) {
+        m.setStyle({ color: '#ff0000', fillColor: '#ff0000' });
+        streetLitterHighlightedBinMarkers.push(m);
+      }
+    });
+  }
+  window.highlightStreetLitterBinsNearStop = highlightStreetLitterBinsNearStop;
 
   // Called on every map zoomend - just resizes the existing markers/icons
   // in place rather than rebuilding the whole layer, so panning/popups
