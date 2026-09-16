@@ -4193,6 +4193,10 @@
     <input type="hidden" id="slEditSiteId">
 
     <div class="form-group">
+      <label>Site Name <span style="font-weight:400; color:#94a3b8;">(optional - shown instead of the address)</span></label>
+      <input type="text" id="slEditName" class="main-search-input" style="font-size:14px; height:40px;" placeholder="e.g. Rosebud Skate Park">
+    </div>
+    <div class="form-group">
       <label>Address</label>
       <input type="text" id="slEditAddr" class="main-search-input" style="font-size:14px; height:40px;">
     </div>
@@ -4216,7 +4220,10 @@
         <label>Lng</label>
         <input type="text" id="slEditLng" class="main-search-input" style="font-size:14px; height:40px;">
       </div>
-      <button type="button" class="btn-cancel" style="height:40px; white-space:nowrap;" onclick="useSlEditCurrentGps()">📍 Use my GPS</button>
+    </div>
+    <div class="form-group" style="display:flex; gap:8px;">
+      <button type="button" class="btn-cancel" style="height:40px; flex:1; white-space:nowrap;" onclick="useSlEditCurrentGps()">📍 Use my GPS</button>
+      <button type="button" class="btn-cancel" style="height:40px; flex:1; white-space:nowrap;" onclick="openLocationPickerModal('sl')">🗺️ Choose on map</button>
     </div>
 
     <div class="form-group">
@@ -4228,6 +4235,12 @@
       <label><img class="icon-img" src="recycle.png" alt=""> Street Recycle run(s)</label>
       <input type="text" id="slEditRr" class="main-search-input" style="font-size:14px; height:40px;" placeholder="e.g. 246 - RECYCLE (AM)">
       <div style="font-size:12px; color:#94a3b8; margin-top:4px;">Comma-separated. Leave blank if this site has no recycling run.</div>
+    </div>
+
+    <div class="form-group">
+      <label>🗑️ Bins at this location</label>
+      <div id="slEditBinsList"></div>
+      <button type="button" class="btn-cancel" style="height:36px; margin-top:6px;" onclick="addSlEditBinRow()">+ Add bin</button>
     </div>
 
     <div class="modal-actions">
@@ -6289,6 +6302,10 @@
       initialLat = parseFloat(document.getElementById('modalPropLat').value) || null;
       initialLng = parseFloat(document.getElementById('modalPropLng').value) || null;
       document.getElementById('pickerModalTitle').innerText = '📍 Click Property Location on Map';
+    } else if (targetType === 'sl') {
+      initialLat = parseFloat(document.getElementById('slEditLat').value) || null;
+      initialLng = parseFloat(document.getElementById('slEditLng').value) || null;
+      document.getElementById('pickerModalTitle').innerText = '📍 Click Street Litter Site Location on Map';
     } else {
       initialLat = parseFloat(document.getElementById('modalBinLat').value) || null;
       initialLng = parseFloat(document.getElementById('modalBinLng').value) || null;
@@ -6343,6 +6360,9 @@
         document.getElementById('modalPropLat').value = pickedCoordinates.lat.toFixed(6);
         document.getElementById('modalPropLng').value = pickedCoordinates.lng.toFixed(6);
         if (window.updateUPropGpsSummary) window.updateUPropGpsSummary();
+      } else if (pickerTargetType === 'sl') {
+        document.getElementById('slEditLat').value = pickedCoordinates.lat.toFixed(6);
+        document.getElementById('slEditLng').value = pickedCoordinates.lng.toFixed(6);
       } else {
         document.getElementById('modalBinLat').value = pickedCoordinates.lat.toFixed(6);
         document.getElementById('modalBinLng').value = pickedCoordinates.lng.toFixed(6);
@@ -6578,7 +6598,50 @@
       if (typeof updateStreetLitterMarkerSizes === 'function') updateStreetLitterMarkerSizes();
     });
     setTimeout(()=>leafletMap&&leafletMap.invalidateSize(),100);
+    setupManualMapRotationGesture(el);
   }
+
+  // Two-finger "twist" gesture that lets the driver manually rotate the
+  // map whenever Track-Up is off (Track-Up itself owns rotation via GPS
+  // heading while it's on - see applyMapHeadingRotation()). Tracks the
+  // angle between the two touch points and steps manualMapRotationDeg by
+  // however much that angle has changed since the gesture started, so a
+  // slow drag out of a pinch-zoom doesn't jump the map around.
+  let mapRotateGestureActive = false;
+  let mapRotateGestureStartAngle = 0;
+  let mapRotateGestureStartRotation = 0;
+  function twoTouchAngleDeg(touches) {
+    const dx = touches[1].clientX - touches[0].clientX;
+    const dy = touches[1].clientY - touches[0].clientY;
+    return Math.atan2(dy, dx) * 180 / Math.PI;
+  }
+  function setupManualMapRotationGesture(container) {
+    if (!container || container.dataset.rotateGestureBound) return;
+    container.dataset.rotateGestureBound = '1';
+
+    container.addEventListener('touchstart', (ev) => {
+      if (isTrackUpEnabled || ev.touches.length !== 2) { mapRotateGestureActive = false; return; }
+      mapRotateGestureActive = true;
+      mapRotateGestureStartAngle = twoTouchAngleDeg(ev.touches);
+      mapRotateGestureStartRotation = manualMapRotationDeg;
+    }, { passive: true });
+
+    container.addEventListener('touchmove', (ev) => {
+      if (!mapRotateGestureActive || ev.touches.length !== 2) return;
+      const angleNow = twoTouchAngleDeg(ev.touches);
+      const deltaDeg = angleNow - mapRotateGestureStartAngle;
+      manualMapRotationDeg = ((mapRotateGestureStartRotation + deltaDeg) % 360 + 360) % 360;
+      applyMapHeadingRotation();
+    }, { passive: true });
+
+    const endGesture = (ev) => {
+      if (ev.touches && ev.touches.length === 2) return; // still 2 fingers down
+      mapRotateGestureActive = false;
+    };
+    container.addEventListener('touchend', endGesture, { passive: true });
+    container.addEventListener('touchcancel', endGesture, { passive: true });
+  }
+
   function mapRunLabel(){
     const selected=Array.from(selectedMapRuns());
     const rawRun=selected.length===1?selected[0].toUpperCase():'';
@@ -8405,6 +8468,7 @@
     const site = (typeof STREET_LITTER_SITES !== 'undefined' ? STREET_LITTER_SITES : []).find(s => String(s.id) === String(siteId));
     if (!site) return;
     document.getElementById('slEditSiteId').value = site.id;
+    document.getElementById('slEditName').value = site.name || '';
     document.getElementById('slEditAddr').value = site.addr || '';
     document.getElementById('slEditSuburb').value = site.suburb || '';
     document.getElementById('slEditPostcode').value = site.postcode || '';
@@ -8412,8 +8476,54 @@
     document.getElementById('slEditLng').value = site.lng || '';
     document.getElementById('slEditRl').value = (site.rl || []).map(r => r.run).join(', ');
     document.getElementById('slEditRr').value = (site.rr || []).map(r => r.run).join(', ');
+    renderSlEditBinsList(site.bins || []);
     openModal('slEditModal');
   };
+
+  // One row per bin at this site: a free-text type (e.g. "240L Street
+  // Litter") and an optional serial number, plus a remove button. Rows
+  // are read straight off the DOM on save (see collectSlEditBins) rather
+  // than kept in a parallel JS array, since the inputs are already the
+  // source of truth while the modal is open.
+  function slEditBinRowHtml(bin) {
+    return `<div class="sl-bin-row" style="display:flex; gap:8px; margin-bottom:6px; align-items:center;">
+      <input type="text" class="main-search-input sl-bin-type" style="font-size:13px; height:36px; flex:2;" placeholder="Bin type e.g. 240L Street Litter" value="${esc(bin.type || '')}">
+      <input type="text" class="main-search-input sl-bin-serial" style="font-size:13px; height:36px; flex:1;" placeholder="Serial (optional)" value="${esc(bin.serial || '')}">
+      <button type="button" class="btn-cancel" style="height:36px; padding:0 10px;" onclick="removeSlEditBinRow(this)">✕</button>
+    </div>`;
+  }
+
+  function renderSlEditBinsList(bins) {
+    const container = document.getElementById('slEditBinsList');
+    if (!container) return;
+    container.innerHTML = (bins && bins.length)
+      ? bins.map(b => slEditBinRowHtml(b)).join('')
+      : '<div class="sl-bin-empty" style="font-size:12px; color:#94a3b8; margin-bottom:6px;">No bins recorded yet.</div>';
+  }
+
+  window.addSlEditBinRow = function() {
+    const container = document.getElementById('slEditBinsList');
+    if (!container) return;
+    const empty = container.querySelector('.sl-bin-empty');
+    if (empty) container.innerHTML = '';
+    container.insertAdjacentHTML('beforeend', slEditBinRowHtml({ type: '', serial: '' }));
+  };
+
+  window.removeSlEditBinRow = function(btn) {
+    const row = btn.closest('.sl-bin-row');
+    if (row) row.remove();
+    const container = document.getElementById('slEditBinsList');
+    if (container && !container.querySelector('.sl-bin-row')) {
+      container.innerHTML = '<div class="sl-bin-empty" style="font-size:12px; color:#94a3b8; margin-bottom:6px;">No bins recorded yet.</div>';
+    }
+  };
+
+  function collectSlEditBins() {
+    return Array.from(document.querySelectorAll('#slEditBinsList .sl-bin-row')).map(row => ({
+      type: row.querySelector('.sl-bin-type').value.trim(),
+      serial: row.querySelector('.sl-bin-serial').value.trim()
+    })).filter(b => b.type || b.serial);
+  }
 
   window.useSlEditCurrentGps = function() {
     if (!userCurrentLocation) { customAlert('No live GPS fix yet.'); return; }
@@ -8427,23 +8537,26 @@
     if (!site) return;
 
     const patch = {
+      name: document.getElementById('slEditName').value.trim(),
       addr: document.getElementById('slEditAddr').value.trim(),
       suburb: document.getElementById('slEditSuburb').value.trim(),
       postcode: document.getElementById('slEditPostcode').value.trim(),
       lat: Number(document.getElementById('slEditLat').value) || site.lat,
       lng: Number(document.getElementById('slEditLng').value) || site.lng,
       rl: parseSlRunInput(document.getElementById('slEditRl').value, site.rl),
-      rr: parseSlRunInput(document.getElementById('slEditRr').value, site.rr)
+      rr: parseSlRunInput(document.getElementById('slEditRr').value, site.rr),
+      bins: collectSlEditBins()
     };
 
     await saveStreetLitterOverride(siteId, patch);
 
     logEdit({
       timestamp: new Date().toISOString(), editType: 'SL_SITE_EDIT',
-      siteId, pid: site.pid, address: patch.addr,
+      siteId, pid: site.pid, name: patch.name, address: patch.addr,
       lat: patch.lat, lng: patch.lng,
       rl: patch.rl.map(r => r.run).join('|'),
-      rr: patch.rr.map(r => r.run).join('|')
+      rr: patch.rr.map(r => r.run).join('|'),
+      bins: patch.bins.map(b => `${b.type}${b.serial ? '#' + b.serial : ''}`).join('|')
     });
     hasUnsyncedChanges = true; updateSyncButtonIcon();
     await saveToDB('masterEditsLog', masterEditsLog);
@@ -8671,7 +8784,7 @@
       : `Precinct: not set · <a href="#" onclick="event.preventDefault();window.openStreetLitterPrecincts();">browse categories</a>`;
     return mapPopupHTML({
       badge: '🗑️',
-      title: esc(s.addr || 'Street Litter site'),
+      title: esc(s.name || s.addr || 'Street Litter site'),
       lines: [esc([s.suburb, s.postcode].filter(Boolean).join(' ')), ...runLines, stopLine, ...binLines, catLine].filter(Boolean),
       actions: [{ label: '✏️ Edit site', onclick: `openStreetLitterEditModal('${esc(String(s.id))}')` }]
     });
@@ -12041,6 +12154,13 @@ window.addEventListener('DOMContentLoaded', async () => {
   // close to its previous value, so the transition is always the short
   // way round, however many times the heading wraps.
   let mapRotationDeg = 0;
+  // Manual (two-finger twist) rotation angle, used whenever Track-Up is
+  // OFF. Track-Up owns rotation while it's on (driven by GPS heading);
+  // once it's off the driver can freely twist the map with two fingers
+  // and this is the angle that persists until they twist again or press
+  // the North-Up button (which resets it back to 0). See
+  // applyMapHeadingRotation() and setupManualMapRotationGesture() below.
+  let manualMapRotationDeg = 0;
   let houseStreetModes = JSON.parse(localStorage.getItem('lukezBunzHouseStreetModes') || '{}');
 
   const q = id => document.getElementById(id);
@@ -13299,6 +13419,13 @@ window.addEventListener('DOMContentLoaded', async () => {
   window.toggleTrackUpOrientation = function(ev) {
     if (ev) ev.stopPropagation();
     isTrackUpEnabled = !isTrackUpEnabled;
+    // Pressing this to go back to "North-Up" means true north, not
+    // whatever angle a two-finger twist had left the map at - so clear
+    // the manual rotation whenever Track-Up is switched off. Switching
+    // Track-Up ON doesn't need to touch it - it's simply unused while
+    // Track-Up drives rotation, and this is what it'll snap back to the
+    // next time Track-Up is turned off again.
+    if (!isTrackUpEnabled) manualMapRotationDeg = 0;
 
     const btn = document.getElementById('btnTrackUpOrientation');
     if (btn) {
@@ -13331,6 +13458,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   function disableTrackUpOrientation() {
     if (!isTrackUpEnabled) return;
     isTrackUpEnabled = false;
+    manualMapRotationDeg = 0;
     const btn = document.getElementById('btnTrackUpOrientation');
     if (btn) {
       btn.classList.remove('active');
@@ -13350,12 +13478,12 @@ window.addEventListener('DOMContentLoaded', async () => {
     // new target, instead of jumping straight to -rawHeading. This is what
     // stops the map spinning almost all the way round whenever the GPS
     // heading crosses 0/360 (see mapRotationDeg comment above).
-    const targetRotation = isTrackUpEnabled ? -rawHeading : 0;
+    const targetRotation = isTrackUpEnabled ? -rawHeading : manualMapRotationDeg;
     const shortestDelta = ((targetRotation - mapRotationDeg + 540) % 360) - 180;
     mapRotationDeg += shortestDelta;
     const heading = -mapRotationDeg; // effective heading used below for the counter-rotated overlay controls
 
-    if (isTrackUpEnabled) {
+    if (isTrackUpEnabled || manualMapRotationDeg !== 0) {
       // A uniform enlargement must cover the container's full diagonal at
       // any rotation angle, not just a fixed guess - otherwise tall/narrow
       // phone screens show grey corners near 45°/135° rotation angles.
