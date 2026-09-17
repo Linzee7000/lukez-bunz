@@ -224,6 +224,30 @@
   flex-wrap: wrap;
   gap: 8px;
 }
+/* Drive wizard "Which stream?" row: icon-only buttons so all four
+   streams sit on one row instead of wrapping into a 2x2 block. */
+.welcome-chip-row.icon-row {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+}
+.welcome-chip-row.icon-row .welcome-chip {
+  min-width: 0;
+  min-height: 48px;
+  padding: 0;
+}
+.welcome-chip-row.icon-row .welcome-chip .icon-img { width: 24px; height: 24px; }
+/* Drive wizard Day / Week rows: every chip shares the row evenly so the
+   whole set (5-7 days, or the 2 week letters) always fits on one line
+   instead of wrapping. */
+.welcome-chip-row.fit-row {
+  flex-wrap: nowrap;
+}
+.welcome-chip-row.fit-row .welcome-chip {
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 0 4px;
+}
 .welcome-chip {
   min-height: 48px;
   min-width: 62px;
@@ -363,7 +387,7 @@ body:not(.dark-mode) .welcome-go-wrap {
          to the right edge (no right padding) so the last button sits
          right at the edge exactly like the Map gear button does, and a
          plain flat drop shadow instead of the old embossed/3D relief. */
-      background: linear-gradient(90deg, rgba(27,67,50,0.8) 0%, rgba(27,67,50,0.8) 85%, rgba(0,0,0,0.8) 90%, rgba(0,0,0,0.8) 100%);
+      background: linear-gradient(90deg, var(--brand-dark) 0%, var(--brand-dark) 85%, #000 90%, #000 100%);
       border: 1px solid #000;
       color: #fff;
       padding: 0 0 0 16px;
@@ -392,7 +416,7 @@ body:not(.dark-mode) .welcome-go-wrap {
     .app-header.stream-fog { background: linear-gradient(90deg, rgba(22,163,74,0.8) 0%, rgba(22,163,74,0.8) 85%, rgba(0,0,0,0.8) 90%, rgba(0,0,0,0.8) 100%); }
     .app-header.stream-slg { background: linear-gradient(90deg, rgba(37,99,235,0.8) 0%, rgba(37,99,235,0.8) 85%, rgba(0,0,0,0.8) 90%, rgba(0,0,0,0.8) 100%); }
     .app-header.stream-slr { background: linear-gradient(90deg, rgba(56,189,248,0.8) 0%, rgba(56,189,248,0.8) 85%, rgba(0,0,0,0.8) 90%, rgba(0,0,0,0.8) 100%); }
-    .app-header.stream-none { background: linear-gradient(90deg, rgba(27,67,50,0.8) 0%, rgba(27,67,50,0.8) 85%, rgba(0,0,0,0.8) 90%, rgba(0,0,0,0.8) 100%); }
+    .app-header.stream-none { background: linear-gradient(90deg, var(--brand-dark) 0%, var(--brand-dark) 85%, #000 90%, #000 100%); }
 
     /* ===== Area Runs Bar =====
        Sits directly under the Map screen's own top bar (inside
@@ -699,8 +723,8 @@ body:not(.dark-mode) .welcome-go-wrap {
        change when filters are active, so it reads as part of the same
        flat button family as the top bar. */
     .filter-menu-btn {
-      background: linear-gradient(180deg, var(--bar-black-hi) 0%, var(--bar-black) 100%);
-      border: 1px solid #000;
+      background: #0d0d0d;
+      border: 1px solid rgba(255,255,255,0.16);
       color: #fff;
       padding: 0;
       width: 42px;
@@ -717,10 +741,11 @@ body:not(.dark-mode) .welcome-go-wrap {
       align-items: center;
       justify-content: center;
       flex-shrink: 0;
-      box-shadow: 0 2px 8px rgba(15,23,42,0.18);
+      box-shadow: none;
     }
     .filter-menu-btn:active {
-      opacity: 0.75;
+      background: #000;
+      opacity: 0.7;
     }
     .filter-menu-btn .icon-img {
       filter: brightness(0) invert(1);
@@ -17983,6 +18008,44 @@ window.addEventListener('DOMContentLoaded', async () => {
     catch (e) { return []; }
   }
 
+  // ---- Auto-pick the nearest run --------------------------------
+  // Looks at the driver's live GPS position and, among the runs already
+  // showing for the picked stream/day/week, works out which one actually
+  // services the closest property (or Street Litter site). Only ever
+  // pre-fills the selection - the run chips stay fully tappable, so a
+  // driver covering a different area can still pick any other run.
+  const SOLO_SCHEDULE_FIELD = { Garbage: 'garRun', Recycling: 'recRun', SummerRecycling: 'recSummerRun', FOGO: 'fogRun' };
+  function nearestRunForStream(stream, runsList) {
+    if (typeof userCurrentLocation === 'undefined' || !userCurrentLocation) return '';
+    if (typeof getDistanceMeters !== 'function') return '';
+    if (!runsList || !runsList.length) return '';
+    const wanted = new Set(runsList.map(lower));
+
+    if (stream === 'StreetGarbage') {
+      if (typeof STREET_LITTER_SITES === 'undefined') return '';
+      let best = '', bestDist = Infinity;
+      STREET_LITTER_SITES.forEach(sl => {
+        if (!sl.lat || !sl.lng) return;
+        const d = getDistanceMeters(userCurrentLocation.lat, userCurrentLocation.lng, sl.lat, sl.lng);
+        if (d > 2000 || d >= bestDist) return;
+        (sl.rl || []).forEach(r => { if (wanted.has(lower(r.run))) { best = r.run; bestDist = d; } });
+      });
+      return best;
+    }
+
+    const field = SOLO_SCHEDULE_FIELD[stream];
+    if (!field || typeof siteRecords === 'undefined') return '';
+    let best = '', bestDist = Infinity;
+    (siteRecords || []).forEach(site => {
+      if (!site.lat || !site.lng || Number(site.lat) === 0) return;
+      const run = site.soloSchedule && site.soloSchedule[field];
+      if (!run || !wanted.has(lower(run))) return;
+      const d = getDistanceMeters(userCurrentLocation.lat, userCurrentLocation.lng, Number(site.lat), Number(site.lng));
+      if (d < bestDist) { bestDist = d; best = run; }
+    });
+    return bestDist <= 2000 ? best : '';
+  }
+
   function streamMeta(key) {
     return driveStreams().find(s => s.key === key) || { key, label: key || 'All', cls:'', icon:'' };
   }
@@ -18032,11 +18095,11 @@ window.addEventListener('DOMContentLoaded', async () => {
     `;
   }
 
-  function streamChipsHtml(selectedKeys, multi) {
+  function streamChipsHtml(selectedKeys, multi, iconOnly) {
     return driveStreams().map(s => {
       const on = multi ? selectedKeys.has(s.key) : selectedKeys === s.key;
-      return `<button type="button" class="welcome-chip btn-3d ${s.cls} ${on?'active':''}" data-stream="${s.key}">
-        <img class="icon-img" src="${s.icon}" alt="">${esc(s.label)}
+      return `<button type="button" class="welcome-chip btn-3d ${s.cls} ${on?'active':''}" data-stream="${s.key}" title="${esc(s.label)}" aria-label="${esc(s.label)}">
+        <img class="icon-img" src="${s.icon}" alt="">${iconOnly ? '' : esc(s.label)}
       </button>`;
     }).join('');
   }
@@ -18063,7 +18126,7 @@ window.addEventListener('DOMContentLoaded', async () => {
       </div>
       <div class="welcome-field">
         <div class="welcome-field-label">Which stream?</div>
-        <div class="welcome-chip-row">${streamChipsHtml(dStream, false)}</div>
+        <div class="welcome-chip-row icon-row">${streamChipsHtml(dStream, false, true)}</div>
       </div>`;
 
     if (!dStream) {
@@ -18078,14 +18141,14 @@ window.addEventListener('DOMContentLoaded', async () => {
     body += `
       <div class="welcome-field">
         <div class="welcome-field-label">Day <span class="welcome-auto-tag">TODAY</span></div>
-        <div class="welcome-chip-row">${dayChipsHtml(dDay, isStreet, 'dday')}</div>
+        <div class="welcome-chip-row fit-row">${dayChipsHtml(dDay, isStreet, 'dday')}</div>
       </div>`;
 
     if (needsWeek) {
       body += `
       <div class="welcome-field">
         <div class="welcome-field-label">Week <span class="welcome-auto-tag">THIS WEEK</span></div>
-        <div class="welcome-chip-row">
+        <div class="welcome-chip-row fit-row">
           ${['A','B'].map(w => `<button type="button" class="welcome-chip btn-3d ${dWeek===w?'active':''}" data-dweek="${w}">Week ${w}</button>`).join('')}
         </div>
       </div>`;
@@ -18348,9 +18411,9 @@ window.addEventListener('DOMContentLoaded', async () => {
     if (d.stream !== undefined) {
       if (wState === 'drive') {
         dStream = d.stream;
-        dRun = '';
         dDay = defaultDayFor(dStream);
         dWeek = todayWeekFor(dStream);
+        dRun = nearestRunForStream(dStream, runsFor(dStream, dDay, streamNeedsWeek(dStream) ? dWeek : ''));
         // The Drive wizard's own title/GO-button colouring is baked
         // straight into its markup (see driveHtml), but --ui-accent is
         // also read by things outside this screen entirely - the Search
@@ -18375,8 +18438,16 @@ window.addEventListener('DOMContentLoaded', async () => {
       render(); return;
     }
 
-    if (d.dday !== undefined) { dDay = d.dday; dRun = ''; render(); return; }
-    if (d.dweek !== undefined) { dWeek = (dWeek === d.dweek) ? '' : d.dweek; dRun = ''; render(); return; }
+    if (d.dday !== undefined) {
+      dDay = d.dday;
+      dRun = nearestRunForStream(dStream, runsFor(dStream, dDay, streamNeedsWeek(dStream) ? dWeek : ''));
+      render(); return;
+    }
+    if (d.dweek !== undefined) {
+      dWeek = (dWeek === d.dweek) ? '' : d.dweek;
+      dRun = nearestRunForStream(dStream, runsFor(dStream, dDay, streamNeedsWeek(dStream) ? dWeek : ''));
+      render(); return;
+    }
     if (d.drun !== undefined) { dRun = (lower(dRun) === lower(d.drun)) ? '' : d.drun; render(); return; }
 
     if (d.xday !== undefined) { xDay = d.xday; xRuns.clear(); render(); return; }
@@ -18498,10 +18569,10 @@ div[class*="map-address-telemetry"] { bottom: 0 !important; }
 #lbDrawerTab {
   position: fixed;
   left: 0;
-  top: 96px;
+  top: 46px;
   z-index: 4200;
   width: 38px;
-  height: 66px;
+  height: 56px;
   display: flex;
   flex-direction: column;
   align-items: center;
