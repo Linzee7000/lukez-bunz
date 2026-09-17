@@ -1742,6 +1742,24 @@ body:not(.dark-mode) .welcome-go-wrap {
       top: 9px;
     }
 
+    /* Smooth movement for the live "you are here" truck marker (see
+       updateMapTruckPosition): the marker's own position is animated by
+       Leaflet's leaflet-div-icon element, and the heading turn is animated
+       by the inner rotate wrapper - both transition instead of snapping
+       to each new GPS fix. */
+    .leaflet-div-icon.custom-gps-icon {
+      transition: transform 0.4s linear;
+      /* Leaflet's own leaflet.css puts a white background + grey border on
+         every .leaflet-div-icon by default (meant for icons that are just
+         plain image/text labels) - override it here or that box shows up
+         behind/around the truck SVG, especially now that it's bigger. */
+      background: transparent;
+      border: none;
+    }
+    .gps-truck-rotate {
+      transition: transform 0.4s ease-out;
+    }
+
     /* Map Flag Icons */
     .run-seq-flag {
       font-size: 13px;
@@ -3961,7 +3979,7 @@ body:not(.dark-mode) .welcome-go-wrap {
        Everything here is rendered by JS (see the welcome-screen script
        block near the end of the file) so the run/stream/day lists always
        reflect the currently loaded data rather than a hardcoded list. -->
-  <div id="welcomeScreen">
+  <div id="welcomeScreen" class="screen-view active">
     <div id="welcomeBody" class="welcome-wrap"></div>
   </div>
 
@@ -5073,14 +5091,11 @@ body:not(.dark-mode) .welcome-go-wrap {
   // Which of Search / Drive HUD / Map was on screen last - restored on
   // load so a refresh (or reopening the app) lands back where the user
   // left off instead of always resetting to a fixed screen.
-  // "Welcome" is no longer a real screen (Drive is its own sidebar now,
-  // like Search/Layers/Settings), so both a brand new install and an
-  // old saved 'welcome' value land on Map - see the startup code below,
-  // which also pops the Drive panel open in that case so a new driver
-  // still sees a job-picker first, not just a bare map.
+  // Defaults to the Welcome screen on a first-ever launch (nothing stored
+  // yet) so the app opens on "What do you want to do?" rather than
+  // dropping a new driver straight onto a map with no run selected. Once
+  // any tab has been visited, that choice is restored instead.
   let activeTab = localStorage.getItem('lukezBunzActiveTab') || 'welcome';
-  const lbLandedOnLegacyWelcome = (activeTab === 'welcome');
-  if (lbLandedOnLegacyWelcome) activeTab = 'map';
   let pinSourceMode = 'flip';
   
   let showBinGpsDots = true;
@@ -5969,30 +5984,29 @@ body:not(.dark-mode) .welcome-go-wrap {
     el.textContent=run==='No run selected'?`📍 ${run}`:`${icon} ${run}`;
   }
   function switchMainTab(tabName) {
-    // "Welcome" is no longer a real screen - Drive is its own sidebar now
-    // (see #welcomeScreen/#lbDriveTab), reachable from any screen without
-    // switching away from it. Anything still asking for 'welcome' lands
-    // on Map with that sidebar popped open instead, so old saved state or
-    // a stray caller doesn't point at a screen that no longer exists.
-    if (tabName === 'welcome') {
-      switchMainTab('map');
-      if (typeof window.lbOpenWelcomeStep === 'function') window.lbOpenWelcomeStep('menu');
-      return;
-    }
-
     activeTab = tabName;
     localStorage.setItem('lukezBunzActiveTab', tabName);
     document.querySelectorAll('.nav-item').forEach(b => b.classList.remove('active'));
     document.querySelectorAll('.screen-view').forEach(s => s.classList.remove('active'));
 
-    // The search card is a permanent fixture above the screen area now
-    // that every screen (including Drive, in its own sidebar) shows it.
+    // The search card is a permanent fixture above the screen area, but
+    // on Welcome it would be a second, competing entry point sitting
+    // directly above the "Find a bin / address / street" buttons that do
+    // the same job - so it's hidden there and restored everywhere else.
     const searchCardEl = document.getElementById('searchCard');
-    if (searchCardEl) searchCardEl.style.display = '';
+    if (searchCardEl) searchCardEl.style.display = (tabName === 'welcome') ? 'none' : '';
 
-    // The drawer highlights the current screen in its list, so it needs
-    // to know about every switch.
+    // The drawer hides its pull-tab on Welcome (where the same options
+    // already fill the screen) and highlights the current screen in its
+    // list, so it needs to know about every switch.
     if (typeof window.lbNotifyTabChanged === 'function') window.lbNotifyTabChanged(tabName);
+
+    if (tabName === 'welcome') {
+      document.getElementById('welcomeScreen').classList.add('active');
+      document.getElementById('navBtnWelcome').classList.add('active');
+      if (typeof window.renderWelcomeScreen === 'function') window.renderWelcomeScreen();
+      return;
+    }
 
     if (tabName === 'search') {
       document.getElementById('searchScreen').classList.add('active');
@@ -6665,37 +6679,120 @@ body:not(.dark-mode) .welcome-go-wrap {
     }
   }
 
+  // Fill + glow colour for the "you are here" GPS truck marker's hopper
+  // body, keyed off activeFilterStream. Mirrors the same stream->colour
+  // mapping used for .stream-gar/.stream-rec/etc elsewhere (getStreamFillColor
+  // covers the kerbside streams only; this also covers the two Street
+  // Litter streams and falls back to the original blue when no stream is
+  // selected). The cab stays white/light-grey regardless of stream, same
+  // as the real trucks.
+  function getGpsTruckColor(streamKey) {
+    if (streamKey === 'Garbage') return { fill: '#dc2626', glow: 'rgba(220,38,38,0.8)' };
+    if (streamKey === 'Recycling') return { fill: '#facc15', glow: 'rgba(250,204,21,0.8)' };
+    if (streamKey === 'SummerRecycling') return { fill: '#f59e0b', glow: 'rgba(245,158,11,0.8)' };
+    if (streamKey === 'FOGO') return { fill: '#16a34a', glow: 'rgba(22,163,74,0.8)' };
+    if (streamKey === 'StreetGarbage') return { fill: '#2563eb', glow: 'rgba(37,99,235,0.8)' };
+    if (streamKey === 'StreetRecycling') return { fill: '#38bdf8', glow: 'rgba(56,189,248,0.8)' };
+    return { fill: '#2563eb', glow: 'rgba(37,99,235,0.8)' }; // no stream selected - original blue
+  }
+
+  // Darkens a hex colour toward black by `amt` (0-1). Paired with the
+  // existing lightenHex() to build the light-to-dark gradient that gives
+  // the GPS truck marker's hopper body a rounded, domed look instead of a
+  // flat fill.
+  function darkenHex(hex, amt) {
+    const m = /^#?([0-9a-f]{6})$/i.exec(String(hex || '').trim());
+    if (!m) return '#000000';
+    const n = parseInt(m[1], 16);
+    const r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
+    const drop = c => Math.round(c * (1 - amt));
+    return '#' + [drop(r), drop(g), drop(b)].map(c => c.toString(16).padStart(2, '0')).join('');
+  }
+
+  // Accumulated (unbounded) rotation actually applied to the truck icon.
+  // Kept separate from lastValidHeading so a heading change from e.g. 350deg
+  // to 10deg always turns the short way (+20deg) instead of the CSS
+  // transition spinning it almost all the way round backwards through 0.
+  let truckDisplayRotation = 0;
+
   function updateMapTruckPosition() {
     if (!leafletMap || !userCurrentLocation) return;
     const pos = [userCurrentLocation.lat, userCurrentLocation.lng];
     const headingDeg = lastValidHeading || 0;
+    const truckColor = getGpsTruckColor(typeof activeFilterStream !== 'undefined' ? activeFilterStream : '');
+    const bodyLight = lightenHex(truckColor.fill, 0.35);
+    const bodyDark = darkenHex(truckColor.fill, 0.30);
 
-    // Keep the truck marker aligned with the real GPS heading. Follow mode only
-    // recentres the map here; it does not apply CSS transforms to Leaflet panes.
-    // Built as inline SVG/CSS (no external image file) so the blue "you are
-    // here" dot and the direction arrow always render and always rotate,
-    // instead of silently disappearing if an image asset is missing.
-    const truckIcon = L.divIcon({
-      className: 'custom-gps-icon',
-      html: `
-        <div style="position:relative; width:34px; height:34px;">
-          <div style="position:absolute; top:50%; left:50%; width:34px; height:34px; margin:-17px 0 0 -17px; transform: rotate(${headingDeg}deg); transform-origin:center center;">
-            <svg width="34" height="34" viewBox="0 0 34 34" xmlns="http://www.w3.org/2000/svg" style="filter: drop-shadow(0 0 4px rgba(37,99,235,0.8));">
-              <path d="M17 1 L28 30 L17 23 L6 30 Z" fill="#2563eb" stroke="#ffffff" stroke-width="1.5" stroke-linejoin="round"/>
-            </svg>
-          </div>
-          <div style="position:absolute; top:50%; left:50%; width:14px; height:14px; margin:-7px 0 0 -7px; background:#2563eb; border:2.5px solid #ffffff; border-radius:50%; box-shadow:0 0 0 2px rgba(37,99,235,0.35), 0 1px 4px rgba(0,0,0,0.4);"></div>
-        </div>
-      `,
-      iconSize: [34, 34],
-      iconAnchor: [17, 17]
-    });
+    const normalizedNew = ((headingDeg % 360) + 360) % 360;
+    const normalizedCurrent = ((truckDisplayRotation % 360) + 360) % 360;
+    const shortestDelta = ((normalizedNew - normalizedCurrent + 540) % 360) - 180;
+    truckDisplayRotation += shortestDelta;
 
     if (!mapTruckMarker) {
+      // First fix only: build the icon. custom-gps-icon (position) and
+      // gps-truck-rotate (heading) both carry a CSS transition, so every
+      // later update below just changes an existing element's
+      // transform/attribute in place and glides there smoothly, rather
+      // than tearing down and rebuilding the whole icon on every GPS fix
+      // the way the old code did (which made the marker snap instantly).
+      //
+      // Modelled top-down on the actual Solo Resource Recovery trucks:
+      // white cab with a tinted windscreen, a roof-mounted amber beacon,
+      // side mirrors, and a gradient-shaded hopper body (light-to-dark
+      // diagonal, echoing the domed/ridged compactor lid) that recolours
+      // per stream instead of carrying the real mural/livery, which is
+      // too fine a level of detail to read at this size anyway.
+      const truckIcon = L.divIcon({
+        className: 'custom-gps-icon',
+        html: `
+          <div style="position:relative; width:52px; height:52px;">
+            <div id="gpsTruckRotate" class="gps-truck-rotate" style="position:absolute; top:50%; left:50%; width:52px; height:52px; margin:-26px 0 0 -26px; transform: rotate(${truckDisplayRotation}deg); transform-origin:center center;">
+              <svg id="gpsTruckSvg" width="52" height="52" viewBox="0 0 34 34" xmlns="http://www.w3.org/2000/svg" style="filter: drop-shadow(0 0 4px ${truckColor.glow});">
+                <defs>
+                  <linearGradient id="gpsTruckBodyGrad" x1="0" y1="0" x2="1" y2="1">
+                    <stop id="gpsTruckStopLight" offset="0%" stop-color="${bodyLight}"/>
+                    <stop id="gpsTruckStopDark" offset="100%" stop-color="${bodyDark}"/>
+                  </linearGradient>
+                </defs>
+                <rect x="3.5" y="14" width="3" height="9" rx="1" fill="#1e293b"/>
+                <rect x="27.5" y="14" width="3" height="9" rx="1" fill="#1e293b"/>
+                <rect x="7" y="9" width="20" height="22" rx="2.5" fill="url(#gpsTruckBodyGrad)" stroke="#ffffff" stroke-width="1.2"/>
+                <line x1="17" y1="11" x2="17" y2="29" stroke="#ffffff" stroke-width="1" opacity="0.35"/>
+                <rect x="8" y="29.5" width="2.5" height="1.5" rx="0.5" fill="#dc2626"/>
+                <rect x="23.5" y="29.5" width="2.5" height="1.5" rx="0.5" fill="#dc2626"/>
+                <rect x="4" y="9" width="2.5" height="3" rx="0.8" fill="#1e293b"/>
+                <rect x="27.5" y="9" width="2.5" height="3" rx="0.8" fill="#1e293b"/>
+                <path d="M11 2 L23 2 L25 9 L9 9 Z" fill="#e5e7eb" stroke="#94a3b8" stroke-width="0.75" stroke-linejoin="round"/>
+                <rect x="13" y="3.4" width="8" height="3" rx="0.6" fill="#1e293b" opacity="0.6"/>
+                <circle cx="17" cy="2.3" r="1.3" fill="#f59e0b"/>
+              </svg>
+            </div>
+          </div>
+        `,
+        iconSize: [52, 52],
+        iconAnchor: [26, 26]
+      });
       mapTruckMarker = L.marker(pos, { icon: truckIcon, zIndexOffset: 2000 }).addTo(leafletMap);
     } else {
+      // Later fixes: setLatLng glides the marker via the CSS transition on
+      // .custom-gps-icon, and the DOM below is mutated in place (not
+      // replaced) so the rotate transition and colour both animate too.
       mapTruckMarker.setLatLng(pos);
-      mapTruckMarker.setIcon(truckIcon);
+      const el = mapTruckMarker.getElement();
+      if (el) {
+        const rotateEl = el.querySelector('#gpsTruckRotate');
+        if (rotateEl) rotateEl.style.transform = `rotate(${truckDisplayRotation}deg)`;
+        const svgEl = el.querySelector('#gpsTruckSvg');
+        if (svgEl) svgEl.style.filter = `drop-shadow(0 0 4px ${truckColor.glow})`;
+        // The hopper body's fill is a gradient reference (url(#gpsTruckBodyGrad))
+        // that never itself changes - only its two stops' colours do, which
+        // is enough to recolour the whole body while keeping the light-to-
+        // dark domed shading intact.
+        const stopLightEl = el.querySelector('#gpsTruckStopLight');
+        if (stopLightEl) stopLightEl.setAttribute('stop-color', bodyLight);
+        const stopDarkEl = el.querySelector('#gpsTruckStopDark');
+        if (stopDarkEl) stopDarkEl.setAttribute('stop-color', bodyDark);
+      }
     }
 
     // Trail point recording happens in recordSnailTrailPoint() (called
@@ -11870,12 +11967,6 @@ window.addEventListener('DOMContentLoaded', async () => {
         // Land back on whichever screen (Search / Drive HUD / Map) was
         // open last time, instead of always resetting to Search.
         switchMainTab(activeTab);
-        // First-ever launch (or an old save from before Drive had its own
-        // sidebar) - pop the Drive panel open so a new driver still sees
-        // a job-picker first, rather than a bare map with nothing selected.
-        if (lbLandedOnLegacyWelcome && typeof window.lbOpenWelcomeStep === 'function') {
-          window.lbOpenWelcomeStep('menu');
-        }
       }
 
       if (!cached || cached.length === 0) {
@@ -12937,6 +13028,12 @@ window.addEventListener('DOMContentLoaded', async () => {
   // the North-Up button (which resets it back to 0). See
   // applyMapHeadingRotation() and setupManualMapRotationGesture() below.
   let manualMapRotationDeg = 0;
+  // 3D tilt for the map view (rotateX applied to #mainLeafletMap, stacked
+  // with the existing heading rotation above). 0 = flat top-down, as
+  // before; cycles through MAP_3D_TILT_LEVELS via the "3D" side button.
+  // See applyMapHeadingRotation() for how it's combined with rotation.
+  let map3DTiltDeg = 0;
+  const MAP_3D_TILT_LEVELS = [0, 30, 55];
   let houseStreetModes = JSON.parse(localStorage.getItem('lukezBunzHouseStreetModes') || '{}');
 
   const q = id => document.getElementById(id);
@@ -14259,7 +14356,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     mapRotationDeg += shortestDelta;
     const heading = -mapRotationDeg; // effective heading used below for the counter-rotated overlay controls
 
-    if (isTrackUpEnabled || manualMapRotationDeg !== 0) {
+    if (isTrackUpEnabled || manualMapRotationDeg !== 0 || map3DTiltDeg !== 0) {
       // A uniform enlargement must cover the container's full diagonal at
       // any rotation angle, not just a fixed guess - otherwise tall/narrow
       // phone screens show grey corners near 45°/135° rotation angles.
@@ -14271,6 +14368,11 @@ window.addEventListener('DOMContentLoaded', async () => {
         const diagonal = Math.sqrt(w * w + h * h);
         scale = Math.max(1.5, (diagonal / Math.min(w, h)) + 0.1);
       }
+      // Tilting (rotateX below) foreshortens the far edge of the map, which
+      // needs extra overscan on top of the rotation-only figure above or
+      // grey space can show through near the top of the screen at higher
+      // tilt angles.
+      if (map3DTiltDeg > 0) scale += map3DTiltDeg / 90;
 
       // Cover that extra ground by physically enlarging the map element
       // itself (real width/height, centred on the same point) rather than
@@ -14291,7 +14393,14 @@ window.addEventListener('DOMContentLoaded', async () => {
         mapEl.style.setProperty('--tu-map-left', (-offsetX) + 'px');
         mapEl.style.setProperty('--tu-map-w', bigW + 'px');
         mapEl.style.setProperty('--tu-map-h', bigH + 'px');
-        mapEl.style.transform = `rotate(${-heading}deg)`;
+        // perspective() as the first function in the list gives this
+        // element its own 3D viewing space, so rotateX tilts it away from
+        // the viewer like a tabletop map being tilted up, pivoting around
+        // its centre (transform-origin: 50% 50% is set in CSS) rather than
+        // the bottom edge - a driving "look-ahead" nav view would instead
+        // pivot at the bottom, but that shifts the GPS position away from
+        // screen-centre, which the rest of this app assumes stays fixed.
+        mapEl.style.transform = `perspective(1400px) rotateX(${map3DTiltDeg}deg) rotate(${-heading}deg)`;
         if (leafletMap) leafletMap.invalidateSize({ pan: false, animate: false });
 
         // Leaflet's own zoom/attribution controls live inside #mainLeafletMap
@@ -14301,9 +14410,20 @@ window.addEventListener('DOMContentLoaded', async () => {
         // the enlargement offset (in the rotated element's own coordinate
         // space) cancels the resize-and-rotate out completely, so they land
         // back at their normal on-screen spot, upright, regardless of heading.
+        // That counter-transform only undoes the flat rotate(); working out
+        // the matching counter-tilt for rotateX too isn't worth it for what's
+        // just the small attribution text, so it's hidden instead while tilted.
         if (controlContainer) {
-          controlContainer.style.transform = `rotate(${heading}deg) translate(${-offsetX}px, ${offsetY}px)`;
-          controlContainer.style.transformOrigin = '50% 50%';
+          if (map3DTiltDeg > 0) {
+            controlContainer.style.transform = 'none';
+            controlContainer.style.opacity = '0';
+            controlContainer.style.pointerEvents = 'none';
+          } else {
+            controlContainer.style.transform = `rotate(${heading}deg) translate(${-offsetX}px, ${offsetY}px)`;
+            controlContainer.style.transformOrigin = '50% 50%';
+            controlContainer.style.opacity = '';
+            controlContainer.style.pointerEvents = '';
+          }
         }
       }
       if (arrowBtnSvg) {
@@ -14321,8 +14441,44 @@ window.addEventListener('DOMContentLoaded', async () => {
       if (controlContainer) {
         controlContainer.style.transform = 'none';
         controlContainer.style.transformOrigin = '';
+        controlContainer.style.opacity = '';
+        controlContainer.style.pointerEvents = '';
       }
     }
+  }
+
+  // Steps through MAP_3D_TILT_LEVELS (0 -> 30 -> 55 -> back to 0) each tap
+  // of the "3D" side button.
+  function cycleMap3DTilt() {
+    const idx = MAP_3D_TILT_LEVELS.indexOf(map3DTiltDeg);
+    const nextIdx = (idx === -1 ? 0 : idx + 1) % MAP_3D_TILT_LEVELS.length;
+    map3DTiltDeg = MAP_3D_TILT_LEVELS[nextIdx];
+    applyMapHeadingRotation();
+    updateMap3DControlsUI();
+  }
+
+  function updateMap3DControlsUI() {
+    const btn = document.getElementById('btnMap3DTilt');
+    if (btn) {
+      btn.classList.toggle('active', map3DTiltDeg > 0);
+      btn.textContent = map3DTiltDeg > 0 ? (map3DTiltDeg + '°') : '3D';
+    }
+  }
+
+  // Manual turn controls. Only meaningful while Track-Up isn't already
+  // driving rotation off the GPS heading, so a tap here hands control back
+  // to the driver the same way twisting two fingers on the map already
+  // does (see setupManualMapRotationGesture) - just as a discrete button
+  // instead of a gesture.
+  function rotateMapLeft() {
+    if (isTrackUpEnabled) disableTrackUpOrientation();
+    manualMapRotationDeg = ((manualMapRotationDeg - 15) % 360 + 360) % 360;
+    applyMapHeadingRotation();
+  }
+  function rotateMapRight() {
+    if (isTrackUpEnabled) disableTrackUpOrientation();
+    manualMapRotationDeg = ((manualMapRotationDeg + 15) % 360 + 360) % 360;
+    applyMapHeadingRotation();
   }
 
   // Multi-Handle Boundary Editing with Edge-Splitting Handles
@@ -14802,6 +14958,13 @@ window.addEventListener('DOMContentLoaded', async () => {
         <button type="button" id="btnTrackUpOrientation" class="map-side-track-toggle ${isTrackUpEnabled ? 'active' : ''}" onclick="toggleTrackUpOrientation(event)" title="Track-Up / Heading Arrow">
           <img class="icon-img" id="trackUpCompassIcon" src="compass.png" alt="" style="width:20px; height:20px; margin:0; display:block;">
         </button>
+
+        <!-- 3D Tilt (cycles flat -> 30° -> 55° -> flat) -->
+        <button type="button" id="btnMap3DTilt" class="map-side-track-toggle ${map3DTiltDeg > 0 ? 'active' : ''}" onclick="cycleMap3DTilt()" title="3D Tilt View (tap to cycle)">${map3DTiltDeg > 0 ? (map3DTiltDeg + '°') : '3D'}</button>
+
+        <!-- Manual turn controls -->
+        <button type="button" onclick="rotateMapLeft()" title="Rotate Map Left">↺</button>
+        <button type="button" onclick="rotateMapRight()" title="Rotate Map Right">↻</button>
       `;
 
       if (typeof updateMapSideLayersUI === 'function') {
@@ -18013,9 +18176,9 @@ window.addEventListener('DOMContentLoaded', async () => {
 
     const img = f => `<img class="icon-img" src="${f}" alt="">`;
 
-    // While Summer Recycling is in force the panel says so up front -
-    // the Drive list quietly offers a different recycling run during
-    // those six weeks, and that shouldn't be a surprise.
+    // While Summer Recycling is in force the home screen says so up
+    // front - the Drive list quietly offers a different recycling run
+    // during those six weeks, and that shouldn't be a surprise.
     let season = '';
     if (typeof isSummerRecyclingActive === 'function' && isSummerRecyclingActive(new Date())) {
       const range = (typeof summerRecyclingRangeLabel === 'function') ? summerRecyclingRangeLabel() : '';
@@ -18023,13 +18186,14 @@ window.addEventListener('DOMContentLoaded', async () => {
     }
 
     return `
-      <div class="welcome-step-head">
-        <button type="button" class="welcome-back" data-act="close-drive-panel" aria-label="Collapse" title="Collapse">&lsaquo;</button>
-        <span class="welcome-step-title">Drive</span>
-      </div>
+      <div class="welcome-q">What do you want to do?</div>
       ${season}
       ${row('drive',   img('drive.png'),   'Drive',            'Start a run — trail recording, track-up, follows you', 'primary')}
       ${row('explore', img('map.png'),     'Check out a run',  'Look over runs without driving them')}
+      ${row('bin',     img('bin.png'),     'Find a bin',       'Search by serial number')}
+      ${row('address', img('houses.png'),  'Find an address',  'Search by street number or PID')}
+      ${row('street',  img('search.png'),  'Find a street',    'Search by street name')}
+      ${row('nearby',  img('navigation.png'), "See what's nearby", 'Runs, bins and addresses around you')}
     `;
   }
 
@@ -18204,7 +18368,6 @@ window.addEventListener('DOMContentLoaded', async () => {
     const needsWeek = streamNeedsWeek(dStream);
     applyFilters(dStream, [dRun], dDay, needsWeek ? dWeek : '');
 
-    document.body.classList.remove('lb-drive-open');
     switchMainTab('map');
 
     // Un-pause the KML snail trail if a previous session left it paused,
@@ -18236,7 +18399,6 @@ window.addEventListener('DOMContentLoaded', async () => {
     const needsWeek = streamNeedsWeek(stream);
     applyFilters(stream, Array.from(xRuns), xDay, needsWeek ? xWeek : '');
 
-    document.body.classList.remove('lb-drive-open');
     switchMainTab('map');
 
     setTimeout(() => {
@@ -18273,7 +18435,6 @@ window.addEventListener('DOMContentLoaded', async () => {
   // look-around, not a drive.
   function goNearby() {
     applyFilters('', [], '', '');
-    document.body.classList.remove('lb-drive-open');
     switchMainTab('map');
     setTimeout(() => {
       if (typeof window.lbDisableTrackUp === 'function') window.lbDisableTrackUp();
@@ -18284,45 +18445,18 @@ window.addEventListener('DOMContentLoaded', async () => {
     }, 260);
   }
 
-  // ---- Open / close the Drive panel ---------------------------------
-  function openDrivePanel() {
-    document.body.classList.add('lb-drive-open');
-    render();
-  }
-  function closeDrivePanel() {
-    document.body.classList.remove('lb-drive-open');
-    document.body.classList.remove('lb-drive-extras-open');
-    // Nothing about the picked run/stream is cleared here - closing the
-    // panel is "put it away", not "start over"; wState only resets to
-    // 'menu' from the panel's own ‹ button or after GO.
-  }
-  function toggleDrivePanel() {
-    document.body.classList.contains('lb-drive-open') ? closeDrivePanel() : openDrivePanel();
-  }
-
   // ---- Events -------------------------------------------------------
   // One delegated listener for the whole screen - the panels are
   // re-rendered wholesale on every change, so per-element handlers would
   // have to be rebound each time.
   document.addEventListener('click', function(ev) {
-    const t = ev.target;
-
-    if (t.closest && t.closest('#lbDriveTab')) { ev.preventDefault(); toggleDrivePanel(); return; }
-
     const screen = document.getElementById('welcomeScreen');
-    if (!screen || !document.body.classList.contains('lb-drive-open')) return;
-
-    const btn = t.closest ? t.closest('button') : null;
-    if (!btn || !screen.contains(btn)) {
-      // Tapping the map (or anything outside the panel and its tab)
-      // closes the panel, same as Layers/Settings/Search.
-      if (!t.closest || !t.closest('#welcomeScreen, #lbDriveTab')) closeDrivePanel();
-      return;
-    }
+    if (!screen || !screen.classList.contains('active')) return;
+    const btn = ev.target.closest('button');
+    if (!btn || !screen.contains(btn)) return;
 
     const d = btn.dataset;
 
-    if (d.act === 'close-drive-panel') { closeDrivePanel(); return; }
     if (d.act === 'back') { wState = 'menu'; render(); return; }
 
     if (d.act === 'drive') {
@@ -18336,6 +18470,10 @@ window.addEventListener('DOMContentLoaded', async () => {
       xDay = ''; xWeek = '';
       render(); return;
     }
+    if (d.act === 'bin')     { goSearch('bin'); return; }
+    if (d.act === 'address') { goSearch('address'); return; }
+    if (d.act === 'street')  { goSearch('street'); return; }
+    if (d.act === 'nearby')  { goNearby(); return; }
     if (d.act === 'drive-go')   { goDrive(); return; }
     if (d.act === 'explore-go') { goExplore(); return; }
 
@@ -18383,16 +18521,15 @@ window.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
-  // Esc closes the Drive panel, same as Layers/Settings/Search.
-  document.addEventListener('keydown', function(ev) {
-    if (ev.key === 'Escape' && document.body.classList.contains('lb-drive-open')) closeDrivePanel();
-  });
+  // Exposed so switchMainTab('welcome') can repaint the screen - the run
+  // lists depend on loaded data, which may have arrived after first paint.
+  window.renderWelcomeScreen = function() {
+    render();
+  };
 
   // Entry points for the pull-out drawer, which is now the only global
   // navigation. Opening a wizard from there jumps straight to its step
-  // rather than making the driver land on the menu and tap again. This
-  // no longer touches which main screen is showing - the Drive panel
-  // floats over whichever one is underneath, same as Layers/Settings.
+  // rather than making the driver land on the menu and tap again.
   window.lbOpenWelcomeStep = function(step) {
     if (step === 'drive') {
       wState = 'drive';
@@ -18404,14 +18541,17 @@ window.addEventListener('DOMContentLoaded', async () => {
     } else {
       wState = 'menu';
     }
-    openDrivePanel();
+    switchMainTab('welcome');
+    render();
   };
 
   window.lbGoNearby = goNearby;
 
-  // A reload mid-shift comes back to whatever screen the driver was on
-  // (see activeTab's default); the Drive panel itself always starts
-  // closed on load rather than trying to restore its open/closed state.
+  // Landing on Welcome for a first launch is handled by activeTab's
+  // default (see its declaration) plus the `active` class in the markup,
+  // so the app's own startup restore stays the single place that decides
+  // which screen opens - a reload mid-shift still comes back to whatever
+  // the driver was on. All that's needed here is to paint the panel.
   document.addEventListener('DOMContentLoaded', render);
   if (document.readyState !== 'loading') render();
 })();
@@ -18671,82 +18811,9 @@ body.lb-drawer-open #lbDrawer { transform: translateX(0); }
 }
 .welcome-season b { color: var(--amber-500); }
 
-/* Drive is its own sidebar now (like Search/Layers/Settings), not a
-   full-screen "Home" - the tab sits right below the search one and
-   tucks away the same way while its own panel, or the search drawer,
-   is open. */
-#lbDriveTab {
-  position: fixed;
-  left: 0;
-  top: 172px;
-  z-index: 4200;
-  width: 38px;
-  height: 56px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  border: 1px solid #000;
-  border-left: none;
-  border-radius: 0 10px 10px 0;
-  background: linear-gradient(180deg, var(--bar-black-hi) 0%, var(--bar-black) 100%);
-  color: #fff;
-  cursor: pointer;
-  -webkit-tap-highlight-color: transparent;
-  box-shadow: 2px 2px 8px rgba(0,0,0,0.5);
-  transition: transform 0.18s ease, opacity 0.18s ease;
-}
-#lbDriveTab .icon-img { width: 20px; height: 20px; filter: brightness(0) invert(1); }
-body.lb-drive-open #lbDriveTab,
-body.lb-drawer-open #lbDriveTab { transform: translateX(-110%); opacity: 0; }
-
-/* ===== The Drive / Check-out-a-run panel =====
-   Same slide-out chrome as Layers/Settings - a pull-tab and a
-   translucent, blurred panel - rather than a separate full screen. Wider
-   than Layers/Settings since the stream/day/run chips need the room. */
-#welcomeScreen {
-  position: fixed;
-  left: 0;
-  top: 8px;
-  bottom: 96px;
-  z-index: 4400;
-  width: max-content;
-  min-width: 300px;
-  max-width: 92vw;
-  display: flex;
-  flex-direction: column;
-  background: linear-gradient(180deg, rgba(20,23,27,0.2) 0%, rgba(11,13,16,0.2) 100%);
-  -webkit-backdrop-filter: blur(6px);
-  backdrop-filter: blur(6px);
-  border: 1px solid #000;
-  border-left: none;
-  border-radius: 0 10px 10px 0;
-  box-shadow: 6px 0 22px rgba(0,0,0,0.6);
-  transform: translateX(-104%);
-  transition: transform 0.24s cubic-bezier(.22,.61,.36,1);
-  overscroll-behavior: contain;
-}
-body.lb-drive-open #welcomeScreen { transform: translateX(0); }
-/* Only one panel at a time. */
-body.lb-drawer-open.lb-drive-open #welcomeScreen { transform: translateX(-104%); }
-.welcome-wrap {
-  flex: 1;
-  overflow-y: auto;
-  -webkit-overflow-scrolling: touch;
-  padding: 8px 10px 20px;
-}
-/* The wizard's own coloured title bar (see .lb-titlebar) doubles as the
-   panel's header now, so it stays pinned while the picker list below it
-   scrolls - the accent colour it already gets is solid enough to read
-   over whatever scrolls underneath. */
-.welcome-step-head {
-  position: sticky;
-  top: -8px;
-  z-index: 2;
-}
-@media (prefers-reduced-motion: reduce) {
-  #welcomeScreen, #lbDriveTab { transition: none !important; }
-}
+/* On the Welcome screen the drawer would just duplicate the menu that
+   is already filling the screen, so the tab is hidden there. */
+body.lb-on-welcome #lbDrawerTab { display: none; }
 
 @media (prefers-reduced-motion: reduce) {
   #lbDrawer, #lbDrawerScrim, #lbDrawerTab { transition: none !important; }
@@ -18766,12 +18833,6 @@ body.lb-drawer-open.lb-drive-open #welcomeScreen { transform: translateX(-104%);
 <button type="button" id="lbDrawerTab" title="Search and options" aria-label="Open options">
   <img class="icon-img" src="search.png" alt="">
   <span class="lb-tab-grip" aria-hidden="true">›</span>
-</button>
-
-<!-- Drive / Check-out-a-run picker - its own sidebar now, same as Search,
-     Layers and Settings, instead of a separate full-screen "Home". -->
-<button type="button" id="lbDriveTab" title="Drive" aria-label="Open Drive">
-  <img class="icon-img" src="drive.png" alt="">
 </button>
 
 <div id="lbDrawer" role="dialog" aria-label="Options">
@@ -18892,20 +18953,31 @@ body.lb-drawer-open.lb-drive-open #welcomeScreen { transform: translateX(-104%);
         <span class="lb-label">${esc(label)}${sub?`<span class="lb-sub">${esc(sub)}</span>`:''}</span>
       </button>`;
 
-    const sectGroup = (typeof window.lbSectGroupHtml === 'function')
-      ? window.lbSectGroupHtml
-      : (key, cls, title, body) => `<div class="${cls}">${title}</div>${body}`;
+    // Inside the Summer Recycling window the drawer says so, because the
+    // run a driver is about to pick changes underneath them.
+    let seasonNote = '';
+    if (typeof isSummerRecyclingActive === 'function' && isSummerRecyclingActive(new Date())) {
+      seasonNote = `<div class="lb-drawer-empty" style="color:var(--amber-500);font-weight:700;">
+        ☀️ Summer Recycle is running in place of Recycle (${esc(typeof summerRecyclingRangeLabel==='function'?summerRecyclingRangeLabel():'')}).
+      </div>`;
+    }
 
-    // Drive/Check-out-a-run now live in their own sidebar (see #lbDriveTab)
-    // and typing here already searches bins, addresses and streets, so
-    // this menu is just what's left: things a query can't do for you.
-    return sectGroup('drawer-more', 'lb-drawer-sect', 'Nearby', `
-      ${item('nearby', img('navigation.png'), "What's nearby", 'Runs, bins and addresses around you')}
-    `) + sectGroup('drawer-screens', 'lb-drawer-sect', 'Screens', `
+    return `
+      <div class="lb-drawer-sect">Start a job</div>
+      ${item('drive',   img('drive.png'), 'Drive',           'Trail recording · track-up · follows you', 'primary')}
+      ${item('explore', img('map.png'),   'Check out a run', 'Look over runs without driving them')}
+      ${seasonNote}
+      <div class="lb-drawer-sect">Find</div>
+      ${item('bin',     img('bin.png'),    'Find a bin',     'Search by serial number')}
+      ${item('address', img('houses.png'), 'Find an address','Search by number, address or PID')}
+      ${item('street',  img('search.png'), 'Find a street',  'Search by street name')}
+      ${item('nearby',  img('navigation.png'), "What's nearby", 'Runs, bins and addresses around you')}
+      <div class="lb-drawer-sect">Screens</div>
+      ${item('go-welcome', '🏠', 'Home', '', cur==='welcome'?'current':'')}
       ${item('go-map',  img('map.png'),   'Map',          '', cur==='map'?'current':'')}
       ${item('go-hud',  img('drive.png'), 'Drive screen', '', cur==='hud'?'current':'')}
       ${item('go-search', img('search.png'), 'Search results', '', cur==='search'?'current':'')}
-    `);
+    `;
   }
 
   function renderBody() {
@@ -18922,16 +18994,7 @@ body.lb-drawer-open.lb-drive-open #welcomeScreen { transform: translateX(-104%);
 
     if (t.closest && t.closest('#lbDrawerTab')) { toggle(); return; }
     if (t.closest && t.closest('#lbDrawerCloseBtn')) { close(); return; }
-    // Tapping the dimmed map behind the drawer is "never mind, take me
-    // to the map" - a faster way out than hunting for the Map row in the
-    // list. The explicit ‹ button above just tucks the drawer away and
-    // leaves you on whatever screen you were on, for when that's what's
-    // actually wanted.
-    if (t.id === 'lbDrawerScrim') {
-      close();
-      if (typeof switchMainTab === 'function') switchMainTab('map');
-      return;
-    }
+    if (t.id === 'lbDrawerScrim') { close(); return; }
 
     const btn = t.closest ? t.closest('#lbDrawer button[data-act], #lbDrawer button[data-prop]') : null;
     if (!btn) return;
@@ -18945,10 +19008,34 @@ body.lb-drawer-open.lb-drive-open #welcomeScreen { transform: translateX(-104%);
     const act = btn.dataset.act;
     close();
 
-    if (act === 'nearby')    { if (typeof window.lbGoNearby === 'function') window.lbGoNearby(); return; }
-    if (act === 'go-map')    { switchMainTab('map'); return; }
-    if (act === 'go-hud')    { switchMainTab('hud'); return; }
-    if (act === 'go-search') { switchMainTab('search'); return; }
+    // The two wizards live on the Welcome screen; the drawer just opens
+    // that screen straight onto the right step rather than duplicating
+    // the pickers here.
+    if (act === 'drive' || act === 'explore') {
+      if (typeof window.lbOpenWelcomeStep === 'function') window.lbOpenWelcomeStep(act);
+      else switchMainTab('welcome');
+      return;
+    }
+    if (act === 'bin' || act === 'address' || act === 'street') {
+      // Reopen the drawer with the box focused - these three are searches,
+      // and the results belong here on top of the map.
+      open();
+      const inp = INPUT();
+      if (inp) {
+        inp.placeholder = act === 'bin' ? 'Type a bin serial number...'
+          : act === 'address' ? 'Type a street number, address or PID...'
+          : 'Type a street name...';
+        inp.value = '';
+        setTimeout(() => { try { inp.focus(); } catch(e){} }, 60);
+      }
+      renderBody();
+      return;
+    }
+    if (act === 'nearby')     { if (typeof window.lbGoNearby === 'function') window.lbGoNearby(); return; }
+    if (act === 'go-welcome') { switchMainTab('welcome'); return; }
+    if (act === 'go-map')     { switchMainTab('map'); return; }
+    if (act === 'go-hud')     { switchMainTab('hud'); return; }
+    if (act === 'go-search')  { switchMainTab('search'); return; }
   });
 
   document.addEventListener('input', function(ev) {
@@ -19312,22 +19399,6 @@ body.stream-slr .lb-layers-head .icon-img { filter: brightness(0); }
 .lb-res-row small { display: block; color: var(--welcome-ink-faint); font-weight: 600; font-size: 11.5px; margin-top: 2px; }
 .lb-res-row .lb-res-go { color: var(--ui-accent-fg); font-size: 15px; font-weight: 900; flex-shrink: 0; }
 .lb-res-row.is-street { border-left: 4px solid var(--ui-accent); }
-
-/* The rest of a category, tucked behind "Show N more" so the first
-   screenful of results stays short enough to actually scan. */
-.lb-res-more {
-  display: flex; align-items: center; justify-content: center; gap: 6px;
-  width: 100%; text-align: center;
-  padding: 7px 10px; margin-top: -2px;
-  border: 1px dashed rgba(255,255,255,0.25); border-radius: 0;
-  background: transparent; color: var(--welcome-ink-faint);
-  font-size: 12px; font-weight: 800; cursor: pointer;
-  -webkit-tap-highlight-color: transparent;
-}
-.lb-res-more .lb-sect-chevron { transition: transform 0.15s ease; }
-.lb-res-more.lb-open .lb-sect-chevron { transform: rotate(180deg); }
-.lb-res-more-body { margin-top: 6px; }
-.lb-res-more-body[hidden] { display: none; }
 
 /* The "you searched for this" pin dropped on the map when a result is
    tapped, so the target is obvious even when the current run filter
@@ -19743,100 +19814,82 @@ body.stream-slr .lb-layers-head .icon-img { filter: brightness(0); }
     return { q, streets: streetList, props, bins, runs: [...runs.values()], sl };
   }
 
-  // Shows the first couple of matches under a category heading with the
-  // rest tucked behind a "Show N more" toggle, rather than dumping up to
-  // CAPS.* items in a row - a search box that "finds everything" only
-  // helps if the first screenful is short enough to actually scan.
-  const RESULTS_PREVIEW = 2;
-  function category(title, key, items, rowFn) {
-    if (!items.length) return '';
-    const shown = items.slice(0, RESULTS_PREVIEW).map(rowFn).join('');
-    const rest = items.slice(RESULTS_PREVIEW);
-    let tail = '';
-    if (rest.length) {
-      tail = `<button type="button" class="lb-res-more" data-more-key="${key}">
-          <span>Show ${rest.length} more</span><span class="lb-sect-chevron" aria-hidden="true">&#9662;</span>
-        </button>
-        <div class="lb-drawer-results lb-res-more-body" id="lbResMore-${key}" hidden>${rest.map(rowFn).join('')}</div>`;
-    }
-    return `<div class="lb-drawer-sect">${esc(title)}</div><div class="lb-drawer-results">${shown}</div>${tail}`;
-  }
-
   function resultsHtml(r) {
     const total = r.streets.length + r.props.length + r.bins.length + r.runs.length + r.sl.length;
     if (!total) return `<div class="lb-drawer-empty">Nothing found for "${esc(r.q)}".</div>`;
 
     let html = '';
 
-    html += category('Streets', 'streets', r.streets, s => `
-      <button type="button" class="lb-res-row is-street" data-lbgo="street" data-key="${esc(s.key)}">
-        <img class="icon-img" src="search.png" alt="">
-        <span class="lb-res-main">${esc(s.label)}
-          <small>${esc(s.n)} propert${s.n === 1 ? 'y' : 'ies'}${s.suburb ? ' · ' + esc(s.suburb) : ''}</small>
-        </span>
-        <span class="lb-res-go">›</span>
-      </button>`);
+    if (r.streets.length) {
+      html += `<div class="lb-drawer-sect">Streets</div><div class="lb-drawer-results">` +
+        r.streets.map(s => `
+          <button type="button" class="lb-res-row is-street" data-lbgo="street" data-key="${esc(s.key)}">
+            <img class="icon-img" src="search.png" alt="">
+            <span class="lb-res-main">${esc(s.label)}
+              <small>${esc(s.n)} propert${s.n === 1 ? 'y' : 'ies'}${s.suburb ? ' · ' + esc(s.suburb) : ''}</small>
+            </span>
+            <span class="lb-res-go">›</span>
+          </button>`).join('') + `</div>`;
+    }
 
-    html += category('Runs', 'runs', r.runs, x => {
-      const meta = STREAM_META[x.stream] || STREAM_META.Garbage;
-      const when = [x.day, x.week ? 'Week ' + x.week : ''].filter(Boolean).join(' · ');
-      return `
-      <button type="button" class="lb-res-row" data-lbgo="run" data-run="${esc(x.run)}"
-              data-stream="${esc(x.stream)}" data-day="${esc(x.day)}" data-week="${esc(x.week)}"
-              data-summer="${x.summer ? '1' : '0'}" data-lat="${esc(x.lat || 0)}" data-lng="${esc(x.lng || 0)}">
-        <img class="icon-img" src="${meta.icon}" alt="">
-        <span class="lb-res-main">Run ${esc(x.run)}
-          <small>${esc(meta.label)}${when ? ' · ' + esc(when) : ''}</small>
-        </span>
-        <span class="lb-res-go">›</span>
-      </button>`;
-    });
+    if (r.runs.length) {
+      html += `<div class="lb-drawer-sect">Runs</div><div class="lb-drawer-results">` +
+        r.runs.map(x => {
+          const meta = STREAM_META[x.stream] || STREAM_META.Garbage;
+          const when = [x.day, x.week ? 'Week ' + x.week : ''].filter(Boolean).join(' · ');
+          return `
+          <button type="button" class="lb-res-row" data-lbgo="run" data-run="${esc(x.run)}"
+                  data-stream="${esc(x.stream)}" data-day="${esc(x.day)}" data-week="${esc(x.week)}"
+                  data-summer="${x.summer ? '1' : '0'}" data-lat="${esc(x.lat || 0)}" data-lng="${esc(x.lng || 0)}">
+            <img class="icon-img" src="${meta.icon}" alt="">
+            <span class="lb-res-main">Run ${esc(x.run)}
+              <small>${esc(meta.label)}${when ? ' · ' + esc(when) : ''}</small>
+            </span>
+            <span class="lb-res-go">›</span>
+          </button>`;
+        }).join('') + `</div>`;
+    }
 
-    html += category('Bins', 'bins', r.bins, b => `
-      <button type="button" class="lb-res-row" data-lbgo="bin"
-              data-pid="${esc(String(b.site.propId || b.site.siteId || ''))}" data-serial="${esc(b.serial)}">
-        <img class="icon-img" src="bin.png" alt="">
-        <span class="lb-res-main">${esc(b.serial)}
-          <small>${esc([b.size, b.stream].filter(Boolean).join(' '))} · ${esc(b.site.baseStreetLine || b.site.addressText || '')}</small>
-        </span>
-        <span class="lb-res-go">›</span>
-      </button>`);
+    if (r.bins.length) {
+      html += `<div class="lb-drawer-sect">Bins</div><div class="lb-drawer-results">` +
+        r.bins.map(b => `
+          <button type="button" class="lb-res-row" data-lbgo="bin"
+                  data-pid="${esc(String(b.site.propId || b.site.siteId || ''))}" data-serial="${esc(b.serial)}">
+            <img class="icon-img" src="bin.png" alt="">
+            <span class="lb-res-main">${esc(b.serial)}
+              <small>${esc([b.size, b.stream].filter(Boolean).join(' '))} · ${esc(b.site.baseStreetLine || b.site.addressText || '')}</small>
+            </span>
+            <span class="lb-res-go">›</span>
+          </button>`).join('') + `</div>`;
+    }
 
-    html += category('Addresses', 'props', r.props, s => `
-      <button type="button" class="lb-res-row" data-lbgo="prop"
-              data-pid="${esc(String(s.propId || s.siteId || ''))}">
-        <img class="icon-img" src="houses.png" alt="">
-        <span class="lb-res-main">${esc(s.baseStreetLine || s.addressText || '')}
-          ${s.suburbLine ? `<small>${esc(s.suburbLine)}</small>` : ''}
-        </span>
-        <span class="lb-res-go">›</span>
-      </button>`);
+    if (r.props.length) {
+      html += `<div class="lb-drawer-sect">Addresses</div><div class="lb-drawer-results">` +
+        r.props.map(s => `
+          <button type="button" class="lb-res-row" data-lbgo="prop"
+                  data-pid="${esc(String(s.propId || s.siteId || ''))}">
+            <img class="icon-img" src="houses.png" alt="">
+            <span class="lb-res-main">${esc(s.baseStreetLine || s.addressText || '')}
+              ${s.suburbLine ? `<small>${esc(s.suburbLine)}</small>` : ''}
+            </span>
+            <span class="lb-res-go">›</span>
+          </button>`).join('') + `</div>`;
+    }
 
-    html += category('Street litter', 'sl', r.sl, s => `
-      <button type="button" class="lb-res-row" data-lbgo="sl" data-id="${esc(String(s.id))}">
-        <img class="icon-img" src="garbage.png" alt="">
-        <span class="lb-res-main">${esc(s.addr || '')}
-          ${s.suburb ? `<small>${esc(s.suburb)}</small>` : ''}
-        </span>
-        <span class="lb-res-go">›</span>
-      </button>`);
+    if (r.sl.length) {
+      html += `<div class="lb-drawer-sect">Street litter</div><div class="lb-drawer-results">` +
+        r.sl.map(s => `
+          <button type="button" class="lb-res-row" data-lbgo="sl" data-id="${esc(String(s.id))}">
+            <img class="icon-img" src="garbage.png" alt="">
+            <span class="lb-res-main">${esc(s.addr || '')}
+              ${s.suburb ? `<small>${esc(s.suburb)}</small>` : ''}
+            </span>
+            <span class="lb-res-go">›</span>
+          </button>`).join('') + `</div>`;
+    }
 
     return html;
   }
-
-  document.addEventListener('click', function(ev) {
-    const btn = ev.target && ev.target.closest ? ev.target.closest('.lb-res-more') : null;
-    if (!btn) return;
-    const body = document.getElementById('lbResMore-' + btn.dataset.moreKey);
-    if (!body) return;
-    ev.preventDefault();
-    ev.stopPropagation();
-    const nowHidden = !body.hidden;
-    body.hidden = nowHidden;
-    btn.classList.toggle('lb-open', !nowHidden);
-    const count = body.querySelectorAll(':scope > button').length;
-    btn.querySelector('span').textContent = nowHidden ? `Show ${count} more` : 'Show fewer';
-  });
 
   function repaintResults() {
     const body = document.getElementById('lbDrawerBody');
@@ -20012,46 +20065,39 @@ body.stream-slr .lb-layers-head .icon-img { filter: brightness(0); }
     const body = document.getElementById('lbLayersBody');
     if (!body) return;
 
-    // Group rows under their section first, then drop any section that
-    // ends up with nothing under it (every row in that section was ruled
-    // out for the current stream) - an empty "KML runs" heading floating
-    // above the next section would be worse than not showing it. Each
-    // surviving section is wrapped as a collapsible group so a long
-    // panel can be folded down to just the headings.
-    const groups = [];
-    let current = null;
+    // Build row HTML first, then drop any section header that ends up
+    // with nothing under it (every row in that section was ruled out
+    // for the current stream) - an empty "KML runs" heading floating
+    // above the next section would be worse than not showing it.
+    const pieces = [];
+    let pendingSect = null;
+    let sectHasRows = false;
 
     LAYER_ROWS.forEach(row => {
       if (row[0] === 'sect') {
-        current = { title: row[1], rows: [] };
-        groups.push(current);
+        pendingSect = row[1];
+        sectHasRows = false;
         return;
       }
       if (!rowApplies(row[0])) return;
-      if (!current) { current = { title: '', rows: [] }; groups.push(current); }
+      if (pendingSect !== null) {
+        pieces.push(`<div class="lb-layers-sect">${esc(pendingSect)}</div>`);
+        pendingSect = null;
+      }
+      sectHasRows = true;
 
       if (row[0] === 'act') {
         const [, fn, icon, label, danger] = row;
-        current.rows.push(`<button type="button" class="lb-layer-btn${danger ? ' danger' : ''}" data-lbfn="${esc(fn)}" data-act="1">
+        pieces.push(`<button type="button" class="lb-layer-btn${danger ? ' danger' : ''}" data-lbfn="${esc(fn)}" data-act="1">
           ${iconHtml(icon)}<span class="lb-label">${esc(label)}</span></button>`);
         return;
       }
       const [key, fn, icon, label] = row;
       const on = flag(key);
-      current.rows.push(`<button type="button" class="lb-layer-btn${on ? ' on' : ''}" data-lbfn="${esc(fn)}">
+      pieces.push(`<button type="button" class="lb-layer-btn${on ? ' on' : ''}" data-lbfn="${esc(fn)}">
         ${iconHtml(icon)}<span class="lb-label">${esc(label)}</span>
         <span class="lb-check">${on ? '✓' : ''}</span></button>`);
     });
-
-    const sectGroup = (typeof window.lbSectGroupHtml === 'function')
-      ? window.lbSectGroupHtml
-      : (key, cls, title, html) => `<div class="${cls}">${title}</div>${html}`;
-
-    const pieces = groups
-      .filter(g => g.rows.length)
-      .map(g => g.title
-        ? sectGroup('layers-' + g.title.toLowerCase().replace(/[^a-z0-9]+/g, '-'), 'lb-layers-sect', esc(g.title), g.rows.join(''))
-        : g.rows.join(''));
 
     body.innerHTML = timerHtml() + pieces.join('');
   }
@@ -20088,18 +20134,6 @@ body.stream-slr .lb-layers-head .icon-img { filter: brightness(0); }
   // Esc closes whichever of the two is showing.
   document.addEventListener('keydown', function(ev) {
     if (ev.key === 'Escape' && document.body.classList.contains('lb-layers-open')) closeLayers();
-  });
-
-  // Tapping the map itself (anything outside the panel and its tab)
-  // closes the Layers panel the same way the search drawer's scrim does -
-  // one tap back to the map instead of hunting for the ‹ button. Both
-  // panels only ever show on top of the Map screen, so "closed" already
-  // means "looking at the map" here.
-  document.addEventListener('click', function(ev) {
-    if (!document.body.classList.contains('lb-layers-open')) return;
-    const t = ev.target;
-    if (t && t.closest && t.closest('#lbLayers, #lbLayersTab')) return;
-    closeLayers();
   });
 
   /* ================= RUN TIMER ======================================
@@ -20155,7 +20189,8 @@ body.stream-slr .lb-layers-head .icon-img { filter: brightness(0); }
   function timerHtml() {
     const running = timer.running;
     const sub = timer.label ? esc(timer.label) : (running || timer.accrued ? 'Run timer' : 'Not started');
-    const body = `
+    return `
+      <div class="lb-layers-sect">Run timer</div>
       <div class="lb-timer ${running ? 'running' : ''}">
         <div class="lb-timer-read" id="lbTimerRead">${fmt(elapsedMs())}</div>
         <div class="lb-timer-sub">${sub}</div>
@@ -20167,9 +20202,6 @@ body.stream-slr .lb-layers-head .icon-img { filter: brightness(0); }
       <button type="button" class="lb-layer-btn danger" data-lbtimer="reset">
         <img class="icon-img" src="minus.png" alt=""><span class="lb-label">Reset timer</span>
       </button>`;
-    return (typeof window.lbSectGroupHtml === 'function')
-      ? window.lbSectGroupHtml('layers-run-timer', 'lb-layers-sect', 'Run timer', body)
-      : `<div class="lb-layers-sect">Run timer</div>${body}`;
   }
 
   // Only the digits are repainted on the tick - rebuilding the whole
@@ -20301,84 +20333,29 @@ body.stream-slr .lb-layers-head .icon-img { filter: brightness(0); }
 .welcome-runs .welcome-chip { flex: 0 0 auto; min-width: 84px; }
 .welcome-runs .welcome-empty { width: 100%; text-align: left; }
 
-/* ---- Drive wizard tools panel (Load KML + toggles) ----
-   Same slide-out treatment as the Layers panel - a pull-tab on the left
-   edge and a translucent, blurred panel - rather than a row of small
-   buttons squeezed onto the wizard page itself. Only shown on the Drive
-   step once a run is picked (see isDriveStep in lb-phase2-script). */
-#lbDriveExtrasTab {
-  position: fixed;
-  left: 0;
-  top: 172px;
-  z-index: 4200;
-  width: 40px;
-  height: 42px;
-  display: none;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  border: 1px solid #000;
-  border-left: none;
-  border-radius: 0 8px 8px 0;
-  background: var(--ui-accent);
-  color: var(--ui-accent-ink);
-  cursor: pointer;
-  -webkit-tap-highlight-color: transparent;
-  box-shadow: 2px 2px 8px rgba(0,0,0,0.5);
-  transition: transform 0.18s ease, opacity 0.18s ease;
-}
-#lbDriveExtrasTab .icon-img { width: 20px; height: 20px; filter: brightness(0) invert(1); }
-/* Shares the same slot as #lbDriveTab (top: 172px) - the two are never
-   shown at once, since this only appears while the Drive panel itself
-   is open (and #lbDriveTab tucks away whenever it is). */
-body.lb-drive-open.lb-drive-step #lbDriveExtrasTab { display: flex; }
-body.lb-drive-extras-open #lbDriveExtrasTab,
-body.lb-drive-open.lb-drawer-open #lbDriveExtrasTab { transform: translateX(-110%); opacity: 0; }
-
-#lbDriveExtras {
-  position: fixed;
-  left: 0;
-  top: 8px;
-  bottom: 96px;
-  z-index: 4400;
-  width: max-content;
-  min-width: 168px;
-  max-width: 86vw;
+/* ---- Drive wizard quick-actions row (Load KML + toggles) ---- */
+.lb-drive-extras {
   display: flex;
-  flex-direction: column;
-  background: linear-gradient(180deg, rgba(20,23,27,0.2) 0%, rgba(11,13,16,0.2) 100%);
-  -webkit-backdrop-filter: blur(6px);
-  backdrop-filter: blur(6px);
-  border: 1px solid #000;
-  border-left: none;
-  border-radius: 0 10px 10px 0;
-  box-shadow: 6px 0 22px rgba(0,0,0,0.6);
-  transform: translateX(-104%);
-  transition: transform 0.24s cubic-bezier(.22,.61,.36,1);
-  overscroll-behavior: contain;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 10px 0 2px;
 }
-body.lb-drive-extras-open #lbDriveExtras { transform: translateX(0); }
-/* Belt-and-braces: the panel is a fixed element that outlives whichever
-   screen you were on when you opened it, so force it shut whenever the
-   Drive panel itself isn't open, rather than relying only on the
-   open/close class being cleared in time. */
-body:not(.lb-drive-open) #lbDriveExtras { transform: translateX(-104%) !important; }
-@media (prefers-reduced-motion: reduce) {
-  #lbDriveExtras, #lbDriveExtrasTab { transition: none !important; }
+.lb-drive-extra-btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 7px 10px; min-height: 34px;
+  border: 1px solid #000; border-radius: 0;
+  background: linear-gradient(180deg, var(--bar-black-hi) 0%, var(--bar-black) 100%);
+  color: var(--welcome-ink-faint); font-size: 12.5px; font-weight: 800;
+  cursor: pointer; -webkit-tap-highlight-color: transparent;
 }
+.lb-drive-extra-btn .icon-img { width: 15px; height: 15px; filter: brightness(0) invert(1); opacity: 0.65; }
+.lb-drive-extra-btn.on {
+  color: #fff;
+  border-left: 3px solid var(--ui-accent);
+  background: linear-gradient(180deg, #23272d 0%, #14171b 100%);
+}
+.lb-drive-extra-btn.on .icon-img { opacity: 1; }
 </style>
-
-<button type="button" id="lbDriveExtrasTab" title="Drive tools" aria-label="Open drive tools">
-  <img class="icon-img" src="layers.png" alt="">
-</button>
-<div id="lbDriveExtras" role="dialog" aria-label="Drive tools">
-  <div class="lb-layers-head">
-    <img class="icon-img" src="layers.png" alt="">
-    <span class="lb-layers-title">Drive tools</span>
-    <button type="button" id="lbDriveExtrasCloseBtn" aria-label="Collapse" title="Collapse">&lsaquo;</button>
-  </div>
-  <div class="lb-layers-body" id="lbDriveExtrasBody"></div>
-</div>
 
 <script id="lb-phase2-script">
 (function(){
@@ -20411,12 +20388,6 @@ body:not(.lb-drive-open) #lbDriveExtras { transform: translateX(-104%) !importan
   function decorate() {
     const root = document.getElementById('welcomeBody');
     if (!root) return;
-
-    // Runs regardless of which wizard step (or the plain home menu) is
-    // showing, since it's also what clears the Drive-tools tab/panel
-    // when you're no longer on the Drive step.
-    syncDriveExtras(root);
-
     const head = root.querySelector('.welcome-step-head');
     if (!head) return;
 
@@ -20448,16 +20419,15 @@ body:not(.lb-drive-open) #lbDriveExtras { transform: translateX(-104%) !importan
       root.style.removeProperty('--ui-accent');
       root.style.removeProperty('--ui-accent-ink');
     }
+
+    addExtrasRow(root);
   }
 
-  /* A panel of quick actions is reachable from the Drive wizard only
-     (Explore/Check-out don't have a single "current run" to attach a
-     KML load to) - same pull-tab-and-slide-out treatment as the Layers
-     panel, using the exact same .lb-layer-btn markup, rather than a
-     row of small buttons that read as a different, lower-priority kind
-     of control. Everything here proxies an existing function so
-     behaviour matches the Layers panel exactly - these are just a
-     shortcut to the same switches, not a second set of state. */
+  /* A small row of quick actions sits above the GO bar on the Drive
+     wizard only (Explore/Check-out don't have a single "current run"
+     to attach a KML load to). Everything here proxies an existing
+     function so behaviour matches the Layers panel exactly - these are
+     just a shortcut to the same switches, not a second set of state. */
   const EXTRA_BTNS = [
     { fn: 'loadKmzForCurrentRun',   icon: 'img:add.png',     label: 'Load KML', act: true },
     { fn: 'toggleKmzLayers',        icon: '🚛',              label: 'KML',       flag: 'kmzLayersVisible' },
@@ -20473,60 +20443,33 @@ body:not(.lb-drive-open) #lbDriveExtras { transform: translateX(-104%) !importan
   }
 
   function extrasHtml() {
-    return EXTRA_BTNS.map(b => {
+    return `<div class="lb-drive-extras">` + EXTRA_BTNS.map(b => {
       const on = b.act ? false : flagOn(b.flag);
-      const ico = b.icon.startsWith('img:') ? `<img class="icon-img" src="${b.icon.slice(4)}" alt="">` : `<span class="lb-ico">${b.icon}</span>`;
-      return `<button type="button" class="lb-layer-btn${on ? ' on' : ''}" data-lbxfn="${b.fn}">
-        ${ico}<span class="lb-label">${b.label}</span>
-        <span class="lb-check">${on ? '✓' : ''}</span></button>`;
-    }).join('');
+      const ico = b.icon.startsWith('img:') ? `<img class="icon-img" src="${b.icon.slice(4)}" alt="">` : `<span>${b.icon}</span>`;
+      return `<button type="button" class="lb-drive-extra-btn${on ? ' on' : ''}" data-lbxfn="${b.fn}">${ico}<span>${b.label}</span></button>`;
+    }).join('') + `</div>`;
   }
 
-  // Only on the Drive step (the one with a single run and a GO bar that
-  // says "GO — Run …"); Explore/Check-out pick multiple runs and don't
-  // have one current run for Load KML to attach to.
-  function isDriveStep(root) {
+  function addExtrasRow(root) {
     const goWrap = root.querySelector('.welcome-go-wrap');
-    if (!goWrap) return false;
-    return /GO\s*—\s*Run\s/.test((goWrap.querySelector('.welcome-go') || {}).textContent || '');
-  }
-
-  function closeDriveExtras() { document.body.classList.remove('lb-drive-extras-open'); }
-
-  function syncDriveExtras(root) {
-    const onDriveStep = isDriveStep(root);
-    document.body.classList.toggle('lb-drive-step', onDriveStep);
-    if (!onDriveStep) { closeDriveExtras(); return; }
-    const body = document.getElementById('lbDriveExtrasBody');
-    if (body) body.innerHTML = extrasHtml();
+    if (!goWrap) return;
+    let row = root.querySelector('.lb-drive-extras');
+    // Only on the Drive step (the one with a single run and a GO bar
+    // that says "GO — Run …"); Explore/Check-out pick multiple runs and
+    // don't have one current run for Load KML to attach to.
+    const isDrive = /GO\s*—\s*Run\s/.test((goWrap.querySelector('.welcome-go') || {}).textContent || '');
+    if (!isDrive) { if (row) row.remove(); return; }
+    const html = extrasHtml();
+    if (row) { row.outerHTML = html; } else { goWrap.insertAdjacentHTML('beforebegin', html); }
   }
 
   document.addEventListener('click', function(ev) {
-    const t = ev.target;
-    if (!t || !t.closest) return;
-
-    if (t.closest('#lbDriveExtrasTab')) {
-      ev.preventDefault();
-      document.body.classList.toggle('lb-drive-extras-open');
-      return;
-    }
-    if (t.closest('#lbDriveExtrasCloseBtn')) { ev.preventDefault(); closeDriveExtras(); return; }
-
-    const btn = t.closest('.lb-layer-btn[data-lbxfn]');
-    if (btn) {
-      ev.preventDefault();
-      const fn = window[btn.dataset.lbxfn];
-      if (typeof fn === 'function') { try { fn(); } catch (e) { console.error(e); } }
-      const root = document.getElementById('welcomeBody');
-      if (root) setTimeout(() => syncDriveExtras(root), 60);
-      return;
-    }
-
-    // Tap the map (outside the panel and its tab) to close it, same as
-    // the Layers and Settings panels.
-    if (document.body.classList.contains('lb-drive-extras-open') && !t.closest('#lbDriveExtras, #lbDriveExtrasTab')) {
-      closeDriveExtras();
-    }
+    const btn = ev.target && ev.target.closest ? ev.target.closest('.lb-drive-extra-btn') : null;
+    if (!btn) return;
+    ev.preventDefault();
+    const fn = window[btn.dataset.lbxfn];
+    if (typeof fn === 'function') { try { fn(); } catch (e) { console.error(e); } }
+    setTimeout(() => { const root = document.getElementById('welcomeBody'); if (root) addExtrasRow(root); }, 60);
   });
 
   const target = document.getElementById('welcomeBody');
@@ -20722,17 +20665,13 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     const body = document.getElementById('lbSettingsBody');
     if (!body) return;
     sources = [];
-    const sectGroup = (typeof window.lbSectGroupHtml === 'function')
-      ? window.lbSectGroupHtml
-      : (key, cls, title, html) => `<div class="${cls}">${title}</div>${html}`;
     let html = '';
     SECTIONS.forEach(sec => {
       const btns = Array.from(document.querySelectorAll(sec.sel))
         .filter(b => !(sec.drop && sec.drop(b)));
       if (!btns.length) return;
-      let rows = '';
-      btns.forEach(b => { rows += rowHtml(b, sources.length); sources.push(b); });
-      html += sectGroup('settings-' + sec.title.toLowerCase().replace(/[^a-z0-9]+/g, '-'), 'lb-layers-sect', esc(sec.title), rows);
+      html += `<div class="lb-layers-sect">${esc(sec.title)}</div>`;
+      btns.forEach(b => { html += rowHtml(b, sources.length); sources.push(b); });
     });
     body.innerHTML = html || `<div class="lb-drawer-empty">No map settings available yet.</div>`;
   }
@@ -20762,14 +20701,7 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     const isSideToggle = src.closest('#mapSettingsGroupBins');
     if (!isSideToggle) closeSettings();
     try { src.click(); } catch (e) { console.error('settings proxy failed', e); }
-  });
-
-  // Same "tap the map to close" behaviour as the Layers panel.
-  document.addEventListener('click', function(ev) {
-    if (!document.body.classList.contains('lb-settings-open')) return;
-    const t = ev.target;
-    if (t && t.closest && t.closest('#lbSettings, #lbSettingsTab')) return;
-    closeSettings();
+    if (isSideToggle) setTimeout(renderSettings, 60);
   });
 
   document.addEventListener('keydown', function(ev) {
@@ -20951,75 +20883,6 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
 #lbSpeedBadge .lb-speed-unit { font-size: 10px; font-weight: 800; opacity: 0.75; }
 </style>
 <div id="lbSpeedBadge"><span class="lb-speed-num">0</span><span class="lb-speed-unit">km/h</span></div>
-
-<style id="lb-sect-collapse-style">
-/* ===== Collapsible section headers =================================
-   Shared by the search drawer's menu, the Layers panel and the Settings
-   panel - each turns its section title into a toggle so a long panel
-   can be folded down to just the headings instead of always scrolling
-   past every row. Purely a display:none toggle on the row group below
-   the heading; nothing about the underlying render functions changes,
-   so every button inside keeps working exactly as before. */
-.lb-sect-group { display: flex; flex-direction: column; }
-.lb-sect-toggle {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  width: 100%;
-  border: none;
-  background: none;
-  cursor: pointer;
-  -webkit-tap-highlight-color: transparent;
-  font: inherit;
-  text-align: left;
-}
-.lb-sect-chevron {
-  flex-shrink: 0;
-  font-size: 10px;
-  margin-left: 6px;
-  transition: transform 0.15s ease;
-  opacity: 0.8;
-}
-.lb-sect-group.lb-collapsed .lb-sect-chevron { transform: rotate(-90deg); }
-.lb-sect-body {
-  display: flex;
-  flex-direction: column;
-  gap: inherit;
-}
-.lb-sect-group.lb-collapsed .lb-sect-body { display: none; }
-</style>
-<script id="lb-sect-collapse-script">
-(function(){
-  'use strict';
-
-  // Wraps a section's heading + body so the heading can toggle the body's
-  // visibility. `key` should be stable and unique within its panel (it's
-  // what remembers the collapsed/expanded state across re-renders and
-  // page reloads) - the section title is normally good enough.
-  window.lbSectGroupHtml = function(key, headerClass, title, bodyHtml) {
-    let collapsed = false;
-    try { collapsed = localStorage.getItem('lbSectCollapsed:' + key) === '1'; } catch (e) {}
-    return '<div class="lb-sect-group' + (collapsed ? ' lb-collapsed' : '') + '" data-sect-key="' + key + '">'
-      + '<button type="button" class="' + headerClass + ' lb-sect-toggle">'
-      +   '<span>' + title + '</span><span class="lb-sect-chevron" aria-hidden="true">&#9662;</span>'
-      + '</button>'
-      + '<div class="lb-sect-body">' + bodyHtml + '</div>'
-      + '</div>';
-  };
-
-  document.addEventListener('click', function(ev) {
-    const btn = ev.target && ev.target.closest ? ev.target.closest('.lb-sect-toggle') : null;
-    if (!btn) return;
-    const group = btn.closest('.lb-sect-group');
-    if (!group) return;
-    ev.preventDefault();
-    ev.stopPropagation();
-    const collapsed = group.classList.toggle('lb-collapsed');
-    const key = group.getAttribute('data-sect-key');
-    if (key) { try { localStorage.setItem('lbSectCollapsed:' + key, collapsed ? '1' : '0'); } catch (e) {} }
-  });
-})();
-</script>
 
 </body>
 </html>
