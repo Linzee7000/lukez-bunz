@@ -18049,7 +18049,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     const meta = streamMeta(dStream);
 
     let body = `
-      <div class="welcome-step-head">
+      <div class="welcome-step-head lb-titlebar${meta.cls ? ' ' + meta.cls : ''}">
         <button type="button" class="welcome-back btn-3d" data-act="back">‹</button>
         <div class="welcome-step-title">Drive</div>
       </div>
@@ -18311,6 +18311,19 @@ window.addEventListener('DOMContentLoaded', async () => {
         dRun = '';
         dDay = defaultDayFor(dStream);
         dWeek = todayWeekFor(dStream);
+        // The Drive wizard's own title/GO-button colouring is baked
+        // straight into its markup (see driveHtml), but --ui-accent is
+        // also read by things outside this screen entirely - the Search
+        // tab header, the pull-out drawer's title bar. Setting the real
+        // filter state here (the same one the map's own stream chips
+        // set) is what makes "the chosen theme colour" actually follow
+        // you off this screen too, rather than only tinting Drive itself.
+        if (typeof window !== 'undefined') {
+          try {
+            activeFilterStream = dStream;
+            if (typeof applyActiveStreamTheme === 'function') applyActiveStreamTheme();
+          } catch (e) {}
+        }
       } else {
         if (xStreams.has(d.stream)) xStreams.delete(d.stream);
         else xStreams.add(d.stream);
@@ -18498,7 +18511,9 @@ body.lb-drawer-open #lbDrawerScrim { opacity: 1; pointer-events: auto; }
   max-width: 86vw;
   display: flex;
   flex-direction: column;
-  background: linear-gradient(180deg, #14171b 0%, #0b0d10 100%);
+  background: linear-gradient(180deg, rgba(20,23,27,0.2) 0%, rgba(11,13,16,0.2) 100%);
+  -webkit-backdrop-filter: blur(7px);
+  backdrop-filter: blur(7px);
   border-right: 1px solid #000;
   box-shadow: 6px 0 22px rgba(0,0,0,0.6);
   transform: translateX(-100%);
@@ -19092,7 +19107,7 @@ body.stream-slr #lbLayersTab .icon-img { filter: brightness(0); }
      rather than being blotted out by a solid black slab, since the
      panel is only ever as wide as its longest label + tick now, not
      the full column it used to reserve. */
-  background: linear-gradient(180deg, rgba(20,23,27,0.82) 0%, rgba(11,13,16,0.82) 100%);
+  background: linear-gradient(180deg, rgba(20,23,27,0.2) 0%, rgba(11,13,16,0.2) 100%);
   -webkit-backdrop-filter: blur(6px);
   backdrop-filter: blur(6px);
   border: 1px solid #000;
@@ -19804,6 +19819,40 @@ body.stream-slr .lb-layers-head .icon-img { filter: brightness(0); }
   }
 
   // [flagName, fnName, icon, label, isAction, danger]
+  // Which stream/source is currently the map's active filter, in the
+  // terms activeFilterStream actually uses - kerbside streams
+  // ('Garbage'/'Recycling'/'SummerRecycling'/'FOGO') and the two Street
+  // Litter sources ('StreetGarbage'/'StreetRecycling'). '' means no
+  // filter is set, in which case nothing is ruled out - there's no
+  // "current run" to judge relevance against, so every option stays.
+  function currentStream() {
+    return (typeof activeFilterStream !== 'undefined') ? String(activeFilterStream || '') : '';
+  }
+  const KERBSIDE_STREAMS = ['Garbage', 'Recycling', 'SummerRecycling', 'FOGO'];
+  const STREET_LITTER_STREAMS = ['StreetGarbage', 'StreetRecycling'];
+
+  // Per-row relevance: a row with no 'when' is always shown (generic
+  // controls - bins, houses, boundaries, satellite, the whole snail
+  // trail section, the file actions). Rows tied to one particular
+  // stream or source only show while that's what's actually selected -
+  // e.g. Street Litter's KML controls have no bearing on a Recycling
+  // kerbside run, so they stay out of the panel rather than sitting
+  // there doing nothing.
+  const ROW_WHEN = {
+    garSq:    () => !currentStream() || currentStream() === 'Garbage',
+    recSq:    () => !currentStream() || currentStream() === 'Recycling' || currentStream() === 'SummerRecycling',
+    fogSq:    () => !currentStream() || currentStream() === 'FOGO',
+    kmz:      () => !currentStream() || KERBSIDE_STREAMS.includes(currentStream()),
+    kerbArr:  () => !currentStream() || KERBSIDE_STREAMS.includes(currentStream()),
+    kerbHeat: () => !currentStream() || KERBSIDE_STREAMS.includes(currentStream()),
+    slArr:    () => !currentStream() || STREET_LITTER_STREAMS.includes(currentStream()),
+    slHeat:   () => !currentStream() || STREET_LITTER_STREAMS.includes(currentStream())
+  };
+  function rowApplies(key) {
+    const fn = ROW_WHEN[key];
+    return !fn || fn();
+  }
+
   const LAYER_ROWS = [
     ['sect', 'Map layers'],
     ['bins',     'toggleBinGpsDots',              'img:bin.png',      'Bins'],
@@ -19842,19 +19891,42 @@ body.stream-slr .lb-layers-head .icon-img { filter: brightness(0); }
   function renderLayers() {
     const body = document.getElementById('lbLayersBody');
     if (!body) return;
-    body.innerHTML = timerHtml() + LAYER_ROWS.map(row => {
-      if (row[0] === 'sect') return `<div class="lb-layers-sect">${esc(row[1])}</div>`;
+
+    // Build row HTML first, then drop any section header that ends up
+    // with nothing under it (every row in that section was ruled out
+    // for the current stream) - an empty "KML runs" heading floating
+    // above the next section would be worse than not showing it.
+    const pieces = [];
+    let pendingSect = null;
+    let sectHasRows = false;
+
+    LAYER_ROWS.forEach(row => {
+      if (row[0] === 'sect') {
+        pendingSect = row[1];
+        sectHasRows = false;
+        return;
+      }
+      if (!rowApplies(row[0])) return;
+      if (pendingSect !== null) {
+        pieces.push(`<div class="lb-layers-sect">${esc(pendingSect)}</div>`);
+        pendingSect = null;
+      }
+      sectHasRows = true;
+
       if (row[0] === 'act') {
         const [, fn, icon, label, danger] = row;
-        return `<button type="button" class="lb-layer-btn${danger ? ' danger' : ''}" data-lbfn="${esc(fn)}" data-act="1">
-          ${iconHtml(icon)}<span class="lb-label">${esc(label)}</span></button>`;
+        pieces.push(`<button type="button" class="lb-layer-btn${danger ? ' danger' : ''}" data-lbfn="${esc(fn)}" data-act="1">
+          ${iconHtml(icon)}<span class="lb-label">${esc(label)}</span></button>`);
+        return;
       }
       const [key, fn, icon, label] = row;
       const on = flag(key);
-      return `<button type="button" class="lb-layer-btn${on ? ' on' : ''}" data-lbfn="${esc(fn)}">
+      pieces.push(`<button type="button" class="lb-layer-btn${on ? ' on' : ''}" data-lbfn="${esc(fn)}">
         ${iconHtml(icon)}<span class="lb-label">${esc(label)}</span>
-        <span class="lb-check">${on ? '✓' : ''}</span></button>`;
-    }).join('');
+        <span class="lb-check">${on ? '✓' : ''}</span></button>`);
+    });
+
+    body.innerHTML = timerHtml() + pieces.join('');
   }
 
   function openLayers() {
@@ -20262,7 +20334,7 @@ body.stream-slr .lb-layers-head .icon-img { filter: brightness(0); }
   max-width: 86vw;
   display: flex;
   flex-direction: column;
-  background: linear-gradient(180deg, rgba(20,23,27,0.82) 0%, rgba(11,13,16,0.82) 100%);
+  background: linear-gradient(180deg, rgba(20,23,27,0.2) 0%, rgba(11,13,16,0.2) 100%);
   -webkit-backdrop-filter: blur(6px);
   backdrop-filter: blur(6px);
   border: 1px solid #000;
