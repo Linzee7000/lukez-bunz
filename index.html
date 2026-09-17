@@ -1742,6 +1742,18 @@ body:not(.dark-mode) .welcome-go-wrap {
       top: 9px;
     }
 
+    /* Smooth movement for the live "you are here" truck marker (see
+       updateMapTruckPosition): the marker's own position is animated by
+       Leaflet's leaflet-div-icon element, and the heading turn is animated
+       by the inner rotate wrapper - both transition instead of snapping
+       to each new GPS fix. */
+    .leaflet-div-icon.custom-gps-icon {
+      transition: transform 0.4s linear;
+    }
+    .gps-truck-rotate {
+      transition: transform 0.4s ease-out;
+    }
+
     /* Map Flag Icons */
     .run-seq-flag {
       font-size: 13px;
@@ -6661,37 +6673,77 @@ body:not(.dark-mode) .welcome-go-wrap {
     }
   }
 
+  // Fill + glow colour for the "you are here" GPS truck marker, keyed off
+  // activeFilterStream. Mirrors the same stream->colour mapping used for
+  // .stream-gar/.stream-rec/etc elsewhere (getStreamFillColor covers the
+  // kerbside streams only; this also covers the two Street Litter streams
+  // and falls back to the original blue when no stream is selected).
+  function getGpsTruckColor(streamKey) {
+    if (streamKey === 'Garbage') return { fill: '#dc2626', glow: 'rgba(220,38,38,0.8)' };
+    if (streamKey === 'Recycling') return { fill: '#facc15', glow: 'rgba(250,204,21,0.8)' };
+    if (streamKey === 'SummerRecycling') return { fill: '#f59e0b', glow: 'rgba(245,158,11,0.8)' };
+    if (streamKey === 'FOGO') return { fill: '#16a34a', glow: 'rgba(22,163,74,0.8)' };
+    if (streamKey === 'StreetGarbage') return { fill: '#2563eb', glow: 'rgba(37,99,235,0.8)' };
+    if (streamKey === 'StreetRecycling') return { fill: '#38bdf8', glow: 'rgba(56,189,248,0.8)' };
+    return { fill: '#2563eb', glow: 'rgba(37,99,235,0.8)' }; // no stream selected - original blue
+  }
+
+  // Accumulated (unbounded) rotation actually applied to the truck icon.
+  // Kept separate from lastValidHeading so a heading change from e.g. 350deg
+  // to 10deg always turns the short way (+20deg) instead of the CSS
+  // transition spinning it almost all the way round backwards through 0.
+  let truckDisplayRotation = 0;
+
   function updateMapTruckPosition() {
     if (!leafletMap || !userCurrentLocation) return;
     const pos = [userCurrentLocation.lat, userCurrentLocation.lng];
     const headingDeg = lastValidHeading || 0;
+    const truckColor = getGpsTruckColor(typeof activeFilterStream !== 'undefined' ? activeFilterStream : '');
 
-    // Keep the truck marker aligned with the real GPS heading. Follow mode only
-    // recentres the map here; it does not apply CSS transforms to Leaflet panes.
-    // Built as inline SVG/CSS (no external image file) so the blue "you are
-    // here" dot and the direction arrow always render and always rotate,
-    // instead of silently disappearing if an image asset is missing.
-    const truckIcon = L.divIcon({
-      className: 'custom-gps-icon',
-      html: `
-        <div style="position:relative; width:34px; height:34px;">
-          <div style="position:absolute; top:50%; left:50%; width:34px; height:34px; margin:-17px 0 0 -17px; transform: rotate(${headingDeg}deg); transform-origin:center center;">
-            <svg width="34" height="34" viewBox="0 0 34 34" xmlns="http://www.w3.org/2000/svg" style="filter: drop-shadow(0 0 4px rgba(37,99,235,0.8));">
-              <path d="M17 1 L28 30 L17 23 L6 30 Z" fill="#2563eb" stroke="#ffffff" stroke-width="1.5" stroke-linejoin="round"/>
-            </svg>
-          </div>
-          <div style="position:absolute; top:50%; left:50%; width:14px; height:14px; margin:-7px 0 0 -7px; background:#2563eb; border:2.5px solid #ffffff; border-radius:50%; box-shadow:0 0 0 2px rgba(37,99,235,0.35), 0 1px 4px rgba(0,0,0,0.4);"></div>
-        </div>
-      `,
-      iconSize: [34, 34],
-      iconAnchor: [17, 17]
-    });
+    const normalizedNew = ((headingDeg % 360) + 360) % 360;
+    const normalizedCurrent = ((truckDisplayRotation % 360) + 360) % 360;
+    const shortestDelta = ((normalizedNew - normalizedCurrent + 540) % 360) - 180;
+    truckDisplayRotation += shortestDelta;
 
     if (!mapTruckMarker) {
+      // First fix only: build the icon. custom-gps-icon (position) and
+      // gps-truck-rotate (heading) both carry a CSS transition, so every
+      // later update below just changes an existing element's
+      // transform/attribute in place and glides there smoothly, rather
+      // than tearing down and rebuilding the whole icon on every GPS fix
+      // the way the old code did (which made the marker snap instantly).
+      const truckIcon = L.divIcon({
+        className: 'custom-gps-icon',
+        html: `
+          <div style="position:relative; width:34px; height:34px;">
+            <div id="gpsTruckRotate" class="gps-truck-rotate" style="position:absolute; top:50%; left:50%; width:34px; height:34px; margin:-17px 0 0 -17px; transform: rotate(${truckDisplayRotation}deg); transform-origin:center center;">
+              <svg id="gpsTruckSvg" width="34" height="34" viewBox="0 0 34 34" xmlns="http://www.w3.org/2000/svg" style="filter: drop-shadow(0 0 4px ${truckColor.glow});">
+                <rect x="4" y="13" width="3" height="7" rx="1" fill="#1e293b"/>
+                <rect x="27" y="13" width="3" height="7" rx="1" fill="#1e293b"/>
+                <path id="gpsTruckPath" d="M12 2 L22 2 L22 8 L27 8 L27 31 L7 31 L7 8 L12 8 Z" fill="${truckColor.fill}" stroke="#ffffff" stroke-width="1.5" stroke-linejoin="round"/>
+                <rect x="13" y="3" width="8" height="4" rx="1" fill="#ffffff" opacity="0.55"/>
+              </svg>
+            </div>
+          </div>
+        `,
+        iconSize: [34, 34],
+        iconAnchor: [17, 17]
+      });
       mapTruckMarker = L.marker(pos, { icon: truckIcon, zIndexOffset: 2000 }).addTo(leafletMap);
     } else {
+      // Later fixes: setLatLng glides the marker via the CSS transition on
+      // .custom-gps-icon, and the DOM below is mutated in place (not
+      // replaced) so the rotate transition and colour both animate too.
       mapTruckMarker.setLatLng(pos);
-      mapTruckMarker.setIcon(truckIcon);
+      const el = mapTruckMarker.getElement();
+      if (el) {
+        const rotateEl = el.querySelector('#gpsTruckRotate');
+        if (rotateEl) rotateEl.style.transform = `rotate(${truckDisplayRotation}deg)`;
+        const svgEl = el.querySelector('#gpsTruckSvg');
+        if (svgEl) svgEl.style.filter = `drop-shadow(0 0 4px ${truckColor.glow})`;
+        const pathEl = el.querySelector('#gpsTruckPath');
+        if (pathEl) pathEl.setAttribute('fill', truckColor.fill);
+      }
     }
 
     // Trail point recording happens in recordSnailTrailPoint() (called
