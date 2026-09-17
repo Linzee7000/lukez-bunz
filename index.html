@@ -17990,10 +17990,15 @@ window.addEventListener('DOMContentLoaded', async () => {
   // ---- Rendering ---------------------------------------------------
   function render() {
     const box = document.getElementById('welcomeBody');
-    if (!box) return;
-    if (wState === 'drive') box.innerHTML = driveHtml();
-    else if (wState === 'explore') box.innerHTML = exploreHtml();
-    else box.innerHTML = menuHtml();
+    if (box) {
+      if (wState === 'drive') box.innerHTML = driveHtml();
+      else if (wState === 'explore') box.innerHTML = exploreHtml();
+      else box.innerHTML = menuHtml();
+    }
+    // The pull-out drawer can also be showing one of these wizards (see
+    // lb-drawer-script) - keep it in sync with the same state rather
+    // than duplicating the picker logic over there.
+    if (typeof window.lbDrawerSyncWizard === 'function') window.lbDrawerSyncWizard();
   }
 
   function menuHtml() {
@@ -18281,16 +18286,35 @@ window.addEventListener('DOMContentLoaded', async () => {
   // have to be rebound each time.
   document.addEventListener('click', function(ev) {
     const screen = document.getElementById('welcomeScreen');
-    if (!screen || !screen.classList.contains('active')) return;
+    const drawer = document.getElementById('lbDrawer');
+    // The same wizard markup can be sitting inside the Welcome screen
+    // OR inside the pull-out drawer (see lb-drawer-script), so this
+    // listener has to watch both - only one of them is ever showing a
+    // wizard at a time, but which one decides what Back/GO should do.
+    const inWelcome = !!(screen && screen.classList.contains('active') && screen.contains(ev.target));
+    const inDrawer = !!(drawer && drawer.contains(ev.target));
+    if (!inWelcome && !inDrawer) return;
     const btn = ev.target.closest('button');
-    if (!btn || !screen.contains(btn)) return;
+    if (!btn) return;
+    if (inWelcome && !screen.contains(btn)) return;
+    if (inDrawer && !drawer.contains(btn)) return;
 
     const d = btn.dataset;
 
-    // The wizard used to back out to its own menu screen; that menu is
-    // retired (the pull-out drawer covers it now), so backing out of
-    // either wizard just leaves Welcome for the map instead.
-    if (d.act === 'back') { switchMainTab('map'); return; }
+    // Back means different things depending on where the wizard is
+    // being shown: inside the drawer it just steps back to the
+    // drawer's own menu (Start a job / Find / Screens) and stays open;
+    // on the full Welcome screen it leaves Welcome for the map, as
+    // before.
+    if (d.act === 'back') {
+      if (inDrawer) {
+        wState = 'menu';
+        if (typeof window.lbDrawerBackToMenu === 'function') window.lbDrawerBackToMenu();
+      } else {
+        switchMainTab('map');
+      }
+      return;
+    }
 
     if (d.act === 'drive') {
       wState = 'drive';
@@ -18307,8 +18331,18 @@ window.addEventListener('DOMContentLoaded', async () => {
     if (d.act === 'address') { goSearch('address'); return; }
     if (d.act === 'street')  { goSearch('street'); return; }
     if (d.act === 'nearby')  { goNearby(); return; }
-    if (d.act === 'drive-go')   { goDrive(); return; }
-    if (d.act === 'explore-go') { goExplore(); return; }
+    if (d.act === 'drive-go') {
+      goDrive();
+      // Hitting GO from the drawer starts the drive and should get the
+      // drawer out of the way of the map, same as tapping the scrim.
+      if (inDrawer && typeof window.lbDrawerClose === 'function') window.lbDrawerClose();
+      return;
+    }
+    if (d.act === 'explore-go') {
+      goExplore();
+      if (inDrawer && typeof window.lbDrawerClose === 'function') window.lbDrawerClose();
+      return;
+    }
 
     // Stream chip
     if (d.stream !== undefined) {
@@ -18360,9 +18394,18 @@ window.addEventListener('DOMContentLoaded', async () => {
     render();
   };
 
-  // Entry points for the pull-out drawer, which is now the only global
-  // navigation. Opening a wizard from there jumps straight to its step
-  // rather than making the driver land on the menu and tap again.
+  // Lets the pull-out drawer paint the same Drive / Check-out-a-run
+  // wizard inside its own panel, reading the same dStream/dDay/... state
+  // this IIFE already tracks, instead of duplicating the picker markup.
+  window.lbWizardHtml = function(step) {
+    if (step === 'drive') return driveHtml();
+    if (step === 'explore') return exploreHtml();
+    return '';
+  };
+
+  // Entry points for the pull-out drawer. Kept as a fallback for any
+  // caller that still wants the wizard on the full Welcome screen
+  // rather than inline in the drawer.
   window.lbOpenWelcomeStep = function(step) {
     if (step === 'drive') {
       wState = 'drive';
@@ -18777,6 +18820,13 @@ body.lb-on-welcome #lbDrawerTab { display: none; }
 
   let isOpen = false;
 
+  // Which panel the drawer body is currently showing. 'menu' is the
+  // usual Start a job / Find / Screens list; 'drive' and 'explore' mean
+  // the drawer is holding the Drive / Check-out-a-run wizard inline
+  // (see lbWizardHtml, exposed by the welcome-screen script) instead of
+  // sending the driver off to a separate full-screen step.
+  let drawerView = 'menu';
+
   function open() {
     isOpen = true;
     document.body.classList.add('lb-drawer-open');
@@ -18788,6 +18838,9 @@ body.lb-on-welcome #lbDrawerTab { display: none; }
   function close() {
     isOpen = false;
     document.body.classList.remove('lb-drawer-open');
+    // Always land back on the main menu next time the drawer opens,
+    // rather than reopening mid-wizard.
+    drawerView = 'menu';
     const p = PANEL();
     if (p) p.style.transform = '';
   }
@@ -18897,6 +18950,16 @@ body.lb-on-welcome #lbDrawerTab { display: none; }
   function renderBody() {
     const body = BODY();
     if (!body) return;
+
+    // Drive / Check-out-a-run: hand off to the welcome-screen script's
+    // wizard renderer so the picker lives here instead of on its own
+    // full-screen step. Its Back button returns here via
+    // lbDrawerBackToMenu(), and GO closes the drawer via lbDrawerClose().
+    if (drawerView === 'drive' || drawerView === 'explore') {
+      body.innerHTML = (typeof window.lbWizardHtml === 'function') ? window.lbWizardHtml(drawerView) : '';
+      return;
+    }
+
     const q = INPUT() ? INPUT().value : '';
     const res = search(q);
     body.innerHTML = (res === null) ? menuHtml() : resultsHtml(res, q);
@@ -18904,6 +18967,22 @@ body.lb-on-welcome #lbDrawerTab { display: none; }
     // "Screens") worth collapsing - a results list is one flat group.
     if (res === null) window.lbCollapseSections(body, '.lb-drawer-sect', 'lbSect:search');
   }
+
+  // Exposed for the wizard's own click listener (in the welcome-screen
+  // script) so its Back button can step the drawer out of the wizard
+  // without closing the whole panel.
+  window.lbDrawerBackToMenu = function() {
+    drawerView = 'menu';
+    renderBody();
+  };
+  window.lbDrawerClose = close;
+
+  // Lets the wizard's own listener repaint the drawer body immediately
+  // after it changes dStream/dDay/dRun/etc., the same way render()
+  // repaints #welcomeBody.
+  window.lbDrawerSyncWizard = function() {
+    if (drawerView === 'drive' || drawerView === 'explore') renderBody();
+  };
 
   // ---- Wiring ------------------------------------------------------
   document.addEventListener('click', function(ev) {
@@ -18936,16 +19015,23 @@ body.lb-on-welcome #lbDrawerTab { display: none; }
       return;
     }
 
-    close();
+    // Back and GO belong to the wizard itself (handled by the
+    // welcome-screen script's own click listener, which also watches
+    // clicks inside this drawer) - this listener only owns opening and
+    // closing the drawer's own panels, so it stays out of their way.
+    if (act === 'back' || act === 'drive-go' || act === 'explore-go') return;
 
-    // The two wizards live on the Welcome screen; the drawer just opens
-    // that screen straight onto the right step rather than duplicating
-    // the pickers here.
+    // Drive / Check out a run: show the wizard right here in the
+    // drawer, in place of the Start a job / Find / Screens list,
+    // instead of sending the driver off to a separate full-screen step.
     if (act === 'drive' || act === 'explore') {
-      if (typeof window.lbOpenWelcomeStep === 'function') window.lbOpenWelcomeStep(act);
-      else switchMainTab('welcome');
+      drawerView = act;
+      renderBody();
       return;
     }
+
+    close();
+
     if (act === 'bin' || act === 'address' || act === 'street') {
       // Reopen the drawer with the box focused - these three are searches,
       // and the results belong here on top of the map.
