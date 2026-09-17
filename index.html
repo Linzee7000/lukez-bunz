@@ -966,7 +966,11 @@ body:not(.dark-mode) .welcome-go-wrap {
     }
 
     /* Drive page street-list sort toggle (Nearby / A-Z) - a simple
-       two-button segmented control sitting just above the street list. */
+       two-button segmented control sitting just above the street list.
+       Restyled to the same dark, black-chrome chip look used everywhere
+       else in the app (see .map-context-btn) - this used to be a plain
+       white/light control, which stood out against the dark street-card
+       list right below it and the rest of the app's UI. */
     .drive-sort-toggle {
       display: flex;
       gap: 8px;
@@ -981,9 +985,9 @@ body:not(.dark-mode) .welcome-go-wrap {
       padding: 8px 10px;
       font-size: 13px;
       font-weight: 700;
-      color: var(--slate-600);
-      background: var(--white);
-      border: 1px solid var(--slate-200);
+      color: #fff;
+      background: #0d0d0d;
+      border: 1px solid rgba(255,255,255,0.16);
       border-radius: 8px;
       cursor: pointer;
     }
@@ -991,15 +995,12 @@ body:not(.dark-mode) .welcome-go-wrap {
       width: 14px;
       height: 14px;
       margin-right: 0;
-      filter: none;
+      filter: brightness(0) invert(1);
     }
     .drive-sort-btn.active {
       color: #fff;
-      background: var(--brand);
+      background: var(--brand-dark);
       border-color: var(--brand-dark);
-    }
-    .drive-sort-btn.active .icon-img {
-      filter: brightness(0) invert(1);
     }
 
     .street-group-card {
@@ -1740,24 +1741,6 @@ body:not(.dark-mode) .welcome-go-wrap {
       box-shadow: 0 0 10px rgba(37,99,235,0.9);
       position: absolute;
       top: 9px;
-    }
-
-    /* Smooth movement for the live "you are here" truck marker (see
-       updateMapTruckPosition): the marker's own position is animated by
-       Leaflet's leaflet-div-icon element, and the heading turn is animated
-       by the inner rotate wrapper - both transition instead of snapping
-       to each new GPS fix. */
-    .leaflet-div-icon.custom-gps-icon {
-      transition: transform 0.4s linear;
-      /* Leaflet's own leaflet.css puts a white background + grey border on
-         every .leaflet-div-icon by default (meant for icons that are just
-         plain image/text labels) - override it here or that box shows up
-         behind/around the truck SVG, especially now that it's bigger. */
-      background: transparent;
-      border: none;
-    }
-    .gps-truck-rotate {
-      transition: transform 0.4s ease-out;
     }
 
     /* Map Flag Icons */
@@ -6679,120 +6662,37 @@ body:not(.dark-mode) .welcome-go-wrap {
     }
   }
 
-  // Fill + glow colour for the "you are here" GPS truck marker's hopper
-  // body, keyed off activeFilterStream. Mirrors the same stream->colour
-  // mapping used for .stream-gar/.stream-rec/etc elsewhere (getStreamFillColor
-  // covers the kerbside streams only; this also covers the two Street
-  // Litter streams and falls back to the original blue when no stream is
-  // selected). The cab stays white/light-grey regardless of stream, same
-  // as the real trucks.
-  function getGpsTruckColor(streamKey) {
-    if (streamKey === 'Garbage') return { fill: '#dc2626', glow: 'rgba(220,38,38,0.8)' };
-    if (streamKey === 'Recycling') return { fill: '#facc15', glow: 'rgba(250,204,21,0.8)' };
-    if (streamKey === 'SummerRecycling') return { fill: '#f59e0b', glow: 'rgba(245,158,11,0.8)' };
-    if (streamKey === 'FOGO') return { fill: '#16a34a', glow: 'rgba(22,163,74,0.8)' };
-    if (streamKey === 'StreetGarbage') return { fill: '#2563eb', glow: 'rgba(37,99,235,0.8)' };
-    if (streamKey === 'StreetRecycling') return { fill: '#38bdf8', glow: 'rgba(56,189,248,0.8)' };
-    return { fill: '#2563eb', glow: 'rgba(37,99,235,0.8)' }; // no stream selected - original blue
-  }
-
-  // Darkens a hex colour toward black by `amt` (0-1). Paired with the
-  // existing lightenHex() to build the light-to-dark gradient that gives
-  // the GPS truck marker's hopper body a rounded, domed look instead of a
-  // flat fill.
-  function darkenHex(hex, amt) {
-    const m = /^#?([0-9a-f]{6})$/i.exec(String(hex || '').trim());
-    if (!m) return '#000000';
-    const n = parseInt(m[1], 16);
-    const r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
-    const drop = c => Math.round(c * (1 - amt));
-    return '#' + [drop(r), drop(g), drop(b)].map(c => c.toString(16).padStart(2, '0')).join('');
-  }
-
-  // Accumulated (unbounded) rotation actually applied to the truck icon.
-  // Kept separate from lastValidHeading so a heading change from e.g. 350deg
-  // to 10deg always turns the short way (+20deg) instead of the CSS
-  // transition spinning it almost all the way round backwards through 0.
-  let truckDisplayRotation = 0;
-
   function updateMapTruckPosition() {
     if (!leafletMap || !userCurrentLocation) return;
     const pos = [userCurrentLocation.lat, userCurrentLocation.lng];
     const headingDeg = lastValidHeading || 0;
-    const truckColor = getGpsTruckColor(typeof activeFilterStream !== 'undefined' ? activeFilterStream : '');
-    const bodyLight = lightenHex(truckColor.fill, 0.35);
-    const bodyDark = darkenHex(truckColor.fill, 0.30);
 
-    const normalizedNew = ((headingDeg % 360) + 360) % 360;
-    const normalizedCurrent = ((truckDisplayRotation % 360) + 360) % 360;
-    const shortestDelta = ((normalizedNew - normalizedCurrent + 540) % 360) - 180;
-    truckDisplayRotation += shortestDelta;
+    // Keep the truck marker aligned with the real GPS heading. Follow mode only
+    // recentres the map here; it does not apply CSS transforms to Leaflet panes.
+    // Built as inline SVG/CSS (no external image file) so the blue "you are
+    // here" dot and the direction arrow always render and always rotate,
+    // instead of silently disappearing if an image asset is missing.
+    const truckIcon = L.divIcon({
+      className: 'custom-gps-icon',
+      html: `
+        <div style="position:relative; width:34px; height:34px;">
+          <div style="position:absolute; top:50%; left:50%; width:34px; height:34px; margin:-17px 0 0 -17px; transform: rotate(${headingDeg}deg); transform-origin:center center;">
+            <svg width="34" height="34" viewBox="0 0 34 34" xmlns="http://www.w3.org/2000/svg" style="filter: drop-shadow(0 0 4px rgba(37,99,235,0.8));">
+              <path d="M17 1 L28 30 L17 23 L6 30 Z" fill="#2563eb" stroke="#ffffff" stroke-width="1.5" stroke-linejoin="round"/>
+            </svg>
+          </div>
+          <div style="position:absolute; top:50%; left:50%; width:14px; height:14px; margin:-7px 0 0 -7px; background:#2563eb; border:2.5px solid #ffffff; border-radius:50%; box-shadow:0 0 0 2px rgba(37,99,235,0.35), 0 1px 4px rgba(0,0,0,0.4);"></div>
+        </div>
+      `,
+      iconSize: [34, 34],
+      iconAnchor: [17, 17]
+    });
 
     if (!mapTruckMarker) {
-      // First fix only: build the icon. custom-gps-icon (position) and
-      // gps-truck-rotate (heading) both carry a CSS transition, so every
-      // later update below just changes an existing element's
-      // transform/attribute in place and glides there smoothly, rather
-      // than tearing down and rebuilding the whole icon on every GPS fix
-      // the way the old code did (which made the marker snap instantly).
-      //
-      // Modelled top-down on the actual Solo Resource Recovery trucks:
-      // white cab with a tinted windscreen, a roof-mounted amber beacon,
-      // side mirrors, and a gradient-shaded hopper body (light-to-dark
-      // diagonal, echoing the domed/ridged compactor lid) that recolours
-      // per stream instead of carrying the real mural/livery, which is
-      // too fine a level of detail to read at this size anyway.
-      const truckIcon = L.divIcon({
-        className: 'custom-gps-icon',
-        html: `
-          <div style="position:relative; width:52px; height:52px;">
-            <div id="gpsTruckRotate" class="gps-truck-rotate" style="position:absolute; top:50%; left:50%; width:52px; height:52px; margin:-26px 0 0 -26px; transform: rotate(${truckDisplayRotation}deg); transform-origin:center center;">
-              <svg id="gpsTruckSvg" width="52" height="52" viewBox="0 0 34 34" xmlns="http://www.w3.org/2000/svg" style="filter: drop-shadow(0 0 4px ${truckColor.glow});">
-                <defs>
-                  <linearGradient id="gpsTruckBodyGrad" x1="0" y1="0" x2="1" y2="1">
-                    <stop id="gpsTruckStopLight" offset="0%" stop-color="${bodyLight}"/>
-                    <stop id="gpsTruckStopDark" offset="100%" stop-color="${bodyDark}"/>
-                  </linearGradient>
-                </defs>
-                <rect x="3.5" y="14" width="3" height="9" rx="1" fill="#1e293b"/>
-                <rect x="27.5" y="14" width="3" height="9" rx="1" fill="#1e293b"/>
-                <rect x="7" y="9" width="20" height="22" rx="2.5" fill="url(#gpsTruckBodyGrad)" stroke="#ffffff" stroke-width="1.2"/>
-                <line x1="17" y1="11" x2="17" y2="29" stroke="#ffffff" stroke-width="1" opacity="0.35"/>
-                <rect x="8" y="29.5" width="2.5" height="1.5" rx="0.5" fill="#dc2626"/>
-                <rect x="23.5" y="29.5" width="2.5" height="1.5" rx="0.5" fill="#dc2626"/>
-                <rect x="4" y="9" width="2.5" height="3" rx="0.8" fill="#1e293b"/>
-                <rect x="27.5" y="9" width="2.5" height="3" rx="0.8" fill="#1e293b"/>
-                <path d="M11 2 L23 2 L25 9 L9 9 Z" fill="#e5e7eb" stroke="#94a3b8" stroke-width="0.75" stroke-linejoin="round"/>
-                <rect x="13" y="3.4" width="8" height="3" rx="0.6" fill="#1e293b" opacity="0.6"/>
-                <circle cx="17" cy="2.3" r="1.3" fill="#f59e0b"/>
-              </svg>
-            </div>
-          </div>
-        `,
-        iconSize: [52, 52],
-        iconAnchor: [26, 26]
-      });
       mapTruckMarker = L.marker(pos, { icon: truckIcon, zIndexOffset: 2000 }).addTo(leafletMap);
     } else {
-      // Later fixes: setLatLng glides the marker via the CSS transition on
-      // .custom-gps-icon, and the DOM below is mutated in place (not
-      // replaced) so the rotate transition and colour both animate too.
       mapTruckMarker.setLatLng(pos);
-      const el = mapTruckMarker.getElement();
-      if (el) {
-        const rotateEl = el.querySelector('#gpsTruckRotate');
-        if (rotateEl) rotateEl.style.transform = `rotate(${truckDisplayRotation}deg)`;
-        const svgEl = el.querySelector('#gpsTruckSvg');
-        if (svgEl) svgEl.style.filter = `drop-shadow(0 0 4px ${truckColor.glow})`;
-        // The hopper body's fill is a gradient reference (url(#gpsTruckBodyGrad))
-        // that never itself changes - only its two stops' colours do, which
-        // is enough to recolour the whole body while keeping the light-to-
-        // dark domed shading intact.
-        const stopLightEl = el.querySelector('#gpsTruckStopLight');
-        if (stopLightEl) stopLightEl.setAttribute('stop-color', bodyLight);
-        const stopDarkEl = el.querySelector('#gpsTruckStopDark');
-        if (stopDarkEl) stopDarkEl.setAttribute('stop-color', bodyDark);
-      }
+      mapTruckMarker.setIcon(truckIcon);
     }
 
     // Trail point recording happens in recordSnailTrailPoint() (called
@@ -13028,12 +12928,6 @@ window.addEventListener('DOMContentLoaded', async () => {
   // the North-Up button (which resets it back to 0). See
   // applyMapHeadingRotation() and setupManualMapRotationGesture() below.
   let manualMapRotationDeg = 0;
-  // 3D tilt for the map view (rotateX applied to #mainLeafletMap, stacked
-  // with the existing heading rotation above). 0 = flat top-down, as
-  // before; cycles through MAP_3D_TILT_LEVELS via the "3D" side button.
-  // See applyMapHeadingRotation() for how it's combined with rotation.
-  let map3DTiltDeg = 0;
-  const MAP_3D_TILT_LEVELS = [0, 30, 55];
   let houseStreetModes = JSON.parse(localStorage.getItem('lukezBunzHouseStreetModes') || '{}');
 
   const q = id => document.getElementById(id);
@@ -14356,7 +14250,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     mapRotationDeg += shortestDelta;
     const heading = -mapRotationDeg; // effective heading used below for the counter-rotated overlay controls
 
-    if (isTrackUpEnabled || manualMapRotationDeg !== 0 || map3DTiltDeg !== 0) {
+    if (isTrackUpEnabled || manualMapRotationDeg !== 0) {
       // A uniform enlargement must cover the container's full diagonal at
       // any rotation angle, not just a fixed guess - otherwise tall/narrow
       // phone screens show grey corners near 45°/135° rotation angles.
@@ -14368,11 +14262,6 @@ window.addEventListener('DOMContentLoaded', async () => {
         const diagonal = Math.sqrt(w * w + h * h);
         scale = Math.max(1.5, (diagonal / Math.min(w, h)) + 0.1);
       }
-      // Tilting (rotateX below) foreshortens the far edge of the map, which
-      // needs extra overscan on top of the rotation-only figure above or
-      // grey space can show through near the top of the screen at higher
-      // tilt angles.
-      if (map3DTiltDeg > 0) scale += map3DTiltDeg / 90;
 
       // Cover that extra ground by physically enlarging the map element
       // itself (real width/height, centred on the same point) rather than
@@ -14393,14 +14282,7 @@ window.addEventListener('DOMContentLoaded', async () => {
         mapEl.style.setProperty('--tu-map-left', (-offsetX) + 'px');
         mapEl.style.setProperty('--tu-map-w', bigW + 'px');
         mapEl.style.setProperty('--tu-map-h', bigH + 'px');
-        // perspective() as the first function in the list gives this
-        // element its own 3D viewing space, so rotateX tilts it away from
-        // the viewer like a tabletop map being tilted up, pivoting around
-        // its centre (transform-origin: 50% 50% is set in CSS) rather than
-        // the bottom edge - a driving "look-ahead" nav view would instead
-        // pivot at the bottom, but that shifts the GPS position away from
-        // screen-centre, which the rest of this app assumes stays fixed.
-        mapEl.style.transform = `perspective(1400px) rotateX(${map3DTiltDeg}deg) rotate(${-heading}deg)`;
+        mapEl.style.transform = `rotate(${-heading}deg)`;
         if (leafletMap) leafletMap.invalidateSize({ pan: false, animate: false });
 
         // Leaflet's own zoom/attribution controls live inside #mainLeafletMap
@@ -14410,20 +14292,9 @@ window.addEventListener('DOMContentLoaded', async () => {
         // the enlargement offset (in the rotated element's own coordinate
         // space) cancels the resize-and-rotate out completely, so they land
         // back at their normal on-screen spot, upright, regardless of heading.
-        // That counter-transform only undoes the flat rotate(); working out
-        // the matching counter-tilt for rotateX too isn't worth it for what's
-        // just the small attribution text, so it's hidden instead while tilted.
         if (controlContainer) {
-          if (map3DTiltDeg > 0) {
-            controlContainer.style.transform = 'none';
-            controlContainer.style.opacity = '0';
-            controlContainer.style.pointerEvents = 'none';
-          } else {
-            controlContainer.style.transform = `rotate(${heading}deg) translate(${-offsetX}px, ${offsetY}px)`;
-            controlContainer.style.transformOrigin = '50% 50%';
-            controlContainer.style.opacity = '';
-            controlContainer.style.pointerEvents = '';
-          }
+          controlContainer.style.transform = `rotate(${heading}deg) translate(${-offsetX}px, ${offsetY}px)`;
+          controlContainer.style.transformOrigin = '50% 50%';
         }
       }
       if (arrowBtnSvg) {
@@ -14441,44 +14312,8 @@ window.addEventListener('DOMContentLoaded', async () => {
       if (controlContainer) {
         controlContainer.style.transform = 'none';
         controlContainer.style.transformOrigin = '';
-        controlContainer.style.opacity = '';
-        controlContainer.style.pointerEvents = '';
       }
     }
-  }
-
-  // Steps through MAP_3D_TILT_LEVELS (0 -> 30 -> 55 -> back to 0) each tap
-  // of the "3D" side button.
-  function cycleMap3DTilt() {
-    const idx = MAP_3D_TILT_LEVELS.indexOf(map3DTiltDeg);
-    const nextIdx = (idx === -1 ? 0 : idx + 1) % MAP_3D_TILT_LEVELS.length;
-    map3DTiltDeg = MAP_3D_TILT_LEVELS[nextIdx];
-    applyMapHeadingRotation();
-    updateMap3DControlsUI();
-  }
-
-  function updateMap3DControlsUI() {
-    const btn = document.getElementById('btnMap3DTilt');
-    if (btn) {
-      btn.classList.toggle('active', map3DTiltDeg > 0);
-      btn.textContent = map3DTiltDeg > 0 ? (map3DTiltDeg + '°') : '3D';
-    }
-  }
-
-  // Manual turn controls. Only meaningful while Track-Up isn't already
-  // driving rotation off the GPS heading, so a tap here hands control back
-  // to the driver the same way twisting two fingers on the map already
-  // does (see setupManualMapRotationGesture) - just as a discrete button
-  // instead of a gesture.
-  function rotateMapLeft() {
-    if (isTrackUpEnabled) disableTrackUpOrientation();
-    manualMapRotationDeg = ((manualMapRotationDeg - 15) % 360 + 360) % 360;
-    applyMapHeadingRotation();
-  }
-  function rotateMapRight() {
-    if (isTrackUpEnabled) disableTrackUpOrientation();
-    manualMapRotationDeg = ((manualMapRotationDeg + 15) % 360 + 360) % 360;
-    applyMapHeadingRotation();
   }
 
   // Multi-Handle Boundary Editing with Edge-Splitting Handles
@@ -14958,13 +14793,6 @@ window.addEventListener('DOMContentLoaded', async () => {
         <button type="button" id="btnTrackUpOrientation" class="map-side-track-toggle ${isTrackUpEnabled ? 'active' : ''}" onclick="toggleTrackUpOrientation(event)" title="Track-Up / Heading Arrow">
           <img class="icon-img" id="trackUpCompassIcon" src="compass.png" alt="" style="width:20px; height:20px; margin:0; display:block;">
         </button>
-
-        <!-- 3D Tilt (cycles flat -> 30° -> 55° -> flat) -->
-        <button type="button" id="btnMap3DTilt" class="map-side-track-toggle ${map3DTiltDeg > 0 ? 'active' : ''}" onclick="cycleMap3DTilt()" title="3D Tilt View (tap to cycle)">${map3DTiltDeg > 0 ? (map3DTiltDeg + '°') : '3D'}</button>
-
-        <!-- Manual turn controls -->
-        <button type="button" onclick="rotateMapLeft()" title="Rotate Map Left">↺</button>
-        <button type="button" onclick="rotateMapRight()" title="Rotate Map Right">↻</button>
       `;
 
       if (typeof updateMapSideLayersUI === 'function') {
@@ -18747,6 +18575,33 @@ body.lb-drawer-open #lbDrawer { transform: translateX(0); }
   text-transform: uppercase;
   padding: 8px 2px 2px;
 }
+/* Collapsible sections - shared by the Search/Layers/Settings side
+   panels (see lbCollapseSections). Each titled section becomes a
+   <details>/<summary> pair wrapping its own rows, so a long panel scans
+   as a list of headings instead of a wall of buttons; tapping a title
+   expands just that section. The section title keeps whatever class it
+   already had (.lb-drawer-sect / .lb-layers-sect) so it looks identical
+   to before, just clickable. */
+.lb-sect-details { display: flex; flex-direction: column; }
+#lbDrawerBody .lb-sect-details { gap: 8px; }
+.lb-layers-body .lb-sect-details { gap: 5px; }
+.lb-sect-details > summary {
+  list-style: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  -webkit-tap-highlight-color: transparent;
+}
+.lb-sect-details > summary::-webkit-details-marker { display: none; }
+.lb-sect-details > summary::after {
+  content: '\25B8';
+  font-size: 10px;
+  opacity: .85;
+  flex-shrink: 0;
+}
+.lb-sect-details[open] > summary::after { content: '\25BE'; }
 .lb-drawer-item {
   display: flex;
   align-items: center;
@@ -18869,6 +18724,52 @@ body.lb-on-welcome #lbDrawerTab { display: none; }
     .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
     .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 
+  // ---- Shared collapsible-section helper ----------------------------
+  // Used by the Search drawer, the Layers panel and the Settings panel:
+  // walks a freshly-rendered container's direct children and wraps every
+  // section-header element (matched by sectSelector, e.g. ".lb-layers-sect")
+  // together with the rows that follow it (up to the next header, or the
+  // end of the container) into a <details>/<summary> pair. Content before
+  // the first header is left exactly as it was, so a panel that starts
+  // with a few "always visible" toggles above its first titled section
+  // keeps them visible. Each section remembers whether it was left open
+  // or closed (per storageKeyPrefix + title) so re-opening the panel
+  // doesn't re-collapse a section the person just expanded.
+  window.lbCollapseSections = function(container, sectSelector, storageKeyPrefix) {
+    if (!container) return;
+    const kids = Array.from(container.children);
+    const groups = [];
+    let current = null;
+    kids.forEach(el => {
+      if (el.matches && el.matches(sectSelector)) {
+        current = { header: el, items: [] };
+        groups.push(current);
+      } else if (current) {
+        current.items.push(el);
+      }
+      // Anything before the first header is left where it is.
+    });
+    groups.forEach((g, idx) => {
+      const title = (g.header.textContent || '').trim();
+      const key = storageKeyPrefix + '::' + title;
+      let stored = null;
+      try { stored = localStorage.getItem(key); } catch (e) {}
+      const open = stored === null ? (idx === 0) : stored === '1';
+      const details = document.createElement('details');
+      details.className = 'lb-sect-details';
+      if (open) details.setAttribute('open', '');
+      const summary = document.createElement('summary');
+      summary.className = g.header.className;
+      summary.textContent = title;
+      details.appendChild(summary);
+      g.header.replaceWith(details);
+      g.items.forEach(it => details.appendChild(it));
+      details.addEventListener('toggle', () => {
+        try { localStorage.setItem(key, details.open ? '1' : '0'); } catch (e) {}
+      });
+    });
+  };
+
   let isOpen = false;
 
   function open() {
@@ -18928,7 +18829,16 @@ body.lb-on-welcome #lbDrawerTab { display: none; }
   }
 
   function resultsHtml(list, q) {
-    if (!list.length) return `<div class="lb-drawer-empty">Nothing found for "${esc(q)}".</div>`;
+    // Always keep a way back to the Screens menu (Map / Drive / Search)
+    // visible above the results - previously the results view replaced
+    // the whole menu, so a search left in the box could stand between a
+    // driver and the "Map" link with no obvious way out except noticing
+    // they had to clear the text box themselves.
+    const backRow = `<button type="button" class="lb-drawer-item" data-act="clear-search">
+        <span class="lb-ico">&#9664;</span>
+        <span class="lb-label">Back to menu</span>
+      </button>`;
+    if (!list.length) return backRow + `<div class="lb-drawer-empty">Nothing found for "${esc(q)}".</div>`;
     const rows = list.slice(0, 25).map(r => {
       const s = r.site;
       const id = esc(String(s.propId || s.siteId || ''));
@@ -18939,7 +18849,7 @@ body.lb-on-welcome #lbDrawerTab { display: none; }
       </button>`;
     }).join('');
     const more = list.length > 25 ? `<div class="lb-drawer-empty">Showing 25 of ${list.length}. Keep typing to narrow it down.</div>` : '';
-    return `<div class="lb-drawer-sect">${list.length} result${list.length===1?'':'s'}</div>
+    return backRow + `<div class="lb-drawer-sect">${list.length} result${list.length===1?'':'s'}</div>
             <div class="lb-drawer-results">${rows}</div>${more}`;
   }
 
@@ -18986,6 +18896,9 @@ body.lb-on-welcome #lbDrawerTab { display: none; }
     const q = INPUT() ? INPUT().value : '';
     const res = search(q);
     body.innerHTML = (res === null) ? menuHtml() : resultsHtml(res, q);
+    // Only the menu view has titled sections ("Start a job" / "Find" /
+    // "Screens") worth collapsing - a results list is one flat group.
+    if (res === null) window.lbCollapseSections(body, '.lb-drawer-sect', 'lbSect:search');
   }
 
   // ---- Wiring ------------------------------------------------------
@@ -19006,6 +18919,19 @@ body.lb-on-welcome #lbDrawerTab { display: none; }
     }
 
     const act = btn.dataset.act;
+
+    // Clearing the inline search box (see resultsHtml) has to happen
+    // without closing the drawer, and before the "close() on every tap"
+    // below - otherwise there's no way back to the Screens/Map menu once
+    // a search has results: the results view doesn't repeat that menu,
+    // so a leftover query used to strand the driver on the results list.
+    if (act === 'clear-search') {
+      const inp = INPUT();
+      if (inp) inp.value = '';
+      renderBody();
+      return;
+    }
+
     close();
 
     // The two wizards live on the Welcome screen; the drawer just opens
@@ -20100,6 +20026,9 @@ body.stream-slr .lb-layers-head .icon-img { filter: brightness(0); }
     });
 
     body.innerHTML = timerHtml() + pieces.join('');
+    if (typeof window.lbCollapseSections === 'function') {
+      window.lbCollapseSections(body, '.lb-layers-sect', 'lbSect:layers');
+    }
   }
 
   function openLayers() {
@@ -20674,6 +20603,9 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
       btns.forEach(b => { html += rowHtml(b, sources.length); sources.push(b); });
     });
     body.innerHTML = html || `<div class="lb-drawer-empty">No map settings available yet.</div>`;
+    if (typeof window.lbCollapseSections === 'function') {
+      window.lbCollapseSections(body, '.lb-layers-sect', 'lbSect:settings');
+    }
   }
 
   function openSettings() {
