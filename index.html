@@ -6673,11 +6673,13 @@ body:not(.dark-mode) .welcome-go-wrap {
     }
   }
 
-  // Fill + glow colour for the "you are here" GPS truck marker, keyed off
-  // activeFilterStream. Mirrors the same stream->colour mapping used for
-  // .stream-gar/.stream-rec/etc elsewhere (getStreamFillColor covers the
-  // kerbside streams only; this also covers the two Street Litter streams
-  // and falls back to the original blue when no stream is selected).
+  // Fill + glow colour for the "you are here" GPS truck marker's hopper
+  // body, keyed off activeFilterStream. Mirrors the same stream->colour
+  // mapping used for .stream-gar/.stream-rec/etc elsewhere (getStreamFillColor
+  // covers the kerbside streams only; this also covers the two Street
+  // Litter streams and falls back to the original blue when no stream is
+  // selected). The cab stays white/light-grey regardless of stream, same
+  // as the real trucks.
   function getGpsTruckColor(streamKey) {
     if (streamKey === 'Garbage') return { fill: '#dc2626', glow: 'rgba(220,38,38,0.8)' };
     if (streamKey === 'Recycling') return { fill: '#facc15', glow: 'rgba(250,204,21,0.8)' };
@@ -6686,6 +6688,19 @@ body:not(.dark-mode) .welcome-go-wrap {
     if (streamKey === 'StreetGarbage') return { fill: '#2563eb', glow: 'rgba(37,99,235,0.8)' };
     if (streamKey === 'StreetRecycling') return { fill: '#38bdf8', glow: 'rgba(56,189,248,0.8)' };
     return { fill: '#2563eb', glow: 'rgba(37,99,235,0.8)' }; // no stream selected - original blue
+  }
+
+  // Darkens a hex colour toward black by `amt` (0-1). Paired with the
+  // existing lightenHex() to build the light-to-dark gradient that gives
+  // the GPS truck marker's hopper body a rounded, domed look instead of a
+  // flat fill.
+  function darkenHex(hex, amt) {
+    const m = /^#?([0-9a-f]{6})$/i.exec(String(hex || '').trim());
+    if (!m) return '#000000';
+    const n = parseInt(m[1], 16);
+    const r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
+    const drop = c => Math.round(c * (1 - amt));
+    return '#' + [drop(r), drop(g), drop(b)].map(c => c.toString(16).padStart(2, '0')).join('');
   }
 
   // Accumulated (unbounded) rotation actually applied to the truck icon.
@@ -6699,6 +6714,8 @@ body:not(.dark-mode) .welcome-go-wrap {
     const pos = [userCurrentLocation.lat, userCurrentLocation.lng];
     const headingDeg = lastValidHeading || 0;
     const truckColor = getGpsTruckColor(typeof activeFilterStream !== 'undefined' ? activeFilterStream : '');
+    const bodyLight = lightenHex(truckColor.fill, 0.35);
+    const bodyDark = darkenHex(truckColor.fill, 0.30);
 
     const normalizedNew = ((headingDeg % 360) + 360) % 360;
     const normalizedCurrent = ((truckDisplayRotation % 360) + 360) % 360;
@@ -6712,16 +6729,36 @@ body:not(.dark-mode) .welcome-go-wrap {
       // transform/attribute in place and glides there smoothly, rather
       // than tearing down and rebuilding the whole icon on every GPS fix
       // the way the old code did (which made the marker snap instantly).
+      //
+      // Modelled top-down on the actual Solo Resource Recovery trucks:
+      // white cab with a tinted windscreen, a roof-mounted amber beacon,
+      // side mirrors, and a gradient-shaded hopper body (light-to-dark
+      // diagonal, echoing the domed/ridged compactor lid) that recolours
+      // per stream instead of carrying the real mural/livery, which is
+      // too fine a level of detail to read at 34px anyway.
       const truckIcon = L.divIcon({
         className: 'custom-gps-icon',
         html: `
           <div style="position:relative; width:34px; height:34px;">
             <div id="gpsTruckRotate" class="gps-truck-rotate" style="position:absolute; top:50%; left:50%; width:34px; height:34px; margin:-17px 0 0 -17px; transform: rotate(${truckDisplayRotation}deg); transform-origin:center center;">
               <svg id="gpsTruckSvg" width="34" height="34" viewBox="0 0 34 34" xmlns="http://www.w3.org/2000/svg" style="filter: drop-shadow(0 0 4px ${truckColor.glow});">
-                <rect x="4" y="13" width="3" height="7" rx="1" fill="#1e293b"/>
-                <rect x="27" y="13" width="3" height="7" rx="1" fill="#1e293b"/>
-                <path id="gpsTruckPath" d="M12 2 L22 2 L22 8 L27 8 L27 31 L7 31 L7 8 L12 8 Z" fill="${truckColor.fill}" stroke="#ffffff" stroke-width="1.5" stroke-linejoin="round"/>
-                <rect x="13" y="3" width="8" height="4" rx="1" fill="#ffffff" opacity="0.55"/>
+                <defs>
+                  <linearGradient id="gpsTruckBodyGrad" x1="0" y1="0" x2="1" y2="1">
+                    <stop id="gpsTruckStopLight" offset="0%" stop-color="${bodyLight}"/>
+                    <stop id="gpsTruckStopDark" offset="100%" stop-color="${bodyDark}"/>
+                  </linearGradient>
+                </defs>
+                <rect x="3.5" y="14" width="3" height="9" rx="1" fill="#1e293b"/>
+                <rect x="27.5" y="14" width="3" height="9" rx="1" fill="#1e293b"/>
+                <rect x="7" y="9" width="20" height="22" rx="2.5" fill="url(#gpsTruckBodyGrad)" stroke="#ffffff" stroke-width="1.2"/>
+                <line x1="17" y1="11" x2="17" y2="29" stroke="#ffffff" stroke-width="1" opacity="0.35"/>
+                <rect x="8" y="29.5" width="2.5" height="1.5" rx="0.5" fill="#dc2626"/>
+                <rect x="23.5" y="29.5" width="2.5" height="1.5" rx="0.5" fill="#dc2626"/>
+                <rect x="4" y="9" width="2.5" height="3" rx="0.8" fill="#1e293b"/>
+                <rect x="27.5" y="9" width="2.5" height="3" rx="0.8" fill="#1e293b"/>
+                <path d="M11 2 L23 2 L25 9 L9 9 Z" fill="#e5e7eb" stroke="#94a3b8" stroke-width="0.75" stroke-linejoin="round"/>
+                <rect x="13" y="3.4" width="8" height="3" rx="0.6" fill="#1e293b" opacity="0.6"/>
+                <circle cx="17" cy="2.3" r="1.3" fill="#f59e0b"/>
               </svg>
             </div>
           </div>
@@ -6741,8 +6778,14 @@ body:not(.dark-mode) .welcome-go-wrap {
         if (rotateEl) rotateEl.style.transform = `rotate(${truckDisplayRotation}deg)`;
         const svgEl = el.querySelector('#gpsTruckSvg');
         if (svgEl) svgEl.style.filter = `drop-shadow(0 0 4px ${truckColor.glow})`;
-        const pathEl = el.querySelector('#gpsTruckPath');
-        if (pathEl) pathEl.setAttribute('fill', truckColor.fill);
+        // The hopper body's fill is a gradient reference (url(#gpsTruckBodyGrad))
+        // that never itself changes - only its two stops' colours do, which
+        // is enough to recolour the whole body while keeping the light-to-
+        // dark domed shading intact.
+        const stopLightEl = el.querySelector('#gpsTruckStopLight');
+        if (stopLightEl) stopLightEl.setAttribute('stop-color', bodyLight);
+        const stopDarkEl = el.querySelector('#gpsTruckStopDark');
+        if (stopDarkEl) stopDarkEl.setAttribute('stop-color', bodyDark);
       }
     }
 
