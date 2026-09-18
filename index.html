@@ -5138,6 +5138,13 @@ body:not(.dark-mode) .welcome-go-wrap {
   let showRecyclingRunSquares = false;
   let showFogoRunSquares = false;
   let showRunBoundaries = true;
+  // Optional second boundary overlay (Map Settings > Layers > Property
+  // boundaries): draws every house allocated to a run, with none of the
+  // bin-distance filtering the normal boundary applies - i.e. the whole
+  // property regardless of whether its bin looks right. Off by default;
+  // drawn in green alongside the normal boundary when on. See
+  // sitesForBoundaryHull and renderMapData for where the two differ.
+  let showPropertyBoundaries = false;
 
   let isTruckFollowEnabled = true;
   let isNextBinBoxVisible = localStorage.getItem('lukezBunzNextBinBoxVisible') !== 'false';
@@ -6146,6 +6153,12 @@ body:not(.dark-mode) .welcome-go-wrap {
 
   function toggleRunBoundaries() {
     showRunBoundaries = !showRunBoundaries;
+    renderMapData();
+    updateMapSideLayersUI();
+  }
+
+  function togglePropertyBoundaries() {
+    showPropertyBoundaries = !showPropertyBoundaries;
     renderMapData();
     updateMapSideLayersUI();
   }
@@ -7225,34 +7238,10 @@ body:not(.dark-mode) .welcome-go-wrap {
         // Auto-generated boundaries (i.e. not a manually-edited custom
         // border - those are handled entirely by useCustomBorder above)
         // should only be shaped by houses actually allocated to this run
-        // AND whose own bin sits within 20m of the house. A bin recorded
-        // much further away than that is usually a data issue (wrong GPS
-        // pin, bin logged on the wrong side of the road, etc.) rather than
-        // a genuine edge of the run, so including it would drag the hull
-        // outward. Collection-point houses are the one deliberate
-        // exception - their bin is meant to sit away from the house, so
-        // they're always kept regardless of that distance.
-        boundaryPoints = sites
-          .filter(s => {
-            if (activeCollectionPointForSite(s)) return true;
-            const housePt = gps(s.lat, s.lng);
-            if (!housePt) return false;
-            const binDistances = [];
-            [s.soloStreams || {}, s.councilStreams || {}].forEach(src => {
-              Object.keys(src).forEach(streamKey => {
-                (src[streamKey] || []).forEach(bin => {
-                  const binPt = gps(bin.lat, bin.lng);
-                  if (binPt) binDistances.push(getDistanceMeters(housePt.lat, housePt.lng, binPt.lat, binPt.lng));
-                });
-              });
-            });
-            // No recorded bin location at all - can't judge a distance,
-            // so don't penalise the house for it; keep it in the boundary.
-            if (!binDistances.length) return true;
-            return binDistances.some(d => d <= 20);
-          })
-          .map(s => gps(s.lat, s.lng))
-          .filter(Boolean);
+        // AND whose own bin sits within 20m of the house - see
+        // sitesForBoundaryHull for the full reasoning (shared with the
+        // live map's own boundary rendering in renderMapData).
+        boundaryPoints = sitesForBoundaryHull(sites).map(s => gps(s.lat, s.lng)).filter(Boolean);
       }
 
       // Only the outermost unique collection points are used.
@@ -10156,7 +10145,7 @@ body:not(.dark-mode) .welcome-go-wrap {
   }
 
   function updateMapSideLayersUI(){
-    const pairs=[['btnSideBins',showBinGpsDots],['btnSideHouses',showHouseGpsDots],['btnSideBoundaries',showRunBoundaries],['btnSideGarbageSq',showGarbageRunSquares],['btnSideRecyclingSq',showRecyclingRunSquares],['btnSideFogoSq',showFogoRunSquares],['btnSideKmz',kmzLayersVisible],['btnSideNextBin',isNextBinBoxVisible],['btnSideGeofence',geofencesVisible],['btnSatelliteLayer',isSatelliteView]];
+    const pairs=[['btnSideBins',showBinGpsDots],['btnSideHouses',showHouseGpsDots],['btnSideBoundaries',showRunBoundaries],['btnSidePropertyBoundaries',showPropertyBoundaries],['btnSideGarbageSq',showGarbageRunSquares],['btnSideRecyclingSq',showRecyclingRunSquares],['btnSideFogoSq',showFogoRunSquares],['btnSideKmz',kmzLayersVisible],['btnSideNextBin',isNextBinBoxVisible],['btnSideGeofence',geofencesVisible],['btnSatelliteLayer',isSatelliteView]];
     pairs.forEach(([id,on])=>{const b=document.getElementById(id);if(!b)return;b.classList.toggle('active',!!on);const c=b.querySelector('.layer-check');if(c)c.textContent=on?'✓':'';});
   }
   function closeMapSideLayers(){const c=document.getElementById('mapSideLayersControl');if(c)c.classList.remove('open');}
@@ -13050,6 +13039,35 @@ window.addEventListener('DOMContentLoaded', async () => {
     return BOUNDARY_KEY_STREAMS.includes(first) ? first : '';
   }
 
+  // Which houses count toward an auto-generated (non-custom) run boundary
+  // hull: allocated to the run (the caller only ever passes in that run's
+  // own sites) AND whose own bin sits within 20m of the house - a bin
+  // recorded much further away is usually a data issue (wrong GPS pin, bin
+  // logged on the wrong side of the road, etc.) rather than a genuine edge
+  // of the run, and including it would drag the hull outward. Collection
+  // points are the deliberate exception, since their bin is meant to sit
+  // away from the house, so they're always kept regardless of that
+  // distance. A house with no recorded bin location at all also can't be
+  // judged on this, so it's kept rather than penalised for missing data.
+  function sitesForBoundaryHull(sites) {
+    return (sites || []).filter(s => {
+      if (activeCollectionPointForSite(s)) return true;
+      const housePt = gps(s.lat, s.lng);
+      if (!housePt) return false;
+      const binDistances = [];
+      [s.soloStreams || {}, s.councilStreams || {}].forEach(src => {
+        Object.keys(src).forEach(streamKey => {
+          (src[streamKey] || []).forEach(bin => {
+            const binPt = gps(bin.lat, bin.lng);
+            if (binPt) binDistances.push(getDistanceMeters(housePt.lat, housePt.lng, binPt.lat, binPt.lng));
+          });
+        });
+      });
+      if (!binDistances.length) return true;
+      return binDistances.some(d => d <= 20);
+    });
+  }
+
   function getRecordsArray() {
     if (typeof siteRecords !== 'undefined' && Array.isArray(siteRecords) && siteRecords.length) return siteRecords;
     if (Array.isArray(window.siteRecords) && window.siteRecords.length) return window.siteRecords;
@@ -14871,6 +14889,7 @@ window.addEventListener('DOMContentLoaded', async () => {
             <button type="button" id="btnSideBins" class="map-side-layer-option" onclick="toggleBinGpsDots(); closeMapSideLayers();"><img class="icon-img" src="bin.png" alt=""> Bins <span class="layer-check"></span></button>
             <button type="button" id="btnSideHouses" class="map-side-layer-option" onclick="toggleHouseGpsDots(); closeMapSideLayers();"><img class="icon-img" src="houses.png" alt=""> Houses <span class="layer-check"></span></button>
             <button type="button" id="btnSideBoundaries" class="map-side-layer-option" onclick="toggleRunBoundaries(); closeMapSideLayers();"><img class="icon-img" src="boundary.png" alt=""> Boundaries <span class="layer-check"></span></button>
+            <button type="button" id="btnSidePropertyBoundaries" class="map-side-layer-option" onclick="togglePropertyBoundaries(); closeMapSideLayers();"><img class="icon-img" src="boundary.png" alt=""> Property boundaries <span class="layer-check"></span></button>
             <button type="button" id="btnSideGarbageSq" class="map-side-layer-option" onclick="toggleGarbageRunSquares(); closeMapSideLayers();"><img class="icon-img" src="garbage.png" alt=""> Garbage Squares <span class="layer-check"></span></button>
             <button type="button" id="btnSideRecyclingSq" class="map-side-layer-option" onclick="toggleRecyclingRunSquares(); closeMapSideLayers();"><img class="icon-img" src="recycle.png" alt=""> Recycling Squares <span class="layer-check"></span></button>
             <button type="button" id="btnSideFogoSq" class="map-side-layer-option" onclick="toggleFogoRunSquares(); closeMapSideLayers();"><img class="icon-img" src="fogo.png" alt=""> FOGO Squares <span class="layer-check"></span></button>
@@ -16241,7 +16260,14 @@ window.addEventListener('DOMContentLoaded', async () => {
       if (customBorder && Array.isArray(customBorder) && customBorder.length >= 3) {
         pts = customBorder.map(p => ({ lat: Number(p[0]), lng: Number(p[1]) }));
       } else {
-        const rawPts = g.sites.map(x => gps(x.lat, x.lng)).filter(Boolean);
+        // Auto-generated boundaries should only be shaped by houses whose
+        // own bin sits within 20m of the house - a bin recorded much
+        // further away is usually a data issue (wrong GPS pin, bin logged
+        // on the wrong side of the road, etc.) rather than a genuine edge
+        // of the run, and including it drags the hull outward. Collection
+        // points are the deliberate exception, since their bin is meant to
+        // sit away from the house.
+        const rawPts = sitesForBoundaryHull(g.sites).map(x => gps(x.lat, x.lng)).filter(Boolean);
         pts = typeof buildRunConvexHull === 'function' ? buildRunConvexHull(rawPts) : rawPts;
       }
       
@@ -16257,6 +16283,28 @@ window.addEventListener('DOMContentLoaded', async () => {
         poly._runGroupKey = g.run;
         poly._boundaryKey = borderKey;
         poly.addTo(mapHullsLayer);
+      }
+
+      // Optional second overlay (Map Settings > Layers > Property
+      // boundaries): the plain "every house allocated to this run"
+      // boundary, with none of the bin-distance filtering above - i.e.
+      // the whole property regardless of whether its bin looks right.
+      // Drawn in green, dashed, and never carries _runGroupKey so it never
+      // picks up boundary-edit drag handles - it's reference-only.
+      if (showPropertyBoundaries) {
+        const propRawPts = g.sites.map(x => gps(x.lat, x.lng)).filter(Boolean);
+        const propPts = typeof buildRunConvexHull === 'function' ? buildRunConvexHull(propRawPts) : propRawPts;
+        if (propPts.length >= 3) {
+          L.polygon(propPts.map(p => [p.lat, p.lng]), {
+            color: '#22c55e',
+            weight: 2,
+            dashArray: '6,6',
+            fillColor: '#22c55e',
+            fillOpacity: 0.05,
+            lineJoin: 'round',
+            interactive: false
+          }).addTo(mapHullsLayer);
+        }
       }
 
       g.sites.forEach(site => {
