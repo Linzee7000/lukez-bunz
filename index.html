@@ -5544,9 +5544,45 @@ per day (minimum) *","1 x per day (minimum) *"],"cleaning":"2 x per year"},"5":{
   }
 
   let leafletMap = null;
-  let osmLayer = null;
-  let satLayer = null;
+  let vicmapCarto = null;
+  let vicmapAerial = null;
+  let vicmapOverlay = null;
   let currentBaseLayer = null;
+
+  // ===== Vicmap basemaps (State of Victoria) =====
+  // Cartographic (roads/names/parcels) is the default base, Aerial is the
+  // "Satellite" toggle, and the transparent Overlay (road names + borders)
+  // is drawn over the aerial so streets stay readable.
+  const VICMAP_WMS_URL = 'https://base.maps.vic.gov.au/service?';
+  const VICMAP_ATTRIBUTION = '&copy; State of Victoria (Vicmap)';
+  function createVicmapCarto(extra) {
+    return L.tileLayer.wms(VICMAP_WMS_URL, Object.assign({
+      layers: 'CARTO_WM',
+      format: 'image/png',
+      transparent: false,
+      attribution: VICMAP_ATTRIBUTION,
+      maxZoom: 20
+    }, extra || {}));
+  }
+  function createVicmapAerial(extra) {
+    return L.tileLayer.wms(VICMAP_WMS_URL, Object.assign({
+      layers: 'AERIAL_WM',
+      format: 'image/jpeg',
+      transparent: false,
+      attribution: VICMAP_ATTRIBUTION,
+      maxZoom: 20
+    }, extra || {}));
+  }
+  function createVicmapOverlay(extra) {
+    return L.tileLayer.wms(VICMAP_WMS_URL, Object.assign({
+      layers: 'OVERLAY_WM',
+      format: 'image/png',
+      transparent: true,
+      attribution: VICMAP_ATTRIBUTION,
+      maxZoom: 20,
+      zIndex: 3
+    }, extra || {}));
+  }
   let mapMarkersLayer = null;
   let mapHullsLayer = null;
   let mapGeofenceLayer = null;
@@ -6206,7 +6242,7 @@ per day (minimum) *","1 x per day (minimum) *"],"cleaning":"2 x per year"},"5":{
   }
 
   function toggleSatelliteView() {
-    if (!leafletMap || !osmLayer || !satLayer) return;
+    if (!leafletMap || !vicmapCarto || !vicmapAerial) return;
     isSatelliteView = !isSatelliteView;
     const satelliteBtn = document.getElementById('btnSatelliteLayer');
     if (satelliteBtn) {
@@ -6217,9 +6253,11 @@ per day (minimum) *","1 x per day (minimum) *"],"cleaning":"2 x per year"},"5":{
 
     if (isSatelliteView) {
       leafletMap.removeLayer(currentBaseLayer);
-      leafletMap.addLayer(satLayer);
+      leafletMap.addLayer(vicmapAerial);
+      if (vicmapOverlay) leafletMap.addLayer(vicmapOverlay);
     } else {
-      leafletMap.removeLayer(satLayer);
+      leafletMap.removeLayer(vicmapAerial);
+      if (vicmapOverlay) leafletMap.removeLayer(vicmapOverlay);
       leafletMap.addLayer(currentBaseLayer);
     }
   }
@@ -6705,9 +6743,9 @@ per day (minimum) *","1 x per day (minimum) *"],"cleaning":"2 x per year"},"5":{
   // The transparent overlay shows the street actually under the truck's
   // real GPS position — NOT the street of the nearest bin/property, which
   // can be a completely different street (or, off-run, kilometres away).
-  // Uses Nominatim's public reverse-geocoding API (the same OSM data the
-  // map tiles already come from, so no extra attribution is needed beyond
-  // the "© OpenStreetMap contributors" already on the tile layer).
+  // Uses Nominatim's public reverse-geocoding API. The map tiles are now
+  // Vicmap, so the "Street names © OpenStreetMap contributors" credit is
+  // added to the map's attribution control in initLeafletMap().
   // `extratags=1` additionally pulls back the OSM way's raw tags when
   // available, which is where a road's posted speed limit (`maxspeed`)
   // lives — most residential streets in OSM don't have it tagged, so the
@@ -6852,7 +6890,7 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
     setTimeout(() => {
       if (!pickerMap) {
         pickerMap = L.map('pickerMapContainer').setView([initialLat, initialLng], 17);
-        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(pickerMap);
+        createVicmapCarto().addTo(pickerMap);
 
         pickerMarker = L.marker([initialLat, initialLng], { draggable: true }).addTo(pickerMap);
 
@@ -7091,10 +7129,14 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
 
     leafletMap=L.map(el,{preferCanvas:true,zoomControl:false,zoomSnap:1}).setView([-38.36,144.91],18);
     //L.control.zoom({position:'topright'}).addTo(leafletMap);
-    osmLayer=L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:20,keepBuffer:10,updateWhenIdle:false,attribution:'&copy; OpenStreetMap contributors'});
-    satLayer=L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{maxZoom:20,attribution:'Tiles &copy; Esri'});
-    currentBaseLayer = osmLayer;
+    vicmapCarto=createVicmapCarto({keepBuffer:10,updateWhenIdle:false});
+    vicmapAerial=createVicmapAerial({keepBuffer:10,updateWhenIdle:false});
+    vicmapOverlay=createVicmapOverlay({keepBuffer:10,updateWhenIdle:false});
+    currentBaseLayer = vicmapCarto;
     currentBaseLayer.addTo(leafletMap);
+    // Street names / speed limits still come from OpenStreetMap (Nominatim),
+    // so keep crediting OSM now that the tiles are Vicmap.
+    leafletMap.attributionControl.addAttribution('Street names &copy; OpenStreetMap contributors');
     mapHullsLayer=L.layerGroup().addTo(leafletMap);
     mapSeqLayer=L.layerGroup().addTo(leafletMap);
     mapMarkersLayer=L.layerGroup().addTo(leafletMap);
