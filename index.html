@@ -5149,9 +5149,12 @@ body:not(.dark-mode) .welcome-go-wrap {
   // dashed reference line but their points can't be dragged, so you don't
   // accidentally grab a neighbouring run's handle when two boundaries sit
   // close together. Switched via the run chips shown in the top bar (see
-  // renderBoundaryRunSwitcher). Null/empty means "only one run showing" —
-  // in that case every handle behaves as before.
-  let activeBoundaryEditRun = null;
+  // renderBoundaryRunSwitcher) - tap a chip to toggle it in/out, up to two
+  // at once, so a shared edge between two adjoining runs can be nudged
+  // into place by dragging either side without switching back and forth.
+  // Empty means "only one run showing" — in that case every handle
+  // behaves as before.
+  let activeBoundaryEditRuns = [];
 
   // Interface accent used whenever no stream is filtered (the "dark
   // green"). Changeable in Map settings > Bling > Colours, persisted in
@@ -7219,7 +7222,37 @@ body:not(.dark-mode) .welcome-go-wrap {
           }
         });
       } else {
-        boundaryPoints=sites.map(s=>gps(s.lat,s.lng)).filter(Boolean);
+        // Auto-generated boundaries (i.e. not a manually-edited custom
+        // border - those are handled entirely by useCustomBorder above)
+        // should only be shaped by houses actually allocated to this run
+        // AND whose own bin sits within 20m of the house. A bin recorded
+        // much further away than that is usually a data issue (wrong GPS
+        // pin, bin logged on the wrong side of the road, etc.) rather than
+        // a genuine edge of the run, so including it would drag the hull
+        // outward. Collection-point houses are the one deliberate
+        // exception - their bin is meant to sit away from the house, so
+        // they're always kept regardless of that distance.
+        boundaryPoints = sites
+          .filter(s => {
+            if (activeCollectionPointForSite(s)) return true;
+            const housePt = gps(s.lat, s.lng);
+            if (!housePt) return false;
+            const binDistances = [];
+            [s.soloStreams || {}, s.councilStreams || {}].forEach(src => {
+              Object.keys(src).forEach(streamKey => {
+                (src[streamKey] || []).forEach(bin => {
+                  const binPt = gps(bin.lat, bin.lng);
+                  if (binPt) binDistances.push(getDistanceMeters(housePt.lat, housePt.lng, binPt.lat, binPt.lng));
+                });
+              });
+            });
+            // No recorded bin location at all - can't judge a distance,
+            // so don't penalise the house for it; keep it in the boundary.
+            if (!binDistances.length) return true;
+            return binDistances.some(d => d <= 20);
+          })
+          .map(s => gps(s.lat, s.lng))
+          .filter(Boolean);
       }
 
       // Only the outermost unique collection points are used.
@@ -13007,6 +13040,15 @@ window.addEventListener('DOMContentLoaded', async () => {
     const parts = String(key).split('#');
     return parts[parts.length - 1] || String(key);
   }
+  // Pulls the stream (Garbage/Recycling/SummerRecycling/FOGO) back out of a
+  // composite boundary key, or '' if the boundary was saved with no stream
+  // filter active. Per boundaryKeyFor's own join order, the stream - when
+  // present - is always the first '#'-separated part.
+  const BOUNDARY_KEY_STREAMS = ['Garbage', 'Recycling', 'SummerRecycling', 'FOGO'];
+  function boundaryKeyStream(key) {
+    const first = String(key).split('#')[0];
+    return BOUNDARY_KEY_STREAMS.includes(first) ? first : '';
+  }
 
   function getRecordsArray() {
     if (typeof siteRecords !== 'undefined' && Array.isArray(siteRecords) && siteRecords.length) return siteRecords;
@@ -13847,8 +13889,12 @@ window.addEventListener('DOMContentLoaded', async () => {
       const currentPts = current.map(asPoint);
       const n = currentPts.length;
 
+      // Only ever match onto another run's boundary if it's on the same
+      // stream (e.g. a Garbage run should never snap onto a Recycling
+      // run's edge just because they happen to sit close together).
+      const currentStream = boundaryKeyStream(borderKey);
       const otherBorders = Object.keys(customRunBorders)
-        .filter(k => k !== borderKey && customRunBorders[k] && customRunBorders[k].length >= 3)
+        .filter(k => k !== borderKey && customRunBorders[k] && customRunBorders[k].length >= 3 && boundaryKeyStream(k) === currentStream)
         .map(k => ({ key: k, pts: customRunBorders[k].map(asPoint) }));
 
       // Step 1: best edge-projected candidate per point, across every
@@ -14394,7 +14440,7 @@ window.addEventListener('DOMContentLoaded', async () => {
       // Default the draggable ("active") run to the first one currently on
       // screen. With only one run showing this is a no-op — every handle
       // is draggable either way (see enableBoundaryVertexHandles).
-      activeBoundaryEditRun = (currentlyShowingRunKeys && currentlyShowingRunKeys[0]) || null;
+      activeBoundaryEditRuns = (currentlyShowingRunKeys && currentlyShowingRunKeys[0]) ? [currentlyShowingRunKeys[0]] : [];
       enableBoundaryVertexHandles();
       window.setMapTopBarContext(
         'Editing run boundary',
@@ -14410,7 +14456,7 @@ window.addEventListener('DOMContentLoaded', async () => {
       window.renderBoundaryRunSwitcher();
     } else {
       boundaryRemovePointsActive = false;
-      activeBoundaryEditRun = null;
+      activeBoundaryEditRuns = [];
       disableBoundaryVertexHandles();
       await saveToDB("customRunBorders", customRunBorders);
       window.clearMapTopBarContext();
@@ -14418,11 +14464,11 @@ window.addEventListener('DOMContentLoaded', async () => {
   };
 
   // Run chips shown next to the "Editing run boundary" title whenever more
-  // than one run is on screen at once. Tapping a chip makes that run the
-  // draggable one (see activeBoundaryEditRun) without changing which runs
-  // are selected/visible/matchable — Snap Houses, Snap Roads and Match
+  // than one run is on screen at once. Tap a chip to toggle it in/out of
+  // the draggable set (up to two at once) without changing which runs are
+  // selected/visible/matchable — Snap Houses, Snap Roads and Match
   // Neighbour still act on every selected run, same as before. Only which
-  // run's dots you can actually drag is what this switches.
+  // run(s)' dots you can actually drag is what this switches.
   window.renderBoundaryRunSwitcher = function(){
     const btnsEl = document.getElementById('mapContextButtons');
     if (!btnsEl) return;
@@ -14433,17 +14479,26 @@ window.addEventListener('DOMContentLoaded', async () => {
       btnsEl.innerHTML = '';
       return;
     }
-    if (!activeBoundaryEditRun || !runs.some(r => mapKey(r) === mapKey(activeBoundaryEditRun))) {
-      activeBoundaryEditRun = runs[0];
-    }
+    activeBoundaryEditRuns = activeBoundaryEditRuns.filter(r => runs.some(x => mapKey(x) === mapKey(r)));
+    if (!activeBoundaryEditRuns.length) activeBoundaryEditRuns = [runs[0]];
     btnsEl.innerHTML = runs.map(r => {
-      const isActive = mapKey(r) === mapKey(activeBoundaryEditRun);
+      const isActive = activeBoundaryEditRuns.some(x => mapKey(x) === mapKey(r));
       return `<button type="button" class="boundary-run-chip${isActive ? ' active' : ''}" onclick="event.stopPropagation(); window.setActiveBoundaryEditRun('${esc(String(r))}')">${esc(String(r))}</button>`;
     }).join('');
   };
 
   window.setActiveBoundaryEditRun = function(runKey){
-    activeBoundaryEditRun = runKey;
+    const idx = activeBoundaryEditRuns.findIndex(r => mapKey(r) === mapKey(runKey));
+    if (idx !== -1) {
+      // Already active - toggle it off, but never drop below one active
+      // run (there'd be nothing left to drag).
+      if (activeBoundaryEditRuns.length > 1) activeBoundaryEditRuns.splice(idx, 1);
+    } else if (activeBoundaryEditRuns.length >= 2) {
+      // Already two active - the new pick replaces the oldest of the two.
+      activeBoundaryEditRuns = [activeBoundaryEditRuns[1], runKey];
+    } else {
+      activeBoundaryEditRuns.push(runKey);
+    }
     window.renderBoundaryRunSwitcher();
     enableBoundaryVertexHandles();
   };
@@ -14512,17 +14567,17 @@ window.addEventListener('DOMContentLoaded', async () => {
     mapEditHandlesLayer.clearLayers();
     if (typeof window.renderBoundaryRunSwitcher === 'function') window.renderBoundaryRunSwitcher();
 
-    // With 2+ runs showing at once, only the run picked in the switcher
-    // gets drag/insert handles — the rest are shown read-only (dashed, a
-    // touch fainter) so overlapping boundaries can't be mixed up. With
-    // just one run showing, activeBoundaryEditRun matches it anyway so
-    // this has no effect.
+    // With 2+ runs showing at once, only the run(s) picked in the switcher
+    // (up to two) get drag/insert handles — the rest are shown read-only
+    // (dashed, a touch fainter) so overlapping boundaries can't be mixed
+    // up. With just one run showing, activeBoundaryEditRuns matches it
+    // anyway so this has no effect.
     const multipleRunsShowing = new Set((currentlyShowingRunKeys||[]).map(mapKey)).size > 1;
 
     mapHullsLayer.eachLayer(layer => {
       if (layer instanceof L.Polygon && layer._runGroupKey) {
         const groupKey = layer._runGroupKey;
-        const isActiveRun = !multipleRunsShowing || mapKey(groupKey) === mapKey(activeBoundaryEditRun);
+        const isActiveRun = !multipleRunsShowing || activeBoundaryEditRuns.some(r => mapKey(r) === mapKey(groupKey));
 
         if (multipleRunsShowing) {
           layer.setStyle(isActiveRun
