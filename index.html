@@ -4580,6 +4580,7 @@ body:not(.dark-mode) .welcome-go-wrap {
 
 <!-- Leaflet & Turf JS -->
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/esri-leaflet@3.0.12/dist/esri-leaflet.js"></script>
 <script src="https://unpkg.com/@turf/turf@6.5.0/turf.min.js"></script>
 
 <script>
@@ -5168,6 +5169,18 @@ per day (minimum) *","1 x per day (minimum) *"],"cleaning":"2 x per year"},"5":{
   let showBinGpsDots = true;
   let showHouseGpsDots = false;
   let isSatelliteView = false;
+  // Victorian property-parcel (cadastre) lines from the Vicmap Open Data
+  // Platform - a free WMS overlay that sits on top of whichever base map
+  // (street or satellite) is showing. Remembered between sessions.
+  let showCadastreLayer = false;
+  try { showCadastreLayer = localStorage.getItem('lukezBunzCadastre') === 'true'; } catch (e) {}
+  // Vicmap Cartographic drawn semi-transparently over the base map through
+  // Esri Leaflet (ArcGIS dynamic map layer). Built lazily on first use so a
+  // failed request can never stop the map itself from starting.
+  let showVicmapOverlay = false;
+  try { showVicmapOverlay = localStorage.getItem('lukezBunzVicmapOverlay') === 'true'; } catch (e) {}
+  let vicmapOverlayLayer = null;
+  let vicmapOverlayWarned = false;
   // Three "Run Square" layers - one per stream (Garbage, Recycling, FOGO).
   // Each draws a small square at every house serviced by that stream's
   // currently visible run(s): outline = the stream's own colour (same hex
@@ -5544,45 +5557,10 @@ per day (minimum) *","1 x per day (minimum) *"],"cleaning":"2 x per year"},"5":{
   }
 
   let leafletMap = null;
-  let vicmapCarto = null;
-  let vicmapAerial = null;
-  let vicmapOverlay = null;
+  let osmLayer = null;
+  let satLayer = null;
   let currentBaseLayer = null;
-
-  // ===== Vicmap basemaps (State of Victoria) =====
-  // Cartographic (roads/names/parcels) is the default base, Aerial is the
-  // "Satellite" toggle, and the transparent Overlay (road names + borders)
-  // is drawn over the aerial so streets stay readable.
-  const VICMAP_WMS_URL = 'https://base.maps.vic.gov.au/service?';
-  const VICMAP_ATTRIBUTION = '&copy; State of Victoria (Vicmap)';
-  function createVicmapCarto(extra) {
-    return L.tileLayer.wms(VICMAP_WMS_URL, Object.assign({
-      layers: 'CARTO_WM',
-      format: 'image/png',
-      transparent: false,
-      attribution: VICMAP_ATTRIBUTION,
-      maxZoom: 20
-    }, extra || {}));
-  }
-  function createVicmapAerial(extra) {
-    return L.tileLayer.wms(VICMAP_WMS_URL, Object.assign({
-      layers: 'AERIAL_WM',
-      format: 'image/jpeg',
-      transparent: false,
-      attribution: VICMAP_ATTRIBUTION,
-      maxZoom: 20
-    }, extra || {}));
-  }
-  function createVicmapOverlay(extra) {
-    return L.tileLayer.wms(VICMAP_WMS_URL, Object.assign({
-      layers: 'OVERLAY_WM',
-      format: 'image/png',
-      transparent: true,
-      attribution: VICMAP_ATTRIBUTION,
-      maxZoom: 20,
-      zIndex: 3
-    }, extra || {}));
-  }
+  let cadastreLayer = null;
   let mapMarkersLayer = null;
   let mapHullsLayer = null;
   let mapGeofenceLayer = null;
@@ -6242,7 +6220,7 @@ per day (minimum) *","1 x per day (minimum) *"],"cleaning":"2 x per year"},"5":{
   }
 
   function toggleSatelliteView() {
-    if (!leafletMap || !vicmapCarto || !vicmapAerial) return;
+    if (!leafletMap || !osmLayer || !satLayer) return;
     isSatelliteView = !isSatelliteView;
     const satelliteBtn = document.getElementById('btnSatelliteLayer');
     if (satelliteBtn) {
@@ -6253,13 +6231,55 @@ per day (minimum) *","1 x per day (minimum) *"],"cleaning":"2 x per year"},"5":{
 
     if (isSatelliteView) {
       leafletMap.removeLayer(currentBaseLayer);
-      leafletMap.addLayer(vicmapAerial);
-      if (vicmapOverlay) leafletMap.addLayer(vicmapOverlay);
+      leafletMap.addLayer(satLayer);
     } else {
-      leafletMap.removeLayer(vicmapAerial);
-      if (vicmapOverlay) leafletMap.removeLayer(vicmapOverlay);
+      leafletMap.removeLayer(satLayer);
       leafletMap.addLayer(currentBaseLayer);
     }
+  }
+
+  function ensureVicmapOverlay() {
+    if (vicmapOverlayLayer) return vicmapOverlayLayer;
+    if (typeof L === 'undefined' || !L.esri || typeof L.esri.dynamicMapLayer !== 'function') {
+      if (typeof customAlert === 'function') customAlert("The Vicmap overlay needs the Esri Leaflet library, which didn't load - check your connection and reload.");
+      return null;
+    }
+    vicmapOverlayLayer = L.esri.dynamicMapLayer({
+      url: 'https://services.land.vic.gov.au/arcgis/rest/services/VicmapBasemaps/Cartographic/MapServer',
+      opacity: 0.7,
+      attribution: '&copy; State of Victoria (Vicmap)'
+    });
+    vicmapOverlayLayer.on('requesterror', function(e) {
+      console.error('Vicmap overlay request failed', e);
+      if (vicmapOverlayWarned) return;
+      vicmapOverlayWarned = true;
+      if (typeof customAlert === 'function') customAlert("The Vicmap overlay couldn't load - the server refused the request" + (e && e.message ? ' (' + e.message + ')' : '') + '.');
+    });
+    return vicmapOverlayLayer;
+  }
+
+  function toggleVicmapOverlay() {
+    showVicmapOverlay = !showVicmapOverlay;
+    try { localStorage.setItem('lukezBunzVicmapOverlay', showVicmapOverlay ? 'true' : 'false'); } catch (e) {}
+    if (leafletMap) {
+      if (showVicmapOverlay) {
+        const lyr = ensureVicmapOverlay();
+        if (lyr) lyr.addTo(leafletMap); else showVicmapOverlay = false;
+      } else if (vicmapOverlayLayer) {
+        leafletMap.removeLayer(vicmapOverlayLayer);
+      }
+    }
+    updateMapSideLayersUI();
+  }
+
+  function toggleCadastreLayer() {
+    showCadastreLayer = !showCadastreLayer;
+    try { localStorage.setItem('lukezBunzCadastre', showCadastreLayer ? 'true' : 'false'); } catch (e) {}
+    if (leafletMap && cadastreLayer) {
+      if (showCadastreLayer) cadastreLayer.addTo(leafletMap);
+      else leafletMap.removeLayer(cadastreLayer);
+    }
+    updateMapSideLayersUI();
   }
 
   function applyHeadingUpMap() {
@@ -6743,9 +6763,9 @@ per day (minimum) *","1 x per day (minimum) *"],"cleaning":"2 x per year"},"5":{
   // The transparent overlay shows the street actually under the truck's
   // real GPS position — NOT the street of the nearest bin/property, which
   // can be a completely different street (or, off-run, kilometres away).
-  // Uses Nominatim's public reverse-geocoding API. The map tiles are now
-  // Vicmap, so the "Street names © OpenStreetMap contributors" credit is
-  // added to the map's attribution control in initLeafletMap().
+  // Uses Nominatim's public reverse-geocoding API (the same OSM data the
+  // map tiles already come from, so no extra attribution is needed beyond
+  // the "© OpenStreetMap contributors" already on the tile layer).
   // `extratags=1` additionally pulls back the OSM way's raw tags when
   // available, which is where a road's posted speed limit (`maxspeed`)
   // lives — most residential streets in OSM don't have it tagged, so the
@@ -6890,7 +6910,7 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
     setTimeout(() => {
       if (!pickerMap) {
         pickerMap = L.map('pickerMapContainer').setView([initialLat, initialLng], 17);
-        createVicmapCarto().addTo(pickerMap);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(pickerMap);
 
         pickerMarker = L.marker([initialLat, initialLng], { draggable: true }).addTo(pickerMap);
 
@@ -7129,14 +7149,29 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
 
     leafletMap=L.map(el,{preferCanvas:true,zoomControl:false,zoomSnap:1}).setView([-38.36,144.91],18);
     //L.control.zoom({position:'topright'}).addTo(leafletMap);
-    vicmapCarto=createVicmapCarto({keepBuffer:10,updateWhenIdle:false});
-    vicmapAerial=createVicmapAerial({keepBuffer:10,updateWhenIdle:false});
-    vicmapOverlay=createVicmapOverlay({keepBuffer:10,updateWhenIdle:false});
-    currentBaseLayer = vicmapCarto;
+    osmLayer=L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:20,keepBuffer:10,updateWhenIdle:false,attribution:'&copy; OpenStreetMap contributors'});
+    satLayer=L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{maxZoom:20,attribution:'Tiles &copy; Esri'});
+    currentBaseLayer = osmLayer;
     currentBaseLayer.addTo(leafletMap);
-    // Street names / speed limits still come from OpenStreetMap (Nominatim),
-    // so keep crediting OSM now that the tiles are Vicmap.
-    leafletMap.attributionControl.addAttribution('Street names &copy; OpenStreetMap contributors');
+    // Parcel boundaries. WMS 1.1.1 avoids GeoServer's 1.3.0 lat/lon axis-order
+    // problems in EPSG:3857, and minZoom stops it requesting state-wide tiles
+    // (which is what makes the server time out) when zoomed right out.
+    cadastreLayer = L.tileLayer.wms('https://opendata.maps.vic.gov.au/geoserver/ows?', {
+      layers: 'open-data-platform:parcel_mp',
+      format: 'image/png',
+      transparent: true,
+      version: '1.1.1',
+      minZoom: 15,
+      maxZoom: 22,
+      opacity: 0.85,
+      zIndex: 5,
+      attribution: '&copy; State of Victoria'
+    });
+    if (showCadastreLayer) cadastreLayer.addTo(leafletMap);
+    if (showVicmapOverlay) {
+      const vo = ensureVicmapOverlay();
+      if (vo) vo.addTo(leafletMap); else showVicmapOverlay = false;
+    }
     mapHullsLayer=L.layerGroup().addTo(leafletMap);
     mapSeqLayer=L.layerGroup().addTo(leafletMap);
     mapMarkersLayer=L.layerGroup().addTo(leafletMap);
@@ -10236,7 +10271,7 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
   }
 
   function updateMapSideLayersUI(){
-    const pairs=[['btnSideBins',showBinGpsDots],['btnSideHouses',showHouseGpsDots],['btnSideBoundaries',showRunBoundaries],['btnSidePropertyBoundaries',showPropertyBoundaries],['btnSideGarbageSq',showGarbageRunSquares],['btnSideRecyclingSq',showRecyclingRunSquares],['btnSideFogoSq',showFogoRunSquares],['btnSideKmz',kmzLayersVisible],['btnSideNextBin',isNextBinBoxVisible],['btnSideGeofence',geofencesVisible],['btnSatelliteLayer',isSatelliteView]];
+    const pairs=[['btnSideBins',showBinGpsDots],['btnSideHouses',showHouseGpsDots],['btnSideBoundaries',showRunBoundaries],['btnSidePropertyBoundaries',showPropertyBoundaries],['btnSideGarbageSq',showGarbageRunSquares],['btnSideRecyclingSq',showRecyclingRunSquares],['btnSideFogoSq',showFogoRunSquares],['btnSideKmz',kmzLayersVisible],['btnSideNextBin',isNextBinBoxVisible],['btnSideGeofence',geofencesVisible],['btnSatelliteLayer',isSatelliteView],['btnSideCadastre',showCadastreLayer],['btnSideVicmapOverlay',showVicmapOverlay]];
     pairs.forEach(([id,on])=>{const b=document.getElementById(id);if(!b)return;b.classList.toggle('active',!!on);const c=b.querySelector('.layer-check');if(c)c.textContent=on?'✓':'';});
   }
   function closeMapSideLayers(){const c=document.getElementById('mapSideLayersControl');if(c)c.classList.remove('open');}
@@ -14987,6 +15022,8 @@ window.addEventListener('DOMContentLoaded', async () => {
             <button type="button" id="btnSideKmz" class="map-side-layer-option" onclick="toggleKmzLayers(); closeMapSideLayers();">🚛 KMZ <span class="layer-check"></span></button>
             <button type="button" id="btnSideNextBin" class="map-side-layer-option" onclick="toggleNextBinBox(); closeMapSideLayers();">📍 Next bin box <span class="layer-check"></span></button>
             <button type="button" id="btnSideGeofence" class="map-side-layer-option" onclick="toggleGeofenceLayerVisibility(); closeMapSideLayers();">🚧 Geofences <span class="layer-check"></span></button>
+            <button type="button" id="btnSideCadastre" class="map-side-layer-option" onclick="toggleCadastreLayer(); closeMapSideLayers();"><img class="icon-img" src="boundary.png" alt=""> Property parcels <span class="layer-check"></span></button>
+            <button type="button" id="btnSideVicmapOverlay" class="map-side-layer-option" onclick="toggleVicmapOverlay(); closeMapSideLayers();"><img class="icon-img" src="boundary.png" alt=""> Vicmap overlay <span class="layer-check"></span></button>
             <button type="button" id="btnSatelliteLayer" class="map-side-layer-option" onclick="toggleSatelliteView(); closeMapSideLayers();"><img class="icon-img" src="satellite.png" alt=""> Satellite <span class="layer-check"></span></button>
           </div>
         </div>
@@ -20392,6 +20429,8 @@ body.stream-slr .lb-layers-head .icon-img { filter: brightness(0); }
       case 'nextBin':   return typeof isNextBinBoxVisible !== 'undefined' && isNextBinBoxVisible;
       case 'geofence':  return typeof geofencesVisible !== 'undefined' && geofencesVisible;
       case 'sat':       return typeof isSatelliteView !== 'undefined' && isSatelliteView;
+      case 'cadastre':  return typeof showCadastreLayer !== 'undefined' && showCadastreLayer;
+      case 'vicOverlay':return typeof showVicmapOverlay !== 'undefined' && showVicmapOverlay;
       case 'trailAge':  return typeof snailTrailColorByAge !== 'undefined' && snailTrailColorByAge;
       case 'trailTime': return typeof snailTrailShowTimeLabels !== 'undefined' && snailTrailShowTimeLabels;
       case 'trailRec':  return !(typeof snailTrailPaused !== 'undefined' && snailTrailPaused);
@@ -20450,6 +20489,8 @@ body.stream-slr .lb-layers-head .icon-img { filter: brightness(0); }
     ['geofence', 'toggleGeofenceLayerVisibility', '🚧',               'Geofences'],
     ['nextBin',  'toggleNextBinBox',              '📍',               'Next bin box'],
     ['sat',      'toggleSatelliteView',           'img:satellite.png','Satellite'],
+    ['cadastre', 'toggleCadastreLayer',           'img:boundary.png', 'Property parcels'],
+    ['vicOverlay','toggleVicmapOverlay',          'img:boundary.png', 'Vicmap overlay'],
 
     ['sect', 'Snail trail'],
     ['trailRec',  'toggleSnailTrailPause',        '⏺',                'Recording'],
