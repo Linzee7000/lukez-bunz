@@ -497,6 +497,14 @@ body:not(.dark-mode) .welcome-go-wrap {
     }
     .app-header h1 {
       margin: 0;
+      /* #lbDrawerTab (the magnifying-glass options tab) is fixed at the
+         very top-left of the screen, 40px wide, sitting on top of
+         everything with a much higher z-index. On the Search and Drive
+         screens (Map's own fullscreen view hides this header entirely
+         behind it) that tab was landing right on top of the first few
+         letters of the title, so only the text is nudged right, past it
+         - the header's own background/padding is untouched. */
+      margin-left: 32px;
       font-size: 18px;
       letter-spacing: -0.3px;
       color: #fff;
@@ -5084,6 +5092,14 @@ body:not(.dark-mode) .welcome-go-wrap {
   let isRunLocked = false;
 
   let travelMode = localStorage.getItem('lukezBunzTravelMode') || 'left';
+  // Which side of the road (relative to direction of travel, not a fixed
+  // compass side) the driver's current/last "next bin" address was on -
+  // 'left', 'right', or null when it's not pinned to a side (nothing
+  // picked yet, or the last pick was a collection point / drive-in /
+  // reverse-in street where both kerbs are worked from one pass). Used by
+  // updateDriverHud to keep picking addresses down the same kerb instead
+  // of hopping across the road to whatever's a few metres closer.
+  let lastSideOfTravel = null;
   // Which order the Drive page's street list is shown in - 'nearby'
   // (closest to the truck's current GPS position first) or 'az'
   // (alphabetical). See setDriveStreetSort / updateDriverHud.
@@ -15487,16 +15503,56 @@ window.addEventListener('DOMContentLoaded', async () => {
     // no longer drives the Drive page's street list, or its street name
     // (that's now the real GPS street - see updateLiveStreetFromGps /
     // updateMapStreetOverlay, which write #hudStreetName directly).
+    //
+    // Which side of the road a site sits on right now, relative to the
+    // direction of travel (not a fixed compass side) - same +/-70deg
+    // left/right cone as the bin-passing check further down, with a
+    // dead-ahead/dead-behind gap that counts as neither.
+    const sideOfSite = (site) => {
+      if (!userCurrentLocation || !site || !site.lat || !site.lng || Number(site.lat) === 0) return null;
+      const bearing = getBearing(userCurrentLocation.lat, userCurrentLocation.lng, Number(site.lat), Number(site.lng));
+      const relAngle = (bearing - (lastValidHeading || 0) + 360) % 360;
+      if (relAngle >= 200 && relAngle <= 340) return 'left';
+      if (relAngle >= 20 && relAngle <= 160) return 'right';
+      return null;
+    };
+    // Collection points and drive-in/reverse-in streets are the only cases
+    // where both kerbs get worked in the same pass, so the same-side
+    // preference below doesn't apply to them.
+    const isBothSidesSite = (site) => {
+      if (activeCollectionPointForSite(site)) return true;
+      const mode = activeStreetModeForSite(site);
+      return !!(mode && (mode.type === 'drive-reverse-out' || mode.type === 'reverse-in-drive-out'));
+    };
+
     let nearestSiteOverall = null, nearestDistOverall = Infinity;
+    let nearestSameSideSite = null, nearestSameSideDist = Infinity;
     if (userCurrentLocation) {
       records.forEach(site => {
         if (site.lat && site.lng && Number(site.lat) !== 0) {
           const d = getDistanceMeters(userCurrentLocation.lat, userCurrentLocation.lng, Number(site.lat), Number(site.lng));
           if (d < nearestDistOverall) { nearestDistOverall = d; nearestSiteOverall = site; }
+          if (lastSideOfTravel && d < nearestSameSideDist && !isBothSidesSite(site) && sideOfSite(site) === lastSideOfTravel) {
+            nearestSameSideDist = d; nearestSameSideSite = site;
+          }
         }
       });
     }
-    const currentSite = nearestDistOverall <= 300 ? nearestSiteOverall : null;
+    // Stick to the same kerb the driver was just working - only falls
+    // back to the plain "nearest overall" pick (which can jump across the
+    // road) once there's nothing left on that side within range, e.g. the
+    // street's ended and it's time to move on.
+    const currentSite = (nearestSameSideSite && nearestSameSideDist <= 300)
+      ? nearestSameSideSite
+      : (nearestDistOverall <= 300 ? nearestSiteOverall : null);
+
+    // Remember which kerb this pick is on for next time. A collection
+    // point / drive-in / reverse-in pick doesn't set a side (both kerbs
+    // are fair game there), so it clears the pin rather than locking the
+    // next pick to whichever side it happened to be nearest on.
+    if (currentSite) {
+      lastSideOfTravel = isBothSidesSite(currentSite) ? null : (sideOfSite(currentSite) || lastSideOfTravel);
+    }
     const mapLiveStreet = q('mapLiveStreet');
     if (mapLiveStreet) {
       const propStreetName = currentSite ? (currentSite.baseStreetLine || currentSite.addressText?.split(',')[0] || '').trim() : 'Scanning Street...';
@@ -18687,7 +18743,7 @@ body.lb-drawer-open #lbDrawer { transform: translateX(0); }
   gap: 8px;
 }
 .lb-drawer-sect {
-  color: var(--welcome-ink-faint);
+  color: var(--ui-accent-fg);
   font-size: 11px;
   font-weight: 800;
   letter-spacing: 0.8px;
@@ -18716,8 +18772,10 @@ body.lb-drawer-open #lbDrawer { transform: translateX(0); }
 .lb-sect-details > summary::-webkit-details-marker { display: none; }
 .lb-sect-details > summary::after {
   content: '\25B8';
-  font-size: 10px;
-  opacity: .85;
+  font-size: 15px;
+  font-weight: 800;
+  color: var(--ui-accent-fg);
+  opacity: 1;
   flex-shrink: 0;
 }
 .lb-sect-details[open] > summary::after { content: '\25BE'; }
@@ -18740,6 +18798,25 @@ body.lb-drawer-open #lbDrawer { transform: translateX(0); }
 }
 .lb-drawer-item .icon-img { width: 20px; height: 20px; filter: brightness(0) invert(1); }
 .lb-drawer-item .lb-ico { width: 22px; text-align: center; font-size: 17px; flex-shrink: 0; }
+/* Theme-coloured icon for whichever row (Drive / Check out a run / Map /
+   Drive screen / Search results) is the one currently active, instead of
+   the plain white glyph every other row gets. Built as a background-colour
+   masked to the icon's own shape, rather than a fixed filter, so it tracks
+   --ui-accent-fg for whichever stream is selected. */
+.lb-drawer-item .lb-ico-tint {
+  display: inline-block;
+  width: 20px; height: 20px;
+  flex-shrink: 0;
+  background-color: var(--ui-accent-fg);
+  -webkit-mask-image: var(--icon-url);
+  mask-image: var(--icon-url);
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
+  -webkit-mask-size: contain;
+  mask-size: contain;
+}
 .lb-drawer-item .lb-label { flex: 1; min-width: 0; }
 .lb-drawer-item .lb-sub {
   display: block;
@@ -18985,7 +19062,19 @@ body.lb-on-welcome #lbDrawerTab { display: none; }
   // ---- Menu --------------------------------------------------------
   function menuHtml() {
     const cur = (typeof activeTab !== 'undefined') ? activeTab : '';
-    const img = f => `<img class="icon-img" src="${f}" alt="">`;
+    // Driving vs. checking-out-a-run both land on the Map tab, but the
+    // wizard flips isTrackUpEnabled the other way for each (goDrive turns
+    // it on, goExplore turns it off) - reuse that same flag here so the
+    // Drive / Check out a run rows only light up for whichever one the
+    // driver is actually in, not just because the map happens to be open.
+    const trackUpKnown = typeof isTrackUpEnabled !== 'undefined';
+    const isDriving = cur === 'map' && trackUpKnown && isTrackUpEnabled;
+    const isExploring = cur === 'map' && trackUpKnown && !isTrackUpEnabled;
+    // tinted=true swaps the plain white icon for one coloured with the
+    // current stream's accent, so the row you're actually on/in stands out.
+    const img = (f, tinted) => tinted
+      ? `<span class="lb-ico-tint" style="--icon-url:url('${f}')"></span>`
+      : `<img class="icon-img" src="${f}" alt="">`;
     const item = (act, ico, label, sub, cls) => `
       <button type="button" class="lb-drawer-item ${cls||''}" data-act="${act}">
         <span class="lb-ico">${ico}</span>
@@ -19003,8 +19092,8 @@ body.lb-on-welcome #lbDrawerTab { display: none; }
 
     return `
       <div class="lb-drawer-sect">Start a job</div>
-      ${item('drive',   img('drive.png'), 'Drive',           'Trail recording · track-up · follows you', 'primary')}
-      ${item('explore', img('map.png'),   'Check out a run', 'Look over runs without driving them')}
+      ${item('drive',   img('drive.png', isDriving), 'Drive',           'Trail recording · track-up · follows you', isDriving ? 'primary current' : 'primary')}
+      ${item('explore', img('map.png', isExploring),   'Check out a run', 'Look over runs without driving them', isExploring ? 'current' : '')}
       ${seasonNote}
       <div class="lb-drawer-sect">Find</div>
       ${item('bin',     img('bin.png'),    'Find a bin',     'Search by serial number')}
@@ -19012,9 +19101,9 @@ body.lb-on-welcome #lbDrawerTab { display: none; }
       ${item('street',  img('search.png'), 'Find a street',  'Search by street name')}
       ${item('nearby',  img('navigation.png'), "What's nearby", 'Runs, bins and addresses around you')}
       <div class="lb-drawer-sect">Screens</div>
-      ${item('go-map',  img('map.png'),   'Map',          '', cur==='map'?'current':'')}
-      ${item('go-hud',  img('drive.png'), 'Drive screen', '', cur==='hud'?'current':'')}
-      ${item('go-search', img('search.png'), 'Search results', '', cur==='search'?'current':'')}
+      ${item('go-map',  img('map.png', cur==='map'),   'Map',          '', cur==='map'?'current':'')}
+      ${item('go-hud',  img('drive.png', cur==='hud'), 'Drive screen', '', cur==='hud'?'current':'')}
+      ${item('go-search', img('search.png', cur==='search'), 'Search results', '', cur==='search'?'current':'')}
     `;
   }
 
@@ -19638,6 +19727,30 @@ body.stream-slr .lb-layers-head .icon-img { filter: brightness(0); }
       stopFollow();
       m.setView([p.lat, p.lng], 20, { animate: true });
       dropPin(p.lat, p.lng, streetLabelOf(site));
+      // The pin above is just a highlight ring (non-interactive), so on
+      // its own it's a dead end - you land on the address but there's
+      // nothing to tap. Open the property's own marker popup (the same
+      // bin/house box you'd get by tapping it directly on the map) so
+      // Inspect/Edit are one tap away instead of leaving the driver to
+      // go hunt for the marker underneath the pin.
+      setTimeout(() => {
+        let opened = false;
+        if (typeof activeMapCircleMarkers !== 'undefined' && activeMapCircleMarkers && activeMapCircleMarkers.forEach) {
+          activeMapCircleMarkers.forEach(obj => {
+            if (opened || !obj || String(obj.siteId) !== id) return;
+            if (obj.layer && typeof obj.layer.openPopup === 'function') {
+              obj.layer.openPopup();
+              opened = true;
+            }
+          });
+        }
+        if (!opened && site && typeof propertyPopup === 'function' && typeof L !== 'undefined') {
+          L.popup({ closeButton: true })
+            .setLatLng([p.lat, p.lng])
+            .setContent(propertyPopup(site))
+            .openOn(m);
+        }
+      }, 80);
     });
   };
 
