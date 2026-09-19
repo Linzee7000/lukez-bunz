@@ -4373,6 +4373,25 @@ body:not(.dark-mode) .welcome-go-wrap {
   </div>
 </div>
 
+<!-- Choose a location on the map (property / bin / street litter pin) - opened by openLocationPickerModal() -->
+<div id="locationPickerModal" class="modal-overlay picker-modal-layer">
+  <div class="modal-box" style="max-width:720px;">
+    <div class="modal-header">
+      <h3 id="pickerModalTitle">📍 Click location on map</h3>
+      <button type="button" class="modal-close-btn" onclick="closeModal('locationPickerModal')">&times;</button>
+    </div>
+    <div id="pickerMapContainer" style="height:min(58vh,460px);width:100%;border-radius:8px;margin-top:8px;"></div>
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin:8px 0;">
+      <div id="pickerCoordsDisplay" style="font-weight:700;font-size:14px;">-</div>
+      <button type="button" class="btn-cancel" style="height:36px;" onclick="togglePickerSatellite()">🛰️ Satellite</button>
+    </div>
+    <div class="modal-actions">
+      <button type="button" class="btn-cancel" onclick="closeModal('locationPickerModal')">Cancel</button>
+      <button type="button" class="btn-save" onclick="applyChosenPickedLocation()">Use this location</button>
+    </div>
+  </div>
+</div>
+
 <!-- Property boundaries (Vicmap), run boundaries from property lines, map provider / zoom -->
 <div id="lbBoundaryModal" class="modal-overlay sub-modal-layer">
   <div class="modal-box run-style-modal-box">
@@ -5638,6 +5657,13 @@ per day (minimum) *","1 x per day (minimum) *"],"cleaning":"2 x per year"},"5":{
   let mapTruckMarker = null;
 
   let pickerMap = null;
+  let pickerStreetLayer = null, pickerSatLayer = null, pickerSatOn = false;
+  window.togglePickerSatellite = function() {
+    if (!pickerMap || !pickerStreetLayer || !pickerSatLayer) return;
+    pickerSatOn = !pickerSatOn;
+    if (pickerSatOn) { pickerMap.removeLayer(pickerStreetLayer); pickerSatLayer.addTo(pickerMap); }
+    else { pickerMap.removeLayer(pickerSatLayer); pickerStreetLayer.addTo(pickerMap); }
+  };
   let pickerMarker = null;
   let pickerTargetType = 'prop';
   let pickedCoordinates = { lat: null, lng: null };
@@ -6874,7 +6900,10 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
       if (!pickerMap) {
         pickerMap = L.map('pickerMapContainer', { maxZoom: 22 }).setView([initialLat, initialLng], 17);
         // Tiles only exist to z19; beyond that Leaflet stretches the z19 tiles so the picker can still zoom right in.
-        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxNativeZoom: 19, maxZoom: 22 }).addTo(pickerMap);
+        pickerStreetLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxNativeZoom: 19, maxZoom: 22 }).addTo(pickerMap);
+        pickerSatLayer = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { maxNativeZoom: 19, maxZoom: 22 });
+        pickerSatOn = false;
+        if (window.lbParcels && window.lbParcels.attachPicker) window.lbParcels.attachPicker(pickerMap);
 
         pickerMarker = L.marker([initialLat, initialLng], { draggable: true }).addTo(pickerMap);
 
@@ -16221,6 +16250,27 @@ window.addEventListener('DOMContentLoaded', async () => {
     return runsApplyToSelection(cp.runs) ? cp : null;
   }
 
+  // Saves a new pin position for a house (same edit the Property > Location save logs), re-matches
+  // it to its Vicmap lot and redraws.
+  window.moveHouseTo = async function(site, lat, lng) {
+    const sc = site.soloSchedule || {};
+    site.lat = Number(lat).toFixed(6);
+    site.lng = Number(lng).toFixed(6);
+    logEdit({
+      timestamp: new Date().toISOString(), editType: "PROPERTY_UPDATE",
+      propId: site.propId, siteId: site.siteId, address: site.addressText,
+      day: sc.day || '', weekLetter: (sc.weekLetter || '').toUpperCase(),
+      garRun: sc.garRun || '', recRun: sc.recRun || '', recSummerRun: sc.recSummerRun || '', fogRun: sc.fogRun || '',
+      runFlags: site.runFlags || '', lat: site.lat, lng: site.lng
+    });
+    hasUnsyncedChanges = true; updateSyncButtonIcon();
+    await saveToDB("masterRecords", siteRecords);
+    await saveToDB("masterEditsLog", masterEditsLog);
+    if (window.lbParcels) { try { await window.lbParcels.matchSite(site); } catch (e) {} }
+    renderMapData();
+    if (window.lbParcels) window.lbParcels.refresh();
+  };
+
   window.drawHouseTriangle = function(site) {
     const id = String(site.propId || site.siteId || '');
     const isSelected = selectedCollectionHouseIds.has(id);
@@ -16262,8 +16312,21 @@ window.addEventListener('DOMContentLoaded', async () => {
       icon,
       keyboard: false,
       pane: 'lukez-house-pane',
-      interactive: true
+      interactive: true,
+      // Only the selected (blue) house can be dragged, so scrolling the map never moves a house by accident.
+      draggable: isSelected
     });
+
+    if (isSelected) {
+      const origin = L.latLng(p.lat, p.lng);
+      marker.on('dragstart', () => { marker.closePopup(); });
+      marker.on('dragend', async () => {
+        const np = marker.getLatLng();
+        const ok = await customConfirm('Move ' + (site.addressText || 'this house') + ' to this spot?');
+        if (!ok) { marker.setLatLng(origin); return; }
+        await window.moveHouseTo(site, np.lat, np.lng);
+      });
+    }
     
     marker.bindPopup(mapPopupHTML({
       badge: '🏠', title: label,
@@ -21771,6 +21834,18 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
       if (hits(P.b, v)) add(P.o, P.h, st.hit);
       if (n >= MAX_DRAW) break;
     }
+    // 2b. Houses whose pin isn't in any lot: red ring = no lot within 25 m, orange = pin outside its lot
+    //     (nearest lot used). Those pins are probably in the wrong place - select the house and drag it.
+    const inV = pt => pt.lng >= v.w && pt.lng <= v.e && pt.lat >= v.s && pt.lat <= v.n;
+    allSites().forEach(s => {
+      if (n >= MAX_DRAW) return;
+      const e = store.sites[siteKey(s)];
+      if (!e || !(e.x || e.m === 1) || !e.q || !isFresh(s, e)) return;
+      const pt = sitePoint(s); if (!pt || !inV(pt)) return;
+      L.circleMarker([pt.lat, pt.lng], { renderer: rend, interactive: false, radius: 16, weight: 3, fill: false,
+        color: e.x ? '#ef4444' : '#f59e0b', opacity: 0.95 }).addTo(group);
+      n++;
+    });
     // 3. Surrounding cadastre (neighbours, parks, road reserves) as faint context lines
     tiles.forEach(t => {
       t.parcels.forEach(P => {
@@ -21976,7 +22051,8 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
       + '<button type="button" ' + btn + ' id="lbParcelMatchAllBtn" onclick="window.lbParcels.matchAllUI()">Match every house</button>'
       + '<button type="button" ' + btn + ' id="lbParcelMatchViewBtn" onclick="window.lbParcels.matchViewUI()">Match houses on screen</button>'
       + '</div>'
-      + '<div class="uprop-flat-btn-row" style="margin:0 0 8px;"><button type="button" ' + btn + ' onclick="window.lbParcels.clearAllUI()">Clear matched boundaries</button></div>'
+      + '<div class="uprop-flat-btn-row" style="margin:0 0 8px;"><button type="button" ' + btn + ' onclick="window.lbParcels.goToNextUnmatched()">Find next house with no lot</button><button type="button" ' + btn + ' onclick="window.lbParcels.clearAllUI()">Clear matched boundaries</button></div>'
+      + '<div class="run-style-help">On the map, a <b>red ring</b> is a house with no lot near its pin and an <b>orange ring</b> is a pin sitting outside its lot. Those pins are usually in the wrong place: select the house (it turns blue), then drag it into its lot.</div>'
       + '<div class="run-style-section-title" style="margin-top:10px;">Run boundaries from property lines</div>'
       + '<div class="uprop-flat-btn-row" style="margin:8px 0;">'
       + '<button type="button" ' + btn + ' id="lbBuildRunsBtn" onclick="window.lbParcels.buildRunsUI(\'selected\')">Build selected run</button>'
@@ -22355,6 +22431,71 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     await customAlert(msg);
   }
 
+
+  /* ---------------- fixing wrong house pins ---------------- */
+  const skipped = new Set();
+  let lastSelected = null;
+  function attentionSites() {
+    const out = [];
+    allSites().forEach(s => {
+      const pt = sitePoint(s); if (!pt) return;
+      const e = store.sites[siteKey(s)];
+      if (!e || !e.q || !isFresh(s, e) || !(e.x || e.m === 1)) return;
+      out.push({ s, pt, e });
+    });
+    return out;
+  }
+  // Jumps to the closest house with no lot (then ones sitting outside their lot), selects it so it turns
+  // blue and can be dragged into place.
+  async function goToNextUnmatched() {
+    await ensureLoaded();
+    if (!ensureMap()) { await customAlert('Open the map first.'); return; }
+    const list = attentionSites();
+    if (!list.length) { await customAlert('Every matched house has its pin inside a lot. Houses that have not been matched yet are handled by "Match every house".'); return; }
+    const c = map.getCenter();
+    list.forEach(o => { o.d = (o.e.x ? 0 : 1e9) + metresBetween(c.lat, c.lng, o.pt.lat, o.pt.lng); });
+    list.sort((a, b) => a.d - b.d);
+    let pick = list.find(o => !skipped.has(siteKey(o.s)));
+    if (!pick) { skipped.clear(); pick = list[0]; }
+    const id = siteKey(pick.s);
+    skipped.add(id);
+    if (typeof selectedCollectionHouseIds !== 'undefined' && typeof toggleCollectionHouse === 'function') {
+      if (lastSelected && lastSelected !== id && selectedCollectionHouseIds.has(lastSelected)) toggleCollectionHouse(lastSelected);
+      if (!selectedCollectionHouseIds.has(id)) toggleCollectionHouse(id);
+      lastSelected = id;
+    }
+    if (typeof closeModal === 'function') closeModal('lbBoundaryModal');
+    map.setView([pick.pt.lat, pick.pt.lng], Math.max(map.getZoom(), 20));
+    pill((pick.e.x ? 'No lot found: ' : 'Outside its lot: ') + (pick.s.addressText || id) + ' (' + skipped.size + ' of ' + list.length + '). Drag the blue house into its lot.', 8000);
+  }
+  // Faint Vicmap lot lines on the "Choose on Map" picker so a pin can be dropped in the right lot.
+  function attachPicker(m) {
+    const grp = L.layerGroup().addTo(m), r = L.canvas({ padding: 0.3 });
+    let token = 0;
+    async function upd() {
+      const my = ++token;
+      grp.clearLayers();
+      if (m.getZoom() < 17) return;
+      const b = m.getBounds();
+      const x0 = Math.floor(b.getWest() / TILE_DEG), x1 = Math.floor(b.getEast() / TILE_DEG), y0 = Math.floor(b.getSouth() / TILE_DEG), y1 = Math.floor(b.getNorth() / TILE_DEG);
+      if ((x1 - x0 + 1) * (y1 - y0 + 1) > 6) return;
+      let all = [];
+      try {
+        const jobs = []; for (let ix = x0; ix <= x1; ix++) for (let iy = y0; iy <= y1; iy++) jobs.push(loadTile(ix, iy));
+        all = [].concat(...(await Promise.all(jobs)));
+      } catch (e) { return; }
+      if (my !== token) return;
+      let n = 0;
+      all.forEach(P => P.parts.forEach(part => {
+        if (n++ > 1500) return;
+        L.polygon(toLatLngs(part.o, part.h), { renderer: r, interactive: false, color: P.road ? '#94a3b8' : '#ea580c', weight: P.road ? 1 : 1.5, fill: false }).addTo(grp);
+      }));
+    }
+    m.on('moveend', upd);
+    upd();
+    return upd;
+  }
+
   window.lbParcels = {
     onMapReady: function () { ensureMap(); ensureLoaded().then(scheduleRefresh); },
     refresh: refresh,
@@ -22365,6 +22506,9 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     matchAllUI: matchAllUI,
     matchViewUI: matchViewUI,
     clearAllUI: clearAllUI,
+    goToNextUnmatched: goToNextUnmatched,
+    attachPicker: attachPicker,
+    attentionSites: attentionSites,
     buildRunsUI: buildRunsUI,
     extraRings: extraRings,
     settingsHTML: settingsHTML,
