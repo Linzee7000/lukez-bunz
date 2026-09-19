@@ -4122,7 +4122,7 @@ body:not(.dark-mode) .welcome-go-wrap {
                      map's side controls now just show a small recording
                      light instead. -->
                 <button type="button" id="btnSnailTrailPause" class="map-context-btn map-settings-opt-btn map-settings-action" onclick="toggleSnailTrailPause()">⏸ Pause Trail</button>
-                <button type="button" class="map-context-btn map-settings-opt-btn map-settings-action" onclick="exportSnailTrailKml()">📤 Export Trail</button>
+                <button type="button" class="map-context-btn map-settings-opt-btn map-settings-action" onclick="exportSnailTrailKml()"><img class="icon-img" src="export.png" alt=""> Export Trail</button>
                 <button type="button" class="map-context-btn map-settings-opt-btn map-settings-action danger" onclick="confirmClearSnailTrail()"><img class="icon-img" src="minus.png" alt=""> Clear Trail</button>
                 <!-- Trail appearance settings: fade the trail from green to
                      red the older it gets, and/or drop a time label every
@@ -5168,28 +5168,6 @@ per day (minimum) *","1 x per day (minimum) *"],"cleaning":"2 x per year"},"5":{
   let showBinGpsDots = true;
   let showHouseGpsDots = false;
   let isSatelliteView = false;
-
-  // ----- Vicmap property parcels: automatic house boundaries (see the
-  // "Vicmap property parcels" section further down for the code) -----
-  const VIC_PARCEL_QUERY_URL = 'https://services-ap1.arcgis.com/P744lA0wf4LlBZ84/ArcGIS/rest/services/Vicmap_Parcel/FeatureServer/0/query';
-  const VIC_PARCEL_ATTRIBUTION = 'Property boundaries &copy; State of Victoria (Vicmap Property)';
-  const PARCEL_NEAR_MAX_M = 30;      // pin on the road? accept a lot up to this far away
-  const PARCEL_RUN_REACH_M = 25;     // max push-out across the road; where another run is opposite it stops at the road centre
-  const vicParcelIndex = new Map();  // siteKey -> {r:[[lat,lng]..], spi, pfi, u, m, d}
-  const lbParcelColors = new Map();  // siteKey -> run colour, refreshed on each map render
-  const parcelRunCache = new Map();
-  const parcelRunPending = new Set();
-  let vicParcelVersion = 0;
-  let parcelFetchBusy = false;
-  let parcelFetchCancel = false;
-  let parcelAttributionAdded = false;
-  let parcelRunRedrawTimer = null;
-  let mapHouseParcelLayer = null;
-  const PARCEL_AUTO_MAX_HOUSES = 1500;  // don't auto-download for huge all-runs views
-  let parcelAutoTimer = null;
-  const parcelAttempted = new Map();     // siteKey -> last lookup time, so a house is never re-asked in a tight loop
-  let parcelAutoBlockedUntil = 0;       // back-off after a stop / failure
-  let housePinBackupCount = 0;
   // Three "Run Square" layers - one per stream (Garbage, Recycling, FOGO).
   // Each draws a small square at every house serviced by that stream's
   // currently visible run(s): outline = the stream's own colour (same hex
@@ -5208,7 +5186,7 @@ per day (minimum) *","1 x per day (minimum) *"],"cleaning":"2 x per year"},"5":{
   // property regardless of whether its bin looks right. Off by default;
   // drawn in green alongside the normal boundary when on. See
   // sitesForBoundaryHull and renderMapData for where the two differ.
-  let showPropertyBoundaries = false;
+  let showPropertyBoundaries = true;
 
   let isTruckFollowEnabled = true;
   let isNextBinBoxVisible = localStorage.getItem('lukezBunzNextBinBoxVisible') !== 'false';
@@ -6225,6 +6203,7 @@ per day (minimum) *","1 x per day (minimum) *"],"cleaning":"2 x per year"},"5":{
     showPropertyBoundaries = !showPropertyBoundaries;
     renderMapData();
     updateMapSideLayersUI();
+    if (window.lbParcels) window.lbParcels.refresh();
   }
 
   function toggleSatelliteView() {
@@ -6244,689 +6223,8 @@ per day (minimum) *","1 x per day (minimum) *"],"cleaning":"2 x per year"},"5":{
       leafletMap.removeLayer(satLayer);
       leafletMap.addLayer(currentBaseLayer);
     }
-  }
-
-  // ===== Vicmap property parcels: automatic house boundaries =====
-  // Every house's boundary is taken from the state's official property map
-  // (Vicmap Property "PARCEL_MP", free, updated regularly) instead of being
-  // drawn by hand. Parcels are matched to houses by GPS pin, cached on the
-  // device (IndexedDB key "vicParcels") and never written to the Edits log,
-  // so bulk-loading thousands of houses can't flood the sync sheet.
-  // A hand-drawn / saved site.boundary always wins over a downloaded parcel.
-
-  function siteKeyForParcel(site) {
-    return String((site && (site.propId || site.siteId || site.addressText)) || '');
-  }
-  function siteBoundaryRing(site) {
-    if (site && Array.isArray(site.boundary) && site.boundary.length >= 3) return site.boundary;
-    const hit = vicParcelIndex.get(siteKeyForParcel(site));
-    return hit && Array.isArray(hit.r) && hit.r.length >= 3 ? hit.r : null;
-  }
-
-  function parcelRoundCoord(n) { return Math.round(n * 1e7) / 1e7; }
-  function ringAreaM2(ring) {
-    if (!ring || !ring.length) return 0;
-    const kx = 111320 * Math.cos(ring[0][0] * Math.PI / 180), ky = 110540;
-    let a = 0;
-    for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
-      a += (ring[j][1] * kx) * (ring[i][0] * ky) - (ring[i][1] * kx) * (ring[j][0] * ky);
-    }
-    return Math.abs(a / 2);
-  }
-
-  // GeoJSON features (lng,lat) -> [{rings:[[lat,lng]...], bbox, area, road, status, spi, pfi, unc}]
-  function parseParcelFeatures(feats) {
-    const out = [];
-    (feats || []).forEach(f => {
-      const g = f && f.geometry;
-      if (!g || !g.coordinates) return;
-      const pr = f.properties || {};
-      const polys = g.type === 'Polygon' ? [g.coordinates] : g.type === 'MultiPolygon' ? g.coordinates : [];
-      polys.forEach(poly => {
-        const rings = poly.map(r => {
-          const pts = r.map(c => [parcelRoundCoord(c[1]), parcelRoundCoord(c[0])]);
-          if (pts.length > 1) {
-            const a = pts[0], b = pts[pts.length - 1];
-            if (a[0] === b[0] && a[1] === b[1]) pts.pop();
-          }
-          return pts;
-        }).filter(r => r.length >= 3);
-        if (!rings.length) return;
-        let minLat = Infinity, minLng = Infinity, maxLat = -Infinity, maxLng = -Infinity;
-        rings[0].forEach(pt => {
-          if (pt[0] < minLat) minLat = pt[0];
-          if (pt[0] > maxLat) maxLat = pt[0];
-          if (pt[1] < minLng) minLng = pt[1];
-          if (pt[1] > maxLng) maxLng = pt[1];
-        });
-        out.push({
-          rings, bbox: [minLat, minLng, maxLat, maxLng], area: ringAreaM2(rings[0]),
-          road: String(pr.parcel_road || '').trim().toUpperCase() === 'Y',
-          status: String(pr.parcel_status || '').trim().toUpperCase(),
-          spi: pr.parcel_spi || '', pfi: pr.parcel_pfi || '',
-          unc: typeof pr.parv_horiz_pos_uncertainty === 'number' ? pr.parv_horiz_pos_uncertainty : null
-        });
-      });
-    });
-    return out;
-  }
-
-  function pointInRingLL(ring, lat, lng) {
-    let inside = false;
-    for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
-      const yi = ring[i][0], xi = ring[i][1], yj = ring[j][0], xj = ring[j][1];
-      if (((yi > lat) !== (yj > lat)) && (lng < (xj - xi) * (lat - yi) / (yj - yi) + xi)) inside = !inside;
-    }
-    return inside;
-  }
-  function parcelContainsPoint(p, lat, lng) {
-    const b = p.bbox;
-    if (lat < b[0] || lat > b[2] || lng < b[1] || lng > b[3]) return false;
-    if (!pointInRingLL(p.rings[0], lat, lng)) return false;
-    for (let i = 1; i < p.rings.length; i++) if (pointInRingLL(p.rings[i], lat, lng)) return false;
-    return true;
-  }
-  function distPointToParcelM(p, lat, lng) {
-    const ring = p.rings[0];
-    const kx = 111320 * Math.cos(lat * Math.PI / 180), ky = 110540;
-    let best = Infinity;
-    for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
-      const ax = (ring[j][1] - lng) * kx, ay = (ring[j][0] - lat) * ky;
-      const bx = (ring[i][1] - lng) * kx, by = (ring[i][0] - lat) * ky;
-      const dx = bx - ax, dy = by - ay, len2 = dx * dx + dy * dy;
-      const t = len2 ? Math.max(0, Math.min(1, -(ax * dx + ay * dy) / len2)) : 0;
-      const d = Math.hypot(ax + t * dx, ay + t * dy);
-      if (d < best) best = d;
-    }
-    return best;
-  }
-  function parcelRank(a, b) {
-    return ((a.status === 'F' ? 0 : 1) - (b.status === 'F' ? 0 : 1)) || (a.area - b.area);
-  }
-
-  // Which lot does this house sit on? Lot containing the pin (never a road
-  // reserve; smallest wins so a unit's lot beats the common property around
-  // it). If the pin is on the road / kerb, take the nearest lot within 30m.
-  function pickParcelForPoint(parcels, lat, lng) {
-    const inside = parcels.filter(p => !p.road && parcelContainsPoint(p, lat, lng)).sort(parcelRank);
-    if (inside.length) return { parcel: inside[0], m: 'in', d: 0 };
-    let best = null, bestD = Infinity;
-    const padLat = 0.0004, padLng = 0.0005;
-    parcels.forEach(p => {
-      if (p.road) return;
-      const b = p.bbox;
-      if (lat < b[0] - padLat || lat > b[2] + padLat || lng < b[1] - padLng || lng > b[3] + padLng) return;
-      const d = distPointToParcelM(p, lat, lng);
-      if (d < bestD || (d === bestD && best && parcelRank(p, best) < 0)) { bestD = d; best = p; }
-    });
-    if (best && bestD <= PARCEL_NEAR_MAX_M) return { parcel: best, m: 'near', d: Math.round(bestD) };
-    return null;
-  }
-
-  async function queryVicParcels(minLat, minLng, maxLat, maxLng) {
-    const out = [];
-    let offset = 0;
-    for (let page = 0; page < 20; page++) {
-      const params = new URLSearchParams({
-        f: 'geojson', where: '1=1',
-        geometry: `${minLng},${minLat},${maxLng},${maxLat}`,
-        geometryType: 'esriGeometryEnvelope', inSR: '4326',
-        spatialRel: 'esriSpatialRelIntersects',
-        outFields: 'parcel_pfi,parcel_spi,parcel_road,parcel_status,parv_horiz_pos_uncertainty',
-        returnGeometry: 'true', outSR: '4326', geometryPrecision: '7',
-        resultOffset: String(offset), resultRecordCount: '2000'
-      });
-      const resp = await fetch(VIC_PARCEL_QUERY_URL + '?' + params.toString());
-      if (!resp.ok) throw new Error('Vicmap parcel service returned HTTP ' + resp.status);
-      const fc = await resp.json();
-      if (fc && fc.error) throw new Error((fc.error.message || 'Vicmap parcel query failed') + (fc.error.code ? ' (' + fc.error.code + ')' : ''));
-      const feats = (fc && fc.features) || [];
-      out.push(...parseParcelFeatures(feats));
-      const more = fc && (fc.exceededTransferLimit || (fc.properties && fc.properties.exceededTransferLimit));
-      if (!more || !feats.length) break;
-      offset += feats.length;
-    }
-    return out;
-  }
-
-  let vicParcelCachePromise = null;
-  function ensureVicParcelCacheLoaded() {
-    if (!vicParcelCachePromise) {
-      vicParcelCachePromise = (async () => {
-        try {
-          const c = await loadFromDB('vicParcels');
-          if (c && Array.isArray(c.items)) {
-            c.items.forEach(e => { if (Array.isArray(e) && e[0] && e[1]) vicParcelIndex.set(e[0], e[1]); });
-            if (vicParcelIndex.size) vicParcelVersion++;
-          }
-          const b = await loadFromDB('housePinBackup');
-          housePinBackupCount = (b && Array.isArray(b.moves)) ? b.moves.length : 0;
-        } catch (e) { console.warn('Vicmap parcel cache load failed', e); }
-      })();
-    }
-    return vicParcelCachePromise;
-  }
-  async function saveVicParcelCache() {
-    try { await saveToDB('vicParcels', { v: 1, savedAt: Date.now(), items: Array.from(vicParcelIndex.entries()) }); }
-    catch (e) { console.warn('Vicmap parcel cache save failed', e); }
-  }
-
-  function parcelStatusChip(msg) {
-    let el = document.getElementById('lbParcelStatus');
-    if (!msg) { if (el) el.remove(); return; }
-    if (!el) {
-      el = document.createElement('div');
-      el.id = 'lbParcelStatus';
-      el.style.cssText = 'position:fixed;left:50%;transform:translateX(-50%);bottom:calc(90px + env(safe-area-inset-bottom,0px));z-index:100000;background:#0f172a;color:#fff;padding:10px 16px;border-radius:999px;font:600 13px system-ui,sans-serif;box-shadow:0 4px 14px rgba(0,0,0,.4);max-width:90vw;text-align:center';
-      el.addEventListener('click', () => { parcelFetchCancel = true; });
-      document.body.appendChild(el);
-    }
-    el.textContent = msg;
-  }
-
-  function ensureParcelAttribution() {
-    if (parcelAttributionAdded || !leafletMap || !leafletMap.attributionControl) return;
-    leafletMap.attributionControl.addAttribution(VIC_PARCEL_ATTRIBUTION);
-    parcelAttributionAdded = true;
-  }
-
-  // Metres between two lat/lng points (fine at street scale).
-  function parcelPinDistM(lat1, lng1, lat2, lng2) {
-    const kx = 111320 * Math.cos(lat1 * Math.PI / 180), ky = 110540;
-    return Math.hypot((lng2 - lng1) * kx, (lat2 - lat1) * ky);
-  }
-  // Does this house still need its lot looked up? Yes if it has none yet, or
-  // its pin has moved since the lookup. A hand-saved boundary is left alone.
-  function parcelNeedsLoad(s) {
-    const k = siteKeyForParcel(s);
-    const p = gps(s.lat, s.lng);
-    if (!k || !p) return false;
-    if (Array.isArray(s.boundary) && s.boundary.length >= 3) return false;
-    const tried = parcelAttempted.get(k);
-    if (tried && Date.now() - tried < 10 * 60 * 1000) return false;
-    const e = vicParcelIndex.get(k);
-    if (!e) return true;
-    if (!e.p) return false;
-    if (parcelPinDistM(e.p[0], e.p[1], p.lat, p.lng) > 3) return true;
-    // A lookup that found no lot used to be remembered forever, so those houses
-    // never got a boundary. Retry them every 6h (old cache entries have no
-    // timestamp, so they get retried once straight away).
-    return !e.r && (Date.now() - (e.t || 0)) > 6 * 3600 * 1000;
-  }
-
-  // Downloads the lots around the given houses (one small request per ~350m
-  // grid cell, two at a time), matches each house to its lot and caches it.
-  // Runs quietly in the background; only speaks up if downloads fail.
-  async function fetchVicmapParcelsFor(sites) {
-    if (parcelFetchBusy || !navigator.onLine) return;
-    await ensureVicParcelCacheLoaded();
-
-    const todoMap = new Map();
-    (sites || []).forEach(s => {
-      if (!parcelNeedsLoad(s)) return;
-      const k = siteKeyForParcel(s);
-      const p = gps(s.lat, s.lng);
-      if (!todoMap.has(k)) todoMap.set(k, { k, lat: p.lat, lng: p.lng });
-      parcelAttempted.set(k, Date.now());
-    });
-    const todo = Array.from(todoMap.values());
-    if (!todo.length) return;
-
-    const CELL_LAT = 0.003, CELL_LNG = 0.004;
-    const cells = new Map();
-    todo.forEach(t => {
-      const id = Math.floor(t.lat / CELL_LAT) + '_' + Math.floor(t.lng / CELL_LNG);
-      if (!cells.has(id)) cells.set(id, []);
-      cells.get(id).push(t);
-    });
-    const queue = Array.from(cells.values());
-
-    parcelFetchBusy = true;
-    parcelFetchCancel = false;
-    const stats = { total: todo.length, done: 0, failedSites: 0, lastError: '' };
-    const PAD_LAT = 0.0005, PAD_LNG = 0.0006;
-    const showProgress = () => parcelStatusChip(`Loading property boundaries… ${stats.done.toLocaleString()} / ${stats.total.toLocaleString()} (tap to stop)`);
-    showProgress();
-
-    async function worker() {
-      while (queue.length && !parcelFetchCancel) {
-        const cell = queue.shift();
-        let minLat = Infinity, minLng = Infinity, maxLat = -Infinity, maxLng = -Infinity;
-        cell.forEach(t => {
-          if (t.lat < minLat) minLat = t.lat; if (t.lat > maxLat) maxLat = t.lat;
-          if (t.lng < minLng) minLng = t.lng; if (t.lng > maxLng) maxLng = t.lng;
-        });
-        let parcels = null;
-        for (let attempt = 0; attempt < 2 && !parcels; attempt++) {
-          try { parcels = await queryVicParcels(minLat - PAD_LAT, minLng - PAD_LNG, maxLat + PAD_LAT, maxLng + PAD_LNG); }
-          catch (e) {
-            console.warn('Parcel query failed', e);
-            stats.lastError = e && e.message ? e.message : String(e);
-            await new Promise(r => setTimeout(r, 900));
-          }
-        }
-        if (!parcels) { stats.failedSites += cell.length; stats.done += cell.length; showProgress(); continue; }
-        cell.forEach(t => {
-          const pick = pickParcelForPoint(parcels, t.lat, t.lng);
-          // Misses are remembered too (r:null) so they aren't re-asked every time.
-          vicParcelIndex.set(t.k, pick
-            ? { r: pick.parcel.rings[0], spi: pick.parcel.spi, pfi: pick.parcel.pfi, u: pick.parcel.unc, m: pick.m, d: pick.d, p: [t.lat, t.lng], t: Date.now() }
-            : { r: null, m: 'none', p: [t.lat, t.lng], t: Date.now() });
-        });
-        stats.done += cell.length;
-        showProgress();
-        await new Promise(r => setTimeout(r, 120));
-      }
-    }
-
-    try {
-      await Promise.all([worker(), worker()]);
-    } finally {
-      parcelFetchBusy = false;
-      parcelStatusChip(null);
-      await saveVicParcelCache();
-      refreshParcelViews();
-    }
-    if (parcelFetchCancel) parcelAutoBlockedUntil = Date.now() + 2 * 60 * 1000;
-    if (stats.failedSites) {
-      parcelAutoBlockedUntil = Date.now() + 2 * 60 * 1000;
-      customAlert(`Couldn't download property boundaries for ${stats.failedSites.toLocaleString()} houses${stats.lastError ? ' (' + stats.lastError + ')' : ''}. They'll be retried later.`);
-    }
-  }
-
-  // Whenever houses are on screen and boundaries are wanted, quietly fetch
-  // any that are missing. Skipped for huge all-runs views (pick a run and
-  // they load) and for a few minutes after a stop or a failure.
-  function scheduleParcelAutoLoad() {
-    clearTimeout(parcelAutoTimer);
-    parcelAutoTimer = setTimeout(autoLoadParcelsForShown, 1200);
-  }
-  async function autoLoadParcelsForShown() {
-    if (!showPropertyBoundaries && !showRunBoundaries) return;
-    if (parcelFetchBusy || Date.now() < parcelAutoBlockedUntil || !navigator.onLine) return;
-    const sites = window.lbVisibleSites || [];
-    if (!sites.length) return;
-    await ensureVicParcelCacheLoaded();
-    // Also load the lots of houses around the shown run(s): the run outline is
-    // cut back to other runs' properties, so those lots must be known too.
-    let pool = sites;
-    if (sites.length <= 600) {
-      let la0 = Infinity, ln0 = Infinity, la1 = -Infinity, ln1 = -Infinity;
-      sites.forEach(s => { const q = gps(s.lat, s.lng); if (!q) return; la0 = Math.min(la0, q.lat); ln0 = Math.min(ln0, q.lng); la1 = Math.max(la1, q.lat); ln1 = Math.max(ln1, q.lng); });
-      const seen = new Set(sites.map(siteKeyForParcel));
-      const extra = getRecordsArray().filter(s => {
-        const q = gps(s.lat, s.lng);
-        return q && q.lat >= la0 - 0.0005 && q.lat <= la1 + 0.0005 && q.lng >= ln0 - 0.0006 && q.lng <= ln1 + 0.0006 && !seen.has(siteKeyForParcel(s));
-      });
-      pool = sites.concat(extra);
-    }
-    const missing = pool.filter(parcelNeedsLoad);
-    if (!missing.length) return;
-    // Big views load in chunks (on-screen houses first); each finished chunk
-    // re-renders the map, which queues the next chunk automatically.
-    const vb = leafletMap ? leafletMap.getBounds().pad(0.2) : null;
-    if (vb) missing.sort((a, b) => {
-      const pa = gps(a.lat, a.lng), pb = gps(b.lat, b.lng);
-      return (pb && vb.contains([pb.lat, pb.lng]) ? 1 : 0) - (pa && vb.contains([pa.lat, pa.lng]) ? 1 : 0);
-    });
-    fetchVicmapParcelsFor(missing.slice(0, PARCEL_AUTO_MAX_HOUSES));
-  }
-
-  // ---- Fix house pins that sit outside their boundary ----------------------
-  // Nearest point on the lot's edge to the pin, then a few metres in toward
-  // the middle of the lot so the pin sits inside it (at the street end, where
-  // the bins are) rather than out on the road.
-  function pinTargetInsideLot(ring, lat, lng) {
-    const kx = 111320 * Math.cos(lat * Math.PI / 180), ky = 110540;
-    let best = null, bestD = Infinity;
-    for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
-      const ax = (ring[j][1] - lng) * kx, ay = (ring[j][0] - lat) * ky;
-      const bx = (ring[i][1] - lng) * kx, by = (ring[i][0] - lat) * ky;
-      const dx = bx - ax, dy = by - ay, len2 = dx * dx + dy * dy;
-      const t = len2 ? Math.max(0, Math.min(1, -(ax * dx + ay * dy) / len2)) : 0;
-      const qx = ax + t * dx, qy = ay + t * dy, d = Math.hypot(qx, qy);
-      if (d < bestD) {
-        const sl = Math.sqrt(len2) || 1;
-        bestD = d; best = { x: qx, y: qy, nx: -dy / sl, ny: dx / sl };
-      }
-    }
-    const toLL = (x, y) => [lat + y / ky, lng + x / kx];
-    // First try straight in from that edge (whichever side of it is inside the lot).
-    for (const inset of [5, 3, 1.5, 0.5]) {
-      for (const sign of [1, -1]) {
-        const ll = toLL(best.x + sign * best.nx * inset, best.y + sign * best.ny * inset);
-        if (pointInRingLL(ring, ll[0], ll[1])) return ll;
-      }
-    }
-    let cx = 0, cy = 0;
-    ring.forEach(pt => { cx += (pt[1] - lng) * kx; cy += (pt[0] - lat) * ky; });
-    cx /= ring.length; cy /= ring.length;
-    const ux = cx - best.x, uy = cy - best.y, len = Math.hypot(ux, uy) || 1;
-    for (const inset of [5, 3, 1.5]) {
-      const ll = toLL(best.x + ux / len * inset, best.y + uy / len * inset);
-      if (pointInRingLL(ring, ll[0], ll[1])) return ll;
-    }
-    const c = toLL(cx, cy);
-    if (pointInRingLL(ring, c[0], c[1])) return c;
-    return toLL(best.x, best.y);
-  }
-
-  function logPinMove(site, lat, lng) {
-    const sch = site.soloSchedule || {};
-    logEdit({
-      timestamp: new Date().toISOString(), editType: "PROPERTY_UPDATE",
-      propId: site.propId, siteId: site.siteId, address: site.addressText,
-      day: sch.day || '', weekLetter: (sch.weekLetter || '').toUpperCase(),
-      garRun: sch.garRun || '', recRun: sch.recRun || '',
-      recSummerRun: sch.recSummerRun || '', fogRun: sch.fogRun || '',
-      runFlags: site.runFlags || '', lat: String(lat), lng: String(lng)
-    });
-  }
-  function findSiteByKey(k) {
-    return siteRecords.find(s => siteKeyForParcel(s) === k);
-  }
-
-  // Layers > "Fix house pins to boundaries": for the houses showing now,
-  // any pin that is outside its imported boundary is moved to just inside it.
-  async function moveHousePinsToBoundaries() {
-    await ensureVicParcelCacheLoaded();
-    const sites = window.lbVisibleSites || [];
-    if (!sites.length) { customAlert('No houses are showing. Pick a run first.'); return; }
-    const moves = [];
-    let noSchedule = 0, noBoundary = 0;
-    sites.forEach(s => {
-      const k = siteKeyForParcel(s);
-      const p = gps(s.lat, s.lng);
-      const e = vicParcelIndex.get(k);
-      if (!k || !p) return;
-      if (!e || !Array.isArray(e.r) || e.r.length < 3 || (Array.isArray(s.boundary) && s.boundary.length >= 3)) { noBoundary++; return; }
-      if (pointInRingLL(e.r, p.lat, p.lng)) return;               // pin already inside its lot
-      if (!s.soloSchedule) { noSchedule++; return; }              // can't be logged safely
-      const t = pinTargetInsideLot(e.r, p.lat, p.lng);
-      moves.push({ k, propId: s.propId, siteId: s.siteId, oldLat: p.lat, oldLng: p.lng,
-                   newLat: Number(t[0].toFixed(7)), newLng: Number(t[1].toFixed(7)),
-                   dist: Math.round(parcelPinDistM(p.lat, p.lng, t[0], t[1])) });
-    });
-    if (!moves.length) {
-      customAlert(noBoundary
-        ? `No pins need moving among the houses that have boundaries loaded. ${noBoundary.toLocaleString()} shown houses have no boundary loaded yet - they load automatically while boundaries are switched on.`
-        : 'Every shown house pin is already inside its property boundary.');
-      return;
-    }
-    const far = moves.filter(m => m.dist > 25).length;
-    const ok = await customConfirm(`${moves.length.toLocaleString()} of the ${sites.length.toLocaleString()} houses showing have their GPS pin outside their property boundary. Move each pin to just inside its boundary, at the point nearest to where it is now?` +
-      (far ? `\n\n${far} of them are more than 25m away, so check those afterwards.` : '') +
-      `\n\nThis changes their saved location and is added to your sync. You can undo it from Layers straight after.`);
-    if (!ok) return;
-
-    await saveToDB('housePinBackup', { savedAt: Date.now(), moves });
-    housePinBackupCount = moves.length;
-    moves.forEach(m => {
-      const site = findSiteByKey(m.k);
-      if (!site) return;
-      site.lat = String(m.newLat); site.lng = String(m.newLng);
-      logPinMove(site, m.newLat, m.newLng);
-      const e = vicParcelIndex.get(m.k);
-      if (e) { e.p = [m.newLat, m.newLng]; e.m = 'in'; e.d = 0; }
-    });
-    hasUnsyncedChanges = true; updateSyncButtonIcon();
-    await saveToDB("masterRecords", siteRecords);
-    await saveToDB("masterEditsLog", masterEditsLog);
-    await saveVicParcelCache();
-    triggerUniversalDataRefresh();
-    customAlert(`Moved ${moves.length.toLocaleString()} house pins inside their boundaries.` +
-      (noSchedule ? ` ${noSchedule} were skipped because they have no saved schedule.` : ''));
-  }
-
-  async function undoHousePinMove() {
-    let backup = null;
-    try { backup = await loadFromDB('housePinBackup'); } catch (e) {}
-    const moves = (backup && backup.moves) || [];
-    if (!moves.length) { housePinBackupCount = 0; customAlert('There is nothing to undo.'); return; }
-    const ok = await customConfirm(`Put ${moves.length.toLocaleString()} house pins back where they were before the last fix?`);
-    if (!ok) return;
-    let restored = 0, changedSince = 0;
-    moves.forEach(m => {
-      const site = findSiteByKey(m.k);
-      const cur = site && gps(site.lat, site.lng);
-      if (!site || !cur) return;
-      if (parcelPinDistM(cur.lat, cur.lng, m.newLat, m.newLng) > 1) { changedSince++; return; }   // moved again since - leave it
-      site.lat = String(m.oldLat); site.lng = String(m.oldLng);
-      logPinMove(site, m.oldLat, m.oldLng);
-      restored++;
-    });
-    hasUnsyncedChanges = true; updateSyncButtonIcon();
-    await saveToDB("masterRecords", siteRecords);
-    await saveToDB("masterEditsLog", masterEditsLog);
-    await saveToDB('housePinBackup', { savedAt: Date.now(), moves: [] });
-    housePinBackupCount = 0;
-    triggerUniversalDataRefresh();
-    customAlert(`Put ${restored.toLocaleString()} house pins back.` + (changedSince ? ` ${changedSince} were left alone because they've been moved again since.` : ''));
-  }
-
-  function refreshParcelViews() {
-    vicParcelVersion++;
-    redrawHouseParcels();
-    if (typeof window.renderMapData === 'function') window.renderMapData();
-  }
-
-  // Draws each shown house's own lot (thin outline in its run's colour).
-  // Only from zoom 16 in, only what's on screen, capped so it stays quick.
-  function redrawHouseParcels() {
-    if (!leafletMap) return;
-    if (!mapHouseParcelLayer) mapHouseParcelLayer = L.layerGroup().addTo(leafletMap);
-    mapHouseParcelLayer.clearLayers();
-    if (!showPropertyBoundaries || leafletMap.getZoom() < 16) return;
-    const b = leafletMap.getBounds().pad(0.2);
-    const sites = window.lbVisibleSites || [];
-    let n = 0;
-    for (let i = 0; i < sites.length && n < 1500; i++) {
-      const s = sites[i];
-      const ring = siteBoundaryRing(s);
-      if (!ring || !ring.some(pt => b.contains(pt))) continue;
-      const color = lbParcelColors.get(siteKeyForParcel(s)) || '#22c55e';
-      L.polygon(ring, { color, weight: 1.5, fillColor: color, fillOpacity: 0.06, lineJoin: 'round', interactive: false }).addTo(mapHouseParcelLayer);
-      n++;
-    }
-    if (n) ensureParcelAttribution();
-  }
-
-  // ---- Run outline built from the houses' lots -------------------------
-  // Union of the run's lots (so the outline follows real property lines and
-  // leaves parks / other runs' properties out), optionally pushed out by
-  // half a road reserve so it ends down the middle of the road instead of
-  // at the front fence. Whatever the push-out would spill into a property
-  // that isn't in this run is cut back to that property's boundary.
-  function streamRunOf(site, stream) {
-    const item = getSiteRuns(site);
-    if (stream === 'Garbage') return item.garRun;
-    if (stream === 'Recycling') return isValidRecycleRun(item.recRun, item.day, item.week) ? item.recRun : '';
-    if (stream === 'SummerRecycling') return item.summerRun;
-    if (stream === 'FOGO') return item.fogRun;
-    return '';
-  }
-  function ringToTurfPoly(ring) {
-    if (!ring || ring.length < 3) return null;
-    const c = ring.map(p => [p[1], p[0]]);
-    c.push([ring[0][1], ring[0][0]]);
-    try { return turf.polygon([c]); } catch (e) { return null; }
-  }
-  function unionAllTurf(polys) {
-    if (!polys.length) return null;
-    let arr = polys.slice().sort((a, b) => a.geometry.coordinates[0][0][0] - b.geometry.coordinates[0][0][0]);
-    const leftovers = [];
-    while (arr.length > 1) {
-      const next = [];
-      for (let i = 0; i < arr.length; i += 2) {
-        if (i + 1 >= arr.length) { next.push(arr[i]); break; }
-        try { next.push(turf.union(arr[i], arr[i + 1]) || arr[i]); }
-        catch (e) { next.push(arr[i]); leftovers.push(arr[i + 1]); }
-      }
-      arr = next;
-    }
-    let result = arr[0];
-    if (leftovers.length) {
-      const coords = [];
-      [result].concat(leftovers).forEach(f => {
-        if (!f || !f.geometry) return;
-        if (f.geometry.type === 'Polygon') coords.push(f.geometry.coordinates);
-        else if (f.geometry.type === 'MultiPolygon') f.geometry.coordinates.forEach(c => coords.push(c));
-      });
-      result = turf.multiPolygon(coords);
-    }
-    return result;
-  }
-  function featureToLatLngs(f) {
-    if (!f || !f.geometry) return null;
-    const conv = ring => ring.map(c => [c[1], c[0]]);
-    const polyRings = poly => {
-      const rings = [conv(poly[0])];
-      for (let i = 1; i < poly.length; i++) {
-        let a = 0;
-        try { a = turf.area(turf.polygon([poly[i]])); } catch (e) {}
-        if (a >= 150) rings.push(conv(poly[i]));   // ignore slivers / tiny gaps
-      }
-      return rings;
-    };
-    if (f.geometry.type === 'Polygon') return polyRings(f.geometry.coordinates);
-    if (f.geometry.type === 'MultiPolygon') return f.geometry.coordinates.map(polyRings);
-    return null;
-  }
-  // Stand-in lot (small octagon round the pin) for a house whose real lot isn't
-  // loaded yet, so it is always inside its own run's outline and never cut
-  // through as a neighbour, instead of the run falling back to a plain hull.
-  function pinLotRing(s) {
-    const p = gps(s.lat, s.lng);
-    if (!p) return null;
-    const dLat = 7 / 110540, dLng = 7 / (111320 * Math.cos(p.lat * Math.PI / 180));
-    const ring = [];
-    for (let i = 0; i < 8; i++) { const a = i * Math.PI / 4; ring.push([p.lat + dLat * Math.sin(a), p.lng + dLng * Math.cos(a)]); }
-    return ring;
-  }
-  // Same run = same number on the same day (and same A/B week for Recycling /
-  // FOGO). The same run number on another day is a different run.
-  function sameRunAs(s, stream, run, ref) {
-    if (lower(streamRunOf(s, stream)) !== lower(run)) return false;
-    const it = getSiteRuns(s);
-    if (ref && ref.day && it.day !== ref.day) return false;
-    if (ref && (stream === 'Recycling' || stream === 'FOGO') && ref.week && it.week !== ref.week) return false;
-    return true;
-  }
-  function neighbourPolysNear(stream, run, bb, ref) {
-    const padLng = 0.0004, padLat = 0.0004;
-    const out = [];
-    getRecordsArray().forEach(s => {
-      if (sameRunAs(s, stream, run, ref)) return;
-      const ring = siteBoundaryRing(s) || pinLotRing(s);
-      if (!ring) return;
-      let inBox = false;
-      for (let i = 0; i < ring.length; i++) {
-        const la = ring[i][0], ln = ring[i][1];
-        if (ln >= bb[0] - padLng && ln <= bb[2] + padLng && la >= bb[1] - padLat && la <= bb[3] + padLat) { inBox = true; break; }
-      }
-      if (!inBox) return;
-      const poly = ringToTurfPoly(ring);
-      if (poly) out.push(poly);
-    });
-    return out;
-  }
-  // Only the neighbour lots within ~55m of this run matter for the road-centre
-  // cut; dropping the rest keeps the geometry work small enough for a phone.
-  function keepPolysNearRings(polys, rings) {
-    const cells = new Set();
-    rings.forEach(r => r.forEach(pt => cells.add(Math.floor(pt[0] / 0.0005) + '_' + Math.floor(pt[1] / 0.0006))));
-    return polys.filter(pl => pl.geometry.coordinates[0].some(c => {
-      const a = Math.floor(c[1] / 0.0005), b = Math.floor(c[0] / 0.0006);
-      for (let i = -1; i <= 1; i++) for (let j = -1; j <= 1; j++) if (cells.has((a + i) + '_' + (b + j))) return true;
-      return false;
-    }));
-  }
-  // Union of the run's lots pushed out over the road: normally ~10m (about the
-  // road centre, where the facing run's outline starts); where no other house
-  // lies within the full reach (nothing opposite, up to the park / shore /
-  // golf course) it goes the full reach. Other houses' lots are always cut out.
-  // Disjoint areas stay as separate boundaries (multi-polygon).
-  function computeParcelRunLatLngs(rings, stream, run, reach, ref) {
-    const polys = rings.map(ringToTurfPoly).filter(Boolean);
-    if (!polys.length) return null;
-    let shape = unionAllTurf(polys);
-    if (!shape) return null;
-    if (reach > 0) {
-      try {
-        const near = turf.buffer(shape, reach * 0.4, { units: 'meters', steps: 2 });
-        const far = turf.buffer(shape, reach, { units: 'meters', steps: 2 });
-        const nb = keepPolysNearRings(neighbourPolysNear(stream, run, turf.bbox(far), ref), rings);
-        const nu = nb.length ? unionAllTurf(nb) : null;
-        let claimed = near, ext = far;
-        if (nu) {
-          try { claimed = turf.difference(near, nu) || near; } catch (e) { console.warn('parcel outline: neighbour cut failed', e); }
-          try { ext = turf.difference(far, turf.buffer(nu, reach, { units: 'meters', steps: 1 })); } catch (e) { ext = null; }
-        }
-        if (ext) { try { claimed = turf.union(claimed, ext) || claimed; } catch (e) {} }
-        try { claimed = turf.union(claimed, shape) || claimed; } catch (e) {}
-        shape = claimed;
-      } catch (e) { console.warn('parcel outline: road-centre reach failed', e); }
-    }
-    try { shape = turf.simplify(shape, { tolerance: 0.000006, highQuality: false, mutate: false }); } catch (e) {}
-    return featureToLatLngs(shape);
-  }
-
-  function parcelRunLatLngs(key, stream, run, sites) {
-    const rings = [];
-    let sig = 0, real = 0;
-    (sites || []).forEach(s => {
-      const k = siteKeyForParcel(s);
-      for (let i = 0; i < k.length; i++) sig = (sig * 31 + k.charCodeAt(i)) | 0;
-      const r = siteBoundaryRing(s);
-      if (r && r.length >= 3) real++;
-      const use = (r && r.length >= 3) ? r : pinLotRing(s);
-      if (use) rings.push(use);
-    });
-    if (!rings.length) return null;
-    // Only work out outlines for runs on screen (the plain outline is shown for
-    // the rest), so an all-runs view can't lock the app up.
-    try {
-      let a0 = Infinity, o0 = Infinity, a1 = -Infinity, o1 = -Infinity;
-      rings.forEach(r => r.forEach(pt => { if (pt[0] < a0) a0 = pt[0]; if (pt[0] > a1) a1 = pt[0]; if (pt[1] < o0) o0 = pt[1]; if (pt[1] > o1) o1 = pt[1]; }));
-      if (leafletMap && !leafletMap.getBounds().pad(0.3).intersects(L.latLngBounds([[a0, o0], [a1, o1]]))) return null;
-    } catch (e) {}
-    const ref = sites && sites.length ? getSiteRuns(sites[0]) : null;
-    const reach = PARCEL_RUN_REACH_M;
-    const cacheKey = [key, stream, rings.length, real, sig, vicParcelVersion, getRecordsArray().length, reach].join('|');
-    const hit = parcelRunCache.get(cacheKey);
-    if (hit) return hit.latlngs;
-    if (!parcelRunPending.has(cacheKey) && parcelRunPending.size < 4) {
-      parcelRunPending.add(cacheKey);
-      parcelRunQueue.push({ cacheKey, rings, stream, run, reach, ref, key });
-      pumpParcelRunQueue();
-    }
-    return null;
-  }
-  const parcelRunQueue = [];
-  let parcelRunWorking = false;
-  function pumpParcelRunQueue() {
-    if (parcelRunWorking || !parcelRunQueue.length) return;
-    const j = parcelRunQueue.shift();
-    parcelRunWorking = true;
-    setTimeout(() => {
-      let latlngs = null;
-      try { latlngs = computeParcelRunLatLngs(j.rings, j.stream, j.run, j.reach, j.ref); }
-      catch (e) { console.error('Parcel run outline failed for', j.key, e); }
-      if (parcelRunCache.size > 200) parcelRunCache.clear();
-      parcelRunCache.set(j.cacheKey, { latlngs });
-      parcelRunPending.delete(j.cacheKey);
-      parcelRunWorking = false;
-      if (latlngs) ensureParcelAttribution();
-      scheduleParcelRunRedraw();
-      pumpParcelRunQueue();
-    }, 60);
-  }
-  function scheduleParcelRunRedraw() {
-    clearTimeout(parcelRunRedrawTimer);
-    parcelRunRedrawTimer = setTimeout(() => {
-      if (parcelRunPending.size) return;   // wait until the last outline is done
-      if (typeof window.renderMapData === 'function') window.renderMapData();
-    }, 250);
+    // Parcel lines switch colour (yellow on satellite, blue on the street map).
+    if (window.lbParcels) window.lbParcels.restyle();
   }
 
   function applyHeadingUpMap() {
@@ -7556,8 +6854,9 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
 
     setTimeout(() => {
       if (!pickerMap) {
-        pickerMap = L.map('pickerMapContainer').setView([initialLat, initialLng], 17);
-        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(pickerMap);
+        pickerMap = L.map('pickerMapContainer', { maxZoom: 22 }).setView([initialLat, initialLng], 17);
+        // Tiles only exist to z19; beyond that Leaflet stretches the z19 tiles so the picker can still zoom right in.
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxNativeZoom: 19, maxZoom: 22 }).addTo(pickerMap);
 
         pickerMarker = L.marker([initialLat, initialLng], { draggable: true }).addTo(pickerMap);
 
@@ -7789,31 +7088,92 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
   }
 
 
+  /* ---------------- Base map providers / zoom ----------------
+     The map can zoom to LB_MAX_ZOOM (22). No free tile server publishes real
+     imagery that deep, so:
+       - keyless default: OpenStreetMap + Esri World Imagery, real tiles to z19,
+         stretched (over-zoomed) from there to z22. Property lines are vector, so
+         they stay razor sharp at every zoom regardless of the tiles under them.
+       - with a Mapbox public token (Map settings > Map provider): Mapbox Streets
+         and Mapbox Satellite, which serve tiles all the way to z22.
+     Swapping happens live via lbBasemap.setToken(). */
+  const LB_MAX_ZOOM = 22;
+  const LB_MAPBOX_TOKEN_KEY = 'lbMapboxToken';
+  function lbGetMapboxToken(){
+    try { return (localStorage.getItem(LB_MAPBOX_TOKEN_KEY) || '').trim(); } catch(e) { return ''; }
+  }
+  function lbBuildBaseLayers(){
+    const tok = lbGetMapboxToken();
+    if (tok) {
+      const mb = (style, extra) => L.tileLayer(
+        'https://api.mapbox.com/styles/v1/mapbox/' + style + '/tiles/256/{z}/{x}/{y}@2x?access_token=' + encodeURIComponent(tok),
+        Object.assign({ maxZoom: LB_MAX_ZOOM, maxNativeZoom: LB_MAX_ZOOM, keepBuffer: 10, updateWhenIdle: false,
+          attribution: '&copy; <a href="https://www.mapbox.com/about/maps/">Mapbox</a> &copy; OpenStreetMap contributors' }, extra || {}));
+      return { street: mb('streets-v12'), sat: mb('satellite-v9'), provider: 'mapbox' };
+    }
+    return {
+      street: L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: LB_MAX_ZOOM, maxNativeZoom: 19, keepBuffer: 10, updateWhenIdle: false, attribution: '&copy; OpenStreetMap contributors' }),
+      sat: L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { maxZoom: LB_MAX_ZOOM, maxNativeZoom: 19, attribution: 'Tiles &copy; Esri' }),
+      provider: 'free'
+    };
+  }
+  function lbSwapBaseLayers(){
+    if (!leafletMap) return;
+    const wasSat = !!isSatelliteView;
+    [osmLayer, satLayer].forEach(l => { if (l && leafletMap.hasLayer(l)) leafletMap.removeLayer(l); });
+    const b = lbBuildBaseLayers();
+    osmLayer = b.street; satLayer = b.sat;
+    currentBaseLayer = osmLayer;
+    (wasSat ? satLayer : osmLayer).addTo(leafletMap);
+    if (typeof window.lbParcels !== 'undefined') window.lbParcels.restyle();
+  }
+  window.lbBasemap = {
+    provider: () => (lbGetMapboxToken() ? 'mapbox' : 'free'),
+    tokenValue: lbGetMapboxToken,
+    // Validates the token with one cheap request, then swaps the live map over.
+    // A blank value goes back to the free tiles.
+    setToken: async function(raw){
+      const tok = String(raw || '').trim();
+      if (tok) {
+        if (!/^pk\./.test(tok)) { customAlert('That does not look like a Mapbox public token - they start with "pk.". Secret tokens (sk.) must never be put in an app.'); return false; }
+        try {
+          const r = await fetch('https://api.mapbox.com/styles/v1/mapbox/streets-v12?access_token=' + encodeURIComponent(tok));
+          if (r.status === 401 || r.status === 403) { customAlert('Mapbox rejected that token (' + r.status + '). Check it was copied in full and that its URL restrictions allow this app.'); return false; }
+        } catch (e) { /* offline - accept it, tiles will load when signal returns */ }
+      }
+      try { if (tok) localStorage.setItem(LB_MAPBOX_TOKEN_KEY, tok); else localStorage.removeItem(LB_MAPBOX_TOKEN_KEY); } catch (e) {}
+      lbSwapBaseLayers();
+      return true;
+    },
+    settingsHTML: function(){
+      const tok = lbGetMapboxToken();
+      const status = tok ? 'Mapbox is on: streets and satellite both serve real tiles to zoom 22.'
+                         : 'Using free tiles: OpenStreetMap and Esri satellite. Real detail stops at zoom 19; zooms 20-22 are enlarged from that.';
+      return '<section class="run-style-section"><div class="run-style-section-title">Map provider</div>'
+        + '<div class="run-style-grid"><label class="color-control-card" style="flex-direction:column;align-items:stretch;gap:6px;"><span>Mapbox public token (optional)</span>'
+        + '<input id="lbMapboxTokenInput" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="pk.eyJ..." value="' + String(tok).replace(/"/g, '&quot;') + '" onchange="window.lbBasemap.setToken(this.value).then(function(){ var h=document.getElementById(\'lbMapProviderHelp\'); if(h) h.textContent=window.lbBasemap.help(); })">'
+        + '</label></div>'
+        + '<div class="run-style-help" id="lbMapProviderHelp">' + status + '</div></section>';
+    },
+    help: function(){
+      return lbGetMapboxToken() ? 'Mapbox is on: streets and satellite both serve real tiles to zoom 22.'
+        : 'Using free tiles: OpenStreetMap and Esri satellite. Real detail stops at zoom 19; zooms 20-22 are enlarged from that.';
+    }
+  };
+
   function initLeafletMap(){
     if(leafletMap)return;
     const el=document.getElementById('mainLeafletMap');
     if(!el||typeof L==='undefined'){console.error('Leaflet/map container unavailable');return;}
 
-    leafletMap=L.map(el,{preferCanvas:true,zoomControl:false,zoomSnap:1}).setView([-38.36,144.91],18);
+    leafletMap=L.map(el,{preferCanvas:true,zoomControl:false,zoomSnap:1,maxZoom:LB_MAX_ZOOM}).setView([-38.36,144.91],18);
     //L.control.zoom({position:'topright'}).addTo(leafletMap);
-    // Zoom 19 is as deep as OpenStreetMap publishes tiles (about 23cm per pixel
-    // at this latitude). maxNativeZoom makes Leaflet stretch the level-19 tiles
-    // for the last zoom level instead of requesting level-20 tiles that don't
-    // exist and leaving the map blank.
-    osmLayer=L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:20,maxNativeZoom:19,keepBuffer:10,updateWhenIdle:false,attribution:'&copy; OpenStreetMap contributors'});
-    // Esri World Imagery: best free aerial/satellite source. Attribution text
-    // is the credit Esri asks for on this service.
-    satLayer=L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{maxZoom:20,keepBuffer:10,updateWhenIdle:false,attribution:'Tiles &copy; Esri &mdash; Source: Esri, Vantor, Earthstar Geographics, and the GIS User Community'});
+    const baseLayers=lbBuildBaseLayers();
+    osmLayer=baseLayers.street;
+    satLayer=baseLayers.sat;
     currentBaseLayer = osmLayer;
     currentBaseLayer.addTo(leafletMap);
     mapHullsLayer=L.layerGroup().addTo(leafletMap);
-    mapHouseParcelLayer=L.layerGroup().addTo(leafletMap);
-    leafletMap.on('moveend', redrawHouseParcels);
-    ensureVicParcelCacheLoaded().then(() => {
-      if (!vicParcelIndex.size) return;
-      redrawHouseParcels();
-      if (typeof window.renderMapData === 'function') window.renderMapData();
-    });
     mapSeqLayer=L.layerGroup().addTo(leafletMap);
     mapMarkersLayer=L.layerGroup().addTo(leafletMap);
     mapKmzRouteLayer=L.layerGroup().addTo(leafletMap);
@@ -7839,6 +7199,7 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
     });
     setTimeout(()=>leafletMap&&leafletMap.invalidateSize(),100);
     setupManualMapRotationGesture(el);
+    if (window.lbParcels) window.lbParcels.onMapReady();
   }
 
   // Two-finger "twist" gesture that lets the driver manually rotate the
@@ -9426,8 +8787,11 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
     const routeSection=`<section class="run-style-section"><div class="run-style-section-title">Imported route</div>
       <div class="run-style-grid"><label class="color-control-card"><span>${iconStyleSelect('kmzRoute')} Route line</span><input id="styleKmzRouteColor" type="color" value="${kmzRouteColor}"></label></div></section>`;
 
-    list.innerHTML=runSection+accentSection+mapSection+liftSection+routeSection;
+    const parcelSection=window.lbParcels?window.lbParcels.settingsHTML():'';
+    const providerSection=window.lbBasemap?window.lbBasemap.settingsHTML():'';
+    list.innerHTML=runSection+accentSection+parcelSection+providerSection+mapSection+liftSection+routeSection;
     openModal('runStyleModal');
+    if (window.lbParcels) window.lbParcels.refreshSettingsUI();
   }
 
   async function saveAndApplyRunStyles(){
@@ -11583,6 +10947,12 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
     const stars = site.ratingStars || 5;
     const boundaryPts = Array.isArray(site.boundary) ? site.boundary.length : 0;
     const propIdEsc = esc(site.propId || site.siteId);
+    const parcelInfo = window.lbParcels ? window.lbParcels.infoFor(site) : null;
+    const boundaryStatusHTML = boundaryPts
+      ? `${boundaryPts}-point boundary drawn by you (used instead of Vicmap). <a href="#" onclick="event.preventDefault(); window.clearPropertyBoundary('${propIdEsc}')" style="color:#ff6b6b;">Clear</a>`
+      : (parcelInfo && parcelInfo.source === 'vicmap'
+          ? `Vicmap boundary: ${esc(parcelInfo.label)}${parcelInfo.area ? ' · ' + parcelInfo.area + ' m²' : ''}${parcelInfo.nearest ? ' · <b>nearest lot (' + parcelInfo.distance + ' m from the pin) - check it</b>' : ''}`
+          : 'No boundary yet. Tap Auto-Detect to match the official Vicmap lot.');
 
     return `
       ${renderUPropPropertyTab(site)}
@@ -11679,10 +11049,10 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
           <div class="uprop-picker-section-label">Boundary</div>
           <div class="uprop-flat-btn-row">
             <button type="button" class="uprop-flat-btn" onclick="window.startPropertyBoundaryDraw('${propIdEsc}')"><img class="icon-img" src="boundary.png" alt="">${boundaryPts ? 'Redraw' : 'Draw'} Boundary</button>
-            <button type="button" class="uprop-flat-btn" onclick="window.autoDetectPropertyBoundary('${propIdEsc}')">🌐 Auto-Detect (OSM)</button>
+            <button type="button" class="uprop-flat-btn" onclick="window.autoDetectPropertyBoundary('${propIdEsc}')">🌐 Auto-Detect (Vicmap)</button>
           </div>
           <div class="uprop-meta-line" style="margin-top:6px;">
-            ${boundaryPts ? `${boundaryPts}-point boundary saved. <a href="#" onclick="event.preventDefault(); window.clearPropertyBoundary('${propIdEsc}')" style="color:#ff6b6b;">Clear</a>` : 'No boundary drawn yet.'}
+            ${boundaryStatusHTML}
           </div>
         </div>
       </div>
@@ -13141,78 +12511,21 @@ window.addEventListener('DOMContentLoaded', async () => {
     }));
   };
 
-  // Best-effort auto-fill from OpenStreetMap: looks up the building
-  // footprint nearest this property's GPS pin via the public Overpass API
-  // and, if one's found, saves it straight in as the boundary (no drawing
-  // needed). Falls back to a plain message if OSM has nothing nearby or
-  // the request fails (e.g. no network).
+  // Auto-Detect: matches this property to its official Vicmap parcel (the
+  // surveyed lot boundary) and keeps it on this device. Unlike the old OSM
+  // building-outline lookup this is the legal lot line, not the roof.
+  // Anything drawn by hand (site.boundary) still takes priority over it.
   window.autoDetectPropertyBoundary = async function(propId) {
     const site = siteRecords.find(s => String(s.propId || s.siteId) === String(propId));
     if (!site) return;
+    if (!window.lbParcels) { customAlert('Property boundary tools have not loaded - reload the app and try again.'); return; }
     const p = gps(site.lat, site.lng);
     if (!p) { customAlert('This property needs GPS coordinates set before boundary lookup will work.'); return; }
-
-    // First choice: the property's actual lot from Vicmap Property.
-    try {
-      const parcels = await queryVicParcels(p.lat - 0.0004, p.lng - 0.0005, p.lat + 0.0004, p.lng + 0.0005);
-      const pick = pickParcelForPoint(parcels, p.lat, p.lng);
-      if (pick) {
-        site.boundary = pick.parcel.rings[0].map(pt => [pt[0], pt[1]]);
-        hasUnsyncedChanges = true; updateSyncButtonIcon();
-        logEdit({
-          timestamp: new Date().toISOString(), editType: "PROPERTY_BOUNDARY",
-          propId: site.propId, siteId: site.siteId, address: site.addressText,
-          boundary: JSON.stringify(site.boundary)
-        });
-        await saveToDB("masterRecords", siteRecords);
-        await saveToDB("masterEditsLog", masterEditsLog);
-        refreshUPropViews();
-        triggerUniversalDataRefresh();
-        redrawHouseParcels();
-        customAlert(pick.m === 'in'
-          ? `Saved this property's boundary from the Vicmap property map (${site.boundary.length} corners).`
-          : `Saved the nearest lot from the Vicmap property map (${pick.d}m from the pin - the pin looks to be on the road, so check it's the right lot).`);
-        return;
-      }
-    } catch (err) {
-      console.warn('Vicmap parcel lookup failed, falling back to OpenStreetMap building outline:', err);
-    }
-
-    try {
-      const query = `[out:json][timeout:15];way(around:25,${p.lat},${p.lng})["building"];out geom;`;
-      const resp = await fetch('https://overpass-api.de/api/interpreter', {
-        method: 'POST',
-        body: query
-      });
-      if (!resp.ok) throw new Error('Overpass request failed');
-      const data = await resp.json();
-      const ways = (data.elements || []).filter(el => el.geometry && el.geometry.length >= 3);
-      if (!ways.length) { customAlert('No building outline found on OpenStreetMap near this property.'); return; }
-
-      let best = null, bestDist = Infinity;
-      ways.forEach(w => {
-        const clat = w.geometry.reduce((a, pt) => a + pt.lat, 0) / w.geometry.length;
-        const clng = w.geometry.reduce((a, pt) => a + pt.lon, 0) / w.geometry.length;
-        const d = getDistanceMeters(p.lat, p.lng, clat, clng);
-        if (d < bestDist) { bestDist = d; best = w; }
-      });
-
-      site.boundary = best.geometry.map(pt => [pt.lat, pt.lon]);
-      hasUnsyncedChanges = true; updateSyncButtonIcon();
-      logEdit({
-        timestamp: new Date().toISOString(), editType: "PROPERTY_BOUNDARY",
-        propId: site.propId, siteId: site.siteId, address: site.addressText,
-        boundary: JSON.stringify(site.boundary)
-      });
-      await saveToDB("masterRecords", siteRecords);
-      await saveToDB("masterEditsLog", masterEditsLog);
-      refreshUPropViews();
-      triggerUniversalDataRefresh();
-      customAlert(`Found a building outline (${site.boundary.length} points) on OpenStreetMap and saved it as this property's boundary.`);
-    } catch (err) {
-      console.error('OSM boundary lookup failed:', err);
-      customAlert("Couldn't reach OpenStreetMap to look up a boundary — check your connection, or use Draw Boundary instead.");
-    }
+    const r = await window.lbParcels.matchSite(site, { force: true });
+    if (!r.ok) { customAlert(r.message); return; }
+    refreshUPropViews();
+    window.lbParcels.refresh();
+    customAlert(r.message);
   };
 
   window.clearPropertyBoundary = async function(propId) {
@@ -13891,6 +13204,43 @@ window.addEventListener('DOMContentLoaded', async () => {
     if (w === 'A' && (r === 220 || r === 222) && d === 'monday') return false;
     return true;
   }
+
+  // Every run of one stream, split the way run boundaries are stored (stream / day / week / run),
+  // with the storage key(s) each one is saved under. Used by the property-line boundary builder
+  // (lb-parcels-script) - it needs ALL runs of the stream so neighbours can be found.
+  window.lbRunGroups = function(stream) {
+    const groups = new Map();
+    getRecordsArray().forEach(site => {
+      const item = getSiteRuns(site);
+      let runVal = '';
+      if (stream === 'Garbage') runVal = item.garRun;
+      else if (stream === 'Recycling') { if (isValidRecycleRun(item.recRun, item.day, item.week)) runVal = item.recRun; }
+      else if (stream === 'FOGO') runVal = item.fogRun;
+      if (!runVal) return;
+      const day = dayKey(item.day);
+      const week = (stream === 'Recycling' || stream === 'FOGO') ? item.week : '';
+      const gk = [stream, day, week, lower(runVal)].join('|');
+      if (!groups.has(gk)) groups.set(gk, { key: gk, stream, run: runVal, day, week, sites: [] });
+      groups.get(gk).sites.push(site);
+    });
+    const list = [...groups.values()];
+    const count = fn => { const m = new Map(); list.forEach(g => { const k = fn(g); m.set(k, (m.get(k) || 0) + 1); }); return m; };
+    const byRun = count(g => lower(g.run)), byDayRun = count(g => g.day + '|' + lower(g.run));
+    const selected = selectedMapRuns();
+    const dayF = activeFilterDay ? dayKey(activeFilterDay) : '';
+    const weekF = clean(activeFilterWeek || '').toUpperCase();
+    list.forEach(g => {
+      g.borderKey = [stream, g.day, g.week, mapKey(g.run)].filter(Boolean).join('#');
+      // Also save under the shorter keys the map looks up when fewer filters are set, but only
+      // where that can't clash with a different run that shares the number.
+      const extra = [];
+      if (byDayRun.get(g.day + '|' + lower(g.run)) === 1) extra.push([stream, g.day, mapKey(g.run)].filter(Boolean).join('#'));
+      if (byRun.get(lower(g.run)) === 1) extra.push([stream, mapKey(g.run)].join('#'));
+      g.extraKeys = extra.filter(k => k !== g.borderKey);
+      g.inSelection = selected.has(lower(g.run)) && (!dayF || g.day === dayF) && (!weekF || !g.week || g.week === weekF);
+    });
+    return list;
+  };
 
   function getStreamFillColor(streamKey) {
     if (streamKey === 'Garbage') return '#dc2626';
@@ -15235,40 +14585,6 @@ window.addEventListener('DOMContentLoaded', async () => {
     if(!boundaryRemovePointsActive) window.toggleBoundaryRemovePointsMode();
   };
 
-  // Editing run boundary mode > "Reset": wipes the saved custom boundary
-  // for every currently-selected run entirely (not point-by-point like
-  // Remove points — the whole saved override, gone), so the run falls
-  // straight back to the automatic outline: the real parcel-fused shape
-  // from each house's own property lines (see parcelRunLatLngs) when
-  // enough of the run's houses have boundaries loaded, or the plain
-  // house-hull otherwise. This is the way back out if a custom border
-  // ever ends up badly wrong — mis-snapped, dragged into a mess, or
-  // (see Snap Houses/Snap Roads/Match Neighbour above) built from the
-  // wrong set of houses.
-  window.resetBoundaryToAutomatic = async function(){
-    const runs = Array.from(selectedMapRuns());
-    if (!runs.length) {
-      customAlert('Select the run(s) you want to reset first, then tap Reset.');
-      return;
-    }
-    const cleared = [];
-    runs.forEach(runKey => {
-      const borderKey = boundaryKeyFor(runKey);
-      if (customRunBorders[borderKey]) {
-        delete customRunBorders[borderKey];
-        cleared.push(runKey.toUpperCase());
-      }
-    });
-    if (!cleared.length) {
-      customAlert('None of the selected run(s) have a saved custom boundary to reset — already automatic.');
-      return;
-    }
-    await saveToDB('customRunBorders', customRunBorders);
-    renderMapData();
-    if (isRoadSnapEditing) enableBoundaryVertexHandles();
-    customAlert(`Cleared the saved boundary for ${cleared.join(', ')}. It'll now show the automatic outline instead.`);
-  };
-
   window.toggleRoadSnapEditing = async function() {
     isRoadSnapEditing = !isRoadSnapEditing;
     const btn = document.getElementById('btnRoadSnap');
@@ -15294,7 +14610,6 @@ window.addEventListener('DOMContentLoaded', async () => {
           {label:'Snap Roads', icon:'🛣️', onClick:()=>window.snapBoundaryToRoads(), row:2, key:'snapRoads'},
           {label:'Match Neighbour', icon:'🧷', onClick:()=>window.snapBoundaryToNeighbor(), row:2, key:'matchNeighbor'},
           {label:'Remove points', icon:'🗑️', onClick:()=>window.toggleBoundaryRemovePointsMode(), row:2, key:'removePoints'},
-          {label:'Reset', icon:'♻️', onClick:()=>window.resetBoundaryToAutomatic(), row:2, key:'resetBoundary'},
           {label:'Done', icon:'✔️', onClick:()=>window.toggleRoadSnapEditing(), variant:'primary', key:'boundaryDone'}
         ],
         ()=>window.toggleRoadSnapEditing()
@@ -17025,7 +16340,6 @@ window.addEventListener('DOMContentLoaded', async () => {
 
     mapMarkersLayer.clearLayers();
     mapHullsLayer.clearLayers();
-    lbParcelColors.clear();
     mapSeqLayer.clearLayers();
     if (mapGarbageSquaresLayer) mapGarbageSquaresLayer.clearLayers();
     if (mapRecyclingSquaresLayer) mapRecyclingSquaresLayer.clearLayers();
@@ -17100,28 +16414,7 @@ window.addEventListener('DOMContentLoaded', async () => {
         pts = typeof buildRunConvexHull === 'function' ? buildRunConvexHull(rawPts) : rawPts;
       }
       
-      // Parcel-based outline (used automatically once the run's houses have their boundaries loaded):
-      // follows the real property lines of every house in the run. Uses all
-      // the run's houses (not just the bin-distance-filtered ones) so every
-      // property is inside it. A saved custom border still wins, and while
-      // an outline is still being worked out (or too few houses have
-      // boundaries loaded) the normal outline below is drawn instead.
-      let parcelOutline = null;
-      if (showRunBoundaries && !(customBorder && Array.isArray(customBorder) && customBorder.length >= 3)) {
-        try { parcelOutline = parcelRunLatLngs(borderKey, g.stream, g.run, g.sites); } catch (e) { console.warn('run outline skipped', e); parcelOutline = null; }
-      }
-      if (parcelOutline) {
-        const ppoly = L.polygon(parcelOutline, {
-          color: runOutlineColor,
-          weight: 2,
-          fillColor: runOutlineColor,
-          fillOpacity: 0.1,
-          lineJoin: 'round',
-          interactive: false
-        });
-        ppoly._boundaryKey = borderKey;
-        ppoly.addTo(mapHullsLayer);
-      } else if (pts.length >= 3 && showRunBoundaries) {
+      if (pts.length >= 3 && showRunBoundaries) {
         const poly = L.polygon(pts.map(p => [p.lat, p.lng]), {
           color: runOutlineColor,
           weight: 2,
@@ -17133,14 +16426,22 @@ window.addEventListener('DOMContentLoaded', async () => {
         poly._runGroupKey = g.run;
         poly._boundaryKey = borderKey;
         poly.addTo(mapHullsLayer);
+        // Separate parts of a run built from property lines (e.g. two estates on one run).
+        if (customBorder && window.lbParcels && window.lbParcels.extraRings) {
+          window.lbParcels.extraRings(borderKey).forEach(ring => {
+            if (!Array.isArray(ring) || ring.length < 3) return;
+            L.polygon(ring, { color: runOutlineColor, weight: 2, fillColor: runOutlineColor, fillOpacity: 0.1, lineJoin: 'round', interactive: false }).addTo(mapHullsLayer);
+          });
+        }
       }
 
-      // Layers > "Property boundaries" now draws each house's real lot
-      // (see redrawHouseParcels) instead of a dashed hull round the run.
+      // "Property boundaries" (Map Settings > Layers) used to draw a dashed
+      // convex hull of the run's houses here. It is now the real Vicmap
+      // cadastre - one outline per property - drawn by the lb-parcels-script
+      // block at the end of the file, independent of run filters.
 
       g.sites.forEach(site => {
         const siteId = String(site.propId || site.siteId || site.addressText || '');
-        lbParcelColors.set(siteId, runOutlineColor);
         if (!seenSiteIds.has(siteId)) {
           seenSiteIds.add(siteId);
           allVisible.push(site);
@@ -17302,9 +16603,6 @@ window.addEventListener('DOMContentLoaded', async () => {
     if (isRoadSnapEditing) enableBoundaryVertexHandles();
     if (typeof drawCollectionPointMarkers === 'function') drawCollectionPointMarkers();
     if (typeof renderKmzEvidence === 'function') renderKmzEvidence();
-    window.lbVisibleSites = allVisible;
-    redrawHouseParcels();
-    scheduleParcelAutoLoad();
     if (typeof updateMapHeaderInfo === 'function') updateMapHeaderInfo(allVisible, groups);
     if (userCurrentLocation && typeof updateMapTruckPosition === 'function') updateMapTruckPosition();
     requestAnimationFrame(() => leafletMap && leafletMap.invalidateSize());
@@ -21168,7 +20466,6 @@ body.stream-slr .lb-layers-head .icon-img { filter: brightness(0); }
   // kerbside run, so they stay out of the panel rather than sitting
   // there doing nothing.
   const ROW_WHEN = {
-    undoPins: () => typeof housePinBackupCount !== 'undefined' && housePinBackupCount > 0,
     garSq:    () => !currentStream() || currentStream() === 'Garbage',
     recSq:    () => !currentStream() || currentStream() === 'Recycling' || currentStream() === 'SummerRecycling',
     fogSq:    () => !currentStream() || currentStream() === 'FOGO',
@@ -21195,14 +20492,12 @@ body.stream-slr .lb-layers-head .icon-img { filter: brightness(0); }
     ['geofence', 'toggleGeofenceLayerVisibility', '🚧',               'Geofences'],
     ['nextBin',  'toggleNextBinBox',              '📍',               'Next bin box'],
     ['sat',      'toggleSatelliteView',           'img:satellite.png','Satellite'],
-    ['act', 'moveHousePinsToBoundaries', '🎯', 'Fix house pins to boundaries', false],
-    ['undoPins', 'undoHousePinMove',      '↩️', 'Undo house pin fix'],
 
     ['sect', 'Snail trail'],
     ['trailRec',  'toggleSnailTrailPause',        '⏺',                'Recording'],
     ['trailAge',  'toggleSnailTrailColorByAge',   '🎨',               'Age colour'],
     ['trailTime', 'toggleSnailTrailTimeLabels',   '🕒',               'Time labels'],
-    ['act', 'exportSnailTrailKml',   '📤',             'Export trail', false],
+    ['act', 'exportSnailTrailKml',   'img:export.png', 'Export trail', false],
     ['act', 'confirmClearSnailTrail','img:minus.png',  'Clear trail',  true],
 
     ['sect', 'KML runs'],
@@ -22049,6 +21344,1017 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
 #lbSpeedBadge .lb-speed-unit { font-size: 10px; font-weight: 800; opacity: 0.75; }
 </style>
 <div id="lbSpeedBadge"><span class="lb-speed-num">0</span><span class="lb-speed-unit">km/h</span></div>
+
+<script id="lb-parcels-script">
+(function(){
+  'use strict';
+  if (window.lbParcels) return;
+
+  /* =====================================================================
+     PROPERTY BOUNDARIES - Vicmap Property (official Victorian cadastre)
+
+     Vicmap Property is the State's surveyed land-parcel layer (Dept of
+     Transport & Planning, CC BY 4.0, updated weekly) published as a free
+     public ArcGIS feature service. This block:
+       1. downloads the parcels around whatever is on screen (small map tiles),
+       2. matches every house pin to the lot it sits in (point-in-polygon;
+          a pin on the kerb falls back to the nearest lot within 25 m),
+       3. keeps the matched outlines on the device (IndexedDB) so they work
+          with no signal,
+       4. draws them as vector lines - razor sharp at every zoom to 22.
+     Anything drawn by hand (site.boundary) always wins over the auto match.
+     ===================================================================== */
+
+  const SERVICES = [
+    'https://services-ap1.arcgis.com/P744lA0wf4LlBZ84/ArcGIS/rest/services/Vicmap_Parcel/FeatureServer/0/query',
+    'https://services6.arcgis.com/GB33F62SbDxJjwEL/ArcGIS/rest/services/Vicmap_Parcel/FeatureServer/0/query'
+  ];
+  const OUT_FIELDS = 'OBJECTID,parcel_pfi,parcel_spi,parcel_spi_code,parcel_lot_number,parcel_plan_number,parcel_road,parcel_status';
+  const PAGE_SIZE   = 2000;      // service maxRecordCount
+  const MAX_PAGES   = 8;
+  const TILE_DEG    = 0.005;     // ~440 m x 550 m
+  const PAD_DEG     = 0.0003;    // ~30 m overlap so edge parcels / near-matches are complete
+  const NEAR_M      = 25;        // kerb-side pin -> nearest lot radius
+  const STALE_M     = 5;         // pin moved further than this since matching => re-match
+  const MIN_DRAW_ZOOM  = 16;
+  const MIN_FETCH_ZOOM = 17;
+  const MAX_DRAW    = 3000;
+  let cacheLimit = 40;
+  const CONCURRENCY = 3;
+  const DB_KEY      = 'propertyParcels';
+  const PANE        = 'lb-parcel-pane';
+  const ATTRIB      = 'Property boundaries: Vicmap &copy; State of Victoria (DTP), CC BY 4.0';
+  const cfg = { retryBaseMs: 500, fetchTimeoutMs: 30000, saveDelayMs: 3000, refreshDelayMs: 300 };
+
+  /* ---------------- geometry (flat [lng,lat,lng,lat,...] rings) ---------------- */
+  const str = v => (v === null || v === undefined) ? '' : String(v).trim();
+  function ringFlat(r) {
+    let end = r.length;
+    if (end > 1 && r[0][0] === r[end - 1][0] && r[0][1] === r[end - 1][1]) end--;
+    const out = new Array(end * 2);
+    for (let i = 0; i < end; i++) { out[2 * i] = r[i][0]; out[2 * i + 1] = r[i][1]; }
+    return out;
+  }
+  function ringBBox(f) {
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (let i = 0; i < f.length; i += 2) {
+      if (f[i] < x0) x0 = f[i]; if (f[i] > x1) x1 = f[i];
+      if (f[i + 1] < y0) y0 = f[i + 1]; if (f[i + 1] > y1) y1 = f[i + 1];
+    }
+    return [x0, y0, x1, y1];
+  }
+  function ringAreaM2(f) {
+    const n = f.length / 2; if (n < 3) return 0;
+    const lat0 = f[1], lng0 = f[0];
+    const kx = 111320 * Math.cos(lat0 * Math.PI / 180), ky = 110540;
+    let a = 0;
+    for (let i = 0, j = n - 1; i < n; j = i++) {
+      const xi = (f[2 * i] - lng0) * kx, yi = (f[2 * i + 1] - lat0) * ky;
+      const xj = (f[2 * j] - lng0) * kx, yj = (f[2 * j + 1] - lat0) * ky;
+      a += xj * yi - xi * yj;
+    }
+    return Math.abs(a) / 2;
+  }
+  function ringContains(f, x, y) {
+    let inside = false; const n = f.length / 2;
+    for (let i = 0, j = n - 1; i < n; j = i++) {
+      const xi = f[2 * i], yi = f[2 * i + 1], xj = f[2 * j], yj = f[2 * j + 1];
+      if (((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi)) inside = !inside;
+    }
+    return inside;
+  }
+  function distRingM(f, x, y) {
+    const n = f.length / 2;
+    const kx = 111320 * Math.cos(y * Math.PI / 180), ky = 110540;
+    let best = Infinity;
+    for (let i = 0, j = n - 1; i < n; j = i++) {
+      const ax = (f[2 * j] - x) * kx, ay = (f[2 * j + 1] - y) * ky;
+      const bx = (f[2 * i] - x) * kx, by = (f[2 * i + 1] - y) * ky;
+      const dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy;
+      let t = l2 ? -(ax * dx + ay * dy) / l2 : 0;
+      t = Math.max(0, Math.min(1, t));
+      const d = Math.hypot(ax + t * dx, ay + t * dy);
+      if (d < best) best = d;
+    }
+    return best;
+  }
+  function partContains(part, x, y) {
+    const b = part.b;
+    if (x < b[0] || x > b[2] || y < b[1] || y > b[3]) return false;
+    if (!ringContains(part.o, x, y)) return false;
+    for (let k = 0; k < part.h.length; k++) if (ringContains(part.h[k], x, y)) return false;
+    return true;
+  }
+
+  /* ---------------- service feature -> compact parcel ---------------- */
+  function isRoad(pr) {
+    // parcel_road = 'Y' flags road parcels; spi_code 13 = "road parcel" identifier origin.
+    return str(pr.parcel_road).toUpperCase() === 'Y' || Number(pr.parcel_spi_code) === 13;
+  }
+  function ingest(f) {
+    const g = f && f.geometry;
+    if (!g || !g.coordinates) return null;
+    const pr = f.properties || {};
+    const polys = g.type === 'Polygon' ? [g.coordinates] : g.type === 'MultiPolygon' ? g.coordinates : null;
+    if (!polys) return null;
+    const parts = [];
+    polys.forEach(poly => {
+      if (!poly || !poly.length) return;
+      const o = ringFlat(poly[0]);
+      if (o.length < 6) return;
+      const h = []; let holeA = 0;
+      for (let k = 1; k < poly.length; k++) {
+        const r = ringFlat(poly[k]);
+        if (r.length >= 6) { h.push(r); holeA += ringAreaM2(r); }
+      }
+      parts.push({ o, h, b: ringBBox(o), a: Math.max(1, ringAreaM2(o) - holeA), i: parts.length });
+    });
+    if (!parts.length) return null;
+    const b = [Infinity, Infinity, -Infinity, -Infinity];
+    parts.forEach(p => { b[0] = Math.min(b[0], p.b[0]); b[1] = Math.min(b[1], p.b[1]); b[2] = Math.max(b[2], p.b[2]); b[3] = Math.max(b[3], p.b[3]); });
+    const pfi = str(pr.parcel_pfi), spi = str(pr.parcel_spi);
+    return {
+      id: pfi || (spi ? 'spi:' + spi : 'oid:' + str(pr.OBJECTID)),
+      spi, lot: str(pr.parcel_lot_number), plan: str(pr.parcel_plan_number),
+      road: isRoad(pr), parts, b
+    };
+  }
+
+  /* ---------------- matching ---------------- */
+  // Returns { P, part, m, d } - m: 0 = pin inside the lot, 1 = nearest lot (pin on kerb/road) - or null.
+  function matchPoint(list, lat, lng) {
+    let inside = null;
+    for (let i = 0; i < list.length; i++) {
+      const P = list[i];
+      if (P.road) continue;
+      const b = P.b;
+      if (lng < b[0] || lng > b[2] || lat < b[1] || lat > b[3]) continue;
+      for (let k = 0; k < P.parts.length; k++) {
+        const part = P.parts[k];
+        if (partContains(part, lng, lat) && (!inside || part.a < inside.part.a)) inside = { P, part, m: 0, d: 0 };
+      }
+    }
+    if (inside) return inside;
+    const padY = NEAR_M / 110540, padX = NEAR_M / (111320 * Math.cos(lat * Math.PI / 180));
+    let best = null;
+    for (let i = 0; i < list.length; i++) {
+      const P = list[i];
+      if (P.road) continue;
+      const b = P.b;
+      if (lng < b[0] - padX || lng > b[2] + padX || lat < b[1] - padY || lat > b[3] + padY) continue;
+      for (let k = 0; k < P.parts.length; k++) {
+        const d = distRingM(P.parts[k].o, lng, lat);
+        if (d <= NEAR_M && (!best || d < best.d)) best = { P, part: P.parts[k], m: 1, d };
+      }
+    }
+    return best;
+  }
+
+  /* ---------------- store (persisted) ---------------- */
+  // parcels: id -> { s: spi, l: lot, n: plan, o: outer ring, h: holes, b: bbox, a: area m2 }
+  // sites:   siteKey -> { p: parcelId, m: 0|1, d: metres, q: [lat,lng] pin used }  or { x: 1, q } = looked up, nothing found
+  let store = { v: 1, parcels: {}, sites: {} };
+  let loadPromise = null, saveTimer = null;
+
+  function ensureLoaded() {
+    if (!loadPromise) {
+      loadPromise = Promise.resolve()
+        .then(() => (typeof loadFromDB === 'function') ? loadFromDB(DB_KEY) : null)
+        .then(d => { if (d && d.v === 1 && d.parcels && d.sites) store = d; })
+        .then(() => loadExtras())
+        .catch(e => console.warn('Parcel cache load failed:', e))
+        .then(() => { refreshSettingsUI(); });
+    }
+    return loadPromise;
+  }
+  async function saveNow() {
+    clearTimeout(saveTimer); saveTimer = null;
+    try { if (typeof saveToDB === 'function') await saveToDB(DB_KEY, store); }
+    catch (e) { console.warn('Parcel cache save failed:', e); }
+  }
+  function scheduleSave() { if (!saveTimer) saveTimer = setTimeout(saveNow, cfg.saveDelayMs); }
+
+  const siteKey = s => String(s.propId || s.siteId || '');
+  function sitePoint(s) {
+    const p = (typeof gps === 'function') ? gps(s.lat, s.lng) : null;
+    return p;
+  }
+  function metresBetween(lat1, lng1, lat2, lng2) {
+    const kx = 111320 * Math.cos(lat1 * Math.PI / 180);
+    return Math.hypot((lng2 - lng1) * kx, (lat2 - lat1) * 110540);
+  }
+  function needsMatch(site, retryNegatives) {
+    const key = siteKey(site); if (!key) return false;
+    const pt = sitePoint(site); if (!pt) return false;
+    const e = store.sites[key];
+    if (!e) return true;
+    if (e.q && metresBetween(pt.lat, pt.lng, e.q[0], e.q[1]) > STALE_M) return true; // pin moved
+    if (e.x) return !!retryNegatives;
+    return !store.parcels[e.p];
+  }
+  const r6 = n => Math.round(n * 1e6) / 1e6;
+  function applyMatch(site, pt, m) {
+    const key = siteKey(site); if (!key) return;
+    const q = [r6(pt.lat), r6(pt.lng)];
+    if (!m) { store.sites[key] = { x: 1, q }; return; }
+    const P = m.P;
+    const pid = P.parts.length > 1 ? P.id + '#' + m.part.i : P.id;
+    if (!store.parcels[pid]) {
+      store.parcels[pid] = { s: P.spi, l: P.lot, n: P.plan, o: m.part.o, h: m.part.h, b: m.part.b, a: Math.round(m.part.a) };
+    }
+    store.sites[key] = { p: pid, m: m.m, d: Math.round(m.d * 10) / 10, q };
+  }
+
+  /* ---------------- tiles ---------------- */
+  const tileOf = (lat, lng) => ({ ix: Math.floor(lng / TILE_DEG), iy: Math.floor(lat / TILE_DEG) });
+  const tkey = (ix, iy) => ix + ':' + iy;
+  function tileEnv(ix, iy) {
+    return { w: ix * TILE_DEG - PAD_DEG, s: iy * TILE_DEG - PAD_DEG, e: (ix + 1) * TILE_DEG + PAD_DEG, n: (iy + 1) * TILE_DEG + PAD_DEG };
+  }
+  const tiles = new Map();       // key -> { parcels }   (LRU)
+  const inflight = new Map();    // key -> Promise
+  const failedTiles = new Map(); // key -> timestamp
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+  function queryURL(base, env, offset) {
+    const p = new URLSearchParams({
+      f: 'geojson', where: '1=1',
+      geometry: [env.w, env.s, env.e, env.n].map(n => n.toFixed(6)).join(','),
+      geometryType: 'esriGeometryEnvelope', inSR: '4326', spatialRel: 'esriSpatialRelIntersects',
+      outFields: OUT_FIELDS, returnGeometry: 'true', outSR: '4326', geometryPrecision: '6',
+      orderByFields: 'OBJECTID', resultOffset: String(offset), resultRecordCount: String(PAGE_SIZE)
+    });
+    return base + '?' + p.toString();
+  }
+  async function fetchJSON(url) {
+    let lastErr;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const ctl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+      const timer = ctl ? setTimeout(() => ctl.abort(), cfg.fetchTimeoutMs) : null;
+      try {
+        const res = await fetch(url, ctl ? { signal: ctl.signal } : undefined);
+        if (timer) clearTimeout(timer);
+        if (res.status === 429 || res.status >= 500) throw new Error('HTTP ' + res.status);
+        if (!res.ok) { const e = new Error('HTTP ' + res.status); e.fatal = true; throw e; }
+        const j = await res.json();
+        if (j && j.error) { const e = new Error(j.error.message || 'Service error'); e.fatal = !(Number(j.error.code) >= 500); throw e; }
+        return j;
+      } catch (e) {
+        if (timer) clearTimeout(timer);
+        lastErr = e;
+        if (e && e.fatal) throw e;
+        if (attempt < 2) await sleep(cfg.retryBaseMs * Math.pow(3, attempt));
+      }
+    }
+    throw lastErr;
+  }
+  async function fetchEnvelope(base, env) {
+    const out = [];
+    let offset = 0;
+    for (let page = 0; page < MAX_PAGES; page++) {
+      const j = await fetchJSON(queryURL(base, env, offset));
+      const feats = (j && j.features) || [];
+      for (const f of feats) { const P = ingest(f); if (P) out.push(P); }
+      const flagged = !!(j && (j.exceededTransferLimit || (j.properties && j.properties.exceededTransferLimit)));
+      if (!feats.length || !(flagged || feats.length >= PAGE_SIZE)) break;
+      offset += feats.length;
+    }
+    return out;
+  }
+  async function fetchTile(ix, iy) {
+    const env = tileEnv(ix, iy);
+    let lastErr;
+    for (const base of SERVICES) {
+      try { return await fetchEnvelope(base, env); } catch (e) { lastErr = e; }
+    }
+    throw lastErr;
+  }
+  function loadTile(ix, iy) {
+    const k = tkey(ix, iy);
+    const hit = tiles.get(k);
+    if (hit) { tiles.delete(k); tiles.set(k, hit); return Promise.resolve(hit.parcels); }
+    if (inflight.has(k)) return inflight.get(k);
+    const p = fetchTile(ix, iy).then(parcels => {
+      tiles.set(k, { parcels });
+      while (tiles.size > cacheLimit) tiles.delete(tiles.keys().next().value);
+      return parcels;
+    }).finally(() => inflight.delete(k));
+    inflight.set(k, p);
+    return p;
+  }
+
+  function allSites() { return (typeof siteRecords !== 'undefined' && Array.isArray(siteRecords)) ? siteRecords : []; }
+  function sitesInTile(ix, iy) {
+    const out = [], list = allSites();
+    for (let i = 0; i < list.length; i++) {
+      const p = sitePoint(list[i]);
+      if (p && Math.floor(p.lng / TILE_DEG) === ix && Math.floor(p.lat / TILE_DEG) === iy) out.push(list[i]);
+    }
+    return out;
+  }
+  // Matches every listed site that still needs it against one tile's parcels.
+  function matchList(parcels, sites, retryNegatives) {
+    const r = { inside: 0, near: 0, none: 0 };
+    sites.forEach(s => {
+      if (!needsMatch(s, retryNegatives)) return;
+      const pt = sitePoint(s); if (!pt) return;
+      const m = matchPoint(parcels, pt.lat, pt.lng);
+      applyMatch(s, pt, m);
+      if (!m) r.none++; else if (m.m === 0) r.inside++; else r.near++;
+    });
+    return r;
+  }
+
+  /* ---------------- map drawing ---------------- */
+  let map = null, group = null, rend = null, attribOn = false;
+  let refreshTimer = null, seenSiteCount = -1;
+
+  function ensureMap() {
+    const lm = (typeof leafletMap !== 'undefined') ? leafletMap : null;
+    if (!lm) return false;
+    if (map === lm) return true;
+    map = lm;
+    if (!map.getPane(PANE)) {
+      const pane = map.createPane(PANE);
+      pane.style.zIndex = 405;              // above tiles, under run boundaries/markers
+      pane.style.pointerEvents = 'none';
+    }
+    rend = L.canvas({ pane: PANE, padding: 0.4 });
+    group = L.layerGroup().addTo(map);
+    map.on('moveend', scheduleRefresh);
+    return true;
+  }
+  const isOn = () => (typeof showPropertyBoundaries !== 'undefined') && !!showPropertyBoundaries;
+  function styles() {
+    const sat = (typeof isSatelliteView !== 'undefined') && !!isSatelliteView;
+    return sat ? {
+      ctx: { color: '#ffffff', weight: 1, opacity: 0.55, fill: false },
+      hit: { color: '#ffd60a', weight: 2, opacity: 0.95, fillColor: '#ffd60a', fillOpacity: 0.12 },
+      man: { color: '#ff9f0a', weight: 2.5, opacity: 1, dashArray: '6,4', fillColor: '#ff9f0a', fillOpacity: 0.1 }
+    } : {
+      ctx: { color: '#64748b', weight: 1, opacity: 0.6, fill: false },
+      hit: { color: '#0369a1', weight: 2, opacity: 0.95, fillColor: '#0ea5e9', fillOpacity: 0.12 },
+      man: { color: '#c2410c', weight: 2.5, opacity: 1, dashArray: '6,4', fillColor: '#f97316', fillOpacity: 0.1 }
+    };
+  }
+  function toLatLngs(o, h) {
+    const ring = f => { const a = new Array(f.length / 2); for (let i = 0; i < a.length; i++) a[i] = [f[2 * i + 1], f[2 * i]]; return a; };
+    return (h && h.length) ? [ring(o)].concat(h.map(ring)) : ring(o);
+  }
+  function viewBox(padFrac) {
+    const b = map.getBounds();
+    const dx = (b.getEast() - b.getWest()) * padFrac, dy = (b.getNorth() - b.getSouth()) * padFrac;
+    return { w: b.getWest() - dx, e: b.getEast() + dx, s: b.getSouth() - dy, n: b.getNorth() + dy };
+  }
+  const hits = (b, v) => !(b[2] < v.w || b[0] > v.e || b[3] < v.s || b[1] > v.n);
+
+  function clearDraw() {
+    if (group) group.clearLayers();
+    setAttribution(false);
+  }
+  function setAttribution(on) {
+    if (!map || !map.attributionControl) return;
+    if (on && !attribOn) { map.attributionControl.addAttribution(ATTRIB); attribOn = true; }
+    else if (!on && attribOn) { map.attributionControl.removeAttribution(ATTRIB); attribOn = false; }
+  }
+  let lastDrawCount = 0;
+  function redraw() {
+    if (!ensureMap()) return 0;
+    group.clearLayers();
+    if (!isOn() || map.getZoom() < MIN_DRAW_ZOOM) { setAttribution(false); lastDrawCount = 0; return 0; }
+    const v = viewBox(0.5), st = styles();
+    let n = 0;
+    const add = (o, h, style) => {
+      if (n >= MAX_DRAW) return;
+      L.polygon(toLatLngs(o, h), Object.assign({ renderer: rend, interactive: false, lineJoin: 'round', smoothFactor: 0.5 }, style)).addTo(group);
+      n++;
+    };
+    // 1. Hand-drawn boundaries (win over everything)
+    allSites().forEach(s => {
+      if (!Array.isArray(s.boundary) || s.boundary.length < 3) return;
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+      s.boundary.forEach(p => { x0 = Math.min(x0, p[1]); x1 = Math.max(x1, p[1]); y0 = Math.min(y0, p[0]); y1 = Math.max(y1, p[0]); });
+      if (!hits([x0, y0, x1, y1], v) || n >= MAX_DRAW) return;
+      L.polygon(s.boundary, Object.assign({ renderer: rend, interactive: false, lineJoin: 'round' }, st.man)).addTo(group);
+      n++;
+    });
+    // 2. Matched properties
+    for (const id in store.parcels) {
+      const P = store.parcels[id];
+      if (hits(P.b, v)) add(P.o, P.h, st.hit);
+      if (n >= MAX_DRAW) break;
+    }
+    // 3. Surrounding cadastre (neighbours, parks, road reserves) as faint context lines
+    tiles.forEach(t => {
+      t.parcels.forEach(P => {
+        if (n >= MAX_DRAW || !hits(P.b, v)) return;
+        P.parts.forEach(part => { if (hits(part.b, v)) add(part.o, part.h, st.ctx); });
+      });
+    });
+    lastDrawCount = n;
+    setAttribution(n > 0);
+    return n;
+  }
+
+  let pillTimer = null;
+  function pill(msg, ms) {
+    if (typeof document === 'undefined' || !document.body) return;
+    let el = document.getElementById('lbParcelPill');
+    if (!msg) { if (el) el.style.display = 'none'; return; }
+    if (!document.body.classList.contains('lb-map-screen')) return;
+    if (!el) {
+      const st = document.createElement('style');
+      st.textContent = '#lbParcelPill{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(env(safe-area-inset-bottom,0px) + 8px);z-index:4100;background:rgba(0,0,0,.85);color:#fff;font:700 11px/1.25 system-ui,sans-serif;padding:5px 9px;border:1px solid rgba(255,255,255,.25);pointer-events:none;display:none;max-width:80vw;text-align:center}';
+      document.head.appendChild(st);
+      el = document.createElement('div'); el.id = 'lbParcelPill'; document.body.appendChild(el);
+    }
+    el.textContent = msg; el.style.display = 'block';
+    clearTimeout(pillTimer);
+    if (ms) pillTimer = setTimeout(() => { el.style.display = 'none'; }, ms);
+  }
+
+  function scheduleRefresh() { clearTimeout(refreshTimer); refreshTimer = setTimeout(refresh, cfg.refreshDelayMs); }
+
+  async function refresh() {
+    if (!ensureMap()) return;
+    if (!isOn()) { clearDraw(); return; }
+    await ensureLoaded();
+    if (allSites().length !== seenSiteCount) { seenSiteCount = allSites().length; tiles.clear(); }
+    redraw();                                   // saved outlines show immediately, even offline
+    if (batch.running || map.getZoom() < MIN_FETCH_ZOOM) return;
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+    const v = viewBox(0.5);
+    const x0 = Math.floor(v.w / TILE_DEG), x1 = Math.floor(v.e / TILE_DEG);
+    const y0 = Math.floor(v.s / TILE_DEG), y1 = Math.floor(v.n / TILE_DEG);
+    if ((x1 - x0 + 1) * (y1 - y0 + 1) > 12) return;
+    const jobs = [];
+    for (let ix = x0; ix <= x1; ix++) for (let iy = y0; iy <= y1; iy++) {
+      const k = tkey(ix, iy);
+      if (tiles.has(k)) continue;
+      const failedAt = failedTiles.get(k);
+      if (failedAt && Date.now() - failedAt < 60000) continue;
+      jobs.push([ix, iy, k]);
+    }
+    if (!jobs.length) return;
+    pill('Loading property boundaries...');
+    let failed = 0;
+    await Promise.all(jobs.map(async ([ix, iy, k]) => {
+      try {
+        const parcels = await loadTile(ix, iy);
+        failedTiles.delete(k);
+        matchList(parcels, sitesInTile(ix, iy), false);
+      } catch (e) { failed++; failedTiles.set(k, Date.now()); }
+    }));
+    redraw();
+    scheduleSave();
+    refreshSettingsUI();
+    if (failed) pill('Property boundaries: no signal - showing saved ones', 4000); else pill(null);
+  }
+
+  /* ---------------- per-property + batch matching ---------------- */
+  // Accepts either a stored parcel (l/n/s) or a freshly ingested one (lot/plan/spi).
+  function labelOf(P) {
+    const lot = P.l || P.lot, plan = P.n || P.plan, spi = P.s || P.spi;
+    if (lot && plan) return 'Lot ' + lot + ' on ' + plan;
+    return spi || plan || 'Vicmap parcel';
+  }
+  function infoFor(site) {
+    if (Array.isArray(site.boundary) && site.boundary.length >= 3) return { source: 'manual', points: site.boundary.length };
+    const e = store.sites[siteKey(site)];
+    if (!e || !e.p) return null;
+    const P = store.parcels[e.p];
+    if (!P) return null;
+    return { source: 'vicmap', label: labelOf(P), spi: P.s, area: P.a || null, nearest: e.m === 1, distance: e.d || 0 };
+  }
+  function boundaryFor(site) {
+    if (Array.isArray(site.boundary) && site.boundary.length >= 3) return site.boundary.map(p => [Number(p[0]), Number(p[1])]);
+    const e = store.sites[siteKey(site)];
+    const P = e && e.p && store.parcels[e.p];
+    return P ? toLatLngs(P.o, null) : null;
+  }
+  async function matchSite(site) {
+    await ensureLoaded();
+    const pt = sitePoint(site);
+    if (!pt) return { ok: false, message: 'This property needs GPS coordinates set before boundary lookup will work.' };
+    const t = tileOf(pt.lat, pt.lng);
+    let parcels;
+    try { parcels = await loadTile(t.ix, t.iy); }
+    catch (e) { return { ok: false, message: "Couldn't reach Vicmap to look up this boundary - check your connection and try again." }; }
+    const m = matchPoint(parcels, pt.lat, pt.lng);
+    applyMatch(site, pt, m);
+    scheduleSave(); refreshSettingsUI();
+    if (!m) return { ok: false, message: "No Vicmap lot was found within " + NEAR_M + " m of this property's pin. Check its GPS location." };
+    const label = labelOf(m.P);
+    if (m.m === 0) return { ok: true, message: 'Matched to ' + label + ' (' + Math.round(m.part.a) + ' m²) from Vicmap.' };
+    return { ok: true, message: "The pin isn't inside any lot, so the nearest one (" + label + ', ' + Math.round(m.d) + ' m away) was used. Check it looks right, or move the pin.' };
+  }
+
+  const batch = { running: false, cancel: false, done: 0, total: 0, houses: 0, inside: 0, near: 0, none: 0, failedHouses: 0 };
+  function progressText() {
+    return 'Matching... ' + batch.done + ' of ' + batch.total + ' map areas (' + (batch.inside + batch.near) + ' houses matched)';
+  }
+  function groupByTile(sites) {
+    const m = new Map();
+    sites.forEach(s => {
+      const pt = sitePoint(s); if (!pt) return;
+      const t = tileOf(pt.lat, pt.lng), k = tkey(t.ix, t.iy);
+      if (!m.has(k)) m.set(k, { ix: t.ix, iy: t.iy, sites: [] });
+      m.get(k).sites.push(s);
+    });
+    return Array.from(m.values()).sort((a, b) => a.ix - b.ix || a.iy - b.iy);
+  }
+  async function runBatch(groups) {
+    Object.assign(batch, { running: true, cancel: false, done: 0, total: groups.length, houses: 0, inside: 0, near: 0, none: 0, failedHouses: 0 });
+    const queue = groups.slice();
+    const tick = () => { refreshSettingsUI(); pill(progressText()); };
+    tick();
+    async function worker() {
+      while (!batch.cancel && queue.length) {
+        const g = queue.shift();
+        try {
+          const parcels = await loadTile(g.ix, g.iy);
+          const r = matchList(parcels, g.sites, true);
+          batch.inside += r.inside; batch.near += r.near; batch.none += r.none;
+        } catch (e) { batch.failedHouses += g.sites.length; }
+        batch.done++;
+        tick();
+        if (batch.done % 20 === 0) await saveNow();
+      }
+    }
+    await Promise.all(Array.from({ length: CONCURRENCY }, worker));
+    const cancelled = batch.cancel;
+    batch.running = false; batch.cancel = false;
+    await saveNow();
+    pill(null); refreshSettingsUI(); redraw();
+    return { inside: batch.inside, near: batch.near, none: batch.none, failedHouses: batch.failedHouses, cancelled };
+  }
+  function summaryText(r) {
+    const matched = r.inside + r.near;
+    let t = (r.cancelled ? 'Stopped. ' : 'Done. ') + matched.toLocaleString() + ' houses matched to their Vicmap boundary';
+    if (r.near) t += ' (' + r.near.toLocaleString() + ' used the nearest lot because the pin sat on the kerb - worth a spot check)';
+    t += '.';
+    if (r.none) t += ' ' + r.none.toLocaleString() + ' had no lot within ' + NEAR_M + ' m - their pin is probably wrong.';
+    if (r.failedHouses) t += ' ' + r.failedHouses.toLocaleString() + ' could not be downloaded (signal?) - run it again to finish them.';
+    return t;
+  }
+  async function runScope(scope) {
+    await ensureLoaded();
+    if (!ensureMap() && scope === 'view') { await customAlert('Open the map first.'); return; }
+    let list = allSites().filter(s => sitePoint(s));
+    if (scope === 'view') {
+      const b = map.getBounds();
+      list = list.filter(s => { const p = sitePoint(s); return p.lat >= b.getSouth() && p.lat <= b.getNorth() && p.lng >= b.getWest() && p.lng <= b.getEast(); });
+    }
+    const need = list.filter(s => needsMatch(s, true));
+    if (!need.length) {
+      await customAlert(scope === 'view' ? 'Every house on screen already has its boundary matched.' : 'Every house with a GPS pin already has its boundary matched.');
+      return;
+    }
+    const groups = groupByTile(need);
+    const ok = await customConfirm('Match ' + need.length.toLocaleString() + ' houses to their Vicmap property boundaries? This downloads parcel data for ' + groups.length + ' map areas, so use Wi-Fi if you can. You can stop at any time and keep what has finished.');
+    if (!ok) return;
+    const r = await runBatch(groups);
+    await customAlert(summaryText(r));
+  }
+  function matchAllUI() { if (batch.running) { batch.cancel = true; refreshSettingsUI(); return; } runScope('all'); }
+  function matchViewUI() { if (batch.running) return; runScope('view'); }
+  async function clearAllUI() {
+    if (batch.running) return;
+    const ok = await customConfirm('Remove every automatically matched boundary from this device? Boundaries you drew by hand are kept.');
+    if (!ok) return;
+    await ensureLoaded();
+    store = { v: 1, parcels: {}, sites: {} };
+    tiles.clear();
+    await saveNow(); redraw(); refreshSettingsUI();
+  }
+
+  function stats() {
+    let total = 0, matched = 0, near = 0, none = 0;
+    allSites().forEach(s => {
+      if (!sitePoint(s)) return;
+      total++;
+      const e = store.sites[siteKey(s)];
+      if (!e || (e.q && !isFresh(s, e))) return;
+      if (e.x) none++; else if (store.parcels[e.p]) { matched++; if (e.m === 1) near++; }
+    });
+    return { total, matched, near, none };
+  }
+  function isFresh(s, e) { const pt = sitePoint(s); return !pt || metresBetween(pt.lat, pt.lng, e.q[0], e.q[1]) <= STALE_M; }
+
+  function settingsHTML() {
+    const btn = 'class="uprop-flat-btn"';
+    return '<section class="run-style-section"><div class="run-style-section-title">Property boundaries (Vicmap)</div>'
+      + '<div class="run-style-help" id="lbParcelStatus" style="font-weight:700;"></div>'
+      + '<div class="uprop-flat-btn-row" style="margin:8px 0;">'
+      + '<button type="button" ' + btn + ' id="lbParcelMatchAllBtn" onclick="window.lbParcels.matchAllUI()">Match every house</button>'
+      + '<button type="button" ' + btn + ' id="lbParcelMatchViewBtn" onclick="window.lbParcels.matchViewUI()">Match houses on screen</button>'
+      + '</div>'
+      + '<div class="uprop-flat-btn-row" style="margin:0 0 8px;"><button type="button" ' + btn + ' onclick="window.lbParcels.clearAllUI()">Clear matched boundaries</button></div>'
+      + '<div class="run-style-section-title" style="margin-top:10px;">Run boundaries from property lines</div>'
+      + '<div class="uprop-flat-btn-row" style="margin:8px 0;">'
+      + '<button type="button" ' + btn + ' id="lbBuildRunsBtn" onclick="window.lbParcels.buildRunsUI(\'selected\')">Build selected run</button>'
+      + '<button type="button" ' + btn + ' id="lbBuildAllBtn" onclick="window.lbParcels.buildRunsUI(\'all\')">Build every run</button>'
+      + '</div>'
+      + '<div class="run-style-help">Works on the stream you have picked. Runs meet halfway down the road between them; a side with no neighbouring run goes to the road edge, or all the way to the shoreline where the land meets water.</div>'
+      + '<div class="run-style-help">Official surveyed lot lines from Vicmap Property (State of Victoria, DTP, CC BY 4.0). Each house is matched to the lot its pin sits in and saved on this device, so boundaries still work with no signal. A boundary you draw by hand always wins.</div></section>';
+  }
+  function refreshSettingsUI() {
+    if (typeof document === 'undefined') return;
+    const el = document.getElementById('lbParcelStatus');
+    const b = document.getElementById('lbParcelMatchAllBtn');
+    if (b) b.textContent = batch.running ? (batch.cancel ? 'Stopping...' : 'Stop matching') : 'Match every house';
+    const bs = document.getElementById('lbBuildRunsBtn'), ba = document.getElementById('lbBuildAllBtn');
+    if (bs) bs.textContent = outBuild.running ? (outBuild.cancel ? 'Stopping...' : 'Stop building') : 'Build selected run';
+    if (ba && !outBuild.running) ba.textContent = 'Build every run';
+    if (!el) return;
+    if (batch.running) { el.textContent = progressText(); return; }
+    const s = stats();
+    let t = s.matched.toLocaleString() + ' of ' + s.total.toLocaleString() + ' houses matched';
+    if (s.near) t += ' - ' + s.near.toLocaleString() + ' to the nearest lot (worth a check)';
+    if (s.none) t += ' - ' + s.none.toLocaleString() + ' not found';
+    el.textContent = t;
+  }
+
+
+  /* =====================================================================
+     RUN OUTLINES - run boundaries that follow property lines
+
+     For one run, every piece of land is given to whichever run is NEAREST
+     (measured from the lot edges), so two runs meet exactly halfway down the
+     road between them. Then:
+       - near the run (<= nearM): kept only across road land, so the line stops
+         at the road centre / the edge of a park instead of cutting into it;
+       - further out: kept only if it lies on a shortest path from the run to
+         the shoreline (land edge) or to a neighbouring run (a wide road or a
+         gap between runs), so a run runs down to the water but does not
+         balloon out across farmland or bush.
+     Other, unserviced private lots act as neighbours too, so a road with a
+     house-less side still gets split down its middle.
+     Raster based (3 m cells) -> traced to a polygon -> simplified.
+     ===================================================================== */
+  const OUT = { cellM: 3, maxCells: 3.0e6, nearM: 15, farM: 150, slackM: 12, neutralMaxM2: 4000, minPartM2: 1500, discM: 6 };
+  const NEUTRAL = 65535;
+  const INF32 = 0xFFFFFFFF;
+
+  function makeGrid(bb, cellM) {
+    const lat0 = bb.s, lng0 = bb.w;
+    const kx = 111320 * Math.cos(((bb.s + bb.n) / 2) * Math.PI / 180), ky = 110540;
+    const wM = (bb.e - bb.w) * kx, hM = (bb.n - bb.s) * ky;
+    const c = Math.max(cellM, Math.sqrt(wM * hM / OUT.maxCells));
+    return { W: Math.max(1, Math.ceil(wM / c)), H: Math.max(1, Math.ceil(hM / c)), c, kx, ky, lng0, lat0 };
+  }
+  function fillRings(g, arr, rings, val) {
+    let minR = Infinity, maxR = -Infinity;
+    const R = rings.map(f => {
+      const n = f.length / 2, xs = new Float64Array(n), ys = new Float64Array(n);
+      for (let i = 0; i < n; i++) {
+        xs[i] = (f[2 * i] - g.lng0) * g.kx / g.c; ys[i] = (f[2 * i + 1] - g.lat0) * g.ky / g.c;
+        if (ys[i] < minR) minR = ys[i]; if (ys[i] > maxR) maxR = ys[i];
+      }
+      return { xs, ys, n };
+    });
+    const r0 = Math.max(0, Math.floor(minR - 0.5)), r1 = Math.min(g.H - 1, Math.ceil(maxR - 0.5));
+    const hit = [];
+    for (let r = r0; r <= r1; r++) {
+      const yc = r + 0.5; hit.length = 0;
+      for (const ring of R) for (let i = 0, j = ring.n - 1; i < ring.n; j = i++) {
+        const yi = ring.ys[i], yj = ring.ys[j];
+        if ((yi > yc) !== (yj > yc)) hit.push(ring.xs[i] + (yc - yi) * (ring.xs[j] - ring.xs[i]) / (yj - yi));
+      }
+      hit.sort((a, b) => a - b);
+      for (let k = 0; k + 1 < hit.length; k += 2) {
+        let c0 = Math.ceil(hit[k] - 0.5), c1 = Math.floor(hit[k + 1] - 0.5);
+        if (c0 < 0) c0 = 0; if (c1 >= g.W) c1 = g.W - 1;
+        for (let cc = c0; cc <= c1; cc++) arr[r * g.W + cc] = val;
+      }
+    }
+  }
+  function fillDisc(g, arr, lat, lng, radM, val) {
+    const cx = (lng - g.lng0) * g.kx / g.c, cy = (lat - g.lat0) * g.ky / g.c, rc = radM / g.c;
+    for (let r = Math.max(0, Math.floor(cy - rc)); r <= Math.min(g.H - 1, Math.ceil(cy + rc)); r++)
+      for (let c = Math.max(0, Math.floor(cx - rc)); c <= Math.min(g.W - 1, Math.ceil(cx + rc)); c++)
+        if ((c + 0.5 - cx) * (c + 0.5 - cx) + (r + 0.5 - cy) * (r + 0.5 - cy) <= rc * rc) arr[r * g.W + c] = val;
+  }
+  // Bucket-queue multi-source Dijkstra over 8-neighbour cells (chamfer 10/14).
+  // canEnter(j) decides which cells may be walked into. keyOf: initial keys per source.
+  function dijkstra(W, H, sources, canEnter, maxKey, out, lab) {
+    const buckets = [];
+    sources.forEach(([i, key]) => { out[i] = key; (buckets[key] || (buckets[key] = [])).push(i); });
+    for (let cost = 0; cost <= maxKey; cost++) {
+      const b = buckets[cost]; if (!b) continue;
+      for (let q = 0; q < b.length; q++) {
+        const i = b[q]; if (out[i] !== cost) continue;
+        const x = i % W, y = (i / W) | 0;
+        for (let dy = -1; dy <= 1; dy++) {
+          const ny = y + dy; if (ny < 0 || ny >= H) continue;
+          for (let dx = -1; dx <= 1; dx++) {
+            if (!dx && !dy) continue;
+            const nx = x + dx; if (nx < 0 || nx >= W) continue;
+            const j = ny * W + nx; if (!canEnter(j)) continue;
+            const nc = cost + ((dx && dy) ? 14 : 10);
+            if (nc < out[j] && nc <= maxKey) { out[j] = nc; if (lab) lab[j] = lab[i]; (buckets[nc] || (buckets[nc] = [])).push(j); }
+          }
+        }
+      }
+      buckets[cost] = null;
+    }
+  }
+  // Morphological opening with a (2k+1)-square: drops thin spurs (road stubs, shoreline slivers)
+  // but keeps every real block, corners included. Summed-area tables keep it O(cells).
+  function openMask(mask, W, H, k) {
+    const V = W + 1, sat = new Int32Array(V * (H + 1));
+    const build = src => {
+      for (let y = 0; y < H; y++) { let row = 0; for (let x = 0; x < W; x++) { row += src[y * W + x]; sat[(y + 1) * V + x + 1] = sat[y * V + x + 1] + row; } }
+    };
+    const box = (x0, y0, x1, y1) => { x0 = Math.max(0, x0); y0 = Math.max(0, y0); x1 = Math.min(W - 1, x1); y1 = Math.min(H - 1, y1); return sat[(y1 + 1) * V + x1 + 1] - sat[y0 * V + x1 + 1] - sat[(y1 + 1) * V + x0] + sat[y0 * V + x0]; };
+    const full = (2 * k + 1) * (2 * k + 1);
+    build(mask);
+    const eroded = new Uint8Array(W * H);
+    for (let y = k; y < H - k; y++) for (let x = k; x < W - k; x++) if (mask[y * W + x] && box(x - k, y - k, x + k, y + k) === full) eroded[y * W + x] = 1;
+    build(eroded);
+    const out = new Uint8Array(W * H);
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (mask[y * W + x] && box(x - k, y - k, x + k, y + k) > 0) out[y * W + x] = 1;
+    return out;
+  }
+  // Boundary of a binary cell mask -> closed rings of grid corners. Interior stays on one side.
+  function traceMask(mask, W, H) {
+    const V = W + 1, next = new Map();
+    const add = (sx, sy, ex, ey) => { const k = sy * V + sx; let a = next.get(k); if (!a) next.set(k, a = []); a.push(ey * V + ex); };
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      if (!mask[y * W + x]) continue;
+      if (y === 0 || !mask[(y - 1) * W + x]) add(x, y, x + 1, y);
+      if (x === W - 1 || !mask[y * W + x + 1]) add(x + 1, y, x + 1, y + 1);
+      if (y === H - 1 || !mask[(y + 1) * W + x]) add(x + 1, y + 1, x, y + 1);
+      if (x === 0 || !mask[y * W + x - 1]) add(x, y + 1, x, y);
+    }
+    const rings = [];
+    for (const [startK, list] of next) {
+      while (list.length) {
+        let cur = startK, nxt = list.pop();
+        const ring = [[startK % V, (startK / V) | 0]];
+        let dirx = (nxt % V) - (cur % V), diry = ((nxt / V) | 0) - ((cur / V) | 0);
+        cur = nxt;
+        let guard = 0;
+        while (cur !== startK && guard++ < 5e6) {
+          ring.push([cur % V, (cur / V) | 0]);
+          const opts = next.get(cur); if (!opts || !opts.length) break;
+          // prefer a right turn, then straight, then left (keeps diagonal-touching blobs apart)
+          let pick = -1, pr = 9;
+          for (let m = 0; m < opts.length; m++) {
+            const ox = (opts[m] % V) - (cur % V), oy = ((opts[m] / V) | 0) - ((cur / V) | 0);
+            const cross = dirx * oy - diry * ox, dot = dirx * ox + diry * oy;
+            const rank = cross > 0 ? 0 : (dot > 0 ? 1 : 2);
+            if (rank < pr) { pr = rank; pick = m; }
+          }
+          nxt = opts.splice(pick, 1)[0];
+          dirx = (nxt % V) - (cur % V); diry = ((nxt / V) | 0) - ((cur / V) | 0);
+          cur = nxt;
+        }
+        if (ring.length >= 4) rings.push(ring);
+      }
+    }
+    return rings;
+  }
+  function ringSignedArea(r) { let a = 0; for (let i = 0, j = r.length - 1; i < r.length; j = i++) a += r[j][0] * r[i][1] - r[i][0] * r[j][1]; return a / 2; }
+  function simplifyClosed(pts, tol) {
+    const n = pts.length; if (n < 5) return pts;
+    const dseg = (p, a, b) => { const dx = b[0] - a[0], dy = b[1] - a[1], l2 = dx * dx + dy * dy; let t = l2 ? ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / l2 : 0; t = Math.max(0, Math.min(1, t)); return Math.hypot(p[0] - a[0] - t * dx, p[1] - a[1] - t * dy); };
+    let far = 0, fd = -1; for (let i = 1; i < n; i++) { const d = Math.hypot(pts[i][0] - pts[0][0], pts[i][1] - pts[0][1]); if (d > fd) { fd = d; far = i; } }
+    const keep = new Uint8Array(n); keep[0] = 1; keep[far] = 1;
+    const dp = (lo, hi, get) => {
+      const stack = [[lo, hi]];
+      while (stack.length) {
+        const [a, b] = stack.pop(); let md = -1, mi = -1;
+        for (let i = a + 1; i < b; i++) { const d = dseg(get(i), get(a), get(b)); if (d > md) { md = d; mi = i; } }
+        if (md > tol) { keep[mi % n] = 1; stack.push([a, mi], [mi, b]); }
+      }
+    };
+    dp(0, far, i => pts[i]);
+    dp(far, n, i => pts[i % n]);
+    const out = []; for (let i = 0; i < n; i++) if (keep[i]) out.push(pts[i]);
+    return out;
+  }
+
+  function groupSeeds(grp) {
+    if (grp._seeds) return grp._seeds;
+    const pids = new Set(), pins = [];
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    const ext = (a, b, c, d) => { x0 = Math.min(x0, a); y0 = Math.min(y0, b); x1 = Math.max(x1, c); y1 = Math.max(y1, d); };
+    grp.sites.forEach(s => {
+      const pt = sitePoint(s); if (!pt) return;
+      const e = store.sites[siteKey(s)];
+      const P = e && e.p && store.parcels[e.p];
+      if (P) { pids.add(e.p); ext(P.b[0], P.b[1], P.b[2], P.b[3]); }
+      else { pins.push(pt); ext(pt.lng, pt.lat, pt.lng, pt.lat); }
+    });
+    return (grp._seeds = { pids, pins, bb: pids.size + pins.length ? [x0, y0, x1, y1] : null });
+  }
+
+  // groups: [{ key, sites }]; target: index into groups; tileParcels: every cadastre parcel around the run.
+  function computeOutline(groups, target, tileParcels, opts) {
+    const O = Object.assign({}, OUT, opts || {});
+    const t0 = Date.now();
+    const seed = groupSeeds(groups[target]);
+    if (!seed.bb) return { rings: [], stats: { reason: 'no seeds' } };
+    const padLat = O.farM / 110540, padLng = O.farM / (111320 * Math.cos(seed.bb[1] * Math.PI / 180));
+    const bb = { w: seed.bb[0] - padLng, s: seed.bb[1] - padLat, e: seed.bb[2] + padLng, n: seed.bb[3] + padLat };
+    const bbA = [bb.w, bb.s, bb.e, bb.n];
+    const g = makeGrid(bb, O.cellM), W = g.W, H = g.H, N = W * H;
+    const land = new Uint8Array(N), label = new Uint16Array(N);
+
+    // which stored parcel belongs to which run
+    const pidLabel = new Map();
+    groups.forEach((grp, gi) => {
+      const sd = groupSeeds(grp); if (!sd.bb || !hits(sd.bb, { w: bb.w, s: bb.s, e: bb.e, n: bb.n })) return;
+      sd.pids.forEach(pid => { if (gi === target || !pidLabel.has(pid)) pidLabel.set(pid, gi === target ? 1 : gi + 2); });
+    });
+
+    // land + road + neutral (unserviced small private lots)
+    const seen = new Set(), roads = [], lands = [], neutrals = [];
+    tileParcels.forEach(P => P.parts.forEach(part => {
+      const pid = P.parts.length > 1 ? P.id + '#' + part.i : P.id;
+      if (seen.has(pid)) return; seen.add(pid);
+      if (!hits(part.b, { w: bb.w, s: bb.s, e: bb.e, n: bb.n })) return;
+      if (P.road) roads.push(part);
+      else { lands.push(part); if (!pidLabel.has(pid) && part.a <= O.neutralMaxM2) neutrals.push(part); }
+    }));
+    lands.forEach(p => fillRings(g, land, [p.o].concat(p.h), 1));
+    roads.forEach(p => fillRings(g, land, [p.o].concat(p.h), 2));
+    const anyRoad = roads.length > 0;
+    neutrals.forEach(p => fillRings(g, label, [p.o].concat(p.h), NEUTRAL));
+    // other runs, then the target on top
+    const paint = (gi, val) => {
+      const sd = groupSeeds(groups[gi]); if (!sd.bb || !hits(sd.bb, { w: bb.w, s: bb.s, e: bb.e, n: bb.n })) return;
+      sd.pids.forEach(pid => { const P = store.parcels[pid]; if (P && hits(P.b, { w: bb.w, s: bb.s, e: bb.e, n: bb.n })) { fillRings(g, label, [P.o].concat(P.h), val); } });
+      sd.pins.forEach(pt => { fillDisc(g, label, pt.lat, pt.lng, O.discM, val); });
+    };
+    groups.forEach((_, gi) => { if (gi !== target) paint(gi, gi + 2); });
+    paint(target, 1);
+    // seeds must stand on land even if the cadastre tile missed them
+    for (let i = 0; i < N; i++) if (label[i] && !land[i]) land[i] = 1;
+
+    const step = g.c / 10;                        // metres per cost unit: cost = metres / step
+    const toCost = m => Math.round(m / step);
+    const maxCost = toCost(O.farM), nearCost = toCost(O.nearM), slackCost = toCost(O.slackM);
+
+    // 1. nearest-run labelling
+    const dist = new Uint32Array(N).fill(INF32);
+    const srcs = []; for (let i = 0; i < N; i++) if (label[i]) srcs.push([i, 0]);
+    dijkstra(W, H, srcs, j => land[j] > 0, maxCost, dist, label);
+
+    // 2. goals for the far reach: shoreline (land edge) or a neighbouring run/lot
+    const goals = [];
+    for (let i = 0; i < N; i++) {
+      if (label[i] !== 1 || dist[i] === INF32) continue;
+      const x = i % W, y = (i / W) | 0;
+      const chk = j => land[j] === 0 || (label[j] !== 0 && label[j] !== 1);
+      if ((x > 0 && chk(i - 1)) || (x < W - 1 && chk(i + 1)) || (y > 0 && chk(i - W)) || (y < H - 1 && chk(i + W))) goals.push([i, maxCost + 1 - dist[i]]);
+    }
+    const h = new Uint32Array(N).fill(INF32);
+    dijkstra(W, H, goals, j => label[j] === 1 && land[j] > 0, 2 * maxCost + 2, h, null);
+
+    // 3. keep = near road/own land, plus cells on shortest paths to a goal
+    const mask = new Uint8Array(N); let kept = 0;
+    for (let i = 0; i < N; i++) {
+      if (label[i] !== 1 || dist[i] === INF32) continue;
+      let k = false;
+      if (dist[i] <= nearCost && (dist[i] === 0 || land[i] === 2 || !anyRoad)) k = true;
+      else if (dist[i] > nearCost && h[i] !== INF32 && (dist[i] + h[i] - (maxCost + 1)) <= slackCost) k = true;
+      if (k) { mask[i] = 1; kept++; }
+    }
+
+    // 4. prune thin spurs (never the run's own lots), then trace, drop specks/holes, simplify, back to lat/lng
+    const opened = openMask(mask, W, H, Math.max(1, Math.ceil(8 / g.c)));
+    for (let i = 0; i < N; i++) if (label[i] === 1 && dist[i] === 0) opened[i] = 1;
+    const rawRings = traceMask(opened, W, H);
+    const areas = rawRings.map(ringSignedArea);
+    let big = 0; areas.forEach(a => { if (Math.abs(a) > Math.abs(big)) big = a; });
+    const out = [];
+    rawRings.forEach((r, k) => {
+      if (Math.sign(areas[k]) !== Math.sign(big)) return;              // hole
+      const areaM2 = Math.abs(areas[k]) * g.c * g.c;
+      if (areaM2 < O.minPartM2) return;
+      const simp = simplifyClosed(r.map(p => [p[0] * g.c, p[1] * g.c]), g.c * 0.8);
+      if (simp.length < 3) return;
+      out.push({ area: Math.round(areaM2), pts: simp.map(p => [r6(g.lat0 + p[1] / g.ky), r6(g.lng0 + p[0] / g.kx)]) });
+    });
+    out.sort((a, b) => b.area - a.area);
+    return { rings: out, stats: { cells: N, cellM: g.c, kept, ms: Date.now() - t0 } };
+  }
+
+  const outBuild = { running: false, cancel: false, done: 0, total: 0 };
+  let extras = {};                 // borderKey -> [ [ [lat,lng]... ], ... ]  (secondary parts of a run)
+  const EXTRAS_KEY = 'runOutlineExtras';
+  function extraRings(key) { return (extras[key] || []); }
+
+  async function tilesFor(bbox) {
+    const x0 = Math.floor(bbox.w / TILE_DEG), x1 = Math.floor(bbox.e / TILE_DEG), y0 = Math.floor(bbox.s / TILE_DEG), y1 = Math.floor(bbox.n / TILE_DEG);
+    const n = (x1 - x0 + 1) * (y1 - y0 + 1);
+    if (n > 120) throw new Error('This run is too large to outline in one piece (' + n + ' map areas).');
+    if (n + 10 > cacheLimit) cacheLimit = n + 10;
+    const all = [];
+    for (let ix = x0; ix <= x1; ix++) for (let iy = y0; iy <= y1; iy++) all.push(loadTile(ix, iy));
+    return [].concat(...(await Promise.all(all)));
+  }
+  // groups: [{ key, borderKey, extraKeys[], sites }]; targets: indexes to build.
+  async function buildRunOutlines(groups, targets, onProgress) {
+    Object.assign(outBuild, { running: true, cancel: false, done: 0, total: targets.length });
+    const results = [], errors = [];
+    const savedLimit = cacheLimit;
+    try {
+      for (const ti of targets) {
+        if (outBuild.cancel) break;
+        const grp = groups[ti];
+        try {
+          const sd = groupSeeds(grp);
+          if (sd.bb) {
+            const padLat = OUT.farM / 110540, padLng = OUT.farM / (111320 * Math.cos(sd.bb[1] * Math.PI / 180));
+            const parcels = await tilesFor({ w: sd.bb[0] - padLng, s: sd.bb[1] - padLat, e: sd.bb[2] + padLng, n: sd.bb[3] + padLat });
+            const r = computeOutline(groups, ti, parcels);
+            if (r.rings.length) results.push({ group: grp, rings: r.rings, stats: r.stats });
+            else errors.push({ group: grp, reason: 'nothing to outline' });
+          } else errors.push({ group: grp, reason: 'no matched houses' });
+        } catch (e) { errors.push({ group: grp, reason: e.message || String(e) }); }
+        outBuild.done++;
+        if (onProgress) onProgress(outBuild.done, outBuild.total);
+        await sleep(0);
+      }
+    } finally { cacheLimit = savedLimit; const cancelled = outBuild.cancel; outBuild.running = false; outBuild.cancel = false; outBuild.cancelled = cancelled; }
+    return { results, errors, cancelled: outBuild.cancelled };
+  }
+  // Writes results into the app's run borders (main ring) and extras (other parts).
+  async function applyOutlines(results) {
+    if (typeof customRunBorders === 'undefined') return 0;
+    let n = 0;
+    results.forEach(r => {
+      const keys = [r.group.borderKey].concat(r.group.extraKeys || []);
+      keys.forEach(k => { customRunBorders[k] = r.rings[0].pts.map(p => [p[0], p[1]]); if (r.rings.length > 1) extras[k] = r.rings.slice(1).map(x => x.pts); else delete extras[k]; });
+      n++;
+    });
+    try { if (typeof saveToDB === 'function') { await saveToDB('customRunBorders', customRunBorders); await saveToDB(EXTRAS_KEY, extras); } } catch (e) { console.warn(e); }
+    try { if (typeof hasUnsyncedChanges !== 'undefined') { hasUnsyncedChanges = true; if (typeof updateSyncButtonIcon === 'function') updateSyncButtonIcon(); } } catch (e) {}
+    return n;
+  }
+  async function loadExtras() {
+    try { const d = (typeof loadFromDB === 'function') ? await loadFromDB(EXTRAS_KEY) : null; if (d && typeof d === 'object') extras = d; } catch (e) {}
+  }
+
+  async function buildRunsUI(scope) {
+    if (outBuild.running) { outBuild.cancel = true; refreshSettingsUI(); return; }
+    if (batch.running) return;
+    const stream = (typeof activeFilterStream !== 'undefined') ? String(activeFilterStream || '') : '';
+    if (['Garbage', 'Recycling', 'FOGO'].indexOf(stream) < 0) { await customAlert('Pick Garbage, Recycling or FOGO on the map first - run boundaries are built one stream at a time.'); return; }
+    if (typeof window.lbRunGroups !== 'function') { await customAlert('Run data is not ready yet.'); return; }
+    await ensureLoaded();
+    const groups = window.lbRunGroups(stream);
+    let targets = groups.map((g, i) => i).filter(i => scope === 'all' || groups[i].inSelection);
+    if (!targets.length) { await customAlert(scope === 'all' ? 'No runs found for this stream.' : 'Select a run on the map first (matching the day filter).'); return; }
+    // every house in the stream needs its lot first
+    const need = []; groups.forEach(g => g.sites.forEach(s => { if (needsMatch(s, false)) need.push(s); }));
+    const names = targets.slice(0, 6).map(i => groups[i].run).join(', ') + (targets.length > 6 ? '...' : '');
+    const ok = await customConfirm('Build ' + targets.length + ' run boundar' + (targets.length === 1 ? 'y' : 'ies') + ' (' + names + ') from property lines? This replaces the saved boundary for ' + (targets.length === 1 ? 'that run' : 'those runs') + '.' + (need.length ? ' ' + need.length.toLocaleString() + ' houses still need matching to their lot first, which downloads parcel data - Wi-Fi is best.' : ''));
+    if (!ok) return;
+    if (need.length) {
+      const r = await runBatch(groupByTile(need));
+      groups.forEach(g => { delete g._seeds; });
+      if (r.cancelled) { await customAlert('Stopped before boundaries were built.'); return; }
+    }
+    const res = await buildRunOutlines(groups, targets, (d, t) => { pill('Building run boundaries ' + d + ' of ' + t + '...'); refreshSettingsUI(); });
+    const n = await applyOutlines(res.results);
+    pill(null); refreshSettingsUI();
+    if (typeof renderMapData === 'function') try { renderMapData(); } catch (e) {}
+    let msg = (res.cancelled ? 'Stopped. ' : 'Done. ') + n + ' run boundar' + (n === 1 ? 'y' : 'ies') + ' built from property lines.';
+    if (res.errors.length) msg += ' ' + res.errors.length + ' skipped (' + res.errors.slice(0, 3).map(e => e.group.run + ': ' + e.reason).join('; ') + (res.errors.length > 3 ? '...' : '') + ').';
+    await customAlert(msg);
+  }
+
+  window.lbParcels = {
+    onMapReady: function () { ensureMap(); ensureLoaded().then(scheduleRefresh); },
+    refresh: refresh,
+    restyle: function () { if (map) redraw(); },
+    matchSite: matchSite,
+    infoFor: infoFor,
+    boundaryFor: boundaryFor,
+    matchAllUI: matchAllUI,
+    matchViewUI: matchViewUI,
+    clearAllUI: clearAllUI,
+    buildRunsUI: buildRunsUI,
+    extraRings: extraRings,
+    settingsHTML: settingsHTML,
+    refreshSettingsUI: refreshSettingsUI,
+    stats: stats,
+    ready: ensureLoaded,
+    // exposed for the test harness only
+    _t: { ingest, matchPoint, ringContains, distRingM, queryURL, fetchEnvelope, fetchTile, loadTile, applyMatch, needsMatch,
+          matchList, groupByTile, runBatch, redraw, computeOutline, openMask, buildRunOutlines, applyOutlines, traceMask, ringSignedArea, simplifyClosed, fillRings, makeGrid, OUT, outBuild, getExtras: () => extras, cfg, tiles, failedTiles, batch, getStore: () => store, setStore: s => { store = s; },
+          saveNow, tileOf, tkey, toLatLngs, lastDraw: () => lastDrawCount, resetMap: () => { map = null; } }
+  };
+
+  ensureLoaded();
+  // The map may have been created before this block ran (script order) - pick it up now.
+  if (typeof leafletMap !== 'undefined' && leafletMap) window.lbParcels.onMapReady();
+})();
+</script>
 
 </body>
 </html>
