@@ -5187,6 +5187,7 @@ per day (minimum) *","1 x per day (minimum) *"],"cleaning":"2 x per year"},"5":{
   let mapHouseParcelLayer = null;
   const PARCEL_AUTO_MAX_HOUSES = 1500;  // don't auto-download for huge all-runs views
   let parcelAutoTimer = null;
+  const parcelAttempted = new Map();     // siteKey -> last lookup time, so a house is never re-asked in a tight loop
   let parcelAutoBlockedUntil = 0;       // back-off after a stop / failure
   let housePinBackupCount = 0;
   // Three "Run Square" layers - one per stream (Garbage, Recycling, FOGO).
@@ -6441,6 +6442,8 @@ per day (minimum) *","1 x per day (minimum) *"],"cleaning":"2 x per year"},"5":{
     const p = gps(s.lat, s.lng);
     if (!k || !p) return false;
     if (Array.isArray(s.boundary) && s.boundary.length >= 3) return false;
+    const tried = parcelAttempted.get(k);
+    if (tried && Date.now() - tried < 10 * 60 * 1000) return false;
     const e = vicParcelIndex.get(k);
     if (!e) return true;
     if (!e.p) return false;
@@ -6464,6 +6467,7 @@ per day (minimum) *","1 x per day (minimum) *"],"cleaning":"2 x per year"},"5":{
       const k = siteKeyForParcel(s);
       const p = gps(s.lat, s.lng);
       if (!todoMap.has(k)) todoMap.set(k, { k, lat: p.lat, lng: p.lng });
+      parcelAttempted.set(k, Date.now());
     });
     const todo = Array.from(todoMap.values());
     if (!todo.length) return;
@@ -6826,36 +6830,42 @@ per day (minimum) *","1 x per day (minimum) *"],"cleaning":"2 x per year"},"5":{
     });
     return out;
   }
-  // Union of the run's lots, grown out over the road in steps. At each step a
-  // point is only claimed if it is nearer this run's lots than any other
-  // house's lot, so two runs facing each other across a road meet exactly at
-  // the road centre; with nothing opposite it grows the full reach (across the
-  // road to the park / shore / golf course). Other houses' lots are always
-  // cut out, and disjoint areas stay as separate boundaries (multi-polygon).
+  // Only the neighbour lots within ~55m of this run matter for the road-centre
+  // cut; dropping the rest keeps the geometry work small enough for a phone.
+  function keepPolysNearRings(polys, rings) {
+    const cells = new Set();
+    rings.forEach(r => r.forEach(pt => cells.add(Math.floor(pt[0] / 0.0005) + '_' + Math.floor(pt[1] / 0.0006))));
+    return polys.filter(pl => pl.geometry.coordinates[0].some(c => {
+      const a = Math.floor(c[1] / 0.0005), b = Math.floor(c[0] / 0.0006);
+      for (let i = -1; i <= 1; i++) for (let j = -1; j <= 1; j++) if (cells.has((a + i) + '_' + (b + j))) return true;
+      return false;
+    }));
+  }
+  // Union of the run's lots pushed out over the road: normally ~10m (about the
+  // road centre, where the facing run's outline starts); where no other house
+  // lies within the full reach (nothing opposite, up to the park / shore /
+  // golf course) it goes the full reach. Other houses' lots are always cut out.
+  // Disjoint areas stay as separate boundaries (multi-polygon).
   function computeParcelRunLatLngs(rings, stream, run, reach, ref) {
     const polys = rings.map(ringToTurfPoly).filter(Boolean);
     if (!polys.length) return null;
     let shape = unionAllTurf(polys);
     if (!shape) return null;
     if (reach > 0) {
-      let nu = null, tooBig = false;
       try {
-        const nb = neighbourPolysNear(stream, run, turf.bbox(turf.buffer(shape, reach, { units: 'meters', steps: 1 })), ref);
-        nu = nb.length ? unionAllTurf(nb) : null;
-        if (nb.length > 800) tooBig = true;
-      } catch (e) { console.warn('parcel outline: neighbour lookup failed', e); }
-      let claimed = shape;
-      const STEPS = tooBig ? 0 : 3;   // very dense areas: skip the stepped growth, just cut round other lots
-      for (let i = 1; i <= STEPS; i++) {
-        const d = reach * i / STEPS;
-        try {
-          let grown = turf.buffer(shape, d, { units: 'meters', steps: 2 });
-          if (nu) grown = turf.difference(grown, turf.buffer(nu, d, { units: 'meters', steps: 2 }));
-          if (grown) claimed = turf.union(claimed, grown) || claimed;
-        } catch (e) { console.warn('parcel outline: road-centre step failed', e); }
-      }
-      if (nu) { try { claimed = turf.difference(claimed, nu) || claimed; } catch (e) { console.warn('parcel outline: neighbour cut failed', e); } }
-      shape = claimed;
+        const near = turf.buffer(shape, reach * 0.4, { units: 'meters', steps: 2 });
+        const far = turf.buffer(shape, reach, { units: 'meters', steps: 2 });
+        const nb = keepPolysNearRings(neighbourPolysNear(stream, run, turf.bbox(far), ref), rings);
+        const nu = nb.length ? unionAllTurf(nb) : null;
+        let claimed = near, ext = far;
+        if (nu) {
+          try { claimed = turf.difference(near, nu) || near; } catch (e) { console.warn('parcel outline: neighbour cut failed', e); }
+          try { ext = turf.difference(far, turf.buffer(nu, reach, { units: 'meters', steps: 1 })); } catch (e) { ext = null; }
+        }
+        if (ext) { try { claimed = turf.union(claimed, ext) || claimed; } catch (e) {} }
+        try { claimed = turf.union(claimed, shape) || claimed; } catch (e) {}
+        shape = claimed;
+      } catch (e) { console.warn('parcel outline: road-centre reach failed', e); }
     }
     try { shape = turf.simplify(shape, { tolerance: 0.000006, highQuality: false, mutate: false }); } catch (e) {}
     return featureToLatLngs(shape);
@@ -17098,7 +17108,7 @@ window.addEventListener('DOMContentLoaded', async () => {
       // boundaries loaded) the normal outline below is drawn instead.
       let parcelOutline = null;
       if (showRunBoundaries && !(customBorder && Array.isArray(customBorder) && customBorder.length >= 3)) {
-        parcelOutline = parcelRunLatLngs(borderKey, g.stream, g.run, g.sites);
+        try { parcelOutline = parcelRunLatLngs(borderKey, g.stream, g.run, g.sites); } catch (e) { console.warn('run outline skipped', e); parcelOutline = null; }
       }
       if (parcelOutline) {
         const ppoly = L.polygon(parcelOutline, {
