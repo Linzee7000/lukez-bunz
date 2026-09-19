@@ -4069,7 +4069,8 @@ body:not(.dark-mode) .welcome-go-wrap {
           <button type="button" class="map-settings-top-btn" id="mapContextCloseBtn" onclick="mapTopBarContextCloseClicked()" title="Close">&times;</button>
         </div>
         <!-- Action-button bar for the active context (e.g. run boundary
-             editing's Snap Houses / Snap Roads / Remove points / Done, or
+             editing's Snap Houses / Snap Parcels / Snap Roads / Match
+             Neighbour / Remove points / Done, or
              geofence drawing's Undo / Finish). Rendered by
              setMapTopBarContext and fixed to the bottom of the screen,
              flush above the bottom nav — see #mapContextRow2 CSS — so it
@@ -14752,6 +14753,234 @@ window.addEventListener('DOMContentLoaded', async () => {
     customAlert(`Matched ${totalMoved} boundary point(s) on ${touchedRuns.join(', ')} to ${Array.from(touchedNeighbors).join(', ')}'s edge — following its exact line, including any curves.`);
   };
 
+  // Run Boundary > Snap Parcels: pull the current boundary onto the real
+  // cadastral edge of THIS run's own houses, instead of a straight line
+  // between house pins (which is all "Snap Houses" gives you, and which
+  // happily cuts through the middle of a lot). Anywhere a house's lot
+  // backs or sides onto a lot that ISN'T part of this run — another run,
+  // unclaimed/unassigned land, a golf course, the beach, anything that
+  // isn't one of this run's own parcels — the boundary is pulled onto
+  // that real shared property line. Road-facing stretches are left
+  // sitting on the property line here, a few metres short of the road;
+  // run "Snap Roads" straight after and it will pull those out onto the
+  // actual road centreline, since everything this tool leaves near a
+  // street is well within Snap Roads' own 35m catch distance. That's the
+  // intended order: Snap Houses -> Snap Parcels -> Snap Roads -> Match
+  // Neighbour (to weld the result exactly onto an already-drawn
+  // neighbouring run) -> Done.
+  //
+  // Mechanically this is Match Neighbour's own approach (project each
+  // point onto the nearest EDGE of a closed loop, group consecutive
+  // points that land on the same loop, force that group to walk the loop
+  // in one consistent direction, then rebuild the whole matched stretch
+  // from the loop's own vertices so it follows every real corner) — the
+  // only difference is what the "loop" is. Instead of another run's
+  // saved border, it's the outline left over once every one of this
+  // run's own house parcels is fused into one shape: wherever two of the
+  // run's own lots sit side by side the seam between them disappears,
+  // and only the true OUTER edge of the run's own footprint is left to
+  // match against.
+  const MATCH_PARCEL_METERS = 60;
+
+  function siteParcelPolygon(site) {
+    const ring = siteBoundaryRing(site);
+    if (!ring || ring.length < 3) return null;
+    const coords = ring.map(pt => [pt[1], pt[0]]);
+    const a = coords[0], b = coords[coords.length - 1];
+    if (a[0] !== b[0] || a[1] !== b[1]) coords.push([a[0], a[1]]);
+    try { return turf.polygon([coords]); } catch (e) { return null; }
+  }
+
+  // Fuses every given site's own parcel polygon into one shape (a
+  // MultiPolygon if the run's houses form more than one separate patch
+  // of land, e.g. split by a park with no houses on it). Skips any
+  // parcel that fails to merge (self-intersecting cadastral geometry
+  // does happen occasionally) instead of aborting the whole run.
+  function unionSiteParcels(sites) {
+    let merged = null, used = 0;
+    sites.forEach(s => {
+      const poly = siteParcelPolygon(s);
+      if (!poly) return;
+      if (!merged) { merged = poly; used++; return; }
+      try {
+        const next = turf.union(merged, poly);
+        if (next) { merged = next; used++; }
+      } catch (e) { /* leave merged as-is, skip just this one parcel */ }
+    });
+    return { merged, used };
+  }
+
+  // Exterior ring(s) of a (Multi)Polygon turf feature, as closed-loop
+  // arrays of {lat,lng}. Holes are ignored — a donut-shaped gap fully
+  // surrounded by this run's own houses (e.g. a little internal park)
+  // isn't a boundary stretch that needs drawing.
+  function exteriorLoopsFromUnion(merged) {
+    if (!merged || !merged.geometry) return [];
+    const g = merged.geometry;
+    const polys = g.type === 'Polygon' ? [g.coordinates] : g.type === 'MultiPolygon' ? g.coordinates : [];
+    return polys.map(poly => poly[0]).filter(r => Array.isArray(r) && r.length >= 4).map(ring => {
+      const pts = ring.map(([lng, lat]) => ({ lat, lng }));
+      if (pts.length > 1 && metersBetween(pts[0], pts[pts.length - 1]) < 0.02) pts.pop();
+      return pts;
+    }).filter(pts => pts.length >= 3);
+  }
+
+  window.snapBoundaryToParcels = async function() {
+    const runs = Array.from(selectedMapRuns());
+    if (!runs.length) {
+      customAlert('Select the run(s) you want to snap first, then tap Snap Parcels.');
+      return;
+    }
+    if (typeof turf === 'undefined') {
+      customAlert('Snap Parcels needs the mapping library (Turf) which failed to load. Check your internet connection and reload the page.');
+      return;
+    }
+    await ensureVicParcelCacheLoaded();
+
+    const asPoint = p => Array.isArray(p)
+      ? { lat: Number(p[0]), lng: Number(p[1]) }
+      : { lat: Number(p.lat), lng: Number(p.lng) };
+
+    let totalMoved = 0, totalMissing = 0;
+    const touchedRuns = [];
+
+    for (const runKey of runs) {
+      const borderKey = boundaryKeyFor(runKey);
+      const current = customRunBorders[borderKey];
+      if (!current || current.length < 3) continue;
+
+      // This run's own houses, regardless of what's currently on screen
+      // or filtered — Snap Parcels should work the same whether or not
+      // this run happens to be the one actively shown.
+      const runSites = getRecordsArray().filter(s => siteRunKeys(s).includes(runKey));
+      const withBoundary = runSites.filter(s => siteBoundaryRing(s));
+      totalMissing += runSites.length - withBoundary.length;
+      if (withBoundary.length < 2) continue;
+
+      const { merged, used } = unionSiteParcels(withBoundary);
+      if (!merged || used < 2) continue;
+      const loops = exteriorLoopsFromUnion(merged).map((pts, i) => ({ key: borderKey + '#' + i, pts }));
+      if (!loops.length) continue;
+
+      const currentPts = current.map(asPoint);
+      const n = currentPts.length;
+
+      // Step 1: best edge-projected candidate per point, across every
+      // part of this run's own fused parcel outline, within the match
+      // threshold.
+      const candidates = currentPts.map(pt => {
+        let best = null;
+        loops.forEach(({ key, pts }) => {
+          const hit = nearestOnBorderLoop(pt, pts);
+          if (hit.dist <= MATCH_PARCEL_METERS && (!best || hit.dist < best.dist)) {
+            best = { loopKey: key, param: hit.param, dist: hit.dist };
+          }
+        });
+        return best;
+      });
+
+      // Step 1b: bridge short unmatched gaps between two stretches that
+      // both matched the same fused-outline part, same idea as Match
+      // Neighbour's own bridging above.
+      const BRIDGE_MAX_METERS = MATCH_PARCEL_METERS * 2;
+      const BRIDGE_MAX_GAP_POINTS = 8;
+      const loopByKey = {};
+      loops.forEach(({ key, pts }) => { loopByKey[key] = pts; });
+      {
+        let bi = 0;
+        while (bi < n) {
+          if (candidates[bi]) { bi++; continue; }
+          let bj = bi;
+          while (bj < n && !candidates[bj]) bj++;
+          const gapLen = bj - bi;
+          const before = candidates[(bi - 1 + n) % n];
+          const after = bj < n ? candidates[bj] : null;
+          if (before && after && before.loopKey === after.loopKey && gapLen <= BRIDGE_MAX_GAP_POINTS) {
+            const pts = loopByKey[before.loopKey];
+            for (let bk = bi; bk < bj; bk++) {
+              const hit = nearestOnBorderLoop(currentPts[bk], pts);
+              if (hit.dist <= BRIDGE_MAX_METERS) {
+                candidates[bk] = { loopKey: before.loopKey, param: hit.param, dist: hit.dist };
+              }
+            }
+          }
+          bi = bj;
+        }
+      }
+
+      let rotateAt = candidates.findIndex(c => !c);
+      if (rotateAt === -1) rotateAt = 0;
+      const order = Array.from({ length: n }, (_, k) => (rotateAt + k) % n);
+
+      // Step 2: walk the run's points in this rotated order, grouping
+      // consecutive points matched to the same fused-outline part,
+      // enforcing one consistent direction of travel, then rebuilding
+      // that whole stretch from the outline's own vertices so it follows
+      // every real property corner instead of straight-lining between
+      // sparse matched points.
+      let movedHere = 0;
+      const resultPts = [];
+      let k = 0;
+      while (k < n) {
+        const origIdx = order[k];
+        if (!candidates[origIdx]) { resultPts.push(currentPts[origIdx]); k++; continue; }
+
+        const loopKey = candidates[origIdx].loopKey;
+        const groupIdx = [];
+        let k2 = k;
+        while (k2 < n && candidates[order[k2]] && candidates[order[k2]].loopKey === loopKey) {
+          groupIdx.push(order[k2]);
+          k2++;
+        }
+
+        const loopPts = loopByKey[loopKey];
+        const period = loopPts.length;
+
+        const raw = groupIdx.map(idx => candidates[idx].param);
+        const unwrapped = [raw[0]];
+        for (let g = 1; g < raw.length; g++) {
+          let v = raw[g];
+          let diff = v - unwrapped[g - 1];
+          while (diff > period / 2) { v -= period; diff = v - unwrapped[g - 1]; }
+          while (diff < -period / 2) { v += period; diff = v - unwrapped[g - 1]; }
+          unwrapped.push(v);
+        }
+
+        const ascending = unwrapped[unwrapped.length - 1] >= unwrapped[0];
+        const EPS = 1e-4;
+        for (let g = 1; g < unwrapped.length; g++) {
+          if (ascending && unwrapped[g] <= unwrapped[g - 1]) unwrapped[g] = unwrapped[g - 1] + EPS;
+          if (!ascending && unwrapped[g] >= unwrapped[g - 1]) unwrapped[g] = unwrapped[g - 1] - EPS;
+        }
+
+        sliceNeighborRange(loopPts, unwrapped[0], unwrapped[unwrapped.length - 1])
+          .forEach(p => resultPts.push(p));
+        movedHere += groupIdx.length;
+
+        k = k2;
+      }
+
+      if (movedHere) {
+        customRunBorders[borderKey] = dedupeLoopPoints(resultPts).map(p => [p.lat, p.lng]);
+        totalMoved += movedHere;
+        touchedRuns.push(runKey.toUpperCase());
+      }
+    }
+
+    if (!totalMoved) {
+      customAlert('No nearby parcel edge was found to snap onto. Make sure "Property boundaries" is switched on and given a moment to load for this run\'s houses (Layers > Fix house pins area), then try again.' +
+        (totalMissing ? ` ${totalMissing.toLocaleString()} house(s) on the selected run(s) have no boundary loaded yet.` : ''));
+      return;
+    }
+
+    await saveToDB('customRunBorders', customRunBorders);
+    renderMapData();
+    if (isRoadSnapEditing) enableBoundaryVertexHandles();
+    customAlert(`Snapped ${totalMoved} boundary point(s) on ${touchedRuns.join(', ')} onto the real property lines.` +
+      (totalMissing ? ` ${totalMissing.toLocaleString()} house(s) had no boundary loaded yet, so nearby stretches may still need a hand nudge.` : '') +
+      ` Now run "Snap Roads" for any stretch that should sit on a street instead.`);
+  };
+
   // Run Boundary > Export: write the run's current boundary (whichever is
   // actually on screen — a manual/snapped override, or the computed hull)
   // out as a KML polygon.
@@ -15170,6 +15399,7 @@ window.addEventListener('DOMContentLoaded', async () => {
         'Editing run boundary',
         [
           {label:'Snap Houses', icon:'🧲', onClick:()=>window.snapActiveBoundaryToRoads(), row:2, key:'snapHouses'},
+          {label:'Snap Parcels', icon:'🏘️', onClick:()=>window.snapBoundaryToParcels(), row:2, key:'snapParcels'},
           {label:'Snap Roads', icon:'🛣️', onClick:()=>window.snapBoundaryToRoads(), row:2, key:'snapRoads'},
           {label:'Match Neighbour', icon:'🧷', onClick:()=>window.snapBoundaryToNeighbor(), row:2, key:'matchNeighbor'},
           {label:'Remove points', icon:'🗑️', onClick:()=>window.toggleBoundaryRemovePointsMode(), row:2, key:'removePoints'},
