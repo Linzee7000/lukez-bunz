@@ -6838,13 +6838,14 @@ per day (minimum) *","1 x per day (minimum) *"],"cleaning":"2 x per year"},"5":{
     let shape = unionAllTurf(polys);
     if (!shape) return null;
     if (reach > 0) {
-      let nu = null;
+      let nu = null, tooBig = false;
       try {
         const nb = neighbourPolysNear(stream, run, turf.bbox(turf.buffer(shape, reach, { units: 'meters', steps: 1 })), ref);
         nu = nb.length ? unionAllTurf(nb) : null;
+        if (nb.length > 800) tooBig = true;
       } catch (e) { console.warn('parcel outline: neighbour lookup failed', e); }
       let claimed = shape;
-      const STEPS = 4;
+      const STEPS = tooBig ? 0 : 3;   // very dense areas: skip the stepped growth, just cut round other lots
       for (let i = 1; i <= STEPS; i++) {
         const d = reach * i / STEPS;
         try {
@@ -6872,25 +6873,43 @@ per day (minimum) *","1 x per day (minimum) *"],"cleaning":"2 x per year"},"5":{
       if (use) rings.push(use);
     });
     if (!rings.length) return null;
+    // Only work out outlines for runs on screen (the plain outline is shown for
+    // the rest), so an all-runs view can't lock the app up.
+    try {
+      let a0 = Infinity, o0 = Infinity, a1 = -Infinity, o1 = -Infinity;
+      rings.forEach(r => r.forEach(pt => { if (pt[0] < a0) a0 = pt[0]; if (pt[0] > a1) a1 = pt[0]; if (pt[1] < o0) o0 = pt[1]; if (pt[1] > o1) o1 = pt[1]; }));
+      if (leafletMap && !leafletMap.getBounds().pad(0.3).intersects(L.latLngBounds([[a0, o0], [a1, o1]]))) return null;
+    } catch (e) {}
     const ref = sites && sites.length ? getSiteRuns(sites[0]) : null;
     const reach = PARCEL_RUN_REACH_M;
     const cacheKey = [key, stream, rings.length, real, sig, vicParcelVersion, getRecordsArray().length, reach].join('|');
     const hit = parcelRunCache.get(cacheKey);
     if (hit) return hit.latlngs;
-    if (!parcelRunPending.has(cacheKey)) {
+    if (!parcelRunPending.has(cacheKey) && parcelRunPending.size < 4) {
       parcelRunPending.add(cacheKey);
-      setTimeout(() => {
-        let latlngs = null;
-        try { latlngs = computeParcelRunLatLngs(rings, stream, run, reach, ref); }
-        catch (e) { console.error('Parcel run outline failed for', key, e); }
-        if (parcelRunCache.size > 200) parcelRunCache.clear();
-        parcelRunCache.set(cacheKey, { latlngs });
-        parcelRunPending.delete(cacheKey);
-        if (latlngs) ensureParcelAttribution();
-        scheduleParcelRunRedraw();
-      }, 40);
+      parcelRunQueue.push({ cacheKey, rings, stream, run, reach, ref, key });
+      pumpParcelRunQueue();
     }
     return null;
+  }
+  const parcelRunQueue = [];
+  let parcelRunWorking = false;
+  function pumpParcelRunQueue() {
+    if (parcelRunWorking || !parcelRunQueue.length) return;
+    const j = parcelRunQueue.shift();
+    parcelRunWorking = true;
+    setTimeout(() => {
+      let latlngs = null;
+      try { latlngs = computeParcelRunLatLngs(j.rings, j.stream, j.run, j.reach, j.ref); }
+      catch (e) { console.error('Parcel run outline failed for', j.key, e); }
+      if (parcelRunCache.size > 200) parcelRunCache.clear();
+      parcelRunCache.set(j.cacheKey, { latlngs });
+      parcelRunPending.delete(j.cacheKey);
+      parcelRunWorking = false;
+      if (latlngs) ensureParcelAttribution();
+      scheduleParcelRunRedraw();
+      pumpParcelRunQueue();
+    }, 60);
   }
   function scheduleParcelRunRedraw() {
     clearTimeout(parcelRunRedrawTimer);
