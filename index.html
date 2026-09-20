@@ -8872,8 +8872,8 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
       <div class="run-style-help">Used for the pull-out tab, the Drive button and selected options when no stream is filtered. With a stream selected, that stream's colour is used instead.</div></section>`;
 
     const mapSection=`<section class="run-style-section"><div class="run-style-section-title">Map locations</div>
-      <div class="run-style-grid"><label class="color-control-card"><span>${iconStyleSelect('houseDots')} House triangles</span><input id="styleHouseDotsColor" type="color" value="${houseDotsColor||'#8b5cf6'}"></label><label class="color-control-card"><span>${iconStyleSelect('collectionHouse')} Collection-point houses</span><input id="styleCollectionHouseColor" type="color" value="${collectionPointHouseColor||'#f59e0b'}"></label><label class="color-control-card"><span>${iconStyleSelect('roadInOut')} Drive in · reverse out</span><input id="styleRoadInOutColor" type="color" value="${roadModeColors['drive-reverse-out']}"></label><label class="color-control-card"><span>${iconStyleSelect('roadReverseIn')} Reverse in · drive out</span><input id="styleRoadReverseInColor" type="color" value="${roadModeColors['reverse-in-drive-out']}"></label></div>
-      <div class="run-style-help">Houses are triangles. Bin dots only appear at a valid kerbside flip location. The icon dropdown next to each colour picks the symbol; Save applies both.</div></section>`;
+      <div class="run-style-grid"><label class="color-control-card"><span>${iconStyleSelect('houseDots')} House numbers</span><input id="styleHouseDotsColor" type="color" value="${houseDotsColor||'#8b5cf6'}"></label><label class="color-control-card"><span>${iconStyleSelect('collectionHouse')} Collection-point houses</span><input id="styleCollectionHouseColor" type="color" value="${collectionPointHouseColor||'#f59e0b'}"></label><label class="color-control-card"><span>${iconStyleSelect('roadInOut')} Drive in · reverse out</span><input id="styleRoadInOutColor" type="color" value="${roadModeColors['drive-reverse-out']}"></label><label class="color-control-card"><span>${iconStyleSelect('roadReverseIn')} Reverse in · drive out</span><input id="styleRoadReverseInColor" type="color" value="${roadModeColors['reverse-in-drive-out']}"></label></div>
+      <div class="run-style-help">Houses show their street number. Bin dots only appear at a valid kerbside flip location. The icon dropdown next to each colour picks the symbol; Save applies both.</div></section>`;
 
     const liftSection=`<section class="run-style-section"><div class="run-style-section-title">Bin lift points</div>
       <div class="run-style-grid">
@@ -16325,6 +16325,9 @@ window.addEventListener('DOMContentLoaded', async () => {
       }
     });
 
+    // Red outline on the property whose bin the truck is passing / pulled up to.
+    updateBinPropertyHighlight();
+
     const movedDist = getDistanceMeters(lastGpsCoords.lat, lastGpsCoords.lng, userCurrentLocation.lat, userCurrentLocation.lng);
     if (movedDist >= 2.0 || !lastTelemetrySite) {
       lastGpsCoords = { ...userCurrentLocation };
@@ -16333,7 +16336,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     }
   };
 
-  /* Interactive House Triangles */
+  /* Interactive House Markers (street-number chips; function name kept as drawHouseTriangle for existing callers) */
   function activeStreetModeForSite(site){
     const id = String(site.propId||site.siteId||'');
     const mode = houseStreetModes[id];
@@ -16367,6 +16370,114 @@ window.addEventListener('DOMContentLoaded', async () => {
     if (window.lbParcels) window.lbParcels.refresh();
   };
 
+  /* Red property highlight while working a bin ----------------------------------------------
+     As the truck passes - or pulls up to - a bin on the run, the property boundary that bin is
+     allocated to is drawn in red. "Reach" is the same 12 m + left/right-side test the pass / pull-up
+     detection in onGpsPositionSuccess uses, so the outline comes up the moment a bin is flipped
+     (truck stopped) or flagged missed (driven past). It stays until the truck is more than 16 m from
+     every bin on that property, or the next bin comes into reach. The outline is the property's saved
+     boundary (hand-drawn wins, else its Vicmap lot); if that lot isn't saved on the device yet it is
+     looked up on the spot (needs signal once, then it's cached like every other property boundary). */
+  const BIN_HIGHLIGHT_ENTER_M = 12;
+  const BIN_HIGHLIGHT_EXIT_M = 16;
+  const BIN_HIGHLIGHT_RETRY_MS = 60000;
+  const binPropertyHighlight = { siteId: null, drawnFor: null, pendingFor: null, map: null, group: null, lookups: new Map() };
+
+  function binPropertyHighlightPane() {
+    const name = 'lukez-bin-property-pane';
+    if (!leafletMap.getPane(name)) {
+      const pane = leafletMap.createPane(name);
+      pane.style.zIndex = 610;            // over run / property outlines, under house numbers (620) and bin dots (660)
+      pane.style.pointerEvents = 'none';
+    }
+    return name;
+  }
+
+  function clearBinPropertyHighlight() {
+    binPropertyHighlight.siteId = null;
+    binPropertyHighlight.drawnFor = null;
+    if (binPropertyHighlight.group) binPropertyHighlight.group.clearLayers();
+  }
+
+  function drawBinPropertyHighlight(siteId, ring) {
+    if (!leafletMap || !Array.isArray(ring) || ring.length < 3) return;
+    if (binPropertyHighlight.map !== leafletMap || !binPropertyHighlight.group) {
+      binPropertyHighlight.map = leafletMap;
+      binPropertyHighlight.group = L.layerGroup().addTo(leafletMap);
+    }
+    binPropertyHighlight.group.clearLayers();
+    L.polygon(ring, {
+      pane: binPropertyHighlightPane(), interactive: false, lineJoin: 'round',
+      color: '#ef4444', weight: 4, opacity: 1, fillColor: '#ef4444', fillOpacity: 0.3
+    }).addTo(binPropertyHighlight.group);
+    binPropertyHighlight.drawnFor = siteId;
+  }
+
+  async function showBinPropertyHighlight(siteId) {
+    const api = window.lbParcels;
+    if (!api || binPropertyHighlight.pendingFor === siteId) return;
+    const site = getRecordsArray().find(s => String(s.propId || s.siteId || s.addressText || '') === siteId);
+    if (!site) return;
+    let ring = api.boundaryFor(site);
+    if (!ring) {
+      const last = binPropertyHighlight.lookups.get(siteId);
+      if (last && Date.now() - last < BIN_HIGHLIGHT_RETRY_MS) return;   // don't hammer Vicmap while offline
+      binPropertyHighlight.pendingFor = siteId;
+      try { await api.matchSite(site); ring = api.boundaryFor(site); }
+      catch (e) { ring = null; }
+      finally { if (binPropertyHighlight.pendingFor === siteId) binPropertyHighlight.pendingFor = null; }
+    }
+    if (binPropertyHighlight.siteId !== siteId) return;                  // truck has already moved on
+    if (ring) { binPropertyHighlight.lookups.delete(siteId); drawBinPropertyHighlight(siteId, ring); }
+    else binPropertyHighlight.lookups.set(siteId, Date.now());
+  }
+
+  // Called on every GPS fix (see onGpsPositionSuccess).
+  function updateBinPropertyHighlight() {
+    if (!leafletMap || !userCurrentLocation || !activeMapCircleMarkers.size) {
+      if (binPropertyHighlight.siteId) clearBinPropertyHighlight();
+      return;
+    }
+    const here = userCurrentLocation, heading = lastValidHeading || 0;
+    const currentId = binPropertyHighlight.siteId;
+    let nextId = null, nextD = Infinity, currentD = Infinity;
+    activeMapCircleMarkers.forEach(m => {
+      if (!m || !m.siteId) return;
+      const d = getDistanceMeters(here.lat, here.lng, m.lat, m.lng);
+      if (m.siteId === currentId && d < currentD) currentD = d;
+      if (d > BIN_HIGHLIGHT_ENTER_M || d >= nextD) return;
+      // Same left / right cones and side setting as the pass / pull-up check.
+      const rel = (getBearing(here.lat, here.lng, m.lat, m.lng) - heading + 360) % 360;
+      const isLeft = rel >= 200 && rel <= 340;
+      const isRight = rel >= 20 && rel <= 160;
+      if (travelMode === 'left' && !isLeft) return;
+      if (travelMode === 'right' && !isRight) return;
+      if (travelMode === 'all' && !(isLeft || isRight)) return;
+      nextId = m.siteId; nextD = d;
+    });
+    const targetId = nextId || (currentD <= BIN_HIGHLIGHT_EXIT_M ? currentId : null);
+    if (!targetId) { if (currentId) clearBinPropertyHighlight(); return; }
+    if (targetId !== currentId) { clearBinPropertyHighlight(); binPropertyHighlight.siteId = targetId; }
+    if (binPropertyHighlight.drawnFor !== targetId || binPropertyHighlight.map !== leafletMap) showBinPropertyHighlight(targetId);
+  }
+
+  // Street number shown on a house's map marker. Works off baseStreetLine (the address line with any
+  // "Unit 3/" prefix already stripped): "12A Smith St" -> "12A", "12-14 Smith St" -> "12-14",
+  // "3/12 Smith St" -> "12", "Lot 7 Smith Rd" -> "7". Returns '' when the address has no number.
+  function houseNumberLabel(site) {
+    const line = String((site && (site.baseStreetLine || cleanStreetAddress(site.addressText))) || '').trim();
+    const m = line.match(/^(?:lot\s+)?(?:\d+[A-Za-z]?\s*\/\s*)?(\d+[A-Za-z]?(?:\s*[-\u2013]\s*\d+[A-Za-z]?)?)\b/i);
+    return m ? m[1].replace(/\s+/g, '') : '';
+  }
+  // White text on dark house colours, near-black text if the picked house colour is light.
+  function houseChipTextColor(bg) {
+    const m = /^#?([0-9a-f]{6})$/i.exec(String(bg || '').trim());
+    if (!m) return '#fff';
+    const n = parseInt(m[1], 16);
+    const r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
+    return (0.299 * r + 0.587 * g + 0.114 * b) > 170 ? '#111' : '#fff';
+  }
+
   window.drawHouseTriangle = function(site) {
     const id = String(site.propId || site.siteId || '');
     const isSelected = selectedCollectionHouseIds.has(id);
@@ -16384,11 +16495,18 @@ window.addEventListener('DOMContentLoaded', async () => {
       (cp ? collectionPointHouseColor : (houseDotsColor || '#8b5cf6'))
     );
     
+    // Houses show their street number (was a triangle). Same colour rules as before - blue when
+    // selected, orange / purple for street modes, the collection-point colour, else the house colour.
+    // A property with no street number (e.g. a named reserve) falls back to a plain colour dot.
+    const houseNum = houseNumberLabel(site);
+    const chipCss = houseNum
+      ? `min-width:20px; height:20px; padding:0 4px; box-sizing:border-box; border-radius:10px; background:${esc(color)}; color:${houseChipTextColor(color)}; border:2px solid #fff; font:800 11px/16px system-ui,-apple-system,'Segoe UI',sans-serif; letter-spacing:-0.2px; text-align:center; white-space:nowrap; filter:drop-shadow(0 1px 3px rgba(0,0,0,0.5)); pointer-events:auto;`
+      : `width:12px; height:12px; box-sizing:border-box; border-radius:50%; background:${esc(color)}; border:2px solid #fff; filter:drop-shadow(0 1px 3px rgba(0,0,0,0.5)); pointer-events:auto;`;
     const icon = L.divIcon({
       className: 'house-map-marker-icon',
       html: `
         <div style="width:34px; height:34px; display:flex; align-items:center; justify-content:center; cursor:pointer;">
-          <div style="width:16px; height:16px; background:${esc(color)}; clip-path:polygon(50% 0%, 0% 100%, 100% 100%); border:2px solid #fff; filter:drop-shadow(0 1px 3px rgba(0,0,0,0.5)); pointer-events:auto;"></div>
+          <div style="${chipCss}">${esc(houseNum)}</div>
         </div>
       `,
       iconSize: [34, 34],
