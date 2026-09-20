@@ -4075,6 +4075,9 @@ body:not(.dark-mode) .welcome-go-wrap {
           <button type="button" id="mapRunColoredBox" class="map-run-colored-box hdr-run-gar" onclick="openFilterDrawerModal()" title="Select run">
             <span id="mapRunTitleText" class="map-run-title">Select run</span>
             <span class="map-run-divider" aria-hidden="true"></span>
+            <!-- Streets this run works (see lb-street-stats-script). Road icon is inline SVG so it
+                 follows the box's text colour on every stream colour. -->
+            <span class="map-run-stat" title="Streets on this run"><svg class="lb-street-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8.5 3 L3.5 21"/><path d="M15.5 3 L20.5 21"/><path d="M12 4 V7.5 M12 10.5 V14 M12 17 V21"/></svg><b id="mapTotalStreets">-</b></span>
             <span class="map-run-stat"><img class="icon-img map-stat-icon" src="houses.png" alt=""><b id="mapTotalHouses">0</b></span>
             <span class="map-run-stat"><img class="icon-img map-stat-icon" src="bin.png" alt=""><b id="mapTotalBins">0</b></span>
             <!-- <span class="map-run-stat" title="Bins flipped this run">✅<b id="mapFlippedBins">0</b></span> -->
@@ -4223,6 +4226,25 @@ body:not(.dark-mode) .welcome-go-wrap {
         <div id="mapStreetInfoOverlay" class="map-street-info-overlay street-overlay-hidden">
           <div id="mapStreetOverlay" class="map-street-transparent-overlay"></div>
           <div id="mapSpeedLimitSign" class="map-speed-limit-sign speed-sign-hidden"></div>
+        </div>
+
+        <!-- THIS STREET, LEFT and RIGHT: appears when the truck is on a street the selected run
+             works. Left block hugs the left edge, right block the right edge.
+             house = houses on this run · bin = bins on this run · crossed bin = houses with no bin
+             allocated. Filled in by lb-street-stats-script (bottom of the file). -->
+        <div id="lbStreetSides" class="lb-street-sides">
+          <div class="lb-ss-side lb-ss-left" id="lbSsLeft">
+            <span class="lb-ss-tag" title="Left side">L</span>
+            <span class="lb-ss-stat" title="Houses on this run - left"><img class="lb-ss-ico" src="houses.png" alt=""><b id="lbSsLH">0</b></span>
+            <span class="lb-ss-stat" title="Bins on this run - left"><img class="lb-ss-ico" src="bin.png" alt=""><b id="lbSsLB">0</b></span>
+            <span class="lb-ss-stat lb-ss-none zero" id="lbSsLNone" title="Houses with no bin - left"><span class="lb-ss-nobin"><img class="lb-ss-ico" src="bin.png" alt=""><svg viewBox="0 0 24 24" aria-hidden="true"><line x1="3" y1="21" x2="21" y2="3"/></svg></span><b id="lbSsLN">0</b></span>
+          </div>
+          <div class="lb-ss-side lb-ss-right" id="lbSsRight">
+            <span class="lb-ss-stat" title="Houses on this run - right"><img class="lb-ss-ico" src="houses.png" alt=""><b id="lbSsRH">0</b></span>
+            <span class="lb-ss-stat" title="Bins on this run - right"><img class="lb-ss-ico" src="bin.png" alt=""><b id="lbSsRB">0</b></span>
+            <span class="lb-ss-stat lb-ss-none zero" id="lbSsRNone" title="Houses with no bin - right"><span class="lb-ss-nobin"><img class="lb-ss-ico" src="bin.png" alt=""><svg viewBox="0 0 24 24" aria-hidden="true"><line x1="3" y1="21" x2="21" y2="3"/></svg></span><b id="lbSsRN">0</b></span>
+            <span class="lb-ss-tag" title="Right side">R</span>
+          </div>
         </div>
 
         <!-- Area Runs Bar: sits directly under the map's top bar and shows
@@ -23010,6 +23032,489 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
   ensureLoaded();
   // The map may have been created before this block ran (script order) - pick it up now.
   if (typeof leafletMap !== 'undefined' && leafletMap) window.lbParcels.onMapReady();
+})();
+</script>
+
+<style id="lb-street-stats-style">
+/* Streets stat in the run box */
+.lb-street-ico { width: 22px; height: 22px; flex: 0 0 auto; margin-right: 4px; }
+
+/* Left / right street strip - sits under the live street name, flush to both screen edges */
+.map-header-panel > .lb-street-sides {
+  display: none;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0;
+  pointer-events: none !important;   /* never swallow a map tap */
+}
+.map-header-panel > .lb-street-sides.show { display: flex; }
+.lb-ss-side {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 32px;
+  min-width: 0;
+  padding: 0 9px;
+  box-sizing: border-box;
+  background: linear-gradient(180deg, var(--bar-black-hi) 0%, var(--bar-black) 100%);
+  border: 1px solid #000;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.45);
+  color: #fff;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.lb-ss-left  { border-left: 0;  border-radius: 0 8px 8px 0; padding-left: 6px; }
+.lb-ss-right { border-right: 0; border-radius: 8px 0 0 8px; padding-right: 6px; }
+.lb-ss-tag {
+  flex: 0 0 auto;
+  width: 17px; height: 17px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 4px;
+  background: var(--ui-accent, var(--bright-green));
+  color: var(--ui-accent-ink, #000);
+  font-size: 11px; font-weight: 900; line-height: 1;
+}
+.lb-ss-stat {
+  display: inline-flex; align-items: center; gap: 3px;
+  font-size: 17px; line-height: 1;
+}
+.lb-ss-stat b { font-weight: 700; font-variant-numeric: tabular-nums; }
+.lb-ss-ico {
+  width: 18px; height: 18px;
+  object-fit: contain;
+  filter: brightness(0) invert(1);   /* the icons are black line art */
+}
+/* Houses with no bin: crossed-out bin + amber count; fades right back when there are none */
+.lb-ss-none { color: #fbbf24; }
+.lb-ss-none.zero { opacity: 0.4; }
+.lb-ss-nobin { position: relative; width: 18px; height: 18px; display: inline-block; flex: 0 0 auto; }
+.lb-ss-nobin .lb-ss-ico { position: absolute; inset: 0; opacity: 0.85; }
+.lb-ss-nobin svg {
+  position: absolute; inset: -1px; width: 20px; height: 20px;
+  fill: none; stroke: #ef4444; stroke-width: 2.6; stroke-linecap: round;
+}
+</style>
+<script id="lb-street-stats-script">
+(function () {
+  'use strict';
+
+  /* ================= STREET STATS ====================================
+     Two additions to the Map screen:
+
+     1. STREETS on the run - a road icon + count in the run box at the
+        top (next to houses and bins): how many different streets the
+        selected run works. Counted per street + suburb, so two
+        "Smith Street"s in different suburbs count as two.
+
+     2. THIS STREET, LEFT and RIGHT - a strip under the live street name
+        that appears when the truck is on a street the run works.
+        One block hard against the left edge (left kerb) and one against
+        the right edge (right kerb), each showing:
+           house icon  = houses on THIS run on that side of the street
+           bin icon    = bins those houses have on this run
+           crossed bin = houses with no bin allocated
+
+        "No bin" means: a property on this street with no bin recorded
+        against it - either it isn't on any bin run, or it IS on this run
+        but has no bin for the stream being worked.
+
+     Left / right is always relative to the direction of travel (same
+     idea as the bin-passing check in onGpsPositionSuccess). Houses are
+     sided by their own pin, not their bin's pin, because bin pins are
+     sometimes on the wrong side of the road. Because a curved street
+     (crescent, court) would fool a plain "which side of the truck's
+     heading line" test for houses further along, street-number parity
+     is used as well: odd and even numbers sit on opposite kerbs, so
+     the houses close to the truck (where the geometry is reliable)
+     vote on which kerb is odd, and that decides every house on the
+     street. If the numbering doesn't behave (votes disagree) it falls
+     back to the plain geometric test.
+
+     Everything here reads the app's existing globals; nothing above it
+     was changed except the two small markup additions.
+  ==================================================================== */
+
+  const NEAR_RUN_M = 70;          // a run house this close = truck is "on" that street
+  const SWITCH_MARGIN_M = 12;     // don't flip street unless the new one is clearly nearer
+  const VOTE_RADIUS_M = 150;      // houses within this vote on which kerb is odd
+  const VOTE_MIN_HOUSES = 2;
+  const VOTE_AGREE = 0.75;
+  const ENTRY_PAD_LAT = 0.0045;   // ~500 m either side of the run's houses on the street
+  const ENTRY_PAD_LNG = 0.006;
+  const M_LAT = 110540, M_LNG = 111320;
+  const TICK_MS = 1000;
+  const MOVE_RECALC_M = 4;
+  const TURN_RECALC_DEG = 12;
+
+  const $ = id => document.getElementById(id);
+
+  /* ---------- small helpers ---------- */
+  function num(v) { const n = parseFloat(v); return Number.isFinite(n) ? n : null; }
+  function posOf(site) {
+    const lat = num(site && site.lat), lng = num(site && site.lng);
+    return (lat === null || lng === null || lat === 0 || lng === 0) ? null : { lat, lng };
+  }
+  function local(p, o) {
+    return { x: (p.lng - o.lng) * M_LNG * Math.cos(o.lat * Math.PI / 180), y: (p.lat - o.lat) * M_LAT };
+  }
+  function distM(a, b) { const v = local(a, b); return Math.hypot(v.x, v.y); }
+  function angDiff(a, b) { return Math.abs((((a - b) % 360) + 540) % 360 - 180); }
+
+  const SUFFIX = {
+    st: 'street', rd: 'road', ave: 'avenue', av: 'avenue', dr: 'drive', drv: 'drive', ct: 'court', crt: 'court',
+    cres: 'crescent', cr: 'crescent', pl: 'place', cl: 'close', pde: 'parade', hwy: 'highway', blvd: 'boulevard',
+    bvd: 'boulevard', ln: 'lane', tce: 'terrace', ter: 'terrace', gr: 'grove', esp: 'esplanade', cct: 'circuit',
+    cir: 'circuit', pwy: 'parkway', pky: 'parkway', gdns: 'gardens', gdn: 'gardens', sq: 'square', wy: 'way'
+  };
+  // "Besgrove St" and "Besgrove Street" must be the same street. Only the LAST word is
+  // expanded, so "St Kilda Road" isn't turned into "Street Kilda Road".
+  function normStreet(s) {
+    const words = String(s || '').toLowerCase().replace(/[.,'’]/g, ' ').replace(/\s+/g, ' ').trim().split(' ').filter(Boolean);
+    if (!words.length) return '';
+    const last = words.length - 1;
+    if (SUFFIX[words[last]]) words[last] = SUFFIX[words[last]];
+    return words.join(' ');
+  }
+
+  // Leading street number of an address line ("12 Smith St" -> 12, "3/12 Smith St" -> 12,
+  // "12A Smith St" -> 12, "12-14 Smith St" -> 12, "Lot 7 Smith Rd" -> 7). null if none.
+  function parseLineNo(line) {
+    line = String(line || '').trim();
+    let m = line.match(/^(?:unit|flat|apt|shop|suite)\s*\d+[A-Za-z]?\s*[\/\s]\s*(\d+)/i)
+         || line.match(/^\d+[A-Za-z]?\s*\/\s*(\d+)/);
+    if (m) return parseInt(m[1], 10);
+    m = line.match(/^(?:lot\s+)?(\d+)/i);
+    return m ? parseInt(m[1], 10) : null;
+  }
+  function houseNo(site) {
+    let n = parseLineNo(site && site.baseStreetLine);
+    if (n === null) n = parseLineNo(String((site && site.addressText) || '').split(',')[0]);
+    return (n && n > 0) ? n : null;
+  }
+
+  function siteIdOf(site) { return String(site.propId || site.siteId || site.addressText || ''); }
+
+  function streetIdOf(site) {
+    const raw = (typeof siteStreetKey === 'function') ? siteStreetKey(site) : String(site.baseStreetLine || '').toLowerCase();
+    const name = normStreet(raw);
+    if (!name) return null;
+    let sub = '';
+    if (typeof getAddressSuburb === 'function') sub = String(getAddressSuburb(site) || '').toLowerCase().trim();
+    return { id: name + '|' + sub, name };
+  }
+
+  /* ---------- data access (all existing app globals) ---------- */
+  function records() {
+    if (typeof siteRecords !== 'undefined' && Array.isArray(siteRecords) && siteRecords.length) return siteRecords;
+    return (window.siteRecords && Array.isArray(window.siteRecords)) ? window.siteRecords : [];
+  }
+  function truckPos() {
+    const t = (typeof userCurrentLocation !== 'undefined') ? userCurrentLocation : null;
+    return (t && Number.isFinite(t.lat) && Number.isFinite(t.lng)) ? t : null;
+  }
+  function truckHeading() {
+    return (typeof lastValidHeading === 'number' && Number.isFinite(lastValidHeading)) ? lastValidHeading : 0;
+  }
+  function selectedRunCount() {
+    try { return (typeof selectedMapRuns === 'function') ? selectedMapRuns().size : 0; } catch (e) { return 0; }
+  }
+  function isLitterStream() {
+    const st = (typeof activeFilterStream !== 'undefined') ? activeFilterStream : '';
+    return st === 'StreetGarbage' || st === 'StreetRecycling';
+  }
+
+  // Same rule the run box uses for its bin total: only the stream(s) being viewed, only
+  // where the house is on the selected run, solo data unless the council source is chosen.
+  function binsOnRun(site) {
+    let total = 0;
+    const streams = (typeof visibleStreams === 'function') ? visibleStreams() : ['Garbage', 'Recycling', 'FOGO'];
+    const ds = (typeof activeFilterDataSource !== 'undefined') ? activeFilterDataSource : 'all';
+    streams.forEach(streamKey => {
+      if (typeof streamMatchesSelectedRun === 'function' && !streamMatchesSelectedRun(site, streamKey)) return;
+      const source = ds === 'council' ? site.councilStreams : site.soloStreams;
+      total += ((source && source[streamKey]) || []).length;
+    });
+    return total;
+  }
+  // Any bin at all, any stream, in whichever data source is being used.
+  function anyBins(site) {
+    const ds = (typeof activeFilterDataSource !== 'undefined') ? activeFilterDataSource : 'all';
+    const sources = ds === 'solo' ? [site.soloStreams] : ds === 'council' ? [site.councilStreams] : [site.soloStreams, site.councilStreams];
+    for (let i = 0; i < sources.length; i++) {
+      const s = sources[i];
+      if (!s) continue;
+      for (const k in s) { if (s[k] && s[k].length) return true; }
+    }
+    return false;
+  }
+
+  /* ---------- the run: which streets, which houses ---------- */
+  let run = null;   // { sig, items, streets: Map(id -> {id,name,items[]}), siteIds:Set, entries:Map }
+
+  function setSites(sites) {
+    const list = Array.isArray(sites) ? sites : [];
+    const selN = selectedRunCount();
+
+    // No run picked (or a Street Litter stream): there is no "the run's streets".
+    if (!selN || isLitterStream() || !list.length) {
+      run = null;
+      showStreetCount(selN && !isLitterStream() ? 0 : null, isLitterStream());
+      hideStrip();
+      return;
+    }
+
+    // Cheap fingerprint first - renderMapData can fire on plain map moves, and there's no
+    // need to re-index the run unless something that changes the answer actually changed.
+    let binTotal = 0;
+    for (let i = 0; i < list.length; i++) binTotal += binsOnRun(list[i]);
+    const sel = Array.from(selectedMapRuns()).sort().join(',');
+    const sig = [
+      sel, activeFilterStream, activeFilterDay, activeFilterWeek, activeFilterDataSource,
+      list.length, siteIdOf(list[0]), siteIdOf(list[list.length - 1]), binTotal
+    ].join('|');
+    if (run && run.sig === sig) { showStreetCount(run.streets.size); return; }
+
+    const streets = new Map();
+    const items = [];
+    const siteIds = new Set();
+    list.forEach(site => {
+      const pos = posOf(site);
+      siteIds.add(siteIdOf(site));
+      if (!pos) return;
+      const sid = streetIdOf(site);
+      if (!sid) return;
+      const it = { site, pos, sid: sid.id, num: houseNo(site), onRun: true, bins: binsOnRun(site) };
+      it.parity = it.num === null ? null : (it.num % 2 === 0 ? 'even' : 'odd');
+      it.none = it.bins === 0;
+      items.push(it);
+      if (!streets.has(sid.id)) streets.set(sid.id, { id: sid.id, name: sid.name, items: [] });
+      streets.get(sid.id).items.push(it);
+    });
+
+    run = { sig, items, streets, siteIds, entries: new Map() };
+    lastCalc = null;
+    showStreetCount(streets.size);
+  }
+
+  // Every property on one street near the run's houses (run or not) - needed to count the
+  // ones with no bin. Built once per street, when the truck first reaches it.
+  function getEntry(id) {
+    if (run.entries.has(id)) return run.entries.get(id);
+    const st = run.streets.get(id);
+    let minLat = Infinity, maxLat = -Infinity, minLng = Infinity, maxLng = -Infinity;
+    st.items.forEach(it => {
+      if (it.pos.lat < minLat) minLat = it.pos.lat;
+      if (it.pos.lat > maxLat) maxLat = it.pos.lat;
+      if (it.pos.lng < minLng) minLng = it.pos.lng;
+      if (it.pos.lng > maxLng) maxLng = it.pos.lng;
+    });
+    minLat -= ENTRY_PAD_LAT; maxLat += ENTRY_PAD_LAT; minLng -= ENTRY_PAD_LNG; maxLng += ENTRY_PAD_LNG;
+
+    const items = [];
+    const seen = new Set();
+    // The run's own houses first (already computed, and the source of truth for "on run").
+    st.items.forEach(it => { items.push(it); seen.add(siteIdOf(it.site)); });
+
+    const recs = records();
+    for (let i = 0; i < recs.length; i++) {
+      const s = recs[i];
+      const pos = posOf(s);
+      if (!pos) continue;
+      if (pos.lat < minLat || pos.lat > maxLat || pos.lng < minLng || pos.lng > maxLng) continue;
+      const sid = streetIdOf(s);
+      if (!sid || sid.id !== id) continue;
+      const key = siteIdOf(s);
+      if (seen.has(key) || run.siteIds.has(key)) continue;   // run houses already in
+      seen.add(key);
+      const n = houseNo(s);
+      items.push({
+        site: s, pos, sid: id, num: n, onRun: false, bins: 0,
+        parity: n === null ? null : (n % 2 === 0 ? 'even' : 'odd'),
+        none: !anyBins(s)
+      });
+    }
+    const entry = { id, items, state: { oddSide: null } };
+    run.entries.set(id, entry);
+    return entry;
+  }
+
+  /* ---------- left / right ---------- */
+  // Fills it.side ('L' | 'R') on every item for the truck's current position + heading.
+  function classify(entry, truck, heading) {
+    const items = entry.items, state = entry.state;
+    const hr = heading * Math.PI / 180, hx = Math.sin(hr), hy = Math.cos(hr);
+
+    let wA = 0, wB = 0, n = 0;
+    items.forEach(it => {
+      const v = local(it.pos, truck);
+      it.off = hx * v.y - hy * v.x;            // > 0: left of the direction of travel
+      it.d = Math.hypot(v.x, v.y);
+      it.geo = it.off > 0 ? 'L' : 'R';
+      if (!it.parity || it.d > VOTE_RADIUS_M) return;
+      // A house right on the road line, or a long way off, says little about which kerb.
+      const w = Math.min(1, Math.abs(it.off) / 8) / (1 + it.d / 50);
+      if (w < 0.02) return;
+      const oddIsLeft = (it.parity === 'odd') === (it.geo === 'L');
+      if (oddIsLeft) wA += w; else wB += w;
+      n++;
+    });
+
+    const tot = wA + wB;
+    if (n >= VOTE_MIN_HOUSES && tot > 0 && Math.max(wA, wB) / tot >= VOTE_AGREE) {
+      state.oddSide = wA > wB ? 'L' : 'R';
+    }
+    // Inconclusive vote: keep whatever this street last agreed on (a crescent bends the
+    // truck's heading a long way without the odd/even kerbs ever swapping).
+
+    const evenSide = state.oddSide === 'L' ? 'R' : 'L';
+    items.forEach(it => {
+      it.side = (state.oddSide && it.parity)
+        ? (it.parity === 'odd' ? state.oddSide : evenSide)
+        : it.geo;
+    });
+    return state.oddSide ? 'parity' : 'geometry';
+  }
+
+  function tally(items) {
+    const out = { L: { houses: 0, bins: 0, none: 0 }, R: { houses: 0, bins: 0, none: 0 } };
+    items.forEach(it => {
+      const s = out[it.side];
+      if (!s) return;
+      if (it.onRun) { s.houses++; s.bins += it.bins; }
+      if (it.none) s.none++;
+    });
+    return out;
+  }
+
+  /* ---------- which street is the truck on ---------- */
+  let curId = null;
+
+  function pickStreet(truck) {
+    if (!run || !run.items.length) return null;
+    const near = new Map();
+    for (let i = 0; i < run.items.length; i++) {
+      const it = run.items[i];
+      if (Math.abs(it.pos.lat - truck.lat) > 0.001) continue;
+      const d = distM(it.pos, truck);
+      if (d > NEAR_RUN_M) continue;
+      const prev = near.get(it.sid);
+      if (prev === undefined || d < prev) near.set(it.sid, d);
+    }
+    if (!near.size) return null;
+
+    let nearestId = null, nearestD = Infinity;
+    near.forEach((d, id) => { if (d < nearestD) { nearestD = d; nearestId = id; } });
+
+    // The live GPS street name (the pill above) is authoritative when it matches one of the
+    // streets right here - it stays correct at junctions where "nearest house" wobbles.
+    const pill = $('mapStreetOverlay');
+    const gpsName = normStreet(pill ? pill.textContent : '');
+    let nameId = null, nameD = Infinity;
+    if (gpsName) {
+      near.forEach((d, id) => {
+        const st = run.streets.get(id);
+        if (st && st.name === gpsName && d < nameD) { nameD = d; nameId = id; }
+      });
+    }
+
+    let chosen = nameId || nearestId;
+    if (!nameId && curId && curId !== chosen && near.has(curId) && nearestD > near.get(curId) - SWITCH_MARGIN_M) {
+      chosen = curId;   // stay put until the other street is clearly nearer
+    }
+    return chosen;
+  }
+
+  /* ---------- drawing ---------- */
+  function showStreetCount(n, hideIt) {
+    const b = $('mapTotalStreets');
+    if (!b) return;
+    const wrap = b.parentNode;
+    if (wrap && wrap.style) wrap.style.display = hideIt ? 'none' : '';
+    b.textContent = (n === null || n === undefined) ? '-' : String(n);
+  }
+
+  let lastSig = '';
+  function hideStrip() {
+    const el = $('lbStreetSides');
+    if (el && el.classList.contains('show')) el.classList.remove('show');
+    lastSig = '';
+  }
+  function setNum(id, v) {
+    const e = $(id);
+    if (e && e.textContent !== String(v)) e.textContent = String(v);
+  }
+  function drawStrip(t) {
+    const el = $('lbStreetSides');
+    if (!el) return;
+    const sig = [t.L.houses, t.L.bins, t.L.none, t.R.houses, t.R.bins, t.R.none].join(',');
+    if (sig !== lastSig) {
+      setNum('lbSsLH', t.L.houses); setNum('lbSsLB', t.L.bins); setNum('lbSsLN', t.L.none);
+      setNum('lbSsRH', t.R.houses); setNum('lbSsRB', t.R.bins); setNum('lbSsRN', t.R.none);
+      const ln = $('lbSsLNone'), rn = $('lbSsRNone');
+      if (ln) ln.classList.toggle('zero', t.L.none === 0);
+      if (rn) rn.classList.toggle('zero', t.R.none === 0);
+      lastSig = sig;
+    }
+    if (!el.classList.contains('show')) el.classList.add('show');
+  }
+
+  /* ---------- the loop ---------- */
+  let lastCalc = null;
+
+  function stripAllowed() {
+    if (typeof activeTab !== 'undefined' && activeTab !== 'map') return false;
+    const bar = $('mapNormalTopBar');
+    if (bar && bar.style.display === 'none') return false;   // settings / edit mode has the top bar
+    return !!run;
+  }
+
+  function tick() {
+    try {
+      if (!stripAllowed()) { hideStrip(); return; }
+      const truck = truckPos();
+      if (!truck) { hideStrip(); return; }
+      const id = pickStreet(truck);
+      if (!id) { curId = null; lastCalc = null; hideStrip(); return; }
+
+      const heading = truckHeading();
+      const entry = getEntry(id);
+      if (id !== curId) { entry.state.oddSide = null; curId = id; lastCalc = null; }
+
+      if (lastCalc && lastCalc.id === id
+          && distM(truck, lastCalc.pos) < MOVE_RECALC_M
+          && angDiff(heading, lastCalc.heading) < TURN_RECALC_DEG) {
+        drawStrip(lastCalc.tally);
+        return;
+      }
+      classify(entry, truck, heading);
+      const t = tally(entry.items);
+      lastCalc = { id, pos: { lat: truck.lat, lng: truck.lng }, heading, tally: t };
+      drawStrip(t);
+    } catch (e) {
+      console.warn('Street stats:', e);
+    }
+  }
+
+  /* ---------- hook into the run box ---------- */
+  const prevHeader = window.updateMapHeaderInfo;
+  if (typeof prevHeader === 'function') {
+    window.updateMapHeaderInfo = function (sites) {
+      const out = prevHeader.apply(this, arguments);
+      try { setSites(sites); tick(); } catch (e) { console.warn('Street stats:', e); }
+      return out;
+    };
+  }
+
+  setInterval(tick, TICK_MS);
+
+  window.lbStreetStats = {
+    refresh: tick,
+    _t: { normStreet, houseNo, parseLineNo, classify, tally, pickStreet, setSites, getEntry, angDiff, local,
+          state: () => ({ run, curId }) }
+  };
 })();
 </script>
 
