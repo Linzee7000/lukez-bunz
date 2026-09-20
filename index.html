@@ -22095,7 +22095,8 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
      house-less side still gets split down its middle.
      Raster based (3 m cells) -> traced to a polygon -> simplified.
      ===================================================================== */
-  const OUT = { cellM: 3, maxCells: 3.0e6, nearM: 15, farM: 150, slackM: 12, neutralMaxM2: 4000, minPartM2: 1500, discM: 6 };
+  const OUT = { cellM: 3, maxCells: 3.0e6, nearM: 15, farM: 150, slackM: 12, neutralMaxM2: 4000, minPartM2: 1500, discM: 6,
+                waterM: 45, bridgeM: 60, groupM2: 6000, groupSpanM: 45, groupFrac: 0.8 };
   const NEUTRAL = 65535;
   const INF32 = 0xFFFFFFFF;
 
@@ -22162,23 +22163,31 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
       buckets[cost] = null;
     }
   }
-  // Morphological opening with a (2k+1)-square: drops thin spurs (road stubs, shoreline slivers)
-  // but keeps every real block, corners included. Summed-area tables keep it O(cells).
-  function openMask(mask, W, H, k) {
+  // Box morphology on a binary mask with a (2k+1)-square, via summed-area tables (O(cells)).
+  // dilate: 1 if any cell in the window is 1. erode: 1 if every in-grid cell in the window is 1
+  // (outside the grid counts as 1, so nothing erodes away from the edge of the working area).
+  function boxMorph(mask, W, H, k, erode) {
     const V = W + 1, sat = new Int32Array(V * (H + 1));
-    const build = src => {
-      for (let y = 0; y < H; y++) { let row = 0; for (let x = 0; x < W; x++) { row += src[y * W + x]; sat[(y + 1) * V + x + 1] = sat[y * V + x + 1] + row; } }
-    };
-    const box = (x0, y0, x1, y1) => { x0 = Math.max(0, x0); y0 = Math.max(0, y0); x1 = Math.min(W - 1, x1); y1 = Math.min(H - 1, y1); return sat[(y1 + 1) * V + x1 + 1] - sat[y0 * V + x1 + 1] - sat[(y1 + 1) * V + x0] + sat[y0 * V + x0]; };
-    const full = (2 * k + 1) * (2 * k + 1);
-    build(mask);
-    const eroded = new Uint8Array(W * H);
-    for (let y = k; y < H - k; y++) for (let x = k; x < W - k; x++) if (mask[y * W + x] && box(x - k, y - k, x + k, y + k) === full) eroded[y * W + x] = 1;
-    build(eroded);
+    for (let y = 0; y < H; y++) { let row = 0; for (let x = 0; x < W; x++) { row += mask[y * W + x]; sat[(y + 1) * V + x + 1] = sat[y * V + x + 1] + row; } }
     const out = new Uint8Array(W * H);
-    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (mask[y * W + x] && box(x - k, y - k, x + k, y + k) > 0) out[y * W + x] = 1;
+    for (let y = 0; y < H; y++) {
+      const y0 = Math.max(0, y - k), y1 = Math.min(H - 1, y + k);
+      for (let x = 0; x < W; x++) {
+        const x0 = Math.max(0, x - k), x1 = Math.min(W - 1, x + k);
+        const cnt = sat[(y1 + 1) * V + x1 + 1] - sat[y0 * V + x1 + 1] - sat[(y1 + 1) * V + x0] + sat[y0 * V + x0];
+        out[y * W + x] = erode ? (cnt === (x1 - x0 + 1) * (y1 - y0 + 1) ? 1 : 0) : (cnt > 0 ? 1 : 0);
+      }
+    }
     return out;
   }
+  // Opening drops thin spurs (road stubs, shoreline slivers) but keeps every real block, corners included.
+  function openMask(mask, W, H, k) {
+    const o = boxMorph(boxMorph(mask, W, H, k, true), W, H, k, false);
+    for (let i = 0; i < o.length; i++) if (!mask[i]) o[i] = 0;
+    return o;
+  }
+  // Closing fills gaps and notches narrower than ~2k cells between parts of the mask.
+  function closeMask(mask, W, H, k) { return boxMorph(boxMorph(mask, W, H, k, false), W, H, k, true); }
   // Boundary of a binary cell mask -> closed rings of grid corners. Interior stays on one side.
   function traceMask(mask, W, H) {
     const V = W + 1, next = new Map();
@@ -22283,7 +22292,6 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     }));
     lands.forEach(p => fillRings(g, land, [p.o].concat(p.h), 1));
     roads.forEach(p => fillRings(g, land, [p.o].concat(p.h), 2));
-    const anyRoad = roads.length > 0;
     neutrals.forEach(p => fillRings(g, label, [p.o].concat(p.h), NEUTRAL));
     // other runs, then the target on top
     const paint = (gi, val) => {
@@ -22295,6 +22303,37 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     paint(target, 1);
     // seeds must stand on land even if the cadastre tile missed them
     for (let i = 0; i < N; i++) if (label[i] && !land[i]) land[i] = 1;
+
+    // Most streets are NOT parcels in the cadastre - they are just the gap between lots. Thin gaps
+    // (roads, lanes, creeks) are walkable road space; only wide empty areas (>= ~waterM) are water/void.
+    const voidM = new Uint8Array(N); let anyVoid = false;
+    for (let i = 0; i < N; i++) if (!land[i]) { voidM[i] = 1; anyVoid = true; }
+    let gapCells = 0;
+    if (anyVoid) {
+      const wide = openMask(voidM, W, H, Math.max(1, Math.ceil(O.waterM / 2 / g.c)));
+      for (let i = 0; i < N; i++) if (voidM[i] && !wide[i]) { land[i] = 2; gapCells++; }
+    }
+    const anyRoad = roads.length > 0 || gapCells > 0;
+
+    // Small clusters of other properties (a few unserviced or other-run houses) get their own label so
+    // they can be swallowed later if the run's houses are on both sides of them.
+    const groupInfo = new Map();               // id -> seed cell count
+    {
+      const maxCells = O.groupM2 / (g.c * g.c);
+      let nextId = groups.length + 2;
+      const seenC = new Uint8Array(N), stack = [];
+      for (let i0 = 0; i0 < N; i0++) {
+        const L0 = label[i0];
+        if (!L0 || L0 === 1 || seenC[i0]) continue;
+        const comp = [i0]; seenC[i0] = 1; stack.length = 0; stack.push(i0);
+        while (stack.length) {
+          const i = stack.pop(), x = i % W, y = (i / W) | 0;
+          const tryN = j => { if (!seenC[j] && label[j] === L0) { seenC[j] = 1; comp.push(j); stack.push(j); } };
+          if (x > 0) tryN(i - 1); if (x < W - 1) tryN(i + 1); if (y > 0) tryN(i - W); if (y < H - 1) tryN(i + W);
+        }
+        if (comp.length <= maxCells && nextId < 60000) { const id = nextId++; comp.forEach(i => { label[i] = id; }); groupInfo.set(id, comp.length); }
+      }
+    }
 
     const step = g.c / 10;                        // metres per cost unit: cost = metres / step
     const toCost = m => Math.round(m / step);
@@ -22329,6 +22368,29 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     // 4. prune thin spurs (never the run's own lots), then trace, drop specks/holes, simplify, back to lat/lng
     const opened = openMask(mask, W, H, Math.max(1, Math.ceil(8 / g.c)));
     for (let i = 0; i < N; i++) if (label[i] === 1 && dist[i] === 0) opened[i] = 1;
+
+    // 3b. Not on this run, but the run's houses are on both sides: take them in.
+    const okLabel = new Uint8Array(65536); okLabel[1] = 1;
+    if (groupInfo.size) {
+      const spanned = closeMask(opened, W, H, Math.max(1, Math.ceil(O.groupSpanM / g.c)));
+      const inside = new Map(), seeds = new Map();
+      for (let i = 0; i < N; i++) {
+        const L1 = label[i]; if (L1 < 2 || !groupInfo.has(L1) || dist[i] !== 0) continue;
+        seeds.set(L1, (seeds.get(L1) || 0) + 1);
+        if (spanned[i]) inside.set(L1, (inside.get(L1) || 0) + 1);
+      }
+      const accepted = new Set();
+      seeds.forEach((n, id) => { if ((inside.get(id) || 0) >= O.groupFrac * n) accepted.add(id); });
+      if (accepted.size) {
+        accepted.forEach(id => { okLabel[id] = 1; });
+        for (let i = 0; i < N; i++) if (accepted.has(label[i]) && dist[i] <= nearCost && dist[i] !== INF32) opened[i] = 1;
+      }
+    }
+    // 3c. Same run on both sides of a road/park: the road and park between belong to it too.
+    {
+      const closed = closeMask(opened, W, H, Math.max(1, Math.ceil(O.bridgeM / g.c)));
+      for (let i = 0; i < N; i++) if (closed[i] && !opened[i] && land[i] > 0 && okLabel[label[i]]) opened[i] = 1;
+    }
     const rawRings = traceMask(opened, W, H);
     const areas = rawRings.map(ringSignedArea);
     let big = 0; areas.forEach(a => { if (Math.abs(a) > Math.abs(big)) big = a; });
@@ -22336,7 +22398,7 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     rawRings.forEach((r, k) => {
       if (Math.sign(areas[k]) !== Math.sign(big)) return;              // hole
       const areaM2 = Math.abs(areas[k]) * g.c * g.c;
-      if (areaM2 < O.minPartM2) return;
+      if (areaM2 < O.minPartM2 && areas[k] !== big) return;            // specks go, but a tiny run keeps its one outline
       const simp = simplifyClosed(r.map(p => [p[0] * g.c, p[1] * g.c]), g.c * 0.8);
       if (simp.length < 3) return;
       out.push({ area: Math.round(areaM2), pts: simp.map(p => [r6(g.lat0 + p[1] / g.ky), r6(g.lng0 + p[0] / g.kx)]) });
@@ -22517,7 +22579,7 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     ready: ensureLoaded,
     // exposed for the test harness only
     _t: { ingest, matchPoint, ringContains, distRingM, queryURL, fetchEnvelope, fetchTile, loadTile, applyMatch, needsMatch,
-          matchList, groupByTile, runBatch, redraw, computeOutline, openMask, buildRunOutlines, applyOutlines, traceMask, ringSignedArea, simplifyClosed, fillRings, makeGrid, OUT, outBuild, getExtras: () => extras, cfg, tiles, failedTiles, batch, getStore: () => store, setStore: s => { store = s; },
+          matchList, groupByTile, runBatch, redraw, computeOutline, openMask, closeMask, boxMorph, buildRunOutlines, applyOutlines, traceMask, ringSignedArea, simplifyClosed, fillRings, makeGrid, OUT, outBuild, getExtras: () => extras, cfg, tiles, failedTiles, batch, getStore: () => store, setStore: s => { store = s; },
           saveNow, tileOf, tkey, toLatLngs, lastDraw: () => lastDrawCount, resetMap: () => { map = null; } }
   };
 
