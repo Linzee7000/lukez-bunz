@@ -16381,7 +16381,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   const BIN_HIGHLIGHT_ENTER_M = 12;
   const BIN_HIGHLIGHT_EXIT_M = 16;
   const BIN_HIGHLIGHT_RETRY_MS = 60000;
-  const binPropertyHighlight = { siteId: null, drawnFor: null, pendingFor: null, map: null, group: null, lookups: new Map() };
+  const binPropertyHighlight = { siteId: null, drawnFor: null, pendingFor: null, pinnedKey: null, map: null, group: null, lookups: new Map() };
 
   function binPropertyHighlightPane() {
     const name = 'lukez-bin-property-pane';
@@ -16432,8 +16432,26 @@ window.addEventListener('DOMContentLoaded', async () => {
     else binPropertyHighlight.lookups.set(siteId, Date.now());
   }
 
+  // Tapping a bin marker outlines its property in red for as long as that bin's popup is open (the live
+  // pass / pull-up highlight below leaves it alone until then). Closing the popup, or tapping another bin,
+  // hands control back to the live highlight.
+  function pinBinPropertyHighlight(siteId, binKey) {
+    if (!siteId) return;
+    if (binPropertyHighlight.siteId !== siteId) clearBinPropertyHighlight();
+    binPropertyHighlight.pinnedKey = binKey;
+    binPropertyHighlight.siteId = siteId;
+    if (binPropertyHighlight.drawnFor !== siteId || binPropertyHighlight.map !== leafletMap) showBinPropertyHighlight(siteId);
+  }
+  function unpinBinPropertyHighlight(binKey) {
+    if (binPropertyHighlight.pinnedKey !== binKey) return;
+    binPropertyHighlight.pinnedKey = null;
+    clearBinPropertyHighlight();
+    updateBinPropertyHighlight();
+  }
+
   // Called on every GPS fix (see onGpsPositionSuccess).
   function updateBinPropertyHighlight() {
+    if (binPropertyHighlight.pinnedKey) return;   // a tapped bin's outline stays put while its popup is open
     if (!leafletMap || !userCurrentLocation || !activeMapCircleMarkers.size) {
       if (binPropertyHighlight.siteId) clearBinPropertyHighlight();
       return;
@@ -16461,13 +16479,27 @@ window.addEventListener('DOMContentLoaded', async () => {
     if (binPropertyHighlight.drawnFor !== targetId || binPropertyHighlight.map !== leafletMap) showBinPropertyHighlight(targetId);
   }
 
-  // Street number shown on a house's map marker. Works off baseStreetLine (the address line with any
-  // "Unit 3/" prefix already stripped): "12A Smith St" -> "12A", "12-14 Smith St" -> "12-14",
-  // "3/12 Smith St" -> "12", "Lot 7 Smith Rd" -> "7". Returns '' when the address has no number.
+  // Number shown on a house's map marker: the street number, with the unit in front for units
+  // ("3/12 Smith St", "Unit 3 12 Smith St" -> "3/12"; "12A Smith St" -> "12A"; "12-14 Smith St" -> "12-14";
+  // "Lot 7 Smith Rd" -> "7"). The unit lives in addressText - baseStreetLine has it stripped off. Returns ''
+  // when the address has no number.
   function houseNumberLabel(site) {
-    const line = String((site && (site.baseStreetLine || cleanStreetAddress(site.addressText))) || '').trim();
-    const m = line.match(/^(?:lot\s+)?(?:\d+[A-Za-z]?\s*\/\s*)?(\d+[A-Za-z]?(?:\s*[-\u2013]\s*\d+[A-Za-z]?)?)\b/i);
-    return m ? m[1].replace(/\s+/g, '') : '';
+    if (!site) return '';
+    const NUM = '\\d+[A-Za-z]?(?:\\s*[-\\u2013]\\s*\\d+[A-Za-z]?)?';
+    const parse = line => {
+      line = String(line || '').trim();
+      let m = line.match(new RegExp('^(?:unit|flat|apt)\\s*(\\d+[A-Za-z]?)\\s*(?:/|\\s)\\s*(' + NUM + ')\\b', 'i'))
+           || line.match(new RegExp('^(\\d+[A-Za-z]?)\\s*/\\s*(' + NUM + ')\\b', 'i'));
+      if (m) return { unit: m[1], num: m[2].replace(/\s+/g, '') };
+      m = line.match(new RegExp('^(?:lot\\s+)?(' + NUM + ')\\b', 'i'));
+      return m ? { unit: '', num: m[1].replace(/\s+/g, '') } : null;
+    };
+    const fromBase = parse(site.baseStreetLine || cleanStreetAddress(site.addressText));
+    const fromRaw = parse(String(site.addressText || '').split(',')[0]);
+    const main = fromBase || fromRaw;
+    if (!main) return '';
+    const unit = main.unit || ((fromRaw && fromRaw.num === main.num) ? fromRaw.unit : '');
+    return unit ? unit + '/' + main.num : main.num;
   }
   // White text on dark house colours, near-black text if the picked house colour is light.
   function houseChipTextColor(bg) {
@@ -16825,6 +16857,10 @@ window.addEventListener('DOMContentLoaded', async () => {
               lines: [`${esc(bin.size || '240L')} · Run: ${esc(g.run)}`],
               actions: binActions
             }));
+
+            // Tapping a bin outlines the property it's allocated to in red while its popup is open.
+            m.on('click', () => pinBinPropertyHighlight(siteId, key));
+            m.on('popupclose', () => unpinBinPropertyHighlight(key));
 
             m.on('dragstart', (ev) => {
               originalDragPos = ev.target.getLatLng();
