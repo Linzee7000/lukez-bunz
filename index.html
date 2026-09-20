@@ -22449,6 +22449,10 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
       if (y === H - 1 || !mask[(y + 1) * W + x]) add(x + 1, y + 1, x, y + 1);
       if (x === 0 || !mask[y * W + x - 1]) add(x, y + 1, x, y);
     }
+    return ringsFromEdges(next, V);
+  }
+  // Joins directed cell-edges (corner key = y * V + x  ->  [corner keys it leads to]) into closed rings of corners.
+  function ringsFromEdges(next, V) {
     const rings = [];
     for (const [startK, list] of next) {
       while (list.length) {
@@ -22518,10 +22522,19 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     const t0 = Date.now();
     const seed = groupSeeds(groups[target]);
     if (!seed.bb) return { rings: [], stats: { reason: 'no seeds' } };
-    const padLat = O.farM / 110540, padLng = O.farM / (111320 * Math.cos(seed.bb[1] * Math.PI / 180));
-    const bb = { w: seed.bb[0] - padLng, s: seed.bb[1] - padLat, e: seed.bb[2] + padLng, n: seed.bb[3] + padLat };
-    const bbA = [bb.w, bb.s, bb.e, bb.n];
-    const g = makeGrid(bb, O.cellM), W = g.W, H = g.H, N = W * H;
+    // Normally the grid covers the whole run. For very large runs (see computeOutlineWindowed) the caller hands in one
+    // fixed window of a shared grid instead, and gets the raw cell mask back to stitch together with its neighbours.
+    const win = O.win || null;
+    let bb, g;
+    if (win) {
+      g = { W: win.W, H: win.H, c: win.c, kx: win.kx, ky: win.ky, lng0: win.lng0, lat0: win.lat0 };
+      bb = { w: g.lng0, s: g.lat0, e: g.lng0 + g.W * g.c / g.kx, n: g.lat0 + g.H * g.c / g.ky };
+    } else {
+      const padLat = O.farM / 110540, padLng = O.farM / (111320 * Math.cos(seed.bb[1] * Math.PI / 180));
+      bb = { w: seed.bb[0] - padLng, s: seed.bb[1] - padLat, e: seed.bb[2] + padLng, n: seed.bb[3] + padLat };
+      g = makeGrid(bb, O.cellM);
+    }
+    const W = g.W, H = g.H, N = W * H;
     const land = new Uint8Array(N), label = new Uint16Array(N);
 
     // which stored parcel belongs to which run
@@ -22641,6 +22654,7 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
       const closed = closeMask(opened, W, H, Math.max(1, Math.ceil(O.bridgeM / g.c)));
       for (let i = 0; i < N; i++) if (closed[i] && !opened[i] && land[i] > 0 && okLabel[label[i]]) opened[i] = 1;
     }
+    if (win) return { opened, W, H, stats: { cells: N, kept, ms: Date.now() - t0 } };
     const rawRings = traceMask(opened, W, H);
     const areas = rawRings.map(ringSignedArea);
     let big = 0; areas.forEach(a => { if (Math.abs(a) > Math.abs(big)) big = a; });
@@ -22657,11 +22671,132 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     return { rings: out, stats: { cells: N, cellM: g.c, kept, ms: Date.now() - t0 } };
   }
 
+  /* ---- Very large runs ------------------------------------------------------------------------------------
+     A run that is spread over tens of kilometres (or has a few stray pins) has a bounding box far too big to
+     rasterise in one go. Instead the ground is cut into 3 km squares on ONE shared 3 m grid; only squares that are
+     near the run's houses are worked out, each with a ~270 m margin so nothing near a square's edge is affected by
+     the cut, and only each square's own core is kept. The cores line up exactly on the shared grid, so their
+     outlines are joined into single rings (no seams) before being simplified. Only the map areas within ~250 m of a
+     house are downloaded, so empty bush / water in between costs nothing. */
+  const WIN = { coreM: 3000, marginM: 60, reachM: 250, maxWindows: 200 };
+
+  // Adds the boundary edges of one window's core to the shared edge map. Edges on the core's own border are left
+  // to the seam pass (they depend on the neighbouring window); the border cells are returned instead.
+  function addCoreEdges(opened, win, next, V) {
+    const K = win.K, W = win.W, ox = win.coreX - win.x0, oy = win.coreY - win.y0;
+    const gx0 = win.coreX, gy0 = win.coreY;
+    const add = (sx, sy, ex, ey) => { const k = sy * V + sx; let a = next.get(k); if (!a) next.set(k, a = []); a.push(ey * V + ex); };
+    const strip = { T: new Uint8Array(K), B: new Uint8Array(K), L: new Uint8Array(K), R: new Uint8Array(K) };
+    for (let ly = 0; ly < K; ly++) {
+      const row = (oy + ly) * W + ox, y = gy0 + ly;
+      for (let lx = 0; lx < K; lx++) {
+        if (!opened[row + lx]) continue;
+        const x = gx0 + lx;
+        if (ly === 0) strip.T[lx] = 1; else if (!opened[row - W + lx]) add(x, y, x + 1, y);
+        if (lx === K - 1) strip.R[ly] = 1; else if (!opened[row + lx + 1]) add(x + 1, y, x + 1, y + 1);
+        if (ly === K - 1) strip.B[lx] = 1; else if (!opened[row + W + lx]) add(x + 1, y + 1, x, y + 1);
+        if (lx === 0) strip.L[ly] = 1; else if (!opened[row + lx - 1]) add(x, y + 1, x, y);
+      }
+    }
+    return strip;
+  }
+  // Edges between two neighbouring cores: wherever a border cell is in the outline and the cell just across the
+  // seam is not (or the neighbouring square was never worked out).
+  function addSeamEdges(strips, K, next, V) {
+    const add = (sx, sy, ex, ey) => { const k = sy * V + sx; let a = next.get(k); if (!a) next.set(k, a = []); a.push(ey * V + ex); };
+    strips.forEach((S, key) => {
+      const [wx, wy] = key.split(',').map(Number);
+      const nR = strips.get((wx + 1) + ',' + wy), nL = strips.get((wx - 1) + ',' + wy);
+      const nB = strips.get(wx + ',' + (wy + 1)), nT = strips.get(wx + ',' + (wy - 1));
+      const gx0 = wx * K, gy0 = wy * K;
+      for (let t = 0; t < K; t++) {
+        if (S.R[t] && !(nR && nR.L[t])) add(gx0 + K, gy0 + t, gx0 + K, gy0 + t + 1);
+        if (S.L[t] && !(nL && nL.R[t])) add(gx0, gy0 + t + 1, gx0, gy0 + t);
+        if (S.B[t] && !(nB && nB.T[t])) add(gx0 + t + 1, gy0 + K, gx0 + t, gy0 + K);
+        if (S.T[t] && !(nT && nT.B[t])) add(gx0 + t, gy0, gx0 + t + 1, gy0);
+      }
+    });
+  }
+
+  // Same result shape as computeOutline. Returns null if the build was stopped part-way.
+  async function computeOutlineWindowed(groups, target) {
+    const O = OUT, t0 = Date.now(), grp = groups[target];
+    const seed = groupSeeds(grp);
+    if (!seed.bb) return { rings: [], stats: { reason: 'no seeds' } };
+    const c = O.cellM, K = Math.round(WIN.coreM / c);
+    const padCells = Math.ceil((O.farM + O.bridgeM + WIN.marginM) / c);
+    const reachCells = Math.ceil((O.farM + 30) / c);
+    const latRef = (seed.bb[1] + seed.bb[3]) / 2;
+    const kx = 111320 * Math.cos(latRef * Math.PI / 180), ky = 110540;
+    const lng0 = seed.bb[0] - (O.farM + O.bridgeM + 100) / kx, lat0 = seed.bb[1] - (O.farM + O.bridgeM + 100) / ky;
+
+    // where the run is: one rectangle per matched lot, one point per unmatched pin
+    const rects = [];
+    seed.pids.forEach(pid => { const P = store.parcels[pid]; if (P) rects.push(P.b); });
+    seed.pins.forEach(pt => rects.push([pt.lng, pt.lat, pt.lng, pt.lat]));
+    const wins = new Map(), need = new Set();
+    const dNeedLng = WIN.reachM / kx, dNeedLat = WIN.reachM / ky;
+    rects.forEach(b => {
+      const cx0 = Math.floor((b[0] - lng0) * kx / c) - reachCells, cx1 = Math.floor((b[2] - lng0) * kx / c) + reachCells;
+      const cy0 = Math.floor((b[1] - lat0) * ky / c) - reachCells, cy1 = Math.floor((b[3] - lat0) * ky / c) + reachCells;
+      for (let wx = Math.floor(cx0 / K); wx <= Math.floor(cx1 / K); wx++) for (let wy = Math.floor(cy0 / K); wy <= Math.floor(cy1 / K); wy++) wins.set(wx + ',' + wy, [wx, wy]);
+      if (wins.size > WIN.maxWindows) throw new Error('This run is too spread out to outline (' + wins.size + '+ sections of ' + (WIN.coreM / 1000) + ' km).');
+      for (let ix = Math.floor((b[0] - dNeedLng) / TILE_DEG); ix <= Math.floor((b[2] + dNeedLng) / TILE_DEG); ix++)
+        for (let iy = Math.floor((b[1] - dNeedLat) / TILE_DEG); iy <= Math.floor((b[3] + dNeedLat) / TILE_DEG); iy++) need.add(tkey(ix, iy));
+    });
+    const order = Array.from(wins.values()).sort((a, b) => a[1] - b[1] || a[0] - b[0]);
+    if (!order.length) return { rings: [], stats: { reason: 'no seeds' } };
+    const maxWx = order.reduce((m, w) => Math.max(m, w[0]), 0), V = (maxWx + 1) * K + 2;
+
+    const next = new Map(), strips = new Map(), savedLimit = cacheLimit;
+    let cells = 0, done = 0;
+    try {
+      for (const [wx, wy] of order) {
+        if (outBuild.cancel) return null;
+        const coreX = wx * K, coreY = wy * K, x0 = coreX - padCells, y0 = coreY - padCells, Wc = K + 2 * padCells;
+        const w = lng0 + x0 * c / kx, s = lat0 + y0 * c / ky, e = w + Wc * c / kx, n = s + Wc * c / ky;
+        // this square's download: only the map areas near the run's houses
+        const jobs = [];
+        for (let ix = Math.floor(w / TILE_DEG); ix <= Math.floor(e / TILE_DEG); ix++)
+          for (let iy = Math.floor(s / TILE_DEG); iy <= Math.floor(n / TILE_DEG); iy++) if (need.has(tkey(ix, iy))) jobs.push([ix, iy]);
+        if (jobs.length + 60 > cacheLimit) cacheLimit = jobs.length + 60;
+        const parcels = [].concat(...(await Promise.all(jobs.map(j => loadTile(j[0], j[1])))));
+        if (outBuild.cancel) return null;
+        const win = { W: Wc, H: Wc, c, kx, ky, lng0: w, lat0: s, x0, y0, coreX, coreY, K };
+        const r = computeOutline(groups, target, parcels, { win });
+        if (!r.opened) continue;
+        strips.set(wx + ',' + wy, addCoreEdges(r.opened, win, next, V));
+        cells += r.stats.cells; done++;
+        pill('Building run ' + grp.run + ' - section ' + done + ' of ' + order.length + '...');
+        await sleep(0);
+      }
+    } finally { cacheLimit = savedLimit; }
+    addSeamEdges(strips, K, next, V);
+
+    const rawRings = ringsFromEdges(next, V);
+    const areas = rawRings.map(ringSignedArea);
+    let big = 0; areas.forEach(a => { if (Math.abs(a) > Math.abs(big)) big = a; });
+    const out = [];
+    rawRings.forEach((r, k) => {
+      if (Math.sign(areas[k]) !== Math.sign(big)) return;              // hole
+      const areaM2 = Math.abs(areas[k]) * c * c;
+      if (areaM2 < O.minPartM2 && areas[k] !== big) return;
+      const simp = simplifyClosed(r.map(p => [p[0] * c, p[1] * c]), c * 0.8);
+      if (simp.length < 3) return;
+      out.push({ area: Math.round(areaM2), pts: simp.map(p => [r6(lat0 + p[1] / ky), r6(lng0 + p[0] / kx)]) });
+    });
+    out.sort((a, b) => b.area - a.area);
+    return { rings: out, stats: { cells, sections: done, ms: Date.now() - t0 } };
+  }
+
   const outBuild = { running: false, cancel: false, done: 0, total: 0 };
   let extras = {};                 // borderKey -> [ [ [lat,lng]... ], ... ]  (secondary parts of a run)
   const EXTRAS_KEY = 'runOutlineExtras';
   function extraRings(key) { return (extras[key] || []); }
 
+  function tileCountOf(bbox) {
+    return (Math.floor(bbox.e / TILE_DEG) - Math.floor(bbox.w / TILE_DEG) + 1) * (Math.floor(bbox.n / TILE_DEG) - Math.floor(bbox.s / TILE_DEG) + 1);
+  }
   async function tilesFor(bbox) {
     const x0 = Math.floor(bbox.w / TILE_DEG), x1 = Math.floor(bbox.e / TILE_DEG), y0 = Math.floor(bbox.s / TILE_DEG), y1 = Math.floor(bbox.n / TILE_DEG);
     const n = (x1 - x0 + 1) * (y1 - y0 + 1);
@@ -22684,8 +22819,13 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
           const sd = groupSeeds(grp);
           if (sd.bb) {
             const padLat = OUT.farM / 110540, padLng = OUT.farM / (111320 * Math.cos(sd.bb[1] * Math.PI / 180));
-            const parcels = await tilesFor({ w: sd.bb[0] - padLng, s: sd.bb[1] - padLat, e: sd.bb[2] + padLng, n: sd.bb[3] + padLat });
-            const r = computeOutline(groups, ti, parcels);
+            const bbox = { w: sd.bb[0] - padLng, s: sd.bb[1] - padLat, e: sd.bb[2] + padLng, n: sd.bb[3] + padLat };
+            // Small / medium runs are outlined in one piece; a run whose bounding box covers more than 120 map areas
+            // is worked out in sections instead (see computeOutlineWindowed).
+            let r;
+            if (tileCountOf(bbox) <= 120) r = computeOutline(groups, ti, await tilesFor(bbox));
+            else r = await computeOutlineWindowed(groups, ti);
+            if (!r) break;                                     // stopped part-way through a large run
             if (r.rings.length) results.push({ group: grp, rings: r.rings, stats: r.stats });
             else errors.push({ group: grp, reason: 'nothing to outline' });
           } else errors.push({ group: grp, reason: 'no matched houses' });
@@ -22829,7 +22969,7 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     ready: ensureLoaded,
     // exposed for the test harness only
     _t: { ingest, matchPoint, ringContains, distRingM, queryURL, fetchEnvelope, fetchTile, loadTile, applyMatch, needsMatch,
-          matchList, groupByTile, runBatch, redraw, computeOutline, openMask, closeMask, boxMorph, buildRunOutlines, applyOutlines, traceMask, ringSignedArea, simplifyClosed, fillRings, makeGrid, OUT, outBuild, getExtras: () => extras, cfg, tiles, failedTiles, batch, getStore: () => store, setStore: s => { store = s; },
+          matchList, groupByTile, runBatch, redraw, computeOutline, computeOutlineWindowed, WIN, ringsFromEdges, openMask, closeMask, boxMorph, buildRunOutlines, applyOutlines, traceMask, ringSignedArea, simplifyClosed, fillRings, makeGrid, OUT, outBuild, getExtras: () => extras, cfg, tiles, failedTiles, batch, getStore: () => store, setStore: s => { store = s; },
           saveNow, tileOf, tkey, toLatLngs, lastDraw: () => lastDrawCount, resetMap: () => { map = null; } }
   };
 
