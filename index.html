@@ -7241,7 +7241,7 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
     const el=document.getElementById('mainLeafletMap');
     if(!el||typeof L==='undefined'){console.error('Leaflet/map container unavailable');return;}
 
-    leafletMap=L.map(el,{preferCanvas:true,zoomControl:false,zoomSnap:1,maxZoom:LB_MAX_ZOOM,touchZoom:false}).setView([-38.36,144.91],18);
+    leafletMap=L.map(el,{preferCanvas:true,zoomControl:false,zoomSnap:1,maxZoom:LB_MAX_ZOOM}).setView([-38.36,144.91],18);
     //L.control.zoom({position:'topright'}).addTo(leafletMap);
     const baseLayers=lbBuildBaseLayers();
     osmLayer=baseLayers.street;
@@ -7305,10 +7305,12 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
 
     container.addEventListener('touchstart', (ev) => {
       if (ev.touches.length !== 2) { mapRotateGestureActive = false; return; }
-      // Now that Leaflet's own pinch-to-zoom is switched off (see
-      // touchZoom:false at map creation), a 2-finger touch belongs
-      // entirely to this rotate gesture - claim it outright so nothing
-      // else (native browser gestures included) can compete for it.
+      // A 2-finger touch drives both Leaflet's own pinch-to-zoom (based on
+      // the distance between the two fingers) and this rotate gesture
+      // (based on the angle between them) at the same time - like most
+      // map apps' combined pinch/rotate gesture. Calling preventDefault
+      // here only blocks the *browser's* native pinch-zoom-the-page
+      // gesture, not Leaflet's own listener on this same element.
       ev.preventDefault();
       mapRotateGestureActive = true;
       mapRotateGestureStartAngle = twoTouchAngleDeg(ev.touches);
@@ -13171,7 +13173,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     ['Saturday', 'SAT'], ['Sunday', 'SUN']
   ];
 
-  let isTrackUpEnabled = false;
+  window.isTrackUpEnabled = false;
   // Continuous (unwrapped) map rotation angle. #mainLeafletMap has a CSS
   // transition on transform, and CSS animates rotate() by the raw numeric
   // degree difference between the old and new value - NOT the shortest way
@@ -13183,14 +13185,22 @@ window.addEventListener('DOMContentLoaded', async () => {
   // the shortest angular delta means the value handed to CSS is always
   // close to its previous value, so the transition is always the short
   // way round, however many times the heading wraps.
-  let mapRotationDeg = 0;
+  window.mapRotationDeg = 0;
   // Manual (two-finger twist) rotation angle, used whenever Track-Up is
   // OFF. Track-Up owns rotation while it's on (driven by GPS heading);
   // once it's off the driver can freely twist the map with two fingers
   // and this is the angle that persists until they twist again or press
   // the North-Up button (which resets it back to 0). See
   // applyMapHeadingRotation() and setupManualMapRotationGesture() below.
-  let manualMapRotationDeg = 0;
+  // NOTE: these three (isTrackUpEnabled/mapRotationDeg/manualMapRotationDeg)
+  // are deliberately hung off `window` rather than declared with `let` -
+  // the two-finger twist gesture itself lives in an earlier, separate
+  // <script> tag (see setupManualMapRotationGesture near the top of the
+  // file), and a `let` in this IIFE is invisible there. Bare references
+  // to these names everywhere else in this file still work unchanged,
+  // since an unshadowed bare identifier falls through to the matching
+  // `window` property anyway.
+  window.manualMapRotationDeg = 0;
 
   // Manual map override: while the driver is stationary they can still
   // freely twist/pan the map even with Track-Up and/or Follow-Me switched
@@ -13198,11 +13208,12 @@ window.addEventListener('DOMContentLoaded', async () => {
   // paused (not switched off) while this is active, and resumes on its
   // own once either: (a) the truck has been moving for 2+ continuous
   // seconds, or (b) the driver hasn't touched the map for 5 seconds.
-  let mapManualOverrideActive = false;
-  let mapManualOverrideIdleTimer = null;
-  let mapManualOverrideMoveStartTs = null;
+  // Also hung off `window` for the same cross-script-tag reason as above.
+  window.mapManualOverrideActive = false;
+  window.mapManualOverrideIdleTimer = null;
+  window.mapManualOverrideMoveStartTs = null;
 
-  function armMapManualOverride() {
+  window.armMapManualOverride = function armMapManualOverride() {
     if (!isTrackUpEnabled && !isTruckFollowEnabled) return; // nothing live to pause
     if (!mapManualOverrideActive) {
       mapManualOverrideActive = true;
@@ -13211,13 +13222,13 @@ window.addEventListener('DOMContentLoaded', async () => {
       manualMapRotationDeg = mapRotationDeg;
       mapManualOverrideMoveStartTs = null;
     }
-  }
+  };
 
-  function bumpMapManualOverrideIdleTimer() {
+  window.bumpMapManualOverrideIdleTimer = function bumpMapManualOverrideIdleTimer() {
     if (!mapManualOverrideActive) return;
     clearTimeout(mapManualOverrideIdleTimer);
     mapManualOverrideIdleTimer = setTimeout(endMapManualOverride, 5000);
-  }
+  };
 
   function endMapManualOverride() {
     if (!mapManualOverrideActive) return;
@@ -14599,7 +14610,11 @@ window.addEventListener('DOMContentLoaded', async () => {
     applyMapHeadingRotation();
   }
 
-  function applyMapHeadingRotation() {
+  // Exposed on `window` (not just a bare top-level function) because the
+  // two-finger twist gesture that calls this lives in an earlier, separate
+  // <script> tag - see the note above isTrackUpEnabled for why that
+  // matters here.
+  window.applyMapHeadingRotation = function applyMapHeadingRotation() {
     const container = document.getElementById('mapScreenContainer');
     const mapEl = document.getElementById('mainLeafletMap');
     const arrowBtnSvg = document.getElementById('trackUpCompassIcon');
