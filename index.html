@@ -21854,6 +21854,7 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
   // parcels: id -> { s: spi, l: lot, n: plan, o: outer ring, h: holes, b: bbox, a: area m2 }
   // sites:   siteKey -> { p: parcelId, m: 0|1, d: metres, q: [lat,lng] pin used }  or { x: 1, q } = looked up, nothing found
   let store = { v: 1, parcels: {}, sites: {} };
+  let dataVer = 0;               // bumped whenever matches / cached tiles change, so the map knows a redraw is really needed
   let loadPromise = null, saveTimer = null;
 
   function ensureLoaded() {
@@ -21895,6 +21896,7 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
   const r6 = n => Math.round(n * 1e6) / 1e6;
   function applyMatch(site, pt, m) {
     const key = siteKey(site); if (!key) return;
+    dataVer++;
     const q = [r6(pt.lat), r6(pt.lng)];
     if (!m) { store.sites[key] = { x: 1, q }; return; }
     const P = m.P;
@@ -21969,6 +21971,17 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     }
     throw lastErr;
   }
+  function trimTiles() { while (tiles.size > cacheLimit) tiles.delete(tiles.keys().next().value); }
+  // Downloads a list of [ix, iy] map areas a few at a time. Firing 60-120 downloads at once (a big run) piles their
+  // JSON in memory together and trips the server's rate limit, which is what made phones run out of memory.
+  async function loadTilesLimited(jobs, limit, stop) {
+    const out = new Array(jobs.length); let next = 0;
+    async function worker() {
+      while (next < jobs.length && !(stop && stop())) { const i = next++; out[i] = await loadTile(jobs[i][0], jobs[i][1]); }
+    }
+    await Promise.all(Array.from({ length: Math.min(limit, jobs.length) }, worker));
+    return [].concat(...out.filter(Boolean));
+  }
   function loadTile(ix, iy) {
     const k = tkey(ix, iy);
     const hit = tiles.get(k);
@@ -21976,7 +21989,8 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     if (inflight.has(k)) return inflight.get(k);
     const p = fetchTile(ix, iy).then(parcels => {
       tiles.set(k, { parcels });
-      while (tiles.size > cacheLimit) tiles.delete(tiles.keys().next().value);
+      dataVer++;
+      trimTiles();
       return parcels;
     }).finally(() => inflight.delete(k));
     inflight.set(k, p);
@@ -22058,14 +22072,27 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     else if (!on && attribOn) { map.attributionControl.removeAttribution(ATTRIB); attribOn = false; }
   }
   let lastDrawCount = 0;
+  // What the last redraw covered. While the truck follows GPS the map pans every second; re-creating thousands of
+  // polygons each time (and re-running it 'constantly') is what exhausted memory, so a pan that stays inside the
+  // area already drawn is skipped - see refresh().
+  let drawnBox = null, drawnSig = '';
+  const MAX_VERTS = 40000;       // faint context lines only; matched lots are always drawn
+  const drawSigNow = () => map.getZoom() + '|' + dataVer + '|' + tiles.size + '|' + (isOn() ? 1 : 0) + '|' + (((typeof isSatelliteView !== 'undefined') && isSatelliteView) ? 1 : 0);
   function redraw() {
     if (!ensureMap()) return 0;
     group.clearLayers();
+    drawnBox = null;
     if (!isOn() || map.getZoom() < MIN_DRAW_ZOOM) { setAttribution(false); lastDrawCount = 0; return 0; }
     const v = viewBox(0.5), st = styles();
-    let n = 0;
+    drawnBox = v; drawnSig = drawSigNow();
+    let n = 0, verts = 0;
     const add = (o, h, style) => {
       if (n >= MAX_DRAW) return;
+      if (style === st.ctx) {
+        let nv = o.length / 2; if (h) for (let k = 0; k < h.length; k++) nv += h[k].length / 2;
+        if (nv > 3000 || verts + nv > MAX_VERTS) return;   // huge Crown-land / bay polygons are not worth drawing as context
+        verts += nv;
+      }
       L.polygon(toLatLngs(o, h), Object.assign({ renderer: rend, interactive: false, lineJoin: 'round', smoothFactor: 0.5 }, style)).addTo(group);
       n++;
     };
@@ -22125,14 +22152,17 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     if (ms) pillTimer = setTimeout(() => { el.style.display = 'none'; }, ms);
   }
 
-  function scheduleRefresh() { clearTimeout(refreshTimer); refreshTimer = setTimeout(refresh, cfg.refreshDelayMs); }
+  function scheduleRefresh() { clearTimeout(refreshTimer); refreshTimer = setTimeout(() => refresh({ move: true }), cfg.refreshDelayMs); }
 
-  async function refresh() {
+  async function refresh(opts) {
     if (!ensureMap()) return;
     if (!isOn()) { clearDraw(); return; }
     await ensureLoaded();
     if (allSites().length !== seenSiteCount) { seenSiteCount = allSites().length; tiles.clear(); }
-    redraw();                                   // saved outlines show immediately, even offline
+    const fromMove = !!(opts && opts.move === true);
+    const cur = viewBox(0.25);
+    const inside = drawnBox && cur.w >= drawnBox.w && cur.e <= drawnBox.e && cur.s >= drawnBox.s && cur.n <= drawnBox.n;
+    if (!(fromMove && inside && drawnSig === drawSigNow())) redraw();   // saved outlines show immediately, even offline
     if (batch.running || map.getZoom() < MIN_FETCH_ZOOM) return;
     if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
     const v = viewBox(0.5);
@@ -22763,7 +22793,7 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
         for (let ix = Math.floor(w / TILE_DEG); ix <= Math.floor(e / TILE_DEG); ix++)
           for (let iy = Math.floor(s / TILE_DEG); iy <= Math.floor(n / TILE_DEG); iy++) if (need.has(tkey(ix, iy))) jobs.push([ix, iy]);
         if (jobs.length + 60 > cacheLimit) cacheLimit = jobs.length + 60;
-        const parcels = [].concat(...(await Promise.all(jobs.map(j => loadTile(j[0], j[1])))));
+        const parcels = await loadTilesLimited(jobs, 6, () => outBuild.cancel);
         if (outBuild.cancel) return null;
         const win = { W: Wc, H: Wc, c, kx, ky, lng0: w, lat0: s, x0, y0, coreX, coreY, K };
         const r = computeOutline(groups, target, parcels, { win });
@@ -22806,8 +22836,8 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     if (n > 120) throw new Error('This run is too large to outline in one piece (' + n + ' map areas).');
     if (n + 10 > cacheLimit) cacheLimit = n + 10;
     const all = [];
-    for (let ix = x0; ix <= x1; ix++) for (let iy = y0; iy <= y1; iy++) all.push(loadTile(ix, iy));
-    return [].concat(...(await Promise.all(all)));
+    for (let ix = x0; ix <= x1; ix++) for (let iy = y0; iy <= y1; iy++) all.push([ix, iy]);
+    return loadTilesLimited(all, 6, () => outBuild.cancel);
   }
   // groups: [{ key, borderKey, extraKeys[], sites }]; targets: indexes to build.
   async function buildRunOutlines(groups, targets, onProgress) {
@@ -22826,7 +22856,7 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
             // Small / medium runs are outlined in one piece; a run whose bounding box covers more than 120 map areas
             // is worked out in sections instead (see computeOutlineWindowed).
             let r;
-            if (tileCountOf(bbox) <= 120) r = computeOutline(groups, ti, await tilesFor(bbox));
+            if (tileCountOf(bbox) <= 120) { const tp = await tilesFor(bbox); if (outBuild.cancel) break; r = computeOutline(groups, ti, tp); }
             else r = await computeOutlineWindowed(groups, ti);
             if (!r) break;                                     // stopped part-way through a large run
             if (r.rings.length) results.push({ group: grp, rings: r.rings, stats: r.stats });
@@ -22834,6 +22864,7 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
           } else errors.push({ group: grp, reason: 'no matched houses' });
         } catch (e) { errors.push({ group: grp, reason: e.message || String(e) }); }
         outBuild.done++;
+        cacheLimit = savedLimit; trimTiles();                // don't keep a big run's map areas in memory for the next run
         if (onProgress) onProgress(outBuild.done, outBuild.total);
         await sleep(0);
       }
