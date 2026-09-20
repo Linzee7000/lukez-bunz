@@ -1545,9 +1545,37 @@ body:not(.dark-mode) .welcome-go-wrap {
       height: 100%;
       z-index: 1;
     }
-    .leaflet-bottom.leaflet-right {
+    /* Zoom control (bottom-right) stays clear of the bottom bars. */
+    #mapScreenContainer .leaflet-bottom.leaflet-right {
       margin-bottom: 140px !important;
       margin-right: 12px !important;
+    }
+    /* Map provider / attribution text moves to the true bottom edge of the
+       screen, under everything else, instead of floating mid-map (it's
+       fixed-positioned so it no longer matters which corner Leaflet put
+       its container in). */
+    #mapScreenContainer .leaflet-control-attribution {
+      position: fixed !important;
+      left: 0 !important;
+      right: 0 !important;
+      bottom: env(safe-area-inset-bottom, 0px) !important;
+      width: 100% !important;
+      max-width: 100% !important;
+      box-sizing: border-box !important;
+      margin: 0 !important;
+      padding: 2px 8px !important;
+      font-size: 9px !important;
+      line-height: 1.3 !important;
+      text-align: center !important;
+      background: rgba(0,0,0,.55) !important;
+      color: #fff !important;
+      white-space: normal !important;
+      z-index: 850 !important;
+      pointer-events: auto !important;
+    }
+    #mapScreenContainer .leaflet-control-attribution a {
+      color: #fff !important;
+      text-decoration: underline !important;
     }
 
     /* Top Control Overlay */
@@ -7244,6 +7272,14 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
       if (typeof updateGpsTrailWeight === 'function') updateGpsTrailWeight();
       if (typeof updateStreetLitterMarkerSizes === 'function') updateStreetLitterMarkerSizes();
     });
+    // A manual drag away from the truck's live position pauses Follow-Me
+    // (and Track-Up's rotation) the same way the two-finger twist does -
+    // see armMapManualOverride/bumpMapManualOverrideIdleTimer/
+    // endMapManualOverride - so the driver can look up the road without
+    // it snapping straight back.
+    leafletMap.on('dragstart', () => { armMapManualOverride(); bumpMapManualOverrideIdleTimer(); });
+    leafletMap.on('drag',      () => { bumpMapManualOverrideIdleTimer(); });
+    leafletMap.on('dragend',   () => { bumpMapManualOverrideIdleTimer(); });
     setTimeout(()=>leafletMap&&leafletMap.invalidateSize(),100);
     setupManualMapRotationGesture(el);
     if (window.lbParcels) window.lbParcels.onMapReady();
@@ -7268,10 +7304,15 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
     container.dataset.rotateGestureBound = '1';
 
     container.addEventListener('touchstart', (ev) => {
-      if (isTrackUpEnabled || ev.touches.length !== 2) { mapRotateGestureActive = false; return; }
+      if (ev.touches.length !== 2) { mapRotateGestureActive = false; return; }
       mapRotateGestureActive = true;
       mapRotateGestureStartAngle = twoTouchAngleDeg(ev.touches);
+      // Twisting while Track-Up/Follow are live pauses them (rather than
+      // switching them off) so the map can be spun to look around; start
+      // the drag from the map's current on-screen angle either way.
+      armMapManualOverride();
       mapRotateGestureStartRotation = manualMapRotationDeg;
+      bumpMapManualOverrideIdleTimer();
     }, { passive: true });
 
     container.addEventListener('touchmove', (ev) => {
@@ -7279,12 +7320,14 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
       const angleNow = twoTouchAngleDeg(ev.touches);
       const deltaDeg = angleNow - mapRotateGestureStartAngle;
       manualMapRotationDeg = ((mapRotateGestureStartRotation + deltaDeg) % 360 + 360) % 360;
+      bumpMapManualOverrideIdleTimer();
       applyMapHeadingRotation();
     }, { passive: true });
 
     const endGesture = (ev) => {
       if (ev.touches && ev.touches.length === 2) return; // still 2 fingers down
       mapRotateGestureActive = false;
+      bumpMapManualOverrideIdleTimer();
     };
     container.addEventListener('touchend', endGesture, { passive: true });
     container.addEventListener('touchcancel', endGesture, { passive: true });
@@ -10029,20 +10072,8 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
     renderStreetLitterLayer();
     if (typeof updateMapSideLayersUI === 'function') updateMapSideLayersUI();
     switchMainTab('map');
-    disableTrackUpOrientation();
-    disableGpsFollow();
-    setTimeout(() => {
-      if (!leafletMap) return;
-      const pts = runLabel
-        ? streetLitterSitesForRun(runLabel, null, streetLitterStreamMode)
-            .map(s => [s.lat, s.lng]).filter(p => p[0] && p[1])
-        : [];
-      if (pts.length > 1) {
-        leafletMap.fitBounds(pts, { padding: [90, 90], maxZoom: 17, animate: true });
-      } else if (lat && lng && Number.isFinite(Number(lat))) {
-        leafletMap.setView([Number(lat), Number(lng)], 17, { animate: true });
-      }
-    }, 150);
+    // Filtering to a run must not move the view - zoom, centre, Track-Up
+    // and GPS-follow all stay exactly as they were before this tap.
   };
 
   // Does a Street Litter site belong under the given search-page stream
@@ -13154,6 +13185,47 @@ window.addEventListener('DOMContentLoaded', async () => {
   // the North-Up button (which resets it back to 0). See
   // applyMapHeadingRotation() and setupManualMapRotationGesture() below.
   let manualMapRotationDeg = 0;
+
+  // Manual map override: while the driver is stationary they can still
+  // freely twist/pan the map even with Track-Up and/or Follow-Me switched
+  // on, to look further up the road. Live GPS heading/centring is simply
+  // paused (not switched off) while this is active, and resumes on its
+  // own once either: (a) the truck has been moving for 2+ continuous
+  // seconds, or (b) the driver hasn't touched the map for 5 seconds.
+  let mapManualOverrideActive = false;
+  let mapManualOverrideIdleTimer = null;
+  let mapManualOverrideMoveStartTs = null;
+
+  function armMapManualOverride() {
+    if (!isTrackUpEnabled && !isTruckFollowEnabled) return; // nothing live to pause
+    if (!mapManualOverrideActive) {
+      mapManualOverrideActive = true;
+      // Start any twist from wherever the map is actually pointed right
+      // now (which may currently be GPS-heading-driven), not from 0.
+      manualMapRotationDeg = mapRotationDeg;
+      mapManualOverrideMoveStartTs = null;
+    }
+  }
+
+  function bumpMapManualOverrideIdleTimer() {
+    if (!mapManualOverrideActive) return;
+    clearTimeout(mapManualOverrideIdleTimer);
+    mapManualOverrideIdleTimer = setTimeout(endMapManualOverride, 5000);
+  }
+
+  function endMapManualOverride() {
+    if (!mapManualOverrideActive) return;
+    mapManualOverrideActive = false;
+    clearTimeout(mapManualOverrideIdleTimer);
+    mapManualOverrideIdleTimer = null;
+    mapManualOverrideMoveStartTs = null;
+    if (isTruckFollowEnabled && userCurrentLocation && leafletMap) {
+      leafletMap.panTo([userCurrentLocation.lat, userCurrentLocation.lng], { animate: true });
+    }
+    applyMapHeadingRotation();
+  }
+  window.endMapManualOverride = endMapManualOverride;
+
   let houseStreetModes = JSON.parse(localStorage.getItem('lukezBunzHouseStreetModes') || '{}');
 
   const q = id => document.getElementById(id);
@@ -14417,35 +14489,11 @@ window.addEventListener('DOMContentLoaded', async () => {
     renderActiveFilterChips();
     switchMainTab('map');
 
-    // A tap here is jumping to look at a run, not starting to drive it -
-    // leave the map North-Up and stop it re-centring on the truck's live
-    // GPS position, same as any other manual look-around (see
-    // disableTrackUpOrientation / disableGpsFollow).
-    disableTrackUpOrientation();
-    disableGpsFollow();
-
-    setTimeout(() => {
-      if (!leafletMap) return;
-
-      // Frame the specific street that was tapped (so it's clearly the
-      // centre of attention) while still leaving the rest of the run
-      // visible around it, rather than zooming all the way in on just
-      // one property.
-      const streetPts = streetKey
-        ? getRecordsArray()
-            .filter(s => siteStreetKey(s) === String(streetKey))
-            .map(s => gps(s.lat, s.lng))
-            .filter(Boolean)
-        : [];
-
-      if (streetPts.length > 1) {
-        leafletMap.fitBounds(streetPts.map(p => [p.lat, p.lng]), { padding: [90, 90], maxZoom: 17, animate: true });
-      } else if (streetPts.length === 1) {
-        leafletMap.setView([streetPts[0].lat, streetPts[0].lng], 16, { animate: true });
-      } else if (propLat && propLng && Number.isFinite(Number(propLat))) {
-        leafletMap.setView([Number(propLat), Number(propLng)], 16, { animate: true });
-      }
-    }, 150);
+    // A tap here only filters/highlights a run that's already on the map -
+    // it must never move the view. So the current zoom level, map centre,
+    // Track-Up setting and GPS-follow ("locate me") setting are all left
+    // exactly as they were before this tap: no more disableTrackUpOrientation/
+    // disableGpsFollow calls and no more leafletMap.setView/fitBounds here.
   };
 
   // Follow Me Toggle
@@ -14453,6 +14501,8 @@ window.addEventListener('DOMContentLoaded', async () => {
     if (ev) ev.stopPropagation();
     isTruckFollowEnabled = !isTruckFollowEnabled;
     hasAutoCenteredTruck = false;
+    mapManualOverrideActive = false;
+    clearTimeout(mapManualOverrideIdleTimer);
 
     const btn = document.getElementById('btnTruckFollowTarget');
     if (btn) {
@@ -14479,6 +14529,8 @@ window.addEventListener('DOMContentLoaded', async () => {
     if (!isTruckFollowEnabled) return;
     isTruckFollowEnabled = false;
     hasAutoCenteredTruck = false;
+    mapManualOverrideActive = false;
+    clearTimeout(mapManualOverrideIdleTimer);
     const btn = document.getElementById('btnTruckFollowTarget');
     if (btn) {
       btn.classList.remove('active');
@@ -14491,6 +14543,8 @@ window.addEventListener('DOMContentLoaded', async () => {
   window.toggleTrackUpOrientation = function(ev) {
     if (ev) ev.stopPropagation();
     isTrackUpEnabled = !isTrackUpEnabled;
+    mapManualOverrideActive = false;
+    clearTimeout(mapManualOverrideIdleTimer);
     // Pressing this to go back to "North-Up" means true north, not
     // whatever angle a two-finger twist had left the map at - so clear
     // the manual rotation whenever Track-Up is switched off. Switching
@@ -14550,7 +14604,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     // new target, instead of jumping straight to -rawHeading. This is what
     // stops the map spinning almost all the way round whenever the GPS
     // heading crosses 0/360 (see mapRotationDeg comment above).
-    const targetRotation = isTrackUpEnabled ? -rawHeading : manualMapRotationDeg;
+    const targetRotation = (isTrackUpEnabled && !mapManualOverrideActive) ? -rawHeading : manualMapRotationDeg;
     const shortestDelta = ((targetRotation - mapRotationDeg + 540) % 360) - 180;
     mapRotationDeg += shortestDelta;
     const heading = -mapRotationDeg; // effective heading used below for the counter-rotated overlay controls
@@ -15071,11 +15125,22 @@ window.addEventListener('DOMContentLoaded', async () => {
       leafletMap.setView([userCurrentLocation.lat, userCurrentLocation.lng], leafletMap.getZoom() || 18);
     }
 
+    // Keep the zoom-level readout between the +/- buttons in sync with
+    // whatever zoom the map is actually at (pinch, scroll-wheel, or the
+    // buttons themselves all fire 'zoomend').
+    function syncZoomLevelDisplay() {
+      const el = document.getElementById('mapZoomLevelDisplay');
+      if (el && leafletMap) el.textContent = Math.round(leafletMap.getZoom());
+    }
+    leafletMap.on('zoomend', syncZoomLevelDisplay);
+    setTimeout(syncZoomLevelDisplay, 0);
+
     const sideOverlay = document.getElementById('mapFixedSideControls');
     if (sideOverlay) {
       sideOverlay.innerHTML = `
-        <!-- Zoom In & Out -->
+        <!-- Zoom In & Out, with the current zoom level shown between them -->
         <button type="button" onclick="if(leafletMap) leafletMap.zoomIn()" title="Zoom In">＋</button>
+        <div id="mapZoomLevelDisplay" title="Current zoom level" style="text-align:center;font:700 12px/1 system-ui,sans-serif;color:#fff;background:rgba(0,0,0,.55);border-radius:6px;padding:3px 0;pointer-events:none;user-select:none;">18</div>
         <button type="button" onclick="if(leafletMap) leafletMap.zoomOut()" title="Zoom Out">－</button>
 
         <!-- Layers Toggle -->
@@ -16153,7 +16218,17 @@ window.addEventListener('DOMContentLoaded', async () => {
     updateSpeedMetaLine();
     updateAreaRunsBar();
 
-    if (isTruckFollowEnabled && leafletMap) {
+    // While the driver has manually spun/panned the map away (see
+    // armMapManualOverride), live GPS re-centring is paused rather than
+    // switched off - it resumes on its own via endMapManualOverride().
+    if (mapManualOverrideActive && speedKmh >= 4) {
+      if (mapManualOverrideMoveStartTs === null) mapManualOverrideMoveStartTs = Date.now();
+      else if (Date.now() - mapManualOverrideMoveStartTs >= 2000) endMapManualOverride();
+    } else if (mapManualOverrideActive) {
+      mapManualOverrideMoveStartTs = null;
+    }
+
+    if (isTruckFollowEnabled && leafletMap && !mapManualOverrideActive) {
       if (!hasAutoCenteredTruck) {
         leafletMap.setView([userCurrentLocation.lat, userCurrentLocation.lng], leafletMap.getZoom() || 18, { animate: false });
         hasAutoCenteredTruck = true;
