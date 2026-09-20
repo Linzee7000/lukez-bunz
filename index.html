@@ -21877,6 +21877,9 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
   // sites:   siteKey -> { p: parcelId, m: 0|1, d: metres, q: [lat,lng] pin used }  or { x: 1, q } = looked up, nothing found
   let store = { v: 1, parcels: {}, sites: {} };
   let dataVer = 0;               // bumped whenever matches / cached tiles change, so the map knows a redraw is really needed
+  // Which houses to outline. null = nothing is filtered, so outline everything (as before). Otherwise a Set of
+  // siteKeys: only the houses the map is currently showing for the filtered run get their boundary drawn.
+  let runKeys = null, runVer = 0;
   let loadPromise = null, saveTimer = null;
 
   function ensureLoaded() {
@@ -22099,7 +22102,7 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
   // area already drawn is skipped - see refresh().
   let drawnBox = null, drawnSig = '';
   const MAX_VERTS = 40000;       // faint context lines only; matched lots are always drawn
-  const drawSigNow = () => map.getZoom() + '|' + dataVer + '|' + tiles.size + '|' + (isOn() ? 1 : 0) + '|' + (((typeof isSatelliteView !== 'undefined') && isSatelliteView) ? 1 : 0);
+  const drawSigNow = () => map.getZoom() + '|' + dataVer + '|' + tiles.size + '|' + (isOn() ? 1 : 0) + '|' + (((typeof isSatelliteView !== 'undefined') && isSatelliteView) ? 1 : 0) + '|' + runVer;
   function redraw() {
     if (!ensureMap()) return 0;
     group.clearLayers();
@@ -22119,7 +22122,9 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
       n++;
     };
     // 1. Hand-drawn boundaries (win over everything)
+    const only = runKeys;   // null = draw everything
     allSites().forEach(s => {
+      if (only && !only.has(siteKey(s))) return;
       if (!Array.isArray(s.boundary) || s.boundary.length < 3) return;
       let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
       s.boundary.forEach(p => { x0 = Math.min(x0, p[1]); x1 = Math.max(x1, p[1]); y0 = Math.min(y0, p[0]); y1 = Math.max(y1, p[0]); });
@@ -22128,9 +22133,15 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
       n++;
     });
     // 2. Matched properties
-    for (const id in store.parcels) {
-      const P = store.parcels[id];
-      if (hits(P.b, v)) add(P.o, P.h, st.hit);
+    let parcelIds;
+    if (only) {
+      const ids = new Set();
+      only.forEach(k => { const e = store.sites[k]; if (e && e.p) ids.add(e.p); });
+      parcelIds = Array.from(ids);
+    } else parcelIds = Object.keys(store.parcels);
+    for (let i = 0; i < parcelIds.length; i++) {
+      const P = store.parcels[parcelIds[i]];
+      if (P && hits(P.b, v)) add(P.o, P.h, st.hit);
       if (n >= MAX_DRAW) break;
     }
     // 2b. Houses whose pin isn't in any lot: red ring = no lot within 25 m, orange = pin outside its lot
@@ -22138,6 +22149,7 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     const inV = pt => pt.lng >= v.w && pt.lng <= v.e && pt.lat >= v.s && pt.lat <= v.n;
     allSites().forEach(s => {
       if (n >= MAX_DRAW) return;
+      if (only && !only.has(siteKey(s))) return;
       const e = store.sites[siteKey(s)];
       if (!e || !(e.x || e.m === 1) || !e.q || !isFresh(s, e)) return;
       const pt = sitePoint(s); if (!pt || !inV(pt)) return;
@@ -23024,10 +23036,45 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     stats: stats,
     ready: ensureLoaded,
     // exposed for the test harness only
-    _t: { ingest, matchPoint, ringContains, distRingM, queryURL, fetchEnvelope, fetchTile, loadTile, applyMatch, needsMatch,
+    _t: { setRunSites, getRunKeys: () => runKeys, ingest, matchPoint, ringContains, distRingM, queryURL, fetchEnvelope, fetchTile, loadTile, applyMatch, needsMatch,
           matchList, groupByTile, runBatch, redraw, computeOutline, computeOutlineWindowed, WIN, ringsFromEdges, openMask, closeMask, boxMorph, buildRunOutlines, applyOutlines, traceMask, ringSignedArea, simplifyClosed, fillRings, makeGrid, OUT, outBuild, getExtras: () => extras, cfg, tiles, failedTiles, batch, getStore: () => store, setStore: s => { store = s; },
           saveNow, tileOf, tkey, toLatLngs, lastDraw: () => lastDrawCount, resetMap: () => { map = null; } }
   };
+
+  /* ---------------- follow the map's filtered houses ---------------- */
+  // Any filter on (run, stream, day, week)? Then the map only shows those houses, and only they get outlined.
+  function filterActive() {
+    try {
+      return (typeof selectedMapRuns === 'function' && selectedMapRuns().size > 0)
+        || !!(typeof activeFilterStream !== 'undefined' && activeFilterStream)
+        || !!(typeof activeFilterDay !== 'undefined' && activeFilterDay)
+        || !!(typeof activeFilterWeek !== 'undefined' && activeFilterWeek);
+    } catch (e) { return false; }
+  }
+  function setRunSites(sites) {
+    let next = null;
+    if (filterActive()) {
+      next = new Set();
+      (Array.isArray(sites) ? sites : []).forEach(s => { const k = siteKey(s); if (k) next.add(k); });
+    }
+    let same = (next === null && runKeys === null);
+    if (!same && next && runKeys && next.size === runKeys.size) {
+      same = true;
+      next.forEach(k => { if (!runKeys.has(k)) same = false; });
+    }
+    if (same) return;
+    runKeys = next; runVer++;
+    if (isOn()) scheduleRefresh();
+  }
+  // The run box hands over exactly the houses the map is drawing, every time it re-renders.
+  const prevHeaderInfo = window.updateMapHeaderInfo;
+  if (typeof prevHeaderInfo === 'function') {
+    window.updateMapHeaderInfo = function (sites) {
+      const out = prevHeaderInfo.apply(this, arguments);
+      try { setRunSites(sites); } catch (e) { console.warn('Property boundaries (run filter):', e); }
+      return out;
+    };
+  }
 
   ensureLoaded();
   // The map may have been created before this block ran (script order) - pick it up now.
