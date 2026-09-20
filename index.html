@@ -4247,6 +4247,10 @@ body:not(.dark-mode) .welcome-go-wrap {
           </div>
         </div>
 
+        <!-- Break chip: appears when the next NHVR break is 30 min away (or overdue / on a break).
+             Tap to open the Layers panel where the full break clock lives. See lb-break-clock-script. -->
+        <div id="lbBreakChip" class="lb-break-chip" style="display:none" role="button" data-level="amber"><span id="lbBreakChipText"></span></div>
+
         <!-- Area Runs Bar: sits directly under the map's top bar and shows
              the run number(s) servicing whatever area the truck's current
              GPS position is in — Garbage, then Recycling, then FOGO —
@@ -21021,7 +21025,7 @@ body.stream-slr .lb-layers-head .icon-img { filter: brightness(0); }
       </button>
       <button type="button" class="lb-layer-btn danger" data-lbtimer="reset">
         <img class="icon-img" src="minus.png" alt=""><span class="lb-label">Reset timer</span>
-      </button>`;
+      </button>` + (window.lbBreakClock ? window.lbBreakClock.sectionHtml() : '');
   }
 
   // Only the digits are repainted on the tick - rebuilding the whole
@@ -23561,6 +23565,402 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     refresh: tick,
     _t: { normStreet, houseNo, parseLineNo, classify, tally, pickStreet, setSites, getEntry, angDiff, local,
           state: () => ({ run, curId }) }
+  };
+})();
+</script>
+
+<style id="lb-break-clock-style">
+/* Break clock box in the Layers panel (sits under the Run timer) */
+.lb-bclock {
+  border: 1px solid #000;
+  border-left: 4px solid var(--bright-green);
+  background: #0f1216;
+  padding: 8px 10px;
+}
+.lb-bc-label {
+  font-size: 11.5px; font-weight: 800; letter-spacing: 0.6px; text-transform: uppercase;
+  color: var(--welcome-ink-faint);
+}
+.lb-bc-read {
+  font-size: 32px; font-weight: 900; line-height: 1.05; letter-spacing: 0.5px;
+  color: var(--bright-green);
+  font-variant-numeric: tabular-nums;
+  margin-top: 2px;
+}
+.lb-bc-sub  { font-size: 12.5px; font-weight: 700; color: #e5e7eb; margin-top: 3px; }
+.lb-bc-sub2 { font-size: 11.5px; font-weight: 600; color: var(--welcome-ink-faint); margin-top: 2px; }
+.lb-bc-note { font-size: 10.5px; color: var(--welcome-ink-faint); padding: 6px 2px 2px; opacity: 0.8; }
+.lb-bclock[data-mode="idle"] .lb-bc-read { color: var(--slate-600); font-size: 22px; }
+.lb-bclock[data-level="amber"] { border-left-color: #fbbf24; }
+.lb-bclock[data-level="amber"] .lb-bc-read { color: #fbbf24; }
+.lb-bclock[data-level="red"], .lb-bclock[data-level="over"] { border-left-color: #ef4444; }
+.lb-bclock[data-level="red"] .lb-bc-read, .lb-bclock[data-level="over"] .lb-bc-read { color: #ef4444; }
+.lb-bclock[data-level="over"] { animation: lbBcPulse 1.2s ease-in-out infinite; }
+.lb-bclock[data-level="rest"] { border-left-color: #38bdf8; }
+.lb-bclock[data-level="rest"] .lb-bc-read { color: #38bdf8; }
+@keyframes lbBcPulse { 50% { background: #2a1114; } }
+
+/* Map chip - right-aligned in the header stack, under the left/right street strip */
+.map-header-panel > .lb-break-chip {
+  align-self: flex-end;
+  margin-right: 0;
+  padding: 0 12px;
+  height: 32px;
+  display: inline-flex; align-items: center;
+  box-sizing: border-box;
+  border: 1px solid #000; border-right: 0;
+  border-radius: 8px 0 0 8px;
+  background: #0f1216;
+  color: #fbbf24;
+  font-size: 17px; font-weight: 800; line-height: 1;
+  font-variant-numeric: tabular-nums;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.45);
+  cursor: pointer;
+}
+.map-header-panel > .lb-break-chip[style*="display: none"] { display: none !important; }
+.lb-break-chip[data-level="amber"] { color: #fbbf24; }
+.lb-break-chip[data-level="red"], .lb-break-chip[data-level="over"] { color: #fff; background: #b91c1c; }
+.lb-break-chip[data-level="over"] { animation: lbBcChipPulse 1s ease-in-out infinite; }
+.lb-break-chip[data-level="rest"] { color: #38bdf8; }
+@keyframes lbBcChipPulse { 50% { background: #7f1d1d; } }
+</style>
+<script id="lb-break-clock-script">
+(function () {
+  'use strict';
+
+  /* ================= BREAK CLOCK (NHVR Standard Hours, solo driver) ===
+     A countdown to the next rest break a fatigue-regulated heavy vehicle
+     driver (a garbage truck is over 12 t GVM) must take under the Heavy
+     Vehicle National Law. Sits under the Run timer in the Layers panel,
+     and pops a chip onto the map when a break is close.
+
+     Standard Hours (solo) - the default hours option, no accreditation:
+        in any 5.5 h   max 5.25 h work   min 15 continuous min rest
+        in any 8 h     max 7.5 h work    min 30 min rest, in blocks of 15+ min
+        in any 11 h    max 10 h work     min 60 min rest, in blocks of 15+ min
+        in any 24 h    max 12 h work     min 7 continuous h stationary rest
+     Source: nhvr.gov.au > Fatigue management > Work and rest hours.
+     Rest shorter than 15 continuous minutes is work time. Everything that
+     isn't a logged break is treated as work (loading is work, waiting at
+     the tip is work) - a garbage truck stops all day, so the app can't tell
+     a rest from a stop by itself: press START BREAK / END BREAK.
+
+     It is a guide, not a work diary - it doesn't replace whatever record
+     the driver's employer requires, and it doesn't cover BFM/AFM/ACH
+     hours or an exemption.
+  ==================================================================== */
+
+  const MIN = 60000, HR = 3600000;
+  const MIN_BLOCK = 15 * MIN;       // shortest stop that counts as rest
+  const MAJOR_REST = 7 * HR;        // a break this long ends the shift
+  const MAX_WORK = 12 * HR;         // work limit in a 24 h period
+  const DAY = 24 * HR;
+  const WARN_MS = 30 * MIN;         // map chip appears this close to a break
+  const RED_MS = 10 * MIN;
+  const KEY = 'lukezBunzBreakClock';
+
+  const RULES = [
+    { id: 'A', win: 5.5 * HR, kind: 'sum',   need: 15 * MIN, title: '5¼ h work limit' },
+    { id: 'B', win: 8 * HR,   kind: 'sum',   need: 30 * MIN, title: '7½ h in 8 h limit' },
+    { id: 'C', win: 11 * HR,  kind: 'sum',   need: 60 * MIN, title: '10 h in 11 h limit' },
+    { id: 'D', title: '12 h work limit' }
+  ];
+
+  /* ---------- state (persisted) ---------- */
+  // start: when the counted work began (null = no shift); lastSeen: last time the app was looking;
+  // breaks: [{ s, e }] - e null while a break is running.
+  let S = { start: null, lastSeen: 0, breaks: [] };
+  try {
+    const raw = localStorage.getItem(KEY);
+    if (raw) { const o = JSON.parse(raw); if (o && typeof o === 'object') S = Object.assign(S, o); }
+  } catch (e) {}
+  if (!Array.isArray(S.breaks)) S.breaks = [];
+  function save() { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) {} }
+
+  /* ---------- the rules engine ---------- */
+  // Rest blocks that count: a virtual long rest before the shift (the driver started fresh), plus every
+  // logged break of 15+ min. A break still running counts up to "now".
+  function blocksOf(st, now) {
+    const out = [{ s: -Infinity, e: st.start }];
+    (st.breaks || []).forEach(b => {
+      const e = (b.e == null) ? now : b.e;
+      if (e - b.s >= MIN_BLOCK) out.push({ s: b.s, e });
+    });
+    return out;
+  }
+  const clip = (b, t, W) => Math.max(0, Math.min(b.e, t) - Math.max(b.s, t - W));
+
+  function workAt(blocks, st, t) {
+    let rest = 0;
+    for (let i = 1; i < blocks.length; i++) rest += Math.max(0, Math.min(blocks[i].e, t) - Math.max(blocks[i].s, st.start));
+    return (t - st.start) - rest;
+  }
+  function ruleOk(rule, blocks, st, t) {
+    if (rule.id === 'D') return workAt(blocks, st, t) <= MAX_WORK;
+    // Work in the window can't exceed (window - rest), where only rest in 15+ min blocks counts as rest -
+    // so "rest in the window >= need" is the same test as the table's "max work time".
+    let sum = 0;
+    for (let i = 0; i < blocks.length; i++) sum += clip(blocks[i], t, rule.win);
+    return sum >= rule.need;
+  }
+  const allOk = (blocks, st, t) => RULES.every(r => ruleOk(r, blocks, st, t));
+  const failing = (blocks, st, t) => RULES.find(r => !ruleOk(r, blocks, st, t)) || RULES[0];
+
+  // How long a break started at `at` has to be (15 min minimum) before all three rest limits are met again.
+  // The 12 h limit can't be fixed by a short break - that one is the end of the shift.
+  function breakLen(st, now, at) {
+    const blocks = blocksOf(st, now);
+    for (let L = 15; L <= 240; L++) {
+      const end = at + L * MIN;
+      const bl = blocks.concat([{ s: at, e: end }]);
+      if (RULES.slice(0, 3).every(r => ruleOk(r, bl, st, end))) return L;
+    }
+    return 15;
+  }
+
+  // Given the shift so far, when must the next break start (working flat out from now)? If a limit
+  // has already been passed, when did that happen?
+  function analyze(st, now) {
+    const blocks = blocksOf(st, now);
+    const worked = Math.max(0, workAt(blocks, st, now));
+
+    // 1. Is a limit passed right now? (a break that hasn't been taken, or work before GO). Walk back to find
+    //    when this stretch began. A limit that was passed earlier but has since been put right by a proper
+    //    break isn't overdue any more - the countdown just carries on from where things stand.
+    if (!allOk(blocks, st, now)) {
+      let bad = now;
+      while (bad - MIN >= st.start && !allOk(blocks, st, bad - MIN)) bad -= MIN;
+      for (let t = Math.max(st.start, bad - MIN); t < bad; t += 1000) { if (!allOk(blocks, st, t)) { bad = t; break; } }
+      const rule = failing(blocks, st, now);
+      return { overdue: true, at: bad, rule, worked, breakMin: rule.id === 'D' ? null : breakLen(st, now, now) };
+    }
+
+    // 2. Otherwise the last moment nothing is breached. From now on nothing but work is added, so the
+    //    answer only ever gets worse with time - which is what makes a binary search valid.
+    let lo = now, hi = now + MAX_WORK + 2000;
+    while (hi - lo > 1) {
+      const mid = Math.floor((lo + hi) / 2);
+      if (allOk(blocks, st, mid)) lo = mid; else hi = mid;
+    }
+    const rule = failing(blocks, st, hi);
+    return { overdue: false, at: lo, rule, worked, breakMin: rule.id === 'D' ? null : breakLen(st, now, lo) };
+  }
+
+  /* ---------- shift control ---------- */
+  const onBreak = () => S.breaks.length && S.breaks[S.breaks.length - 1].e == null;
+  function newShift(now, startedEarlierMs) {
+    S = { start: now - (startedEarlierMs || 0), lastSeen: now, breaks: [] };
+    lastWarn = null; save();
+  }
+  function startBreak() {
+    const now = Date.now();
+    if (S.start == null) return;
+    if (onBreak()) return;
+    S.breaks.push({ s: now, e: null });
+    lastWarn = null; save();
+  }
+  function endBreak() {
+    const now = Date.now();
+    if (!onBreak()) return;
+    const b = S.breaks[S.breaks.length - 1];
+    b.e = now;
+    // A 7 h stop ends the shift: whatever comes next is a fresh 24 h period.
+    if (b.e - b.s >= MAJOR_REST) newShift(now);
+    lastWarn = null; save();
+  }
+  // GO on the Drive wizard. The first run of the day starts the clock; a later run the same shift carries
+  // on where it was (time between runs is work unless a break was logged). A gap of 7 h+ since the app was
+  // last looking, or a shift older than 24 h, is a new shift.
+  function onGo() {
+    const now = Date.now();
+    if (S.start == null || (now - (S.lastSeen || S.start)) >= MAJOR_REST || (now - S.start) >= DAY) newShift(now);
+    else if (onBreak()) endBreak();
+    S.lastSeen = now; save();
+  }
+
+  /* ---------- formatting ---------- */
+  const pad = n => String(n).padStart(2, '0');
+  function hms(ms) {
+    const t = Math.max(0, Math.floor(ms / 1000));
+    const h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), s = t % 60;
+    return (h ? h + ':' : '') + pad(m) + ':' + pad(s);
+  }
+  function hm(ms) {
+    const m = Math.max(0, Math.floor(ms / MIN));
+    return Math.floor(m / 60) + ':' + pad(m % 60);
+  }
+  function clock(ts) {
+    try { return new Date(ts).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }); } catch (e) { return ''; }
+  }
+
+  /* ---------- what the display should say right now ---------- */
+  // mode: 'idle' | 'working' | 'break'
+  function view(now) {
+    if (S.start == null) return { mode: 'idle' };
+    if (onBreak()) {
+      const b = S.breaks[S.breaks.length - 1];
+      const el = now - b.s;
+      const v = { mode: 'break', elapsed: el, counts: el >= MIN_BLOCK, toGo: Math.max(0, MIN_BLOCK - el) };
+      if (v.counts) { const a = analyze(S, now); v.next = a; }
+      return v;
+    }
+    const a = analyze(S, now);
+    return { mode: 'working', a, remaining: a.at - now };
+  }
+
+  /* ---------- panel ---------- */
+  function sectionHtml() {
+    setTimeout(paint, 0);
+    return `
+      <div class="lb-layers-sect">Next break</div>
+      <div class="lb-bclock" id="lbBreakBox" data-mode="idle" data-level="ok">
+        <div class="lb-bc-label" id="lbBcLabel">Break clock</div>
+        <div class="lb-bc-read" id="lbBcRead">--:--</div>
+        <div class="lb-bc-sub" id="lbBcSub"></div>
+        <div class="lb-bc-sub2" id="lbBcSub2"></div>
+      </div>
+      <button type="button" class="lb-layer-btn" data-lbbreak="begin" data-show="idle"><span class="lb-ico">⏱</span><span class="lb-label">Start work clock now</span></button>
+      <button type="button" class="lb-layer-btn" data-lbbreak="start" data-show="working"><span class="lb-ico">☕</span><span class="lb-label">Start break</span></button>
+      <button type="button" class="lb-layer-btn" data-lbbreak="end" data-show="break"><span class="lb-ico">▶️</span><span class="lb-label">End break</span></button>
+      <button type="button" class="lb-layer-btn" data-lbbreak="early" data-show="working break"><span class="lb-ico">⏪</span><span class="lb-label">I started earlier…</span></button>
+      <button type="button" class="lb-layer-btn danger" data-lbbreak="newshift" data-show="working break"><img class="icon-img" src="minus.png" alt=""><span class="lb-label">New shift</span></button>
+      <div class="lb-bc-note">NHVR Standard Hours, solo driver. A guide only - not a work diary.</div>`;
+  }
+
+  function setText(id, v) { const e = document.getElementById(id); if (e && e.textContent !== v) e.textContent = v; }
+
+  let lastWarn = null;
+  function warn(v) {
+    // A buzz at 15 min, 5 min and when the break is due (phones that can't vibrate just skip it).
+    if (v.mode !== 'working') return;
+    const key = v.a.rule.id + '|' + Math.round(v.a.at / MIN);
+    if (!lastWarn || lastWarn.key !== key) lastWarn = { key, level: 99 };
+    const level = v.remaining <= 0 ? 0 : v.remaining <= 5 * MIN ? 1 : v.remaining <= 15 * MIN ? 2 : 99;
+    if (level < lastWarn.level) {
+      lastWarn.level = level;
+      try { if (navigator.vibrate) navigator.vibrate(level === 0 ? [500, 200, 500, 200, 500] : [300, 150, 300]); } catch (e) {}
+    }
+  }
+
+  function paint() {
+    const now = Date.now();
+    const v = view(now);
+    warn(v);
+
+    // ---- map chip ----
+    const chip = document.getElementById('lbBreakChip');
+    if (chip) {
+      let show = false, text = '', level = 'ok';
+      if (v.mode === 'break') {
+        show = true; level = 'rest';
+        text = '☕ On break ' + hms(v.elapsed) + (v.counts ? ' ✓' : '');
+      } else if (v.mode === 'working') {
+        if (v.remaining <= 0) { show = true; level = 'over'; text = '⚠ Break overdue ' + hms(-v.remaining); }
+        else if (v.remaining <= WARN_MS) { show = true; level = v.remaining <= RED_MS ? 'red' : 'amber'; text = '☕ Break in ' + hms(v.remaining); }
+      }
+      chip.style.display = show ? '' : 'none';
+      if (show) { chip.dataset.level = level; setText('lbBreakChipText', text); }
+    }
+
+    // ---- layers panel ----
+    const box = document.getElementById('lbBreakBox');
+    if (!box) return;
+    let level = 'ok', label = '', read = '', sub = '', sub2 = '';
+
+    if (v.mode === 'idle') {
+      label = 'Break clock'; read = 'Not started';
+      sub = 'Starts when you press GO on a run';
+    } else if (v.mode === 'break') {
+      level = 'rest';
+      label = 'On break';
+      read = hms(v.elapsed);
+      if (v.counts) {
+        sub = '✓ 15 min done - this counts as rest';
+        const n = v.next;
+        sub2 = n.overdue ? '' : 'Next break due ' + hm(n.at - now) + ' after you go back on';
+      } else {
+        sub = 'Needs 15 min to count as rest - ' + hms(v.toGo) + ' to go';
+        sub2 = 'Under 15 min is work time';
+      }
+    } else {
+      const a = v.a;
+      if (v.remaining <= 0) {
+        level = 'over';
+        label = 'Break overdue';
+        read = hms(-v.remaining);
+        sub = (a.rule.id === 'D' ? 'End of shift - 7 h rest' : 'Take at least ' + a.breakMin + ' min') + ' · ' + a.rule.title + ' passed';
+      } else {
+        level = v.remaining <= RED_MS ? 'red' : v.remaining <= WARN_MS ? 'amber' : 'ok';
+        label = a.rule.id === 'D' ? 'End of shift in' : 'Next break in';
+        read = hms(v.remaining);
+        sub = (a.rule.id === 'D' ? 'End of shift - 7 h rest' : a.breakMin + ' min break') + ' · ' + a.rule.title;
+      }
+      sub2 = 'Worked ' + hm(a.worked) + ' of 12:00 · shift started ' + clock(S.start);
+    }
+
+    box.dataset.mode = v.mode; box.dataset.level = level;
+    setText('lbBcLabel', label); setText('lbBcRead', read); setText('lbBcSub', sub); setText('lbBcSub2', sub2);
+    const wrap = box.parentNode;
+    if (wrap && wrap.querySelectorAll) {
+      wrap.querySelectorAll('[data-show]').forEach(el => {
+        const on = el.dataset.show.split(' ').indexOf(v.mode) >= 0;
+        el.style.display = on ? '' : 'none';
+      });
+    }
+  }
+
+  /* ---------- taps ---------- */
+  document.addEventListener('click', async function (ev) {
+    const chip = ev.target && ev.target.closest ? ev.target.closest('#lbBreakChip') : null;
+    if (chip) { ev.preventDefault(); if (typeof window.lbOpenLayers === 'function') window.lbOpenLayers(); return; }
+
+    const btn = ev.target && ev.target.closest ? ev.target.closest('[data-lbbreak]') : null;
+    if (!btn) return;
+    ev.preventDefault();
+    const act = btn.dataset.lbbreak;
+    if (act === 'begin') newShift(Date.now());
+    else if (act === 'start') startBreak();
+    else if (act === 'end') endBreak();
+    else if (act === 'early') {
+      const raw = (typeof window.customPrompt === 'function')
+        ? await window.customPrompt('How many minutes had you already been working before you pressed GO? (0 = none)', '0')
+        : window.prompt('Minutes already worked before GO?', '0');
+      const n = parseInt(raw, 10);
+      if (Number.isFinite(n) && n > 0 && n <= 12 * 60 && S.start != null) { S.start -= n * MIN; lastWarn = null; save(); }
+    } else if (act === 'newshift') {
+      const ok = (typeof window.customConfirm === 'function')
+        ? await window.customConfirm('Start a new shift? This clears the break clock.')
+        : window.confirm('Start a new shift? This clears the break clock.');
+      if (ok) newShift(Date.now());
+    }
+    paint();
+  });
+
+  /* ---------- wiring ---------- */
+  // GO on the Drive wizard starts (or carries on) the shift.
+  if (window.lbRunTimer && typeof window.lbRunTimer.start === 'function') {
+    const prevStart = window.lbRunTimer.start.bind(window.lbRunTimer);
+    window.lbRunTimer.start = function () {
+      const out = prevStart.apply(null, arguments);
+      try { onGo(); paint(); } catch (e) { console.warn('Break clock:', e); }
+      return out;
+    };
+  }
+
+  let saveAt = 0;
+  setInterval(function () {
+    try {
+      const now = Date.now();
+      if (S.start != null && now - saveAt > 30000) { S.lastSeen = now; save(); saveAt = now; }
+      paint();
+    } catch (e) { console.warn('Break clock:', e); }
+  }, 1000);
+
+  window.lbBreakClock = {
+    sectionHtml, paint,
+    startBreak, endBreak, newShift, onGo,
+    get state() { return JSON.parse(JSON.stringify(S)); },
+    _t: { analyze, view, blocksOf, ruleOk, allOk, workAt, RULES, setState: s => { S = s; }, MIN, HR }
   };
 })();
 </script>
