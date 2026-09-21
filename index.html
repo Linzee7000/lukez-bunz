@@ -7499,7 +7499,7 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
       }
 
       // Only the outermost unique collection points are used.
-      pts=buildRunConvexHull(boundaryPoints);
+      pts=lbTightOutline(boundaryPoints, 'draw|'+key);
     }
 
     // A Summer boundary must only ever be drawn for one explicitly selected
@@ -12315,6 +12315,14 @@ window.addEventListener('DOMContentLoaded', async () => {
 
     // Upload edits, boundaries, AND reminders together
     if (SCRIPT_URL) {
+      // Boundaries are shared: read what the other devices saved and merge it in before sending ours.
+      try {
+        const bst = await (await fetch(SCRIPT_URL)).json();
+        if (bst && bst.boundaries && typeof window.lbMergeBoundaries === 'function') {
+          const bm = window.lbMergeBoundaries(bst.boundaries);
+          if (bm.added || bm.updated) { await saveToDB('customRunBorders', customRunBorders); }
+        }
+      } catch (bErr) { console.warn('Boundary pull failed, sending this device own set:', bErr); }
       // Only send edits that haven't been sent yet - resending the whole
       // history every sync was silently duplicating every past edit as a
       // new row in the Google Sheet.
@@ -12344,6 +12352,7 @@ window.addEventListener('DOMContentLoaded', async () => {
         lastSyncedEditCount = masterEditsLog.length;
         await saveToDB('lastSyncedEditCount', lastSyncedEditCount);
         hasUnsyncedChanges = false;
+        if (typeof window.lbMarkBoundariesSynced === 'function') window.lbMarkBoundariesSynced();
 
         // Street Litter edits (run/GPS/address changes) are small,
         // per-site patches keyed by site id - unlike boundaries/reminders
@@ -13548,6 +13557,196 @@ window.addEventListener('DOMContentLoaded', async () => {
     return out;
   };
 
+  /* ---- Tight run outline --------------------------------------------------------------------
+     The convex hull the app drew (and that "Snap Houses" saved) is the shape of a rubber band pulled
+     round the outermost houses: on a run shaped like a crescent or an L it sweeps across parks, bush
+     and other runs. This traces the run's actual footprint instead:
+       1. drop the houses onto a grid of ~50 m cells,
+       2. "close" it - grow every occupied cell by a gap of about 100 m, then shrink it back - which joins
+          houses on both sides of a road and fills backyards, but leaves a park wider than that carved out,
+       3. walk round the edge of the one connected shape, and simplify the staircase.
+     If the run is in several separate pieces the gap is widened (200, 400, 800 m) until they join; if
+     they still do not, the old convex hull is used. The outline always contains every house it was
+     given. */
+  function lbHullOf(points) { return typeof buildRunConvexHull === 'function' ? buildRunConvexHull(points) : points; }
+  const lbOutlineCache = new Map();
+  window.lbTightOutline = function lbTightOutline(pts, cacheKey) {
+    const pp = []; const seen = new Set();
+    (pts || []).forEach(p => { const lat = Number(p.lat), lng = Number(p.lng); if (!Number.isFinite(lat) || !Number.isFinite(lng)) return; const k = lat.toFixed(5) + ',' + lng.toFixed(5); if (!seen.has(k)) { seen.add(k); pp.push({ lat, lng }); } });
+    const n = pp.length;
+    if (n < 4) return lbHullOf(pp);
+    let sig = ''; if (cacheKey) { let a = 0, b = 0; pp.forEach(p => { a += p.lat; b += p.lng; }); sig = cacheKey + '|' + n + '|' + a.toFixed(5) + '|' + b.toFixed(5); const hit = lbOutlineCache.get(cacheKey); if (hit && hit.sig === sig) return hit.ring; }
+    let lat0 = 0; pp.forEach(p => lat0 += p.lat); lat0 /= n;
+    const kx = 111320 * Math.cos(lat0 * Math.PI / 180), ky = 111320;
+    const X = pp.map(p => p.lng * kx), Y = pp.map(p => p.lat * ky);
+    const minX = Math.min(...X), maxX = Math.max(...X), minY = Math.min(...Y), maxY = Math.max(...Y);
+    const C = Math.max(50, Math.max(maxX - minX, maxY - minY) / 350);       // cell size, m
+    let result = null;
+    for (const gapM of [100, 200, 400, 800]) {
+      const R = Math.max(1, Math.round(gapM / C)), pad = R + 2;
+      const ox = minX - pad * C, oy = minY - pad * C;
+      const W = Math.ceil((maxX - minX) / C) + 1 + 2 * pad, H = Math.ceil((maxY - minY) / C) + 1 + 2 * pad;
+      const g0 = new Uint8Array(W * H), cellOf = new Int32Array(n);
+      for (let i = 0; i < n; i++) { const cx = Math.floor((X[i] - ox) / C), cy = Math.floor((Y[i] - oy) / C); cellOf[i] = cy * W + cx; g0[cellOf[i]] = 1; }
+      // square close: dilate then erode, each as a row pass and a column pass over running sums
+      const pass = (src, wantAll) => {
+        const dst = new Uint8Array(W * H), win = 2 * R + 1;
+        const tmp = new Uint8Array(W * H);
+        for (let y = 0; y < H; y++) {           // along x
+          let s = 0; const row = y * W;
+          for (let x = -R; x < W + R; x++) {
+            const add = x + R, rem = x - R - 1;
+            if (add < W) s += src[row + add]; if (rem >= 0) s -= src[row + rem];
+            if (x >= 0 && x < W) tmp[row + x] = wantAll ? (s === win ? 1 : 0) : (s > 0 ? 1 : 0);
+          }
+        }
+        for (let x = 0; x < W; x++) {           // along y
+          let s = 0;
+          for (let y = -R; y < H + R; y++) {
+            const add = y + R, rem = y - R - 1;
+            if (add < H) s += tmp[add * W + x]; if (rem >= 0) s -= tmp[rem * W + x];
+            if (y >= 0 && y < H) dst[y * W + x] = wantAll ? (s === win ? 1 : 0) : (s > 0 ? 1 : 0);
+          }
+        }
+        return dst;
+      };
+      // the erode has to see the dilated shape as ONE image: run its two passes on a separable window too
+      const dil = pass(g0, false), clo = pass(dil, true);
+      // label connected pieces (4-neighbour)
+      const lab = new Int32Array(W * H); let nl = 0; const stack = [];
+      for (let s = 0; s < W * H; s++) {
+        if (!clo[s] || lab[s]) continue;
+        nl++; lab[s] = nl; stack.push(s);
+        while (stack.length) {
+          const c = stack.pop(), cx = c % W, cy = (c - cx) / W;
+          if (cx > 0 && clo[c - 1] && !lab[c - 1]) { lab[c - 1] = nl; stack.push(c - 1); }
+          if (cx < W - 1 && clo[c + 1] && !lab[c + 1]) { lab[c + 1] = nl; stack.push(c + 1); }
+          if (cy > 0 && clo[c - W] && !lab[c - W]) { lab[c - W] = nl; stack.push(c - W); }
+          if (cy < H - 1 && clo[c + W] && !lab[c + W]) { lab[c + W] = nl; stack.push(c + W); }
+        }
+      }
+      const cnt = new Array(nl + 1).fill(0); for (let i = 0; i < n; i++) cnt[lab[cellOf[i]]]++;
+      let best = 1; for (let l = 2; l <= nl; l++) if (cnt[l] > cnt[best]) best = l;
+      const big = cnt.filter((c, l) => l > 0 && c >= Math.max(3, 0.03 * n)).length;
+      if (big > 1 && gapM < 800) continue;                     // still in separate pieces: widen the gap
+      if (big > 1) break;                                      // give up: convex hull
+      // trace the edge of piece `best`: directed edges with the shape on the right
+      const out = new Map(), edges = [];
+      const vk = (i, j) => i * (H + 2) + j;
+      const addE = (i0, j0, i1, j1) => { const e = { i0, j0, i1, j1, used: false }; edges.push(e); const k = vk(i0, j0); let a = out.get(k); if (!a) out.set(k, a = []); a.push(e); };
+      for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+        const c = y * W + x; if (lab[c] !== best) continue;
+        if (y === 0 || lab[c - W] !== best) addE(x, y, x + 1, y);
+        if (x === W - 1 || lab[c + 1] !== best) addE(x + 1, y, x + 1, y + 1);
+        if (y === H - 1 || lab[c + W] !== best) addE(x + 1, y + 1, x, y + 1);
+        if (x === 0 || lab[c - 1] !== best) addE(x, y + 1, x, y);
+      }
+      let bestRing = null, bestArea = 0;
+      for (const e0 of edges) {
+        if (e0.used) continue;
+        const ring = []; let e = e0, guard = 0;
+        while (e && !e.used && guard++ < edges.length + 5) {
+          e.used = true; ring.push([e.i0, e.j0]);
+          const nx = (out.get(vk(e.i1, e.j1)) || []).filter(f => !f.used);
+          if (!nx.length) break;
+          if (nx.length === 1) e = nx[0];
+          else {                                                // two ways on (cells touching at a corner): take the right-most turn
+            const dx = e.i1 - e.i0, dy = e.j1 - e.j0; let pick = nx[0], sc = -9;
+            nx.forEach(f => { const fx = f.i1 - f.i0, fy = f.j1 - f.j0, cross = dx * fy - dy * fx; if (cross > sc) { sc = cross; pick = f; } });
+            e = pick;
+          }
+        }
+        let a = 0; for (let k = 0; k < ring.length; k++) { const p = ring[k], q = ring[(k + 1) % ring.length]; a += p[0] * q[1] - q[0] * p[1]; }
+        if (Math.abs(a) > bestArea) { bestArea = Math.abs(a); bestRing = ring; }
+      }
+      if (!bestRing || bestRing.length < 4) break;
+      // simplify (Douglas-Peucker on the closed ring), tolerance ~ a cell
+      const P = bestRing.map(p => [ox + p[0] * C, oy + p[1] * C]);
+      const dp = (arr, tol) => {
+        if (arr.length < 3) return arr;
+        const a = arr[0], b = arr[arr.length - 1]; let dm = 0, im = 0;
+        const dxx = b[0] - a[0], dyy = b[1] - a[1], L = Math.hypot(dxx, dyy) || 1e-9;
+        for (let i = 1; i < arr.length - 1; i++) { const d = Math.abs(dyy * arr[i][0] - dxx * arr[i][1] + b[0] * a[1] - b[1] * a[0]) / L; if (d > dm) { dm = d; im = i; } }
+        if (dm <= tol) return [a, b];
+        const l = dp(arr.slice(0, im + 1), tol), r = dp(arr.slice(im), tol);
+        return l.slice(0, -1).concat(r);
+      };
+      let far = 0, fd = -1; for (let i = 1; i < P.length; i++) { const d = Math.hypot(P[i][0] - P[0][0], P[i][1] - P[0][1]); if (d > fd) { fd = d; far = i; } }
+      const h1 = dp(P.slice(0, far + 1), C * 0.8), h2 = dp(P.slice(far).concat([P[0]]), C * 0.8);
+      const simp = h1.slice(0, -1).concat(h2.slice(0, -1));
+      if (simp.length < 3) break;
+      // the simplified edge can cut a corner and leave a house that sat right on the cell edge outside it:
+      // push every vertex out by that much (mitred, capped) so the outline always contains its houses
+      let sa = 0; for (let k = 0; k < simp.length; k++) { const a = simp[k], b = simp[(k + 1) % simp.length]; sa += a[0] * b[1] - b[0] * a[1]; }
+      const sgn = sa > 0 ? 1 : -1, off = C * 0.8 + 3, m = simp.length;
+      const grown = simp.map((v, k) => {
+        const a = simp[(k + m - 1) % m], b = simp[(k + 1) % m];
+        const e1x = v[0] - a[0], e1y = v[1] - a[1], e2x = b[0] - v[0], e2y = b[1] - v[1];
+        const l1 = Math.hypot(e1x, e1y) || 1, l2 = Math.hypot(e2x, e2y) || 1;
+        const n1x = sgn * e1y / l1, n1y = -sgn * e1x / l1, n2x = sgn * e2y / l2, n2y = -sgn * e2x / l2;
+        let mx = n1x + n2x, my = n1y + n2y; const dn = 1 + n1x * n2x + n1y * n2y;
+        let f = dn > 0.2 ? off / dn : off * 2.5; let ox2 = mx * f, oy2 = my * f; const len = Math.hypot(ox2, oy2), cap = off * 2.5;
+        if (len > cap) { ox2 *= cap / len; oy2 *= cap / len; }
+        return [v[0] + ox2, v[1] + oy2];
+      });
+      result = grown.map(p => ({ lat: p[1] / ky, lng: p[0] / kx }));
+      break;
+    }
+    if (!result) result = lbHullOf(pp);
+    if (cacheKey) { lbOutlineCache.set(cacheKey, { sig, ring: result }); if (lbOutlineCache.size > 400) lbOutlineCache.delete(lbOutlineCache.keys().next().value); }
+    return result;
+  };
+
+  /* ---- Run boundaries shared between devices ---------------------------------------------------
+     Boundaries were saved on the device that made them and only ever sent UP to the sync script, never
+     read back, so each phone / computer had its own set (and one device's upload could replace another's).
+     Now every sync first reads what the script holds and merges it per run:
+       - a boundary this device has changed since its last sync goes up, and wins;
+       - otherwise the script's version replaces / fills in this device's.
+     Nothing is ever deleted by a merge. The same pull runs a few seconds after the app opens. */
+  const LB_BASE_KEY = 'lbBoundaryBase';
+  function lbBorderHash(v) {
+    try {
+      const s = JSON.stringify(v, (k, x) => typeof x === 'number' ? Math.round(x * 1e6) / 1e6 : x);
+      let h = 5381; for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+      return h + ':' + s.length;
+    } catch (e) { return ''; }
+  }
+  function lbBoundaryBase() { try { return JSON.parse(localStorage.getItem(LB_BASE_KEY) || '{}') || {}; } catch (e) { return {}; } }
+  window.lbMergeBoundaries = function(server) {
+    const base = lbBoundaryBase(); let added = 0, updated = 0;
+    Object.keys(server || {}).forEach(k => {
+      const srv = server[k]; if (!Array.isArray(srv) || srv.length < 3) return;
+      const local = customRunBorders[k];
+      const hasLocal = Array.isArray(local) && local.length >= 3;
+      if (hasLocal && lbBorderHash(local) !== base[k]) return;       // changed here since the last sync: ours wins
+      if (!hasLocal) { customRunBorders[k] = srv; added++; }
+      else if (lbBorderHash(local) !== lbBorderHash(srv)) { customRunBorders[k] = srv; updated++; }
+    });
+    return { added, updated };
+  };
+  window.lbMarkBoundariesSynced = function() {
+    const b = {}; Object.keys(customRunBorders || {}).forEach(k => { const v = customRunBorders[k]; if (Array.isArray(v) && v.length >= 3) b[k] = lbBorderHash(v); });
+    try { localStorage.setItem(LB_BASE_KEY, JSON.stringify(b)); } catch (e) {}
+  };
+  let lbPulling = false;
+  window.lbPullBoundaries = async function() {
+    if (lbPulling || typeof SCRIPT_URL === 'undefined' || !SCRIPT_URL) return null;
+    lbPulling = true;
+    try {
+      const st = await (await fetch(SCRIPT_URL)).json();
+      if (!st || !st.boundaries || typeof st.boundaries !== 'object') return { added: 0, updated: 0, server: 0 };
+      const r = window.lbMergeBoundaries(st.boundaries); r.server = Object.keys(st.boundaries).length;
+      if (r.added || r.updated) {
+        try { await saveToDB('customRunBorders', customRunBorders); } catch (e) {}
+        try { if (typeof activeTab !== 'undefined' && activeTab === 'map') renderMapData(); } catch (e) {}
+      }
+      return r;
+    } catch (e) { console.warn('boundary pull failed', e); return null; }
+    finally { lbPulling = false; }
+  };
+  setTimeout(() => { try { if (navigator.onLine !== false) window.lbPullBoundaries(); } catch (e) {} }, 7000);
+
   function getRecordsArray() {
     if (typeof siteRecords !== 'undefined' && Array.isArray(siteRecords) && siteRecords.length) return siteRecords;
     if (Array.isArray(window.siteRecords) && window.siteRecords.length) return window.siteRecords;
@@ -14072,13 +14271,13 @@ window.addEventListener('DOMContentLoaded', async () => {
       return;
     }
 
-    const snappedHull = typeof buildRunConvexHull === 'function' ? buildRunConvexHull(housePoints) : housePoints;
+    const snappedHull = lbTightOutline(housePoints);
     customRunBorders[borderKey] = snappedHull.map(p => [p.lat, p.lng]);
     await saveToDB("customRunBorders", customRunBorders);
 
     renderMapData();
     if (isRoadSnapEditing) enableBoundaryVertexHandles();
-    customAlert(`Boundary successfully snapped to the perimeter of ${housePoints.length} houses on this run.` + (snapStrays.size ? ` ${snapStrays.size} house${snapStrays.size === 1 ? '' : 's'} with a wrong-looking location ${snapStrays.size === 1 ? 'was' : 'were'} left out.` : ''));
+    customAlert(`Boundary snapped tightly around ${housePoints.length} houses on this run.` + (snapStrays.size ? ` ${snapStrays.size} house${snapStrays.size === 1 ? '' : 's'} with a wrong-looking location ${snapStrays.size === 1 ? 'was' : 'were'} left out.` : ''));
   };
 
   // Run Boundary > Snap to Roads: pull nearby road geometry from
@@ -16981,7 +17180,7 @@ window.addEventListener('DOMContentLoaded', async () => {
         // points are the deliberate exception, since their bin is meant to
         // sit away from the house.
         const rawPts = sitesForBoundaryHull(g.sites).map(x => gps(x.lat, x.lng)).filter(Boolean);
-        pts = typeof buildRunConvexHull === 'function' ? buildRunConvexHull(rawPts) : rawPts;
+        pts = lbTightOutline(rawPts, 'map|' + borderKey);
       }
       
       if (pts.length >= 3 && showRunBoundaries) {
@@ -19811,8 +20010,8 @@ body.lb-on-welcome #lbDrawerTab { display: none; }
       const key = storageKeyPrefix + '::' + title;
       let stored = null;
       try { stored = localStorage.getItem(key); } catch (e) {}
-      // The Trail section of Layers holds Clear / Export trail, so it is never left folded away.
-      const open = stored === null ? (idx === 0 || (storageKeyPrefix === 'lbSect:layers' && title === 'Trail')) : stored === '1';
+      // The Trail section of Layers holds Clear / Export trail, and the menu's Edit section is the only way to Edit: neither starts folded away.
+      const open = stored === null ? (idx === 0 || (storageKeyPrefix === 'lbSect:layers' && title === 'Trail') || (storageKeyPrefix === 'lbSect:search' && title === 'Edit')) : stored === '1';
       const details = document.createElement('details');
       details.className = 'lb-sect-details';
       if (open) details.setAttribute('open', '');
@@ -19958,6 +20157,8 @@ body.lb-on-welcome #lbDrawerTab { display: none; }
       ${item('explore', img('map.png', isExploring),   'Check out a run', 'Look over runs without driving them', isExploring ? 'current' : '')}
       ${seasonNote}
       ${item('nearby',  img('navigation.png'), "What's nearby", 'Runs, bins and addresses around you')}
+      <div class="lb-drawer-sect">Edit</div>
+      ${item('edit', img('edit.png'), 'Edit & settings', 'Bins, houses, boundaries, geofences, KML files')}
       <div class="lb-drawer-sect">Screens</div>
       ${item('go-map',  img('map.png', cur==='map'),   'Map',          '', cur==='map'?'current':'')}
       ${item('go-hud',  img('drive.png', cur==='hud'), 'Drive screen', '', cur==='hud'?'current':'')}
@@ -20063,6 +20264,11 @@ body.lb-on-welcome #lbDrawerTab { display: none; }
         setTimeout(() => { try { inp.focus(); } catch(e){} }, 60);
       }
       renderBody();
+      return;
+    }
+    if (act === 'edit') {
+      const openEdit = () => { if (typeof window.lbOpenSettings === 'function') window.lbOpenSettings(); };
+      if (typeof activeTab !== 'undefined' && activeTab !== 'map') { switchMainTab('map'); setTimeout(openEdit, 700); } else openEdit();
       return;
     }
     if (act === 'nearby')     { if (typeof window.lbGoNearby === 'function') window.lbGoNearby(); return; }
@@ -21129,6 +21335,11 @@ body.stream-slr .lb-layers-head .icon-img { filter: brightness(0); }
     ['slArr',    'toggleStreetLitterRouteArrows',   '➡️', 'Street litter arrows'],
     ['slHeat',   'toggleStreetLitterRouteHeatmap',  '🎨', 'Street litter heatmap']
   ];
+
+  // Handed to the Layers header's "Hide all / Show all" button (ux/99b-layers.js).
+  window.lbLayerToggles = () => LAYER_ROWS
+    .filter(r => r[0] !== 'sect' && r[0] !== 'act' && rowApplies(r[0]))
+    .map(r => ({ key: r[0], fn: r[1], on: !!flag(r[0]) }));
 
   function iconHtml(spec) {
     return spec.startsWith('img:')
@@ -24427,6 +24638,10 @@ body.ux2 .lb-bclock[data-level="rest"] .lb-bc-read{color:var(--ux-info) !importa
 body.ux2 .lb-bc-sub{color:var(--ux-text) !important}
 body.ux2 .lb-bc-sub2, body.ux2 .lb-bc-note{color:var(--ux-text-3) !important}
 body.ux2 #lbNextBinTab{bottom:calc(var(--ux-dock-total) + 8px) !important;height:36px !important;border:0 !important;border-radius:var(--ux-rad) !important;background:var(--ux-glass-solid) !important;color:var(--ux-text) !important;box-shadow:var(--ux-shadow-sm), inset 0 0 0 1px var(--ux-line-2) !important;font-size:13px !important;font-weight:750 !important}
+body.ux2 #uxLayersAll{margin-left:auto !important;margin-right:6px !important;height:34px !important;padding:0 12px !important;display:inline-flex;align-items:center !important;gap:7px !important;background:transparent !important;color:var(--ux-text) !important;border:1px solid var(--ux-line-2) !important;border-radius:var(--ux-rad) !important;box-shadow:none !important;font:700 13px/1 system-ui, -apple-system, 'Segoe UI', sans-serif !important;letter-spacing:.02em !important;cursor:pointer !important;white-space:nowrap !important}
+body.ux2 #uxLayersAll:active{background:var(--ux-s3) !important}
+body.ux2 #uxLayersAll:disabled{opacity:.5}
+body.ux2 #uxLayersAll svg{flex:none !important}
 /* ---- 04-home.css ---- */
 body.ux2.stream-none{--ui-accent:var(--ux-neutral, #34c98a);--ui-accent-ink:var(--ux-neutral-ink, #04140c);--ui-accent-fg:var(--ux-neutral, #34c98a)}
 body.ux2 .welcome-wrap{gap:12px !important;padding:2px 0 24px !important}
@@ -25761,6 +25976,25 @@ html body.ux2 #uxTimer:active{background:color-mix(in srgb, var(--ui-accent) 24%
 html body.ux2.ux-picking #uxTimer, html body.ux2.ux-ctxrow #uxTimer{display:none !important}
 html body.ux2 #uxLowHint{display:none;align-self:flex-start !important;height:24px !important;align-items:center !important;padding:0 12px 0 10px !important;background:linear-gradient(90deg, color-mix(in srgb, var(--ux-bg) 85%, transparent), transparent) !important;border-left:3px solid var(--ux-warn) !important;color:var(--ux-text-2) !important;font-size:11.5px !important;font-weight:700 !important;letter-spacing:.04em !important}
 html body.ux2.ux-lowzoom.lb-map-screen #uxLowHint{display:inline-flex !important}
+html body.ux2 #mapNormalTopBar{position:relative !important}
+html body.ux2 #uxHdrTools{position:absolute !important;right:8px !important;top:0 !important;height:48px !important;z-index:3 !important;display:flex;align-items:center !important;gap:4px !important;pointer-events:auto !important}
+html body.ux2 #uxHdrTools #uxTimer{height:34px !important;padding:0 8px !important;gap:6px !important;background:transparent !important;border-left:0 !important;border-bottom:2px solid var(--ux-line-2) !important;align-self:center !important}
+html body.ux2 #uxHdrTools #uxTimer[data-s="run"]{border-bottom-color:var(--ui-accent) !important}
+html body.ux2 #uxHdrTools #uxTimer[data-s="pause"]{border-bottom-color:var(--ux-warn) !important}
+html body.ux2 #uxHdrTools #uxTimer b{font-size:16px !important}
+html body.ux2 #uxHdrTools #uxBreak{display:none;height:34px !important;padding:0 8px !important;gap:5px !important;align-items:center !important;background:transparent !important;border:0 !important;border-bottom:2px solid var(--ux-warn) !important;border-radius:0 !important;box-shadow:none !important;color:var(--ux-warn) !important;font:800 14px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace !important;cursor:pointer !important}
+html body.ux2.ux-break-on #uxHdrTools #uxBreak{display:inline-flex !important}
+html body.ux2 #uxHdrTools #uxBreak[data-level="over"], html body.ux2 #uxHdrTools #uxBreak[data-level="red"]{color:#fff !important;background:#c81e1e !important;border-bottom-color:#c81e1e !important}
+html body.ux2 #uxHdrTools #uxBreak[data-level="rest"]{color:var(--ux-info) !important;border-bottom-color:var(--ux-info) !important}
+html body.ux2 #uxHdrTools #snailTrailRecLight{position:static !important;margin:0 4px 0 2px !important;flex:none !important;width:10px !important;height:10px !important}
+html body.ux2 .map-header-panel > .lb-break-chip{display:none !important}
+html body.ux2 #mapRunColoredBox .map-run-title{max-width:calc(100% - var(--ux-tools-w, 150px)) !important;overflow:hidden !important;text-overflow:ellipsis !important;white-space:nowrap !important}
+@media (max-width: 699px){html body.ux2 #mapRunColoredBox #uxMsStats{margin-left:0 !important;flex:1 0 100% !important}
+html body.ux2 #mapRunColoredBox #uxMsStats .map-run-stat{height:26px !important}
+html body.ux2 #mapRunColoredBox #uxMsStats .map-run-stat:first-child{padding-left:0 !important}
+html body.ux2 #mapRunColoredBox #uxMsStats .map-run-stat + .map-run-stat::before{top:6px !important;bottom:6px !important}}
+@media (min-width: 900px){html body.ux2 #uxHdrTools{display:none !important}
+html body.ux2 #mapRunColoredBox .map-run-title{max-width:none !important}}
 /* ---- 15-search.css ---- */
 html body.ux2 .search-card,
 html body.ux2 .search-card[class*="stream-"]{background:none !important;border:0 !important;border-left:3px solid var(--ui-accent) !important;border-radius:0 !important;box-shadow:none !important;padding:2px 0 2px 10px !important;margin:0 0 4px !important}
@@ -27459,18 +27693,64 @@ html body.ux2 .bin-map-marker-icon.ux-stray .bin-dot-inner{border-color:#ff453a 
   window.uxOpenStraySheet = openSheet;
   document.addEventListener('keydown', function(ev){ if (ev.key === 'Escape' && sheet && sheet.classList.contains('open')) closeSheet(); });
 
-  // ---- Edit & settings: a "Data problems" section on top ----------------------------------
+  // ---- Edit & settings: a "Data" section on top -----------------------------------------
+  var I_SYNC = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true"><path d="M20 8A8 8 0 0 0 5.5 6M4 4v4h4M4 16a8 8 0 0 0 14.5 2M20 20v-4h-4"/></svg>';
+  function row(id, ico, label){ return '<button type="button" id="' + id + '" class="lb-layer-btn"><span class="lb-ico ux-warn-ico">' + ico + '</span><span class="lb-label">' + label + '</span></button>'; }
   function injectRow(){
     var body = $('lbSettingsBody');
     if (!body || body.querySelector('#uxStrayRow')) return;
     var d = document.createElement('details'); d.className = 'lb-sect-details'; d.setAttribute('open', '');
-    d.innerHTML = '<summary class="lb-layers-sect">Data problems</summary>' +
-      '<button type="button" id="uxStrayRow" class="lb-layer-btn" data-uxs-open="1"><span class="lb-ico ux-warn-ico">' + WARN + '</span><span class="lb-label">Location problems: check and export</span></button>';
+    d.innerHTML = '<summary class="lb-layers-sect">Data</summary>' +
+      row('uxStrayRow', WARN, 'Location problems: check and export') +
+      row('uxBdPull', I_SYNC, 'Get run boundaries from the sync') +
+      row('uxBdExport', DL, 'Export run boundaries (file)') +
+      row('uxBdImport', GO, 'Import run boundaries (file)');
     body.insertBefore(d, body.firstChild);
+    var wrap = d.querySelector('#uxBdPull'); if (wrap) wrap.querySelector('.ux-warn-ico').style.color = 'var(--ux-text-2)';
+    ['uxBdExport', 'uxBdImport'].forEach(function(i){ var e = d.querySelector('#' + i); if (e) e.querySelector('.ux-warn-ico').style.color = 'var(--ux-text-2)'; });
+  }
+  function alertMsg(m){ try { return (window.customAlert || alert)(m); } catch (e) {} }
+  function borders(){ return g('customRunBorders') || {}; }
+  function countB(o){ var n = 0; Object.keys(o).forEach(function(k){ if (Array.isArray(o[k]) && o[k].length >= 3) n++; }); return n; }
+  async function pullB(){
+    if (typeof window.lbPullBoundaries !== 'function') return;
+    var el = $('uxBdPull'); if (el) el.querySelector('.lb-label').textContent = 'Getting run boundaries...';
+    var r = await window.lbPullBoundaries();
+    if (el) el.querySelector('.lb-label').textContent = 'Get run boundaries from the sync';
+    if (!r) { alertMsg('Could not reach the sync. Check the connection and try again.'); return; }
+    alertMsg('The sync holds ' + r.server + ' run boundar' + (r.server === 1 ? 'y' : 'ies') + '. Added ' + r.added + ' and updated ' + r.updated + ' here. This device now has ' + countB(borders()) + '.' +
+      (r.server < countB(borders()) ? '\n\nThe sync holds fewer than this device does: run Sync once to send them, and if that number does not go up, use Export / Import (file) to share them.' : ''));
+  }
+  function exportB(){
+    var b = borders(), out = {}; Object.keys(b).forEach(function(k){ if (Array.isArray(b[k]) && b[k].length >= 3) out[k] = b[k]; });
+    var n = Object.keys(out).length; if (!n) { alertMsg('This device has no saved run boundaries to export.'); return; }
+    if (download('run-boundaries-' + stamp() + '.json', JSON.stringify(out))) alertMsg('Exported ' + n + ' run boundaries.');
+  }
+  function importB(){
+    var inp = document.createElement('input'); inp.type = 'file'; inp.accept = '.json,application/json'; inp.style.display = 'none';
+    inp.addEventListener('change', function(){
+      var f = inp.files && inp.files[0]; if (!f) return;
+      var rd = new FileReader();
+      rd.onload = async function(){
+        try {
+          var o = JSON.parse(rd.result), b = borders(), n = 0;
+          Object.keys(o).forEach(function(k){ if (Array.isArray(o[k]) && o[k].length >= 3) { b[k] = o[k]; n++; } });
+          if (!n) { alertMsg('That file has no run boundaries in it.'); return; }
+          var sv = g('saveToDB'); if (typeof sv === 'function') await sv('customRunBorders', b);
+          try { var h = g('hasUnsyncedChanges'); } catch (e) {}
+          if (typeof window.renderMapData === 'function') window.renderMapData();
+          alertMsg('Imported ' + n + ' run boundaries. Run Sync to share them with your other devices.');
+        } catch (e) { alertMsg('That file could not be read as run boundaries.'); }
+      };
+      rd.readAsText(f);
+    });
+    document.body.appendChild(inp); inp.click(); setTimeout(function(){ try { inp.remove(); } catch (e) {} }, 60000);
   }
   document.addEventListener('click', function(ev){
-    var t = ev.target && ev.target.closest ? ev.target.closest('#uxStrayRow') : null;
-    if (t) { ev.preventDefault(); ev.stopPropagation(); openSheet(); }
+    var t = ev.target && ev.target.closest ? ev.target.closest('#uxStrayRow,#uxBdPull,#uxBdExport,#uxBdImport') : null;
+    if (!t) return;
+    ev.preventDefault(); ev.stopPropagation();
+    if (t.id === 'uxStrayRow') openSheet(); else if (t.id === 'uxBdPull') pullB(); else if (t.id === 'uxBdExport') exportB(); else importB();
   }, true);
   var po = window.lbOpenSettings;
   if (typeof po === 'function') window.lbOpenSettings = function(){ var r = po.apply(this, arguments); try { injectRow(); } catch (e) {} return r; };
@@ -27600,23 +27880,15 @@ html body.ux2 .bin-map-marker-icon.ux-stray .bin-dot-inner{border-color:#ff453a 
       a.addEventListener('click', function(ev){ ev.stopPropagation(); if (window.uxOpenPanel) window.uxOpenPanel('layers'); });
       s.appendChild(a);
     }
-    if (!$('uxSideEdit')) {
-      var b = document.createElement('button');
-      b.type = 'button'; b.id = 'uxSideEdit'; b.className = 'ux-side-btn';
-      b.title = 'Edit and settings'; b.setAttribute('aria-label', 'Edit and settings');
-      b.innerHTML = svg('pencil');
-      b.addEventListener('click', function(ev){ ev.stopPropagation(); if (window.uxOpenPanel) window.uxOpenPanel('settings'); });
-      s.appendChild(b);
-    }
+    var old = $('uxSideEdit'); if (old && old.parentNode) old.parentNode.removeChild(old);   // Edit lives in the side menu now
     // keep them last, whatever the map code appended after them
-    var l = $('uxSideLayers'), e = $('uxSideEdit');
-    if (l && l.nextElementSibling !== e || e && e.nextElementSibling) { s.appendChild(l); s.appendChild(e); }
+    var l = $('uxSideLayers');
+    if (l && l.nextElementSibling) s.appendChild(l);
   }
   function syncSide(){
     var c = document.body.classList;
-    var l = $('uxSideLayers'), e = $('uxSideEdit');
+    var l = $('uxSideLayers');
     if (l) l.classList.toggle('on', c.contains('lb-layers-open'));
-    if (e) e.classList.toggle('on', c.contains('lb-settings-open'));
   }
 
   // ---- 2. street strip ------------------------------------------------------------
@@ -27764,6 +28036,72 @@ html body.ux2 .bin-map-marker-icon.ux-stray .bin-dot-inner{border-color:#ff453a 
 })();
 
 /* =====================================================================
+   Header tools: the run timer, the break clock and the recording light live at the right of the
+   title bar, not floating over the map. (They used to sit in three different places: a box under
+   the title, a wide "Break overdue" banner, and a dot in the next-bin card.)
+   The real elements are MOVED, not copied, so everything that already finds them by id keeps working.
+   ===================================================================== */
+(function(){
+  'use strict';
+  function $(id){ return document.getElementById(id); }
+  var tools = null, brk = null, lastKey = '';
+  var I_ALERT = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true"><path d="M12 3 2.5 20h19L12 3z"/><path d="M12 10v5M12 17.6v.4"/></svg>';
+  var I_CLOCK = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>';
+  var I_CUP = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true"><path d="M4 8h13v6a5 5 0 0 1-5 5H9a5 5 0 0 1-5-5V8z"/><path d="M17 10h2a2 2 0 0 1 0 4h-2"/></svg>';
+
+  function ensure(){
+    var bar = $('mapNormalTopBar'); if (!bar) return null;
+    if (!tools || !tools.parentNode) {
+      tools = $('uxHdrTools');
+      if (!tools) { tools = document.createElement('div'); tools.id = 'uxHdrTools'; bar.appendChild(tools); }
+    }
+    if (!brk || !brk.parentNode) {
+      brk = $('uxBreak');
+      if (!brk) {
+        brk = document.createElement('button'); brk.type = 'button'; brk.id = 'uxBreak';
+        brk.addEventListener('click', function(ev){ ev.stopPropagation(); var c = $('lbBreakChip'); if (c) c.click(); });
+        tools.appendChild(brk);
+      }
+    }
+    var t = $('uxTimer'), r = $('snailTrailRecLight');
+    if (t && t.parentNode !== tools) tools.appendChild(t);
+    if (r && r.parentNode !== tools) tools.appendChild(r);
+    return tools;
+  }
+
+  // the break clock: mirror the app's own chip in a form that fits
+  function short(text, level){
+    var m = /(\d+):(\d+)(?::(\d+))?\s*$/.exec(text || ''); if (!m) return '';
+    var a = +m[1], b = +m[2], c = m[3] === undefined ? null : +m[3], pad = function(n){ return (n < 10 ? '0' : '') + n; };
+    var s;
+    if (c !== null) s = a > 0 ? a + 'h' + pad(b) : pad(b) + ':' + pad(c);      // h:mm:ss -> "4h39" / mm:ss -> "12:05"
+    else s = pad(a) + ':' + pad(b);
+    return (level === 'over' ? '+' : '') + s;
+  }
+  function sync(){
+    if (!ensure()) return;
+    var chip = $('lbBreakChip'), txt = $('lbBreakChipText');
+    var on = !!(chip && chip.style.display !== 'none');
+    var level = chip ? (chip.dataset.level || 'ok') : 'ok', full = txt ? txt.textContent : '';
+    var key = on + '|' + level + '|' + full;
+    if (key === lastKey) return; lastKey = key;
+    brk.style.display = on ? '' : 'none';
+    brk.setAttribute('data-level', level);
+    brk.title = full ? full + ' - tap to open the break clock' : 'Break clock';
+    brk.setAttribute('aria-label', full || 'Break clock');
+    if (on) brk.innerHTML = (level === 'over' || level === 'red' ? I_ALERT : level === 'rest' ? I_CUP : I_CLOCK) + '<span>' + short(full, level) + '</span>';
+    document.body.classList.toggle('ux-break-on', on);
+  }
+  function width(){
+    if (!tools) return;
+    var w = Math.ceil(tools.getBoundingClientRect().width) + 10;
+    if (tools.__w !== w) { tools.__w = w; document.documentElement.style.setProperty('--ux-tools-w', w + 'px'); }
+  }
+  setInterval(function(){ if (document.body.getAttribute('data-ux-screen') === 'map' && !document.hidden) { try { sync(); width(); } catch (e) {} } }, 500);
+  if (window.ResizeObserver) { var t0 = setInterval(function(){ if (ensure()) { clearInterval(t0); new ResizeObserver(width).observe(tools); } }, 400); }
+})();
+
+/* =====================================================================
    Zoomed right out (Check out a run frames a whole run, sometimes the whole
    depot): the map has one DOM marker per house and per bin - thousands of
    them, each with shadows - and they are only dots at that scale. Painting
@@ -27873,6 +28211,134 @@ html body.ux2 .bin-map-marker-icon.ux-stray .bin-dot-inner{border-color:#ff453a 
   if (typeof prev === 'function') {
     window.renderMapData = function(){ var r = prev.apply(this, arguments); try { bind(); now(); cull(); } catch (e) {} return r; };
   }
+})();
+
+/* =====================================================================
+   Layers: one button by the heading to hide everything at once (and to bring it back).
+   Every layer used to be a separate switch, KML routes and heatmaps included. "Hide all"
+   switches off each layer that is on and remembers which; "Show all" puts those back (or, if
+   nothing was remembered, the essentials: bins, houses and run boundaries).
+   Not touched: trail recording, satellite and the Next bin box - those are not layers, and
+   switching recording off by accident would lose the day's trail.
+   ===================================================================== */
+(function(){
+  'use strict';
+  var VIS = ['bins','houses','bounds','propBounds','garSq','recSq','fogSq','geofence','kmz','kerbArr','kerbHeat','slArr','slHeat'];
+  var ESSENTIAL = ['bins','houses','bounds'];
+  var MEMO = 'uxLayersMemo';
+  var EYE = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true"><path d="M2 12s3.6-6.5 10-6.5S22 12 22 12s-3.6 6.5-10 6.5S2 12 2 12z"/><circle cx="12" cy="12" r="2.8"/>';
+  var EYE_ON = EYE + '</svg>';
+  var EYE_OFF = EYE + '<path d="M3 3l18 18"/></svg>';
+
+  // Every toggle re-draws the map; do that once at the end instead of once per layer.
+  var batching = false, dirty = false;
+  var prevRender = window.renderMapData;
+  if (typeof prevRender === 'function') {
+    window.renderMapData = function(){
+      if (batching) { dirty = true; return; }
+      return prevRender.apply(this, arguments);
+    };
+  }
+
+  function toggles(){ try { return (window.lbLayerToggles && window.lbLayerToggles()) || []; } catch (e) { return []; } }
+  function visRows(){ return toggles().filter(function(t){ return VIS.indexOf(t.key) >= 0; }); }
+  function memo(v){
+    try { if (v === undefined) return JSON.parse(localStorage.getItem(MEMO) || 'null'); if (v === null) localStorage.removeItem(MEMO); else localStorage.setItem(MEMO, JSON.stringify(v)); } catch (e) {}
+    return null;
+  }
+  function sleep(ms){ return new Promise(function(r){ setTimeout(r, ms); }); }
+
+  async function apply(keys, wantOn){
+    batching = true; dirty = false;
+    try {
+      var rows = visRows();
+      for (var i = 0; i < rows.length; i++) {
+        var t = rows[i];
+        if (keys.indexOf(t.key) < 0 || t.on === wantOn) continue;
+        try { var f = window[t.fn]; if (typeof f === 'function') await f(); } catch (e) { console.error('layer toggle failed', t.fn, e); }
+        await sleep(0);
+      }
+    } finally {
+      batching = false;
+      if (dirty && typeof window.renderMapData === 'function') { try { window.renderMapData(); } catch (e) {} }
+      dirty = false;
+    }
+  }
+
+  async function master(){
+    var btn = document.getElementById('uxLayersAll'); if (btn) btn.disabled = true;
+    var rows = visRows(), on = rows.filter(function(t){ return t.on; }).map(function(t){ return t.key; });
+    if (on.length) { memo(on); await apply(on, false); }
+    else {
+      var m = memo(), keys = (m && m.length) ? m : ESSENTIAL;
+      await apply(keys, true); memo(null);
+    }
+    if (btn) btn.disabled = false;
+    // re-draw the panel so every row shows its new state
+    try { if (document.body.classList.contains('lb-layers-open') && typeof window.lbOpenLayers === 'function') window.lbOpenLayers(); } catch (e) {}
+    refresh();
+  }
+
+  function ensure(){
+    var head = document.querySelector('#lbLayers .lb-layers-head'); if (!head) return null;
+    var b = document.getElementById('uxLayersAll');
+    if (!b) {
+      b = document.createElement('button'); b.type = 'button'; b.id = 'uxLayersAll';
+      var close = document.getElementById('lbLayersCloseBtn');
+      head.insertBefore(b, close || null);
+      b.addEventListener('click', function(ev){ ev.preventDefault(); ev.stopPropagation(); master(); });
+    }
+    return b;
+  }
+  function refresh(){
+    var b = ensure(); if (!b) return;
+    var anyOn = visRows().some(function(t){ return t.on; });
+    var label = anyOn ? 'Hide all' : 'Show all';
+    if (b.getAttribute('data-l') !== label) {
+      b.setAttribute('data-l', label);
+      b.innerHTML = (anyOn ? EYE_OFF : EYE_ON) + '<span>' + label + '</span>';
+      b.title = anyOn ? 'Switch every layer off (they are remembered)' : 'Switch back on what was showing';
+    }
+  }
+  // keep the label right whenever the panel is opened or a row is flicked
+  new MutationObserver(function(){ try { refresh(); } catch (e) {} }).observe(document.body, { attributes: true, attributeFilter: ['class'] });
+  document.addEventListener('click', function(ev){
+    if (ev.target && ev.target.closest && ev.target.closest('#lbLayersBody')) setTimeout(refresh, 200);
+  }, true);
+  setInterval(function(){ if (document.body.classList.contains('lb-layers-open')) try { refresh(); } catch (e) {} }, 700);
+})();
+
+/* =====================================================================
+   The bin warning menu (Contaminated / Heavy / ...) and the reminder menu are drop-downs that
+   the app hangs off the row that opened them. In the next-bin card that row is at the bottom of
+   the screen, so the menu ran off the edge and its options could not be reached. They are now
+   placed against the screen: below the button if there is room, above it if not, never off the
+   sides, and scrollable if the screen is very short.
+   ===================================================================== */
+(function(){
+  'use strict';
+  function place(menu, btn){
+    if (!menu || menu.style.display === 'none' || !menu.style.display) return;
+    var vw = window.innerWidth, vh = window.innerHeight, M = 8;
+    menu.style.position = 'fixed'; menu.style.right = 'auto'; menu.style.bottom = 'auto';
+    menu.style.zIndex = '20400'; menu.style.maxHeight = (vh - 2 * M) + 'px'; menu.style.overflowY = 'auto';
+    var w = menu.offsetWidth, h = menu.offsetHeight;
+    var r = btn && btn.getBoundingClientRect ? btn.getBoundingClientRect() : { left: vw - w - M, right: vw - M, top: vh / 2, bottom: vh / 2 };
+    var left = Math.min(Math.max(M, r.right - w), vw - w - M);
+    var top = (r.bottom + 4 + h <= vh - M) ? r.bottom + 4 : (r.top - 4 - h >= M ? r.top - 4 - h : Math.max(M, vh - h - M));
+    menu.style.left = Math.round(left) + 'px'; menu.style.top = Math.round(top) + 'px';
+  }
+  function wrap(name){
+    var prev = window[name]; if (typeof prev !== 'function') return;
+    window[name] = function(event, menuId){
+      var btn = event && event.target && event.target.closest ? event.target.closest('button') : null;
+      var r = prev.apply(this, arguments);
+      try { place(document.getElementById(menuId), btn); } catch (e) {}
+      return r;
+    };
+  }
+  wrap('toggleBinIssueMenu');
+  wrap('toggleBinReminderMenu');
 })();
 
 
