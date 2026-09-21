@@ -10,9 +10,9 @@ from shapely.ops import unary_union
 from shapely import prepared
 
 S = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'work'); os.makedirs(S + '/pdf/svg', exist_ok=True)   # master.csv, routes-m.json, compare-results.json and pdf/svg/ live here
-DL = os.path.expanduser('~/Downloads')
-PDFS = ['1.1 RECYCLE - Monday Week A - MAY22.pdf', '2.1 RECYCLE - Tuesday Week A - APR22.pdf',
-        '2.2 RECYCLE - Tuesday Week B - MAR22.pdf', '4.2 RECYCLE - Thursday Week B - 2025.pdf']
+DL = os.environ.get('ROUTEMAP_PDF_DIR', os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..')))   # folder with the route-map PDFs (default: the repo root)
+SUF = os.environ.get('ROUTEMAP_SUFFIX', '')   # lets several copies run side by side, one per PDF; modes_export.py merges the outputs
+PDFS = sorted(f for f in os.listdir(DL) if 'RECYCLE' in f.upper() and f.lower().endswith('.pdf'))
 ROUTE_COL = {'green': (0.0, 68.99, 31.4), 'orange': (100.0, 75.3, 0.0), 'purple': (50.2, 0.0, 50.2)}
 LAT0, LNG0 = -38.30, 144.95
 KX = 111320 * math.cos(math.radians(LAT0)); KY = 110540.0
@@ -101,7 +101,7 @@ def parse_d(d):
     flush()
     return out
 def page_routes(pdf, page):
-    svg = f'{S}/pdf/svg/{abs(hash(pdf)) % 10**6}_{page}.svg'
+    svg = f"{S}/pdf/svg/{re.sub(r'[^A-Za-z0-9]+', '_', pdf)}_{page}.svg"
     if not os.path.exists(svg):
         subprocess.run(['pdftocairo', '-svg', '-f', str(page), '-l', str(page), os.path.join(DL, pdf), svg], check=True)
     root = ET.parse(svg).getroot()
@@ -242,5 +242,5 @@ for pdf in PDFS:
         results.append(rec); out_geo[tag] = rm
         fmt = lambda g: 'n/a' if not g else f"in {g['inside']*100:4.0f}%  ≤15m {g['w15']*100:4.0f}%  ≤30m {g['w30']*100:4.0f}%  far {g['far_m']:5.0f}m"
         print(f"{tag:22s} fit {f:5.1f}m ({len(H)} houses, {rec['scale_m_per_pt']} m/pt) {gn['km'] if gn else 0:.1f}km | NEW {fmt(gn)} | OLD {fmt(go)}", flush=True)
-json.dump(results, open(f'{S}/compare-results.json', 'w'), indent=1)
-json.dump({k: {n: [[(x / KX + 0, y / KY) for x, y in pl] for pl in polys] for n, polys in v.items()} for k, v in out_geo.items()}, open(f'{S}/routes-m.json', 'w'))
+json.dump(results, open(f'{S}/compare-results{SUF}.json', 'w'), indent=1)
+json.dump({k: {n: [[(x / KX + 0, y / KY) for x, y in pl] for pl in polys] for n, polys in v.items()} for k, v in out_geo.items()}, open(f'{S}/routes-m{SUF}.json', 'w'))

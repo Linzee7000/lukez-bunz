@@ -4,7 +4,12 @@ from scipy.spatial import cKDTree
 from shapely.geometry import LineString, MultiLineString
 from shapely.ops import unary_union
 import os; os.chdir(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'work')); sys.argv=['x','NONE']; exec(open(os.path.join(os.path.dirname(os.path.abspath(__file__)),'compare.py')).read().split('results = []')[0])
-routes=json.load(open('routes-m.json')); res={r['tag']:r for r in json.load(open('compare-results.json')) if 'fit_m' in r}
+import glob
+routes={}; res={}
+for f in sorted(glob.glob('routes-m*.json')): routes.update(json.load(open(f)))
+for f in sorted(glob.glob('compare-results*.json')):
+    for r in json.load(open(f)):
+        if 'fit_m' in r: res[r['tag']]=r
 pts,addrs=[],[]
 with open('master.csv',newline='',encoding='utf8') as f:
     for row in csv.DictReader(f):
