@@ -5339,6 +5339,10 @@ const STREET_LITTER_SERVICE_LEVELS = {"seasons":[{"key":"tourist1","label":"Tour
   let collectionSelectionActive = false;
   let roadModes = JSON.parse(localStorage.getItem('lukezBunzRoadModes')||'[]');
   let roadModeColors = { 'drive-reverse-out':'#f97316', 'reverse-in-drive-out':'#2563eb' };
+  // Streets the trucks drive in / reverse in, read off the run route maps (data/street-modes.json). Shared by everyone and
+  // shown for every kerbside stream (unlike roadModes above, which are lines a driver drew on this device).
+  let sharedStreetModes = [];
+  let showStreetModes = (function(){ try { return localStorage.getItem('lukezBunzShowStreetModes') !== '0'; } catch(e){ return true; } })();
 
   /*
     KMZ evidence is deliberately kept separate from property/bin master data.
@@ -7387,7 +7391,25 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
 
   function drawRoadModes(){
     roadModes.forEach(r=>{ if(!Array.isArray(r.points)||r.points.length<2)return; const label=r.type==='drive-reverse-out'?'Drive in · reverse out':'Reverse in · drive out'; L.polyline(r.points.map(p=>[p.lat,p.lng]),{color:roadModeColors[r.type]||'#f97316',weight:7,opacity:.9}).bindPopup(mapPopupHTML({title:label})).addTo(mapSeqLayer); });
+    // Shared street modes: dashed, so they read as "from the run maps" next to the solid lines drawn by hand. Not for Street Litter.
+    if(showStreetModes && !/^Street/.test(activeFilterStream||'')){
+      sharedStreetModes.forEach(s=>{ if(!Array.isArray(s.points)||s.points.length<2)return; const label=s.type==='drive-reverse-out'?'Drive in · reverse out':'Reverse in · drive out'; L.polyline(s.points,{color:roadModeColors[s.type]||'#f97316',weight:5,opacity:.85,dashArray:'10 6'}).bindPopup(mapPopupHTML({title:label,lines:[s.street?esc(s.street):'','From the run maps - position is approximate']})).addTo(mapSeqLayer); });
+    }
   }
+  function toggleStreetModes(){
+    showStreetModes = !showStreetModes;
+    try { localStorage.setItem('lukezBunzShowStreetModes', showStreetModes ? '1' : '0'); } catch(e){}
+    renderMapData();
+    updateMapSideLayersUI();
+  }
+  (async function(){
+    try {
+      const r = await fetch('data/street-modes.json', { cache: 'no-cache' });
+      if(!r.ok) return;
+      const d = await r.json();
+      if(d && Array.isArray(d.segments)){ sharedStreetModes = d.segments; if(typeof leafletMap !== 'undefined' && leafletMap) renderMapData(); }
+    } catch(e){}
+  })();
 
   function propertyPopup(site){const id=String(site.propId||site.siteId||'');return `<div><b>${esc(cleanStreetAddress(site.addressText)||site.baseStreetLine||'Property')}</b><br><small>${esc(site.suburbLine||'')}</small><br><button type="button" onclick="openPropertyInspectModal('${esc(id)}')">Inspect</button> <button type="button" onclick="promptEditProperty('${esc(id)}')">Edit</button></div>`;}
   /*
@@ -21775,6 +21797,7 @@ body.stream-slr .lb-layers-head .icon-img { filter: brightness(0); }
       case 'houses':    return typeof showHouseGpsDots !== 'undefined' && showHouseGpsDots;
       case 'bounds':    return typeof showRunBoundaries !== 'undefined' && showRunBoundaries;
       case 'propBounds':return typeof showPropertyBoundaries !== 'undefined' && showPropertyBoundaries;
+      case 'streetModes':return typeof showStreetModes !== 'undefined' && showStreetModes;
       case 'garSq':     return typeof showGarbageRunSquares !== 'undefined' && showGarbageRunSquares;
       case 'recSq':     return typeof showRecyclingRunSquares !== 'undefined' && showRecyclingRunSquares;
       case 'fogSq':     return typeof showFogoRunSquares !== 'undefined' && showFogoRunSquares;
@@ -21818,7 +21841,8 @@ body.stream-slr .lb-layers-head .icon-img { filter: brightness(0); }
     recSq:    () => !currentStream() || currentStream() === 'Recycling' || currentStream() === 'SummerRecycling',
     fogSq:    () => !currentStream() || currentStream() === 'FOGO',
     kmz:      () => !currentStream() || KERBSIDE_STREAMS.includes(currentStream()),
-    kerbArr:  () => !currentStream() || KERBSIDE_STREAMS.includes(currentStream()),
+    streetModes: () => !currentStream() || KERBSIDE_STREAMS.includes(currentStream()),
+    kerbArr: () => !currentStream() || KERBSIDE_STREAMS.includes(currentStream()),
     kerbHeat: () => !currentStream() || KERBSIDE_STREAMS.includes(currentStream()),
     slArr:    () => !currentStream() || STREET_LITTER_STREAMS.includes(currentStream()),
     slHeat:   () => !currentStream() || STREET_LITTER_STREAMS.includes(currentStream())
@@ -21834,6 +21858,7 @@ body.stream-slr .lb-layers-head .icon-img { filter: brightness(0); }
     ['houses',   'toggleHouseGpsDots',            'img:houses.png',   'Houses'],
     ['bounds',   'toggleRunBoundaries',           'img:boundary.png', 'Run boundaries'],
     ['propBounds','togglePropertyBoundaries',     'img:boundary.png', 'Property boundaries'],
+    ['streetModes','toggleStreetModes',           'img:route.png',    'Reverse in / drive in streets'],
     ['garSq',    'toggleGarbageRunSquares',       'img:garbage.png',  'Garbage squares'],
     ['recSq',    'toggleRecyclingRunSquares',     'img:recycle.png',  'Recycling squares'],
     ['fogSq',    'toggleFogoRunSquares',          'img:fogo.png',     'FOGO squares'],
@@ -31162,7 +31187,7 @@ html body.ux2 .lb-photo-note{margin:4px 0 10px !important;padding:9px 12px !impo
    ===================================================================== */
 (function(){
   'use strict';
-  var VIS = ['bins','houses','bounds','propBounds','garSq','recSq','fogSq','geofence','kmz','kerbArr','kerbHeat','slArr','slHeat'];
+  var VIS = ['bins','houses','bounds','propBounds','streetModes','garSq','recSq','fogSq','geofence','kmz','kerbArr','kerbHeat','slArr','slHeat'];
   var ESSENTIAL = ['bins','houses','bounds'];
   var MEMO = 'uxLayersMemo';
   var EYE = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true"><path d="M2 12s3.6-6.5 10-6.5S22 12 22 12s-3.6 6.5-10 6.5S2 12 2 12z"/><circle cx="12" cy="12" r="2.8"/>';
