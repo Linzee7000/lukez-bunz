@@ -26518,6 +26518,8 @@ html body.ux2 #uxDaysCard .uxc-main b{font-size:17px !important;font-weight:800 
 html body.ux2 #uxDaysCard .uxc-main span{font-size:12px !important;font-weight:600 !important;color:var(--ux-text-2) !important}
 html body.ux2 #uxDaysCard .uxc-go{flex:none !important;height:36px !important;padding:0 14px !important;background:var(--ui-accent) !important;color:var(--ux-on-accent, #0b0f14) !important;border:0 !important;border-radius:0 !important;font:800 13px/1 system-ui, -apple-system, 'Segoe UI', sans-serif !important;letter-spacing:.04em !important;text-transform:uppercase !important}
 html body.ux2 #uxDaysCard .uxc-x{flex:none !important;width:32px !important;height:36px !important;padding:0 !important;display:inline-flex;align-items:center !important;justify-content:center !important;background:transparent !important;border:0 !important;color:var(--ux-text-2) !important}
+html body.ux2.ux-days.lb-map-screen #uxStrayChip, html body.ux2.ux-days.lb-map-screen #uxStrayChip.ux-on,
+html body.ux2.ux-days.ux-lowzoom.lb-map-screen #uxLowHint, html body.ux2.ux-days.lb-map-screen #uxLowHint{display:none !important}
 </style>
 <script id="ux2-script">
 /* UX2 behaviour glue. Everything here is additive: it calls the existing
@@ -27981,7 +27983,7 @@ html body.ux2 #uxDaysCard .uxc-x{flex:none !important;width:32px !important;heig
   var DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
   var SHORT = { Monday: 'Mon', Tuesday: 'Tue', Wednesday: 'Wed', Thursday: 'Thu', Friday: 'Fri', Saturday: 'Sat', Sunday: 'Sun' };
   var DAYCOL = { Monday: '#4c9aff', Tuesday: '#ffb020', Wednesday: '#2dd4bf', Thursday: '#c084fc', Friday: '#ff6b81', Saturday: '#a3e635', Sunday: '#94a3b8' };
-  var RUNCOL = ['#4c9aff', '#ffb020', '#2dd4bf', '#c084fc', '#ff6b81', '#22d3ee', '#f97316', '#a3e635', '#f472b6', '#facc15', '#818cf8', '#34d399', '#fb7185', '#60a5fa', '#e879f9'];
+  var RUNCOL = ['#4c9aff', '#ffb020', '#2dd4bf', '#c084fc', '#ff6b81', '#a3e635', '#f97316', '#22d3ee', '#f472b6', '#facc15'];
   var STREAMS = [['Garbage', 'Garbage'], ['Recycling', 'Recycling'], ['FOGO', 'FOGO']];
   var GF = {};
   function g(n){ try { return (GF[n] || (GF[n] = new Function('return ' + n)))(); } catch (e) { return undefined; } }
@@ -28050,9 +28052,9 @@ html body.ux2 #uxDaysCard .uxc-x{flex:none !important;width:32px !important;heig
     var all = collect(), list = all.filter(function(r){ return !st.week || !r.week || r.week === st.week; });
     runsNow = list;
     layer = L.layerGroup().addTo(m); labels = L.layerGroup().addTo(m);
-    var bounds = null, k = 0;
+    var bounds = null, colOf = st.day ? neighbourColours(list.filter(function(r){ return r.day === st.day; })) : null;
     list.forEach(function(r){
-      var show = !st.day || r.day === st.day, col = st.day ? RUNCOL[(k++) % RUNCOL.length] : DAYCOL[r.day];
+      var show = !st.day || r.day === st.day, col = st.day ? colOf[r.key] : DAYCOL[r.day];
       var parts = r.rings.map(function(x){ return [x]; });            // each separate part is its own polygon, not a hole of the others
       var style = show
         ? { pane: 'ux-days', color: '#0b0f14', weight: 1.2, opacity: .85, fillColor: col, fillOpacity: st.day ? .5 : .42, interactive: true, lineJoin: 'round' }
@@ -28067,11 +28069,27 @@ html body.ux2 #uxDaysCard .uxc-x{flex:none !important;width:32px !important;heig
         var mk = L.marker(lp, { icon: ic, pane: 'ux-days-lbl', interactive: false, keyboard: false }); mk._uxBig = !st.day; mk.addTo(labels);
       }
     });
-    syncLabels();
-    if (fit && bounds) { try { m.fitBounds(bounds, { padding: [24, 24], animate: false }); } catch (e) {} }
-    fillBar(all);
+    syncLabels(); fillBar(all);
+    if (fit && bounds) {
+      var top = 24; try { var cb = m.getContainer().getBoundingClientRect(), bb2 = bar && bar.getBoundingClientRect(); if (bb2) top = Math.max(24, Math.round(bb2.bottom - cb.top) + 12); } catch (e) {}
+      try { m.fitBounds(bounds, { paddingTopLeft: [24, top], paddingBottomRight: [64, 24], animate: false }); } catch (e) {}
+    }
     if (!list.length) note('No run boundaries for ' + st.stream + ' yet. Edit & settings > Data > Rebuild all run boundaries.');
     else note('');
+  }
+  // runs that share a line get different colours (they share exact points, so a shared point means neighbours)
+  function neighbourColours(list){
+    var at = {}, nb = {}, out = {};
+    list.forEach(function(r){ nb[r.key] = {}; r.rings.forEach(function(ring){ ring.forEach(function(p){ var k = p[0] + ',' + p[1]; (at[k] = at[k] || []).push(r.key); }); }); });
+    Object.keys(at).forEach(function(k){ var a = at[k]; if (a.length < 2) return; a.forEach(function(x){ a.forEach(function(y){ if (x !== y) nb[x][y] = 1; }); }); });
+    var order = list.slice().sort(function(a, c){ return Object.keys(nb[c.key]).length - Object.keys(nb[a.key]).length; }), used = RUNCOL.map(function(){ return 0; });
+    order.forEach(function(r){
+      var taken = {}; Object.keys(nb[r.key]).forEach(function(k){ if (out[k] != null) taken[out[k]] = 1; });
+      var pick = -1; for (var i = 0; i < RUNCOL.length; i++) if (!taken[i] && (pick < 0 || used[i] < used[pick])) pick = i;
+      if (pick < 0) { pick = 0; for (var j = 1; j < RUNCOL.length; j++) if (used[j] < used[pick]) pick = j; }
+      out[r.key] = pick; used[pick]++;
+    });
+    var cols = {}; Object.keys(out).forEach(function(k){ cols[k] = RUNCOL[out[k]]; }); return cols;
   }
   function syncLabels(){
     var m = g('leafletMap'); if (!m || !labels) return;
