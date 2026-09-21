@@ -7470,7 +7470,9 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
       // Summer recycling boundaries must be based on the actual selected
       // collection locations, not the wider property assignments.
       if(activeFilterStream==='SummerRecycling'){
+        const strayHouses=lbStraySites(sites);
         sites.forEach(site=>{
+          if(strayHouses.has(site)) return;
           const bins=(site.soloStreams?.Recycling||[]);
           bins.forEach(bin=>{
             const binPoint=gps(bin.lat,bin.lng);
@@ -13326,7 +13328,9 @@ window.addEventListener('DOMContentLoaded', async () => {
   // distance. A house with no recorded bin location at all also can't be
   // judged on this, so it's kept rather than penalised for missing data.
   function sitesForBoundaryHull(sites) {
+    const strays = lbStraySites(sites);      // data errors far from the bulk of the run never shape the boundary
     return (sites || []).filter(s => {
+      if (strays.has(s)) return false;
       if (activeCollectionPointForSite(s)) return true;
       const housePt = gps(s.lat, s.lng);
       if (!housePt) return false;
@@ -13343,6 +13347,174 @@ window.addEventListener('DOMContentLoaded', async () => {
       return binDistances.some(d => d <= 20);
     });
   }
+
+  /* ---- Stray houses: data errors that sit far away from the bulk of their run ------------------
+     A run is a connected patch of streets. A house that is recorded kilometres away from every
+     other house on the run is (almost always) a wrong pin or a wrong run number, and one such
+     house drags the run boundary - and the "Check out a run" framing - out across the map.
+
+     How it is judged: houses closer than LB_STRAY_LINK_M to each other are joined into patches. The
+     biggest patch is the run. A smaller patch is a stray only if it is tiny (a handful of houses, or
+     up to ~1% of the run) AND at least LB_STRAY_TINY_GAP_M from the run, or small (up to ~3%) AND at
+     least LB_STRAY_SMALL_GAP_M from it. A run that is genuinely in two or three big pieces is left
+     alone, and so is a run that is spread so thin (rural) that no patch holds most of it. Strays are
+     never deleted or moved: they are left out of the boundary / framing, drawn with a red ring, and
+     listed for export so they can be fixed at the source. */
+  const LB_STRAY_LINK_M = 600, LB_STRAY_TINY_GAP_M = 1000, LB_STRAY_SMALL_GAP_M = 2500;
+  window.lbStrayIds = window.lbStrayIds || new Set();
+  window.lbStrayView = window.lbStrayView || { count: 0, groups: 0, sites: [] };
+
+  function lbStrayScan(pts) {
+    const n = pts.length, flags = new Array(n).fill(false), gaps = new Array(n).fill(0);
+    if (n < 8) return { flags, gaps };
+    let lat0 = 0; for (let i = 0; i < n; i++) lat0 += pts[i].lat; lat0 /= n;
+    const kx = 111320 * Math.cos(lat0 * Math.PI / 180), ky = 111320;
+    const X = new Float64Array(n), Y = new Float64Array(n);
+    for (let i = 0; i < n; i++) { X[i] = pts[i].lng * kx; Y[i] = pts[i].lat * ky; }
+    const cell = LB_STRAY_LINK_M, L2 = cell * cell, grid = new Map();
+    const cx = new Int32Array(n), cy = new Int32Array(n);
+    for (let i = 0; i < n; i++) {
+      cx[i] = Math.floor(X[i] / cell); cy[i] = Math.floor(Y[i] / cell);
+      const k = cx[i] + ',' + cy[i]; let a = grid.get(k); if (!a) grid.set(k, a = []); a.push(i);
+    }
+    const par = new Int32Array(n); for (let i = 0; i < n; i++) par[i] = i;
+    const find = i => { while (par[i] !== i) { par[i] = par[par[i]]; i = par[i]; } return i; };
+    for (let i = 0; i < n; i++) {
+      for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) {
+        const a = grid.get((cx[i] + dx) + ',' + (cy[i] + dy)); if (!a) continue;
+        for (let m = 0; m < a.length; m++) {
+          const j = a[m]; if (j <= i) continue;
+          const ddx = X[i] - X[j], ddy = Y[i] - Y[j];
+          if (ddx * ddx + ddy * ddy <= L2) { const ri = find(i), rj = find(j); if (ri !== rj) par[ri] = rj; }
+        }
+      }
+    }
+    const comps = new Map();
+    for (let i = 0; i < n; i++) { const r = find(i); let a = comps.get(r); if (!a) comps.set(r, a = []); a.push(i); }
+    if (comps.size < 2) return { flags, gaps };
+    const list = [...comps.values()].sort((a, b) => b.length - a.length);
+    if (list[0].length < 0.6 * n) return { flags, gaps };      // no clear "bulk of the run": do not guess
+    const kept = list[0].slice();
+    const tinyMax = Math.max(4, Math.floor(n * 0.01)), smallMax = Math.floor(n * 0.03);
+    for (let c = 1; c < list.length; c++) {
+      const comp = list[c]; let g2 = Infinity;
+      for (let a = 0; a < comp.length; a++) {
+        const i = comp[a];
+        for (let b = 0; b < kept.length; b++) {
+          const j = kept[b], ddx = X[i] - X[j], ddy = Y[i] - Y[j], d2 = ddx * ddx + ddy * ddy;
+          if (d2 < g2) g2 = d2;
+        }
+      }
+      const gap = Math.sqrt(g2);
+      const stray = (comp.length <= tinyMax && gap >= LB_STRAY_TINY_GAP_M) || (comp.length <= smallMax && gap >= LB_STRAY_SMALL_GAP_M);
+      if (stray) comp.forEach(i => { flags[i] = true; gaps[i] = gap; });
+      else for (let a = 0; a < comp.length; a++) kept.push(comp[a]);
+    }
+    return { flags, gaps };
+  }
+
+  // Where a house is judged from: its own pin, or - when it has none but a bin does - that bin's pin,
+  // because a bin pin on the map with no house behind it is exactly what shows up far from its run.
+  function lbStrayPoint(site) {
+    const h = gps(site.lat, site.lng); if (h) return h;
+    for (const src of [site.soloStreams || {}, site.councilStreams || {}]) {
+      for (const k of Object.keys(src)) for (const b of (src[k] || [])) { const p = gps(b.lat, b.lng); if (p) return p; }
+    }
+    return null;
+  }
+
+  // sites (one run's houses) -> Map(site -> metres from the run) for the ones that are strays
+  function lbStraySites(sites) {
+    const out = new Map();
+    if (!sites || sites.length < 8) return out;
+    const pts = [], own = [];
+    sites.forEach(s => { const g = lbStrayPoint(s); if (g) { pts.push(g); own.push(s); } });
+    const r = lbStrayScan(pts);
+    own.forEach((s, i) => { if (r.flags[i]) out.set(s, r.gaps[i]); });
+    return out;
+  }
+  window.lbStraySites = lbStraySites;
+
+  // Called by renderMapData with the run groups it is about to draw: remembers which houses are strays
+  // (so their markers get the red ring) and how many, for the warning on the map.
+  function lbStrayMarkGroups(groups, total) {
+    const ids = window.lbStrayIds; ids.clear();
+    const view = { count: 0, groups: 0, sites: [], skipped: false };
+    window.lbStrayView = view;
+    if (total > 8000) { view.skipped = true; return; }   // "all runs" is too big to judge live: use the export
+    const seen = new Set();
+    groups.forEach(g => {
+      view.groups++;
+      lbStraySites(g.sites).forEach((gap, s) => {
+        ids.add(String(s.propId || s.siteId || ''));
+        if (seen.has(s)) return; seen.add(s);
+        view.sites.push({ site: s, gap, stream: g.stream, run: g.run });
+      });
+    });
+    view.count = view.sites.length;
+  }
+
+  // Everything the export needs. scope 'view' = whatever the map is currently filtered to (stream, day,
+  // week, chosen runs); 'all' = every run. Each row is one problem to fix at the source.
+  //   Far from the run   the house pin is kilometres from every other house on its run
+  //   No location        the house has no usable lat / lng
+  //   Bin pin far        a bin's pin is a long way from its own house (not a collection point)
+  //   Collection point far   a collection point was placed a long way from the house it serves
+  window.lbStrayReport = function(scope) {
+    const sel = selectedMapRuns(), st = clean(activeFilterStream);
+    const dayF = activeFilterDay ? dayKey(activeFilterDay) : '';
+    const wkF = clean(activeFilterWeek).toUpperCase();
+    const groups = new Map();
+    getRecordsArray().forEach(site => {
+      const item = getSiteRuns(site);
+      [['Garbage', item.garRun], ['Recycling', isValidRecycleRun(item.recRun, item.day, item.week) ? item.recRun : ''], ['FOGO', item.fogRun]].forEach(([stream, run]) => {
+        if (!run) return;
+        if (scope === 'view') {
+          if (st && st !== 'SummerRecycling' && stream !== st) return;
+          if (st === 'SummerRecycling') return;
+          if (dayF && item.day !== dayF) return;
+          if (wkF && stream !== 'Garbage' && item.week !== wkF) return;
+          if (sel.size && !sel.has(mapKey(run))) return;
+        }
+        const wk = stream === 'Garbage' ? '' : item.week;
+        const k = [stream, item.day, wk, lower(run)].join('|');
+        let g = groups.get(k);
+        if (!g) groups.set(k, g = { stream, run: clean(run), day: item.day, week: wk, sites: [] });
+        g.sites.push(site);
+      });
+    });
+    const rows = [], out = { rows, groups: 0, houses: 0, far: 0, missing: 0, binFar: 0, cpFar: 0, scope };
+    const dayName = d => d ? d.charAt(0).toUpperCase() + d.slice(1) : '';
+    groups.forEach(g => {
+      out.groups++; out.houses += g.sites.length;
+      const base = { stream: g.stream, run: g.run, day: dayName(g.day), week: g.week };
+      const strays = lbStraySites(g.sites);
+      g.sites.forEach(site => {
+        const house = gps(site.lat, site.lng);
+        if (strays.has(site)) {
+          const gap = strays.get(site);
+          rows.push(Object.assign({}, base, { problem: 'Far from the run', detail: (house ? 'House pin' : 'Bin pin (the house has no location)') + ' is ' + (gap / 1000).toFixed(1) + ' km from the nearest other house on this run', meters: Math.round(gap), site }));
+          out.far++; return;
+        }
+        if (!house) { rows.push(Object.assign({}, base, { problem: 'No location', detail: 'This house has no usable Lat / Lng', meters: '', site })); out.missing++; return; }
+        const cp = collectionPointForSite(site);
+        if (cp && Number.isFinite(Number(cp.lat)) && Number.isFinite(Number(cp.lng))) {
+          const cd = getDistanceMeters(house.lat, house.lng, Number(cp.lat), Number(cp.lng));
+          if (cd > 800) { rows.push(Object.assign({}, base, { problem: 'Collection point far from house', detail: 'Its collection point is ' + Math.round(cd) + ' m from the house', meters: Math.round(cd), site })); out.cpFar++; }
+          return;
+        }
+        const bins = ((site.soloStreams || {})[g.stream] || []);
+        bins.forEach(bin => {
+          const bp = gps(bin.lat, bin.lng); if (!bp) return;
+          const d = getDistanceMeters(house.lat, house.lng, bp.lat, bp.lng);
+          if (d > 250) { rows.push(Object.assign({}, base, { problem: 'Bin pin far from house', detail: 'Bin pin is ' + Math.round(d) + ' m from its house', meters: Math.round(d), site, bin })); out.binFar++; }
+        });
+      });
+    });
+    const prio = { 'Far from the run': 0, 'No location': 1, 'Collection point far from house': 2, 'Bin pin far from house': 3 };
+    rows.sort((a, b) => (prio[a.problem] - prio[b.problem]) || (a.stream + a.run).localeCompare(b.stream + b.run, undefined, { numeric: true }) || (b.meters || 0) - (a.meters || 0));
+    return out;
+  };
 
   function getRecordsArray() {
     if (typeof siteRecords !== 'undefined' && Array.isArray(siteRecords) && siteRecords.length) return siteRecords;
@@ -13852,12 +14024,15 @@ window.addEventListener('DOMContentLoaded', async () => {
     const records = getRecordsArray();
     const housePoints = [];
 
+    const snapSites = [];
     records.forEach(site => {
       if (siteMatchesAllActiveFilters(site)) {
-        if (site.lat && site.lng && Number(site.lat) !== 0 && Number(site.lng) !== 0) {
-          housePoints.push({ lat: Number(site.lat), lng: Number(site.lng) });
-        }
+        if (site.lat && site.lng && Number(site.lat) !== 0 && Number(site.lng) !== 0) snapSites.push(site);
       }
+    });
+    const snapStrays = lbStraySites(snapSites);
+    snapSites.forEach(site => {
+      if (!snapStrays.has(site)) housePoints.push({ lat: Number(site.lat), lng: Number(site.lng) });
     });
 
     if (housePoints.length < 3) {
@@ -13871,7 +14046,7 @@ window.addEventListener('DOMContentLoaded', async () => {
 
     renderMapData();
     if (isRoadSnapEditing) enableBoundaryVertexHandles();
-    customAlert(`Boundary successfully snapped to the perimeter of ${housePoints.length} houses on this run.`);
+    customAlert(`Boundary successfully snapped to the perimeter of ${housePoints.length} houses on this run.` + (snapStrays.size ? ` ${snapStrays.size} house${snapStrays.size === 1 ? '' : 's'} with a wrong-looking location ${snapStrays.size === 1 ? 'was' : 'were'} left out.` : ''));
   };
 
   // Run Boundary > Snap to Roads: pull nearby road geometry from
@@ -16561,7 +16736,7 @@ window.addEventListener('DOMContentLoaded', async () => {
       ? `min-width:20px; height:20px; padding:0 4px; box-sizing:border-box; border-radius:var(--ux-rad); background:${esc(color)}; color:${houseChipTextColor(color)}; border:2px solid #fff; font:800 11px/16px system-ui,-apple-system,'Segoe UI',sans-serif; letter-spacing:-0.2px; text-align:center; white-space:nowrap; filter:drop-shadow(0 1px 3px rgba(0,0,0,0.5)); pointer-events:auto;`
       : `width:12px; height:12px; box-sizing:border-box; border-radius:50%; background:${esc(color)}; border:2px solid #fff; filter:drop-shadow(0 1px 3px rgba(0,0,0,0.5)); pointer-events:auto;`;
     const icon = L.divIcon({
-      className: 'house-map-marker-icon',
+      className: 'house-map-marker-icon' + (window.lbStrayIds && window.lbStrayIds.has(id) ? ' ux-stray' : ''),
       html: `
         <div style="width:34px; height:34px; display:flex; align-items:center; justify-content:center; cursor:pointer;">
           <div style="${chipCss}">${esc(houseNum)}</div>
@@ -16753,6 +16928,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     const seenSiteIds = new Set();
     let totalMatchingSites = 0;
     groups.forEach(g => { totalMatchingSites += g.sites.length; });
+    try { lbStrayMarkGroups(groups, totalMatchingSites); } catch (e) { console.warn('stray check failed', e); }
 
     const shouldDrawIndividualMarkers = (st !== '' || selected.size > 0 || activeFilterDay !== '' || totalMatchingSites <= 3500);
 
@@ -17102,8 +17278,10 @@ window.addEventListener('DOMContentLoaded', async () => {
     // The run number alone is not enough: "223" exists for every stream, day and week, so framing all
     // of them zoomed the map right out across the whole peninsula. Use the same test the map itself
     // uses to decide what to draw (stream + day + week + run), and only fall back if that finds nothing.
+    // Houses that are data errors (kilometres from the rest of the run) are left out of the framing.
     for (const strict of [true, false]) {
       if (pts.length) break;
+      const hit = [];
       getRecordsArray().forEach(site => {
         if (sel.size) {
           const item = getSiteRuns(site);
@@ -17111,6 +17289,11 @@ window.addEventListener('DOMContentLoaded', async () => {
           if (!runs.some(r => sel.has(r))) return;
         }
         if (strict) { try { if (typeof siteMatchesMapFilters === 'function' && !siteMatchesMapFilters(site)) return; } catch (e) {} }
+        hit.push(site);
+      });
+      const bad = lbStraySites(hit);
+      hit.forEach(site => {
+        if (bad.has(site)) return;
         const g = gps(site.lat, site.lng);
         if (g) pts.push([g.lat, g.lng]);
       });
@@ -19596,7 +19779,8 @@ body.lb-on-welcome #lbDrawerTab { display: none; }
       const key = storageKeyPrefix + '::' + title;
       let stored = null;
       try { stored = localStorage.getItem(key); } catch (e) {}
-      const open = stored === null ? (idx === 0) : stored === '1';
+      // The Trail section of Layers holds Clear / Export trail, so it is never left folded away.
+      const open = stored === null ? (idx === 0 || (storageKeyPrefix === 'lbSect:layers' && title === 'Trail')) : stored === '1';
       const details = document.createElement('details');
       details.className = 'lb-sect-details';
       if (open) details.setAttribute('open', '');
@@ -20903,6 +21087,8 @@ body.stream-slr .lb-layers-head .icon-img { filter: brightness(0); }
     ['trailRec',  'toggleSnailTrailPause',        '⏺',                'Recording'],
     ['trailAge',  'toggleSnailTrailColorByAge',   '🎨',               'Age colour'],
     ['trailTime', 'toggleSnailTrailTimeLabels',   '🕒',               'Time labels'],
+    ['act', 'exportSnailTrailKml',   'img:export.png', 'Export trail', false],
+    ['act', 'confirmClearSnailTrail','img:minus.png',  'Clear trail',  true],
 
     ['sect', 'KML routes'],
     ['kmz',      'toggleKmzLayers',                 '🚛', 'Show KMZ runs'],
@@ -21499,8 +21685,6 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     // What the Layers panel SHOWS is over there; everything here changes data.
     { title: 'KML / KMZ files', sel: '#mapSettingsGroupKml .map-settings-opt-btn',
       drop: b => !/loadKmzForCurrentRun|openKmlEditModal/.test(b.getAttribute('onclick') || '') },
-    { title: 'Trail data',      sel: '#mapSettingsGroupKml .map-settings-opt-btn',
-      drop: b => !/exportSnailTrailKml|confirmClearSnailTrail/.test(b.getAttribute('onclick') || '') },
     { title: 'Colours & icons', sel: '#mapSettingsGroupCustomize .map-settings-opt-btn' },
     { title: 'Which side to collect', sel: '#mapSettingsGroupBins .map-settings-opt-btn' }
   ];
@@ -25601,6 +25785,40 @@ html body.ux2.dark-mode .modal-box .unified-filter-btn.active,
 html body.ux2 .modal-box .unified-filter-btn.active[class*="stream-"],
 html body.ux2.dark-mode .modal-box .unified-filter-btn.active[class*="stream-"]{background:linear-gradient(0deg, color-mix(in srgb, var(--sc) 30%, transparent), transparent 90%) !important;border:0 !important;border-bottom:3px solid var(--sc) !important;box-shadow:none !important;color:var(--ux-text) !important}
 html body.ux2 .modal-box .unified-filter-grid, html body.ux2 .modal-box .runs-grid{border:0 !important;background:none !important;padding:0 !important}
+/* ---- 16-strays.css ---- */
+html body.ux2 #uxStrayChip{display:none !important;align-self:flex-start !important;height:26px !important;align-items:center !important;gap:7px !important;padding:0 12px 0 9px !important;background:linear-gradient(90deg, color-mix(in srgb, var(--ux-bg) 94%, transparent), color-mix(in srgb, var(--ux-bg) 78%, transparent) 70%, color-mix(in srgb, var(--ux-bg) 40%, transparent)) !important;border:0 !important;border-left:3px solid var(--ux-bad) !important;border-radius:0 !important;box-shadow:none !important;color:var(--ux-bad) !important;font:700 12px/1 system-ui, -apple-system, 'Segoe UI', sans-serif !important;letter-spacing:.03em !important;cursor:pointer !important}
+html body.ux2.lb-map-screen #uxStrayChip.ux-on{display:inline-flex !important}
+html body.ux2 #uxStrayChip:active{background:color-mix(in srgb, var(--ux-bad) 22%, transparent) !important}
+html body.ux2.ux-picking #uxStrayChip, html body.ux2.ux-ctxrow #uxStrayChip{display:none !important}
+html body.ux2 .house-map-marker-icon.ux-stray > div > div{border-color:#ff453a !important;box-shadow:0 0 0 3px rgba(255,69,58,.5), 0 0 0 5px rgba(255,255,255,.85) !important}
+html body.ux2 #uxStraySheet{display:none !important;position:fixed !important;inset:0 !important;z-index:20500 !important}
+html body.ux2 #uxStraySheet.open{display:block !important}
+html body.ux2 #uxStraySheet .uxs-scrim{position:absolute !important;inset:0 !important;background:var(--ux-scrim) !important}
+html body.ux2 #uxStraySheet .uxs-panel{position:absolute !important;left:0 !important;right:0 !important;bottom:0 !important;max-height:82vh !important;display:flex;flex-direction:column !important;background:var(--ux-s1) !important;border-top:3px solid var(--ux-bad) !important;border-radius:0 !important;box-shadow:var(--ux-shadow) !important;color:var(--ux-text) !important;padding-bottom:var(--ux-safe-b) !important}
+html body.ux2 #uxStraySheet .uxs-head{display:flex;align-items:flex-start !important;gap:10px !important;padding:14px 8px 10px 16px !important;border-bottom:1px solid var(--ux-line) !important}
+html body.ux2 #uxStraySheet .uxs-head > div{flex:1 !important;min-width:0 !important}
+html body.ux2 #uxStraySheet .uxs-head b{display:block;font-size:18px !important;font-weight:800 !important}
+html body.ux2 #uxStraySheet .uxs-sub{display:block;margin-top:2px !important;font-size:12.5px !important;color:var(--ux-text-2) !important;font-weight:600 !important}
+html body.ux2 #uxStraySheet .uxs-x{flex:none !important;width:44px !important;height:44px !important;border:0 !important;background:transparent !important;color:var(--ux-text-2) !important;font-size:28px !important;line-height:1 !important;cursor:pointer !important}
+html body.ux2 #uxStraySheet .uxs-body{flex:1 !important;overflow:auto !important;-webkit-overflow-scrolling:touch !important;padding:4px 0 8px !important}
+html body.ux2 #uxStraySheet .uxs-help, html body.ux2 #uxStraySheet .uxs-empty, html body.ux2 #uxStraySheet .uxs-more{margin:0 !important;padding:10px 16px !important;font-size:13px !important;line-height:1.45 !important;color:var(--ux-text-2) !important}
+html body.ux2 #uxStraySheet .uxs-row{display:grid;grid-template-columns:1fr auto !important;column-gap:8px !important;align-items:center !important;width:100% !important;text-align:left !important;padding:10px 12px 10px 13px !important;margin:0 !important;background:transparent !important;color:var(--ux-text) !important;border:0 !important;border-left:3px solid var(--ux-bad) !important;border-bottom:1px solid var(--ux-line) !important;border-radius:0 !important;box-shadow:none !important;cursor:pointer !important}
+html body.ux2 #uxStraySheet .uxs-row.nofly{cursor:default !important;border-left-color:var(--ux-warn) !important}
+html body.ux2 #uxStraySheet .uxs-row:active{background:var(--ux-s3) !important}
+html body.ux2 #uxStraySheet .uxs-row svg{grid-row:1 / span 3 !important;grid-column:2 !important;color:var(--ux-text-3) !important}
+html body.ux2 #uxStraySheet .uxs-k{font-size:11px !important;font-weight:800 !important;letter-spacing:.08em !important;text-transform:uppercase !important;color:var(--ux-bad) !important}
+html body.ux2 #uxStraySheet .uxs-row.nofly .uxs-k{color:var(--ux-warn) !important}
+html body.ux2 #uxStraySheet .uxs-a{font-size:15px !important;font-weight:700 !important;overflow:hidden !important;text-overflow:ellipsis !important;white-space:nowrap !important}
+html body.ux2 #uxStraySheet .uxs-d{font-size:12px !important;color:var(--ux-text-3) !important;font-weight:600 !important}
+html body.ux2 #uxStraySheet .uxs-note{min-height:0 !important;padding:0 16px !important;font-size:12.5px !important;color:var(--ux-ok) !important;font-weight:700 !important}
+html body.ux2 #uxStraySheet .uxs-note:not(:empty){padding:6px 16px !important}
+html body.ux2 #uxStraySheet .uxs-foot{display:flex;gap:8px !important;padding:10px 12px 12px !important;border-top:1px solid var(--ux-line) !important}
+html body.ux2 #uxStraySheet .uxs-btn{flex:1 !important;min-height:48px !important;display:inline-flex;align-items:center !important;justify-content:center !important;gap:8px !important;padding:0 12px !important;background:var(--ux-s2) !important;color:var(--ux-text) !important;border:1px solid var(--ux-line-2) !important;border-radius:var(--ux-rad) !important;box-shadow:none !important;font:700 14px/1.1 system-ui, -apple-system, 'Segoe UI', sans-serif !important;cursor:pointer !important}
+html body.ux2 #uxStraySheet .uxs-btn.primary{background:color-mix(in srgb, var(--ui-accent) 20%, var(--ux-s2)) !important;border-color:color-mix(in srgb, var(--ui-accent) 55%, transparent) !important}
+html body.ux2 #uxStraySheet .uxs-btn:disabled{opacity:.4;cursor:default !important}
+html body.ux2 #uxStraySheet .uxs-btn:active{background:var(--ux-s3) !important}
+@media (min-width: 720px){html body.ux2 #uxStraySheet .uxs-panel{left:50% !important;right:auto !important;bottom:50% !important;width:560px !important;max-height:76vh !important;transform:translate(-50%, 50%)}}
+html body.ux2 .ux-warn-ico{color:var(--ux-bad) !important;display:inline-flex;align-items:center !important;justify-content:center !important}
 </style>
 <script id="ux2-script">
 /* UX2 behaviour glue. Everything here is additive: it calls the existing
@@ -27053,6 +27271,188 @@ html body.ux2 .modal-box .unified-filter-grid, html body.ux2 .modal-box .runs-gr
 })();
 
 /* =====================================================================
+   Location problems: houses whose pin is nowhere near the rest of their run.
+   The detection lives with the boundary code (window.lbStraySites / lbStrayReport);
+   this is the part the driver sees:
+     - a one-line warning under the run title while the current view has any
+     - a sheet that lists them, flies to one on tap, and exports a CSV
+       (this run, or every run) to fix at the source
+     - the same sheet from Edit & settings > Data problems
+   ===================================================================== */
+(function(){
+  'use strict';
+  var GF = {};
+  function g(n){ try { return (GF[n] || (GF[n] = new Function('return ' + n)))(); } catch (e) { return undefined; } }
+  function $(id){ return document.getElementById(id); }
+  function esc(s){ return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+  var WARN = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true"><path d="M12 3 2.5 20h19L12 3z"/><path d="M12 10v5M12 17.6v.4"/></svg>';
+  var DL = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true"><path d="M12 4v11M7 11l5 5 5-5M5 20h14"/></svg>';
+  var GO = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true"><path d="M9 5l7 7-7 7"/></svg>';
+
+  // ---- the line under the run title -------------------------------------------------
+  var chip = null;
+  function ensureChip(){
+    if (chip && chip.parentNode) return chip;
+    var t = $('uxTimer');
+    if (!t || !t.parentNode) return null;
+    chip = document.createElement('button');
+    chip.type = 'button'; chip.id = 'uxStrayChip';
+    chip.setAttribute('aria-label', 'Houses with a wrong-looking location');
+    var anchor = $('uxLowHint') || t;
+    anchor.parentNode.insertBefore(chip, anchor.nextSibling);
+    chip.addEventListener('click', function(){ openSheet(); });
+    return chip;
+  }
+  function refreshChip(){
+    var v = window.lbStrayView, c = ensureChip(); if (!c) return;
+    var n = v && v.count || 0;
+    c.classList.toggle('ux-on', n > 0);
+    if (n > 0) c.innerHTML = WARN + '<span>' + n + (n === 1 ? ' house' : ' houses') + ' far from the run</span>';
+  }
+
+  // ---- CSV -------------------------------------------------------------------------
+  function csvCell(v){ v = v == null ? '' : String(v); return /[",\r\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; }
+  function toCsv(report){
+    var head = ['Problem','Detail','Distance (m)','Stream','Run','Day','Week','Site Id','Property ID','Address','Suburb','House Lat','House Lng','Bin Serial','Bin Lat','Bin Lng'];
+    var lines = [head.map(csvCell).join(',')];
+    report.rows.forEach(function(r){
+      var s = r.site || {}, b = r.bin || {};
+      lines.push([r.problem, r.detail, r.meters, r.stream, r.run, r.day, r.week, s.siteId, s.propId, s.addressText, s.suburbLine, s.lat, s.lng, b.serial, b.lat, b.lng].map(csvCell).join(','));
+    });
+    return '﻿' + lines.join('\r\n');
+  }
+  function stamp(){ var d = new Date(), p = function(n){ return (n < 10 ? '0' : '') + n; }; return d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()); }
+  function download(name, text){
+    try {
+      var blob = new Blob([text], { type: 'text/csv;charset=utf-8' });
+      var a = document.createElement('a');
+      a.href = URL.createObjectURL(blob); a.download = name; a.style.display = 'none';
+      document.body.appendChild(a); a.click();
+      setTimeout(function(){ try { URL.revokeObjectURL(a.href); a.remove(); } catch (e) {} }, 4000);
+      return true;
+    } catch (e) { return false; }
+  }
+  function viewName(){
+    var t = $('mapRunTitleText'); var s = t ? String(t.textContent || '').replace(/[^A-Za-z0-9]+/g, '-').replace(/^-|-$/g, '') : '';
+    return s || 'view';
+  }
+  function exportCsv(scope){
+    var rep = window.lbStrayReport && window.lbStrayReport(scope);
+    if (!rep) return;
+    if (!rep.rows.length) { note('Nothing to export: no location problems found.'); return; }
+    var ok = download('location-problems-' + (scope === 'all' ? 'all-runs' : viewName()) + '-' + stamp() + '.csv', toCsv(rep));
+    note(ok ? 'Exported ' + rep.rows.length + ' row' + (rep.rows.length === 1 ? '' : 's') + '.' : 'Could not start the download on this device.');
+  }
+
+  // ---- the sheet -------------------------------------------------------------------
+  var sheet = null, report = null;
+  function note(msg){ var n = sheet && sheet.querySelector('.uxs-note'); if (n) { n.textContent = msg; } }
+  function build(){
+    if (sheet && sheet.parentNode) return sheet;
+    sheet = document.createElement('div'); sheet.id = 'uxStraySheet';
+    sheet.setAttribute('role', 'dialog'); sheet.setAttribute('aria-label', 'Location problems');
+    sheet.innerHTML =
+      '<div class="uxs-scrim" data-uxs="close"></div>' +
+      '<div class="uxs-panel">' +
+        '<div class="uxs-head"><div><b>Location problems</b><small class="uxs-sub"></small></div>' +
+        '<button type="button" class="uxs-x" data-uxs="close" aria-label="Close">&times;</button></div>' +
+        '<div class="uxs-body"></div>' +
+        '<div class="uxs-note" role="status"></div>' +
+        '<div class="uxs-foot">' +
+          '<button type="button" class="uxs-btn primary" data-uxs="exp-view">' + DL + '<span>Export this run</span></button>' +
+          '<button type="button" class="uxs-btn" data-uxs="exp-all">' + DL + '<span>Export all runs</span></button>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(sheet);
+    sheet.addEventListener('click', function(ev){
+      var t = ev.target && ev.target.closest ? ev.target.closest('[data-uxs],[data-uxs-go]') : null; if (!t) return;
+      var a = t.getAttribute('data-uxs');
+      if (a === 'close') closeSheet();
+      else if (a === 'exp-view') exportCsv('view');
+      else if (a === 'exp-all') exportCsv('all');
+      else if (t.hasAttribute('data-uxs-go')) fly(+t.getAttribute('data-uxs-go'));
+    });
+    return sheet;
+  }
+  function label(r){
+    var wk = r.week ? r.week : '';
+    return r.stream + ' ' + r.run + ' · ' + (r.day ? r.day.slice(0, 3) : '') + (wk ? ' ' + wk : '');
+  }
+  function fill(){
+    var body = sheet.querySelector('.uxs-body'), sub = sheet.querySelector('.uxs-sub');
+    report = window.lbStrayReport ? window.lbStrayReport('view') : { rows: [], groups: 0 };
+    var r = report;
+    var far = r.far || 0, miss = r.missing || 0, bf = r.binFar || 0, cf = r.cpFar || 0;
+    sub.textContent = r.rows.length
+      ? [far && far + ' house' + (far === 1 ? '' : 's') + ' far from the run', miss && miss + ' with no location', cf && cf + ' collection point' + (cf === 1 ? '' : 's') + ' far from the house', bf && bf + ' bin pin' + (bf === 1 ? '' : 's') + ' far from the house'].filter(Boolean).join(' · ')
+      : 'Nothing found in this view';
+    var html = '';
+    if (!r.rows.length) html = '<p class="uxs-empty">No house in this view has a location that looks wrong. Use Export all runs to check every run.</p>';
+    else {
+      html += '<p class="uxs-help">Houses far from the run are left out of the boundary and the Check out a run view, and ringed in red on the map. Nothing has been changed: export the list, fix the pin (or the run number) at the source, and it clears on the next refresh.</p>';
+      r.rows.slice(0, 40).forEach(function(row, i){
+        var s = row.site || {}, has = !!(s.lat && s.lng && +s.lat && +s.lng);
+        html += '<button type="button" class="uxs-row' + (has ? '' : ' nofly') + '"' + (has ? ' data-uxs-go="' + i + '"' : '') + '>' +
+          '<span class="uxs-k">' + esc(row.problem) + '</span>' +
+          '<span class="uxs-a">' + esc(s.addressText || s.propId || s.siteId || '(no address)') + '</span>' +
+          '<span class="uxs-d">' + esc(label(row)) + ' · ' + esc(row.detail) + '</span>' + (has ? GO : '') + '</button>';
+      });
+      if (r.rows.length > 40) html += '<p class="uxs-more">+ ' + (r.rows.length - 40) + ' more in the export</p>';
+    }
+    body.innerHTML = html;
+    var ev = sheet.querySelector('[data-uxs="exp-view"]'); if (ev) ev.disabled = !r.rows.length;
+    note('');
+  }
+  function fly(i){
+    var row = report && report.rows[i]; if (!row) return;
+    var s = row.site, m = g('leafletMap'); if (!s || !m) return;
+    var lat = +s.lat, lng = +s.lng; if (!isFinite(lat) || !isFinite(lng)) return;
+    closeSheet();
+    try { if (typeof window.lbDisableGpsFollow === 'function') window.lbDisableGpsFollow(); } catch (e) {}
+    try { m.setView([lat, lng], 17, { animate: true }); } catch (e) {}
+  }
+  function openSheet(){
+    try { if (typeof window.lbCloseSettings === 'function') window.lbCloseSettings(); } catch (e) {}
+    try { if (typeof window.lbCloseLayers === 'function') window.lbCloseLayers(); } catch (e) {}
+    build();
+    sheet.querySelector('.uxs-body').innerHTML = '<p class="uxs-empty">Checking...</p>';
+    document.body.classList.add('ux-sheet-open'); sheet.classList.add('open');
+    setTimeout(function(){ try { fill(); } catch (e) { console.error(e); } }, 30);
+  }
+  function closeSheet(){
+    document.body.classList.remove('ux-sheet-open');
+    if (sheet) sheet.classList.remove('open');
+  }
+  window.uxOpenStraySheet = openSheet;
+  document.addEventListener('keydown', function(ev){ if (ev.key === 'Escape' && sheet && sheet.classList.contains('open')) closeSheet(); });
+
+  // ---- Edit & settings: a "Data problems" section on top ----------------------------------
+  function injectRow(){
+    var body = $('lbSettingsBody');
+    if (!body || body.querySelector('#uxStrayRow')) return;
+    var d = document.createElement('details'); d.className = 'lb-sect-details'; d.setAttribute('open', '');
+    d.innerHTML = '<summary class="lb-layers-sect">Data problems</summary>' +
+      '<button type="button" id="uxStrayRow" class="lb-layer-btn" data-uxs-open="1"><span class="lb-ico ux-warn-ico">' + WARN + '</span><span class="lb-label">Location problems: check and export</span></button>';
+    body.insertBefore(d, body.firstChild);
+  }
+  document.addEventListener('click', function(ev){
+    var t = ev.target && ev.target.closest ? ev.target.closest('#uxStrayRow') : null;
+    if (t) { ev.preventDefault(); ev.stopPropagation(); openSheet(); }
+  }, true);
+  var po = window.lbOpenSettings;
+  if (typeof po === 'function') window.lbOpenSettings = function(){ var r = po.apply(this, arguments); try { injectRow(); } catch (e) {} return r; };
+  // the Edit button in the side column calls the original by name; keep the panel current whenever it re-renders
+  setInterval(function(){ if (document.body.classList.contains('lb-settings-open')) try { injectRow(); } catch (e) {} }, 400);
+
+  // ---- keep the line under the title current -------------------------------------------
+  var prev = window.renderMapData;
+  if (typeof prev === 'function') {
+    window.renderMapData = function(){ var r = prev.apply(this, arguments); try { refreshChip(); } catch (e) {} return r; };
+  }
+  setInterval(function(){ try { refreshChip(); } catch (e) {} }, 1500);
+})();
+
+/* =====================================================================
    Zoom level: shown only while you are zooming. Tap + or - (or pinch) and
    the number you landed on appears beside the buttons, then fades.
    ===================================================================== */
@@ -27373,6 +27773,7 @@ html body.ux2 .modal-box .unified-filter-grid, html body.ux2 .modal-box .runs-gr
   function coverOpen(){
     var b = document.body, c = b.classList;
     if (c.contains('lb-layers-open') || c.contains('lb-settings-open') || c.contains('lb-drawer-open')) return true;
+    if (c.contains('ux-sheet-open')) return true;
     return !!document.querySelector('.modal-overlay.open');
   }
   function apply(z){
