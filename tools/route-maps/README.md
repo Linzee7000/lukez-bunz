@@ -15,6 +15,7 @@ mkdir -p work && curl -sL "<SCRIPT_URL>?download=csv" -o work/master.csv     # t
 # put the PDFs in the repo root (or set ROUTEMAP_PDF_DIR), then:
 venv/bin/python compare.py            # -> work/compare-results.json, work/routes-m.json (and a per-page report)
 venv/bin/python modes_export.py       # -> work/street-modes.json  (copy to data/street-modes.json)
+venv/bin/python extend_boundaries.py --write   # stretch recycling boundaries to cover the streets driven (rewrites data/run-boundaries.json, new `generated`)
 venv/bin/python cover.py              # how many of each run's houses sit inside its boundary (needs work/master.csv)
 ```
 
