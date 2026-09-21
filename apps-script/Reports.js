@@ -127,7 +127,7 @@ function recipients_(roles) {
 }
 
 function sendMail_(to, subject, body, attachments) {
-  var o = { to: to.join(","), subject: subject, body: body, name: (CONFIG.COMPANY || "Lukez Bunz") };
+  var o = { to: to.join(","), subject: subject, body: body, name: (CONFIG.SENDER_NAME || "Lukez Bunz") };
   if (attachments && attachments.length) o.attachments = attachments;
   MailApp.sendEmail(o);
 }
