@@ -12171,6 +12171,7 @@ window.addEventListener('DOMContentLoaded', async () => {
 
       if (cachedEdits) masterEditsLog = cachedEdits;
       if (cachedBorders) customRunBorders = cachedBorders;
+      window.lbBordersLoaded = true;
 
       // Restore the "unsynced" badge if edits were made last session but
       // the app never got a chance to sync them off the device.
@@ -12344,7 +12345,7 @@ window.addEventListener('DOMContentLoaded', async () => {
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
           body: 'payload=' + encodeURIComponent(JSON.stringify({ 
             edits: editsPayload,
-            boundaries: customRunBorders || {},
+            boundaries: (typeof window.lbBoundariesToPush === 'function' ? window.lbBoundariesToPush() : (customRunBorders || {})),
             reminders: typeof siteReminders !== 'undefined' ? siteReminders : {},
             streetLitterEdits: streetLitterOverrides || {}
           }))
@@ -13580,6 +13581,9 @@ window.addEventListener('DOMContentLoaded', async () => {
     const kx = 111320 * Math.cos(lat0 * Math.PI / 180), ky = 111320;
     const X = pp.map(p => p.lng * kx), Y = pp.map(p => p.lat * ky);
     const minX = Math.min(...X), maxX = Math.max(...X), minY = Math.min(...Y), maxY = Math.max(...Y);
+    // every house that was given (several can share one pin), so a big block of units far off counts for what it is
+    const allX = [], allY = [];
+    (pts || []).forEach(p => { const la = Number(p.lat), ln = Number(p.lng); if (Number.isFinite(la) && Number.isFinite(ln)) { allX.push(ln * kx); allY.push(la * ky); } });
     const C = Math.max(50, Math.max(maxX - minX, maxY - minY) / 350);       // cell size, m
     let result = null;
     for (const gapM of [100, 200, 400, 800]) {
@@ -13689,7 +13693,20 @@ window.addEventListener('DOMContentLoaded', async () => {
         if (len > cap) { ox2 *= cap / len; oy2 *= cap / len; }
         return [v[0] + ox2, v[1] + oy2];
       });
-      result = grown.map(p => ({ lat: p[1] / ky, lng: p[0] / kx }));
+      const cand = grown.map(p => ({ lat: p[1] / ky, lng: p[0] / kx }));
+      // a run made of two blobs that only touch at a corner can trace as two loops: if the outline leaves a real share of the
+      // houses outside (small far-off clusters are left out on purpose), widen the gap so the blobs join properly
+      let outside = 0;
+      for (let i = 0; i < allX.length; i++) {
+        let inn = false; const x = allX[i], y = allY[i];
+        for (let a = 0, b = grown.length - 1; a < grown.length; b = a++) {
+          const xa = grown[a][0], ya = grown[a][1], xb = grown[b][0], yb = grown[b][1];
+          if (((ya > y) !== (yb > y)) && (x < (xb - xa) * (y - ya) / (yb - ya) + xa)) inn = !inn;
+        }
+        if (!inn) outside++;
+      }
+      if (outside > Math.max(3, 0.04 * allX.length)) { if (gapM < 800) continue; break; }
+      result = cand;
       break;
     }
     if (!result) result = lbHullOf(pp);
@@ -13745,8 +13762,122 @@ window.addEventListener('DOMContentLoaded', async () => {
     } catch (e) { console.warn('boundary pull failed', e); return null; }
     finally { lbPulling = false; }
   };
-  setTimeout(() => { try { if (navigator.onLine !== false) window.lbPullBoundaries(); } catch (e) {} }, 7000);
+  // startup jobs wait until the saved boundaries have been read back from the device, or they could be written over
+  function lbWhenBordersLoaded(fn, delay) {
+    let tries = 0;
+    const t = setInterval(() => {
+      if (window.lbBordersLoaded) { clearInterval(t); setTimeout(fn, delay || 0); }
+      else if (++tries > 240) clearInterval(t);
+    }, 500);
+  }
+  lbWhenBordersLoaded(() => { try { if (navigator.onLine !== false) window.lbPullBoundaries(); } catch (e) {} }, 5000);
 
+
+  /* ---- Rebuild every run's boundary from its houses, and share the result ----------------------
+     window.lbRebuildAllBoundaries()  traces every run (Garbage / Recycling / FOGO, under the same keys the
+                                      map and the property-line builder use) with the tight outline, leaving out
+                                      houses whose pin is a data error. The boundaries it replaces are kept
+                                      (IndexedDB 'customRunBordersBackup') so it can be undone.
+     window.lbApplySharedBoundaries() loads data/run-boundaries.json from beside the app, once per version of that
+                                      file, so every device starts from the same set. A boundary drawn by hand on a
+                                      device after that is that device's own and is never overwritten by the same
+                                      version of the file.
+     Boundaries that came from a rebuild or the shared file are NOT sent to the sync script (they are already
+     shared, and a few hundred of them are far too big for it): only hand-made ones go up. */
+  const LB_SHARED_KEY = 'lbSharedBoundaryBase', LB_SHARED_VER = 'lbSharedBoundaryVer';
+  function lbSharedBase() { try { return JSON.parse(localStorage.getItem(LB_SHARED_KEY) || '{}') || {}; } catch (e) { return {}; } }
+  function lbRememberShared(keys) {
+    const b = lbSharedBase();
+    keys.forEach(k => { const v = customRunBorders[k]; if (Array.isArray(v) && v.length >= 3) b[k] = lbBorderHash(v); });
+    try { localStorage.setItem(LB_SHARED_KEY, JSON.stringify(b)); } catch (e) {}
+  }
+  window.lbBoundariesToPush = function() {
+    const b = lbSharedBase(), out = {};
+    Object.keys(customRunBorders || {}).forEach(k => {
+      const v = customRunBorders[k]; if (!Array.isArray(v) || v.length < 3) return;
+      if (b[k] && b[k] === lbBorderHash(v)) return;
+      out[k] = v;
+    });
+    return out;
+  };
+  const lbR5 = ring => ring.map(p => [Math.round(p.lat * 1e5) / 1e5, Math.round(p.lng * 1e5) / 1e5]);
+  // pure part: what the rebuild would save. { boundaries: {key: ring}, aliases: {shortKey: key}, built, skipped }
+  window.lbBuildAllBoundaries = async function(onProgress) {
+    const groups = [];
+    ['Garbage', 'Recycling', 'FOGO'].forEach(st => { try { window.lbRunGroups(st).forEach(g => groups.push(g)); } catch (e) { console.warn(e); } });
+    const boundaries = {}, aliases = {}; let built = 0, skipped = 0, left = 0;
+    for (let i = 0; i < groups.length; i++) {
+      const g = groups[i], strays = lbStraySites(g.sites), pts = [];
+      g.sites.forEach(s => { if (strays.has(s)) { left++; return; } const p = gps(s.lat, s.lng); if (p) pts.push(p); });
+      if (pts.length < 3) { skipped++; continue; }
+      const ring = lbR5(window.lbTightOutline(pts));
+      if (ring.length < 3) { skipped++; continue; }
+      boundaries[g.borderKey] = ring; built++;
+      (g.extraKeys || []).forEach(k => { aliases[k] = g.borderKey; });
+      if (i % 4 === 3) { if (onProgress) onProgress(i + 1, groups.length); await new Promise(r => setTimeout(r, 0)); }
+    }
+    return { boundaries, aliases, built, skipped, total: groups.length, leftOut: left };
+  };
+  function lbPutBoundaries(res) {
+    let put = 0;
+    Object.keys(res.boundaries).forEach(k => { customRunBorders[k] = res.boundaries[k].map(p => p.slice()); put++; });
+    Object.keys(res.aliases).forEach(k => { const src = res.boundaries[res.aliases[k]]; if (src) { customRunBorders[k] = src.map(p => p.slice()); put++; } });
+    lbRememberShared(Object.keys(res.boundaries).concat(Object.keys(res.aliases)));
+    return put;
+  }
+  async function lbBackupBoundaries() { try { await saveToDB('customRunBordersBackup', JSON.parse(JSON.stringify(customRunBorders || {}))); } catch (e) {} }
+  window.lbRebuildAllBoundaries = async function(onProgress) {
+    await lbBackupBoundaries();
+    const res = await window.lbBuildAllBoundaries(onProgress);
+    if (!res.built) return res;
+    res.put = lbPutBoundaries(res);
+    try { await saveToDB('customRunBorders', customRunBorders); } catch (e) {}
+    try { if (typeof activeTab !== 'undefined' && activeTab === 'map') renderMapData(); } catch (e) {}
+    return res;
+  };
+  window.lbHasBoundaryBackup = async function() {
+    try { const b = await loadFromDB('customRunBordersBackup'); return !!(b && typeof b === 'object'); } catch (e) { return false; }
+  };
+  window.lbUndoBoundaryRebuild = async function() {
+    let b = null; try { b = await loadFromDB('customRunBordersBackup'); } catch (e) {}
+    if (!b || typeof b !== 'object') return null;
+    Object.keys(customRunBorders).forEach(k => delete customRunBorders[k]);
+    Object.keys(b).forEach(k => { customRunBorders[k] = b[k]; });
+    try { localStorage.removeItem(LB_SHARED_KEY); localStorage.removeItem(LB_SHARED_VER); } catch (e) {}
+    try { await saveToDB('customRunBorders', customRunBorders); await saveToDB('customRunBordersBackup', null); } catch (e) {}
+    try { if (typeof activeTab !== 'undefined' && activeTab === 'map') renderMapData(); } catch (e) {}
+    return Object.keys(b).length;
+  };
+  let lbSharedBusy = false;
+  window.lbApplySharedBoundaries = async function(opts) {
+    opts = opts || {};
+    if (lbSharedBusy) return null;
+    lbSharedBusy = true;
+    try {
+      const r = await fetch('data/run-boundaries.json', { cache: 'no-cache' });
+      if (!r.ok) return { none: true };
+      const f = await r.json();
+      if (!f || typeof f.boundaries !== 'object') return { none: true };
+      const ver = String(f.generated || f.version || '');
+      let seen = ''; try { seen = localStorage.getItem(LB_SHARED_VER) || ''; } catch (e) {}
+      if (!opts.force && ver && seen === ver) return { same: true, version: ver };
+      const al = f.aliases || {}, valid = { boundaries: {}, aliases: {} };
+      Object.keys(f.boundaries).forEach(k => { const v = f.boundaries[k]; if (Array.isArray(v) && v.length >= 3) valid.boundaries[k] = v; });
+      Object.keys(al).forEach(k => { if (valid.boundaries[al[k]]) valid.aliases[k] = al[k]; });
+      const keys = Object.keys(valid.boundaries).concat(Object.keys(valid.aliases));
+      const diff = keys.filter(k => { const src = valid.boundaries[k] || valid.boundaries[valid.aliases[k]]; return lbBorderHash(customRunBorders[k]) !== lbBorderHash(src); });
+      if (diff.length) {
+        await lbBackupBoundaries();
+        lbPutBoundaries(valid);
+        try { await saveToDB('customRunBorders', customRunBorders); } catch (e) {}
+        try { if (typeof activeTab !== 'undefined' && activeTab === 'map') renderMapData(); } catch (e) {}
+      } else { lbPutBoundaries(valid); }
+      try { localStorage.setItem(LB_SHARED_VER, ver); } catch (e) {}
+      return { applied: diff.length, runs: Object.keys(valid.boundaries).length, version: ver };
+    } catch (e) { return null; }
+    finally { lbSharedBusy = false; }
+  };
+  lbWhenBordersLoaded(() => { try { window.lbApplySharedBoundaries().then(r => { if (r && r.applied) window.dispatchEvent(new CustomEvent('lb-shared-boundaries', { detail: r })); }); } catch (e) {} }, 1500);
   function getRecordsArray() {
     if (typeof siteRecords !== 'undefined' && Array.isArray(siteRecords) && siteRecords.length) return siteRecords;
     if (Array.isArray(window.siteRecords) && window.siteRecords.length) return window.siteRecords;
@@ -26086,6 +26217,8 @@ html body.ux2 #uxStraySheet .uxs-btn:active{background:var(--ux-s3) !important}
 @media (min-width: 720px){html body.ux2 #uxStraySheet .uxs-panel{left:50% !important;right:auto !important;bottom:50% !important;width:560px !important;max-height:76vh !important;transform:translate(-50%, 50%)}}
 html body.ux2 .ux-warn-ico{color:var(--ux-bad) !important;display:inline-flex;align-items:center !important;justify-content:center !important}
 html body.ux2 .bin-map-marker-icon.ux-stray .bin-dot-inner{border-color:#ff453a !important;box-shadow:0 0 0 3px rgba(255,69,58,.55), 0 0 0 5px rgba(255,255,255,.85) !important}
+html body.ux2 #uxToast{position:fixed !important;left:8px !important;right:8px !important;top:calc(env(safe-area-inset-top, 0px) + 92px) !important;z-index:20500 !important;display:none;padding:10px 12px !important;background:var(--ux-s2, #1a222c) !important;color:var(--ux-text) !important;border:0 !important;border-left:3px solid var(--ui-accent, #f5c518) !important;font:600 13px/1.35 system-ui, -apple-system, 'Segoe UI', sans-serif !important;box-shadow:none !important;border-radius:0 !important;max-width:420px !important;bottom:auto !important;height:auto !important;min-height:0 !important;width:auto !important;inset-block-end:auto !important}
+html body.ux2 #uxToast.on{display:block !important}
 </style>
 <script id="ux2-script">
 /* UX2 behaviour glue. Everything here is additive: it calls the existing
@@ -27693,6 +27826,7 @@ html body.ux2 .bin-map-marker-icon.ux-stray .bin-dot-inner{border-color:#ff453a 
   document.addEventListener('keydown', function(ev){ if (ev.key === 'Escape' && sheet && sheet.classList.contains('open')) closeSheet(); });
 
   // ---- Edit & settings: a "Data" section on top -----------------------------------------
+  var I_BUILD = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true"><path d="M4 8l5-4 6 3 5-3v13l-5 3-6-3-5 4V8z"/><path d="M9 4v13M15 7v13"/></svg>';
   var I_SYNC = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true"><path d="M20 8A8 8 0 0 0 5.5 6M4 4v4h4M4 16a8 8 0 0 0 14.5 2M20 20v-4h-4"/></svg>';
   function row(id, ico, label){ return '<button type="button" id="' + id + '" class="lb-layer-btn"><span class="lb-ico ux-warn-ico">' + ico + '</span><span class="lb-label">' + label + '</span></button>'; }
   function injectRow(){
@@ -27701,12 +27835,15 @@ html body.ux2 .bin-map-marker-icon.ux-stray .bin-dot-inner{border-color:#ff453a 
     var d = document.createElement('details'); d.className = 'lb-sect-details'; d.setAttribute('open', '');
     d.innerHTML = '<summary class="lb-layers-sect">Data</summary>' +
       row('uxStrayRow', WARN, 'Location problems: check and export') +
+      row('uxBdRebuild', I_BUILD, 'Rebuild all run boundaries from the houses') +
+      row('uxBdUndo', I_SYNC, 'Undo the last rebuild') +
       row('uxBdPull', I_SYNC, 'Get run boundaries from the sync') +
       row('uxBdExport', DL, 'Export run boundaries (file)') +
       row('uxBdImport', GO, 'Import run boundaries (file)');
     body.insertBefore(d, body.firstChild);
     var wrap = d.querySelector('#uxBdPull'); if (wrap) wrap.querySelector('.ux-warn-ico').style.color = 'var(--ux-text-2)';
-    ['uxBdExport', 'uxBdImport'].forEach(function(i){ var e = d.querySelector('#' + i); if (e) e.querySelector('.ux-warn-ico').style.color = 'var(--ux-text-2)'; });
+    ['uxBdExport', 'uxBdImport', 'uxBdRebuild', 'uxBdUndo'].forEach(function(i){ var e = d.querySelector('#' + i); if (e) e.querySelector('.ux-warn-ico').style.color = 'var(--ux-text-2)'; });
+    var u = d.querySelector('#uxBdUndo'); if (u) { u.style.display = 'none'; if (window.lbHasBoundaryBackup) window.lbHasBoundaryBackup().then(function(y){ if (y && u.isConnected) u.style.display = ''; }); }
   }
   function alertMsg(m){ try { return (window.customAlert || alert)(m); } catch (e) {} }
   function borders(){ return g('customRunBorders') || {}; }
@@ -27719,6 +27856,25 @@ html body.ux2 .bin-map-marker-icon.ux-stray .bin-dot-inner{border-color:#ff453a 
     if (!r) { alertMsg('Could not reach the sync. Check the connection and try again.'); return; }
     alertMsg('The sync holds ' + r.server + ' run boundar' + (r.server === 1 ? 'y' : 'ies') + '. Added ' + r.added + ' and updated ' + r.updated + ' here. This device now has ' + countB(borders()) + '.' +
       (r.server < countB(borders()) ? '\n\nThe sync holds fewer than this device does: run Sync once to send them, and if that number does not go up, use Export / Import (file) to share them.' : ''));
+  }
+  async function rebuildB(){
+    var ok = window.customConfirm ? await window.customConfirm('Rebuild the boundary of every run (Garbage, Recycling, FOGO) from its houses? Houses with a wrong-looking location are left out. This replaces the boundaries on this device; the old ones are kept so you can undo it.') : true;
+    if (!ok) return;
+    var el = $('uxBdRebuild'), lab = el && el.querySelector('.lb-label');
+    if (lab) lab.textContent = 'Rebuilding...';
+    var res = null;
+    try { res = await window.lbRebuildAllBoundaries(function(i, n){ if (lab) lab.textContent = 'Rebuilding ' + i + ' of ' + n + '...'; }); } catch (e) { console.error(e); }
+    if (lab) lab.textContent = 'Rebuild all run boundaries from the houses';
+    var u = $('uxBdUndo'); if (u && res && res.built) u.style.display = '';
+    if (!res || !res.built) { alertMsg('Nothing was rebuilt: no runs with enough house locations were found.'); return; }
+    alertMsg('Rebuilt ' + res.built + ' run boundaries from ' + res.total + ' runs' + (res.skipped ? ' (' + res.skipped + ' had too few houses)' : '') + '. ' + res.leftOut + ' houses with a wrong-looking location were left out. Use Export run boundaries (file) to share the set.');
+  }
+  async function undoB(){
+    var ok = window.customConfirm ? await window.customConfirm('Put back the run boundaries this device had before the last rebuild or shared update?') : true;
+    if (!ok) return;
+    var n = await window.lbUndoBoundaryRebuild();
+    var u = $('uxBdUndo'); if (u) u.style.display = 'none';
+    alertMsg(n == null ? 'There is nothing to undo.' : 'Put back ' + n + ' run boundaries.');
   }
   function exportB(){
     var b = borders(), out = {}; Object.keys(b).forEach(function(k){ if (Array.isArray(b[k]) && b[k].length >= 3) out[k] = b[k]; });
@@ -27746,15 +27902,27 @@ html body.ux2 .bin-map-marker-icon.ux-stray .bin-dot-inner{border-color:#ff453a 
     document.body.appendChild(inp); inp.click(); setTimeout(function(){ try { inp.remove(); } catch (e) {} }, 60000);
   }
   document.addEventListener('click', function(ev){
-    var t = ev.target && ev.target.closest ? ev.target.closest('#uxStrayRow,#uxBdPull,#uxBdExport,#uxBdImport') : null;
+    var t = ev.target && ev.target.closest ? ev.target.closest('#uxStrayRow,#uxBdPull,#uxBdExport,#uxBdImport,#uxBdRebuild,#uxBdUndo') : null;
     if (!t) return;
     ev.preventDefault(); ev.stopPropagation();
-    if (t.id === 'uxStrayRow') openSheet(); else if (t.id === 'uxBdPull') pullB(); else if (t.id === 'uxBdExport') exportB(); else importB();
+    if (t.id === 'uxStrayRow') openSheet(); else if (t.id === 'uxBdPull') pullB(); else if (t.id === 'uxBdRebuild') rebuildB(); else if (t.id === 'uxBdUndo') undoB(); else if (t.id === 'uxBdExport') exportB(); else importB();
   }, true);
   var po = window.lbOpenSettings;
   if (typeof po === 'function') window.lbOpenSettings = function(){ var r = po.apply(this, arguments); try { injectRow(); } catch (e) {} return r; };
   // the Edit button in the side column calls the original by name; keep the panel current whenever it re-renders
   setInterval(function(){ if (document.body.classList.contains('lb-settings-open')) try { injectRow(); } catch (e) {} }, 400);
+
+  function toast(msg){
+    var t = $('uxToast');
+    if (!t) { t = document.createElement('div'); t.id = 'uxToast'; t.setAttribute('aria-live', 'polite'); document.body.appendChild(t); }
+    t.textContent = msg; t.classList.add('on');
+    clearTimeout(t.__t); t.__t = setTimeout(function(){ t.classList.remove('on'); }, 7000);
+    t.onclick = function(){ t.classList.remove('on'); };
+  }
+  window.addEventListener('lb-shared-boundaries', function(ev){
+    var d = ev && ev.detail || {};
+    try { toast('Run boundaries updated from the shared set (' + (d.applied || 0) + ' changed). Undo is in Edit & settings > Data.'); } catch (e) {}
+  });
 
   // ---- keep the line under the title current -------------------------------------------
   var prev = window.renderMapData;
