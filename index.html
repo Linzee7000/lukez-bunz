@@ -13773,6 +13773,220 @@ window.addEventListener('DOMContentLoaded', async () => {
   lbWhenBordersLoaded(() => { try { if (navigator.onLine !== false) window.lbPullBoundaries(); } catch (e) {} }, 5000);
 
 
+  /* ---- Run boundaries that meet -------------------------------------------------------------------
+     Every house belongs to exactly one run per stream, so the runs of a stream tile the service area and
+     each run's edge is the edge of its neighbour. This works that out from the houses:
+       1. every ~15 m square of ground goes to the run of the NEAREST house (so two runs meet half way between
+          their nearest houses: the middle of the road, or between two back-to-back properties);
+       2. ground more than about 60 m from the nearest house is left out (parks, bush, water) - further out where
+          the houses are far apart (a country road: three times their spacing, up to 220 m) - unless it lies between
+          two runs' houses less than 140 m away, where the runs are joined instead of leaving a gap;
+       3. a piece of a run with fewer than 5 houses is given to the run around it (a pin on the wrong side of a line);
+       4. the lines between runs are traced ONCE and simplified once, so the two runs share exactly the same
+          points, and each run's ring is put together from those shared lines.
+     lbTessellate(groups) -> { rings: { key: [ring, ring, ...] } }   (first ring = the run's main part,
+     the rest are separate pieces); a ring is [[lat, lng], ...]. groups: [{ key, pts: [{lat, lng}] }]. */
+  window.lbTessellate = function lbTessellate(groups, o) {
+    o = o || {};
+    const D_OUT = o.outM || 60, D_MEET = o.meetM || 140, MIN_H = o.minHouses || 5, TOL = o.tol || 0.8, TOL_OUT = o.tolOut || 2;
+    let cnt = 0, lat0 = 0;
+    groups.forEach(g => g.pts.forEach(p => { lat0 += p.lat; cnt++; }));
+    if (!cnt) return { rings: {}, stats: { cells: 0 } };
+    lat0 /= cnt;
+    const kx = 111320 * Math.cos(lat0 * Math.PI / 180), ky = 111320;
+    let minX = 1e18, minY = 1e18, maxX = -1e18, maxY = -1e18;
+    groups.forEach(g => g.pts.forEach(p => { const x = p.lng * kx, y = p.lat * ky; if (x < minX) minX = x; if (x > maxX) maxX = x; if (y < minY) minY = y; if (y > maxY) maxY = y; }));
+    let C = o.cell || 15;
+    for (;;) { const w = (maxX - minX + 2 * (D_MEET + 2 * C)) / C, h = (maxY - minY + 2 * (D_MEET + 2 * C)) / C; if (w * h <= (o.maxCells || 9e6)) break; C *= 1.25; }
+    const pad = D_MEET + 2 * C, ox = minX - pad, oy = minY - pad;
+    const W = Math.ceil((maxX - minX + 2 * pad) / C) + 1, H = Math.ceil((maxY - minY + 2 * pad) / C) + 1, N = W * H;
+    if (groups.length > 65000) throw new Error('too many runs');
+    const lab = new Uint16Array(N), bestD = new Uint16Array(N).fill(65535), secD = new Uint16Array(N).fill(65535), reach = new Uint8Array(N);
+    // how far each house 'owns' ground: 60 m in a street, more where its neighbours are far away
+    const HX = [], HY = [], HG = [];
+    groups.forEach((g, gi) => g.pts.forEach(p => { HX.push(p.lng * kx); HY.push(p.lat * ky); HG.push(gi); }));
+    const NH = HX.length, BK = 250, hb = new Map(), bkey = (bx, by) => bx * 100003 + by;
+    for (let i = 0; i < NH; i++) { const k = bkey(Math.floor(HX[i] / BK), Math.floor(HY[i] / BK)); let a = hb.get(k); if (!a) hb.set(k, a = []); a.push(i); }
+    const hreach = new Float32Array(NH), R_MAX = o.reachMaxM || 220;
+    for (let i = 0; i < NH; i++) {
+      const bx = Math.floor(HX[i] / BK), by = Math.floor(HY[i] / BK); let d1 = 1e9, d2 = 1e9, d3 = 1e9;
+      for (let ring = 1; ring <= 4; ring++) {
+        d1 = d2 = d3 = 1e9;
+        for (let ax = -ring; ax <= ring; ax++) for (let ay = -ring; ay <= ring; ay++) {
+          const a = hb.get(bkey(bx + ax, by + ay)); if (!a) continue;
+          for (let q = 0; q < a.length; q++) {
+            const j = a[q]; if (j === i) continue;
+            const d = Math.hypot(HX[j] - HX[i], HY[j] - HY[i]);
+            if (d < d3) { if (d < d2) { d3 = d2; if (d < d1) { d2 = d1; d1 = d; } else d2 = d; } else d3 = d; }
+          }
+        }
+        if (d3 <= ring * BK) break;                                       // the 3 nearest are certainly inside the searched square
+      }
+      hreach[i] = Math.max(D_OUT, Math.min(R_MAX, 1.5 * d3));
+    }
+    // 1. nearest house wins each cell (and remember the nearest house of a DIFFERENT run)
+    let hi = 0;
+    groups.forEach((g, gi) => {
+      const id = gi + 1;
+      g.pts.forEach(p => {
+        const rh = hreach[hi++], rs = Math.max(D_MEET, rh), R = Math.ceil(rs / C) + 1, M2 = rs * rs, RH2 = rh * rh;
+        const cx = (p.lng * kx - ox) / C, cy = (p.lat * ky - oy) / C, ix = Math.floor(cx), iy = Math.floor(cy);
+        for (let dy = -R; dy <= R; dy++) {
+          const y = iy + dy; if (y < 0 || y >= H) continue;
+          const ddy = (y + 0.5 - cy) * C, row = y * W;
+          for (let dx = -R; dx <= R; dx++) {
+            const x = ix + dx; if (x < 0 || x >= W) continue;
+            const ddx = (x + 0.5 - cx) * C, d2 = ddx * ddx + ddy * ddy;
+            if (d2 > M2) continue;
+            const dq = Math.round(Math.sqrt(d2) * 4), c = row + x, b = bestD[c], l = lab[c];
+            if (dq < b) { if (l !== id && l !== 0) secD[c] = b; bestD[c] = dq; lab[c] = id; reach[c] = d2 <= RH2 ? 1 : 0; }
+            else if (l !== id && dq < secD[c]) secD[c] = dq;
+          }
+        }
+      });
+    });
+    // 2. keep what is near a house, or between two runs
+    const MEET4 = D_MEET * 4;
+    let cells = 0;
+    for (let c = 0; c < N; c++) {
+      if (!lab[c]) continue;
+      const b = bestD[c];
+      if (reach[c] || (b <= MEET4 && secD[c] <= MEET4)) cells++; else lab[c] = 0;
+    }
+    // 3. pieces with almost no houses go to the run around them
+    const comp = bestD; comp.fill(0);                       // reuse the array
+    const csize = [0], clab = [0]; let nc = 0; const st = [];
+    for (let s = 0; s < N; s++) {
+      if (!lab[s] || comp[s]) continue;
+      const L = lab[s], id = nc < 65534 ? ++nc : 65535; if (id < 65535) { csize.push(0); clab.push(L); }
+      comp[s] = id; st.push(s); let sz = 0;
+      while (st.length) {
+        const c = st.pop(); sz++;
+        const x = c % W;
+        if (x > 0 && lab[c - 1] === L && !comp[c - 1]) { comp[c - 1] = id; st.push(c - 1); }
+        if (x < W - 1 && lab[c + 1] === L && !comp[c + 1]) { comp[c + 1] = id; st.push(c + 1); }
+        if (c >= W && lab[c - W] === L && !comp[c - W]) { comp[c - W] = id; st.push(c - W); }
+        if (c + W < N && lab[c + W] === L && !comp[c + W]) { comp[c + W] = id; st.push(c + W); }
+      }
+      if (id < 65535) csize[id] = sz;
+    }
+    const chouses = new Int32Array(nc + 1);
+    groups.forEach((g, gi) => g.pts.forEach(p => {
+      const x = Math.floor((p.lng * kx - ox) / C), y = Math.floor((p.lat * ky - oy) / C), c = y * W + x;
+      if (x >= 0 && x < W && y >= 0 && y < H && comp[c] && lab[c] === gi + 1 && comp[c] <= nc) chouses[comp[c]]++;
+    }));
+    const small = new Map();
+    for (let c = 0; c < N; c++) { const k = comp[c]; if (k && k <= nc && chouses[k] < MIN_H) { let a = small.get(k); if (!a) small.set(k, a = []); a.push(c); } }
+    let absorbed = 0;
+    small.forEach((arr, k) => {
+      const tally = new Map(), L = clab[k];
+      arr.forEach(c => { const x = c % W; [x > 0 ? c - 1 : -1, x < W - 1 ? c + 1 : -1, c >= W ? c - W : -1, c + W < N ? c + W : -1].forEach(q => { if (q >= 0 && lab[q] && lab[q] !== L && comp[q] !== k) tally.set(lab[q], (tally.get(lab[q]) || 0) + 1); }); });
+      let best = 0, bn = 0; tally.forEach((v, l) => { if (v > bn) { bn = v; best = l; } });
+      arr.forEach(c => { lab[c] = best; }); absorbed++;
+    });
+    // 4. the lines between runs, traced once
+    const V = W + 1;
+    const Ep = [], Eq = [], El = [], Er = [], adj = new Map();
+    const addE = (p, q, l, r) => {
+      const e = Ep.length; Ep.push(p); Eq.push(q); El.push(l); Er.push(r);
+      let a = adj.get(p); if (!a) adj.set(p, a = []); a.push(e);
+      a = adj.get(q); if (!a) adj.set(q, a = []); a.push(e);
+    };
+    for (let y = 0; y < H; y++) {
+      const row = y * W;
+      for (let x = 0; x <= W; x++) {
+        const a = x > 0 ? lab[row + x - 1] : 0, b = x < W ? lab[row + x] : 0;
+        if (a !== b) addE(y * V + x, (y + 1) * V + x, a, b);          // going north: west cell on the left, east cell on the right
+      }
+    }
+    for (let y = 0; y <= H; y++) {
+      const row = y * W;
+      for (let x = 0; x < W; x++) {
+        const below = y > 0 ? lab[row - W + x] : 0, above = y < H ? lab[row + x] : 0;
+        if (below !== above) addE(y * V + x, y * V + x + 1, above, below); // going east: the cell above on the left
+      }
+    }
+    const nE = Ep.length, used = new Uint8Array(nE), chains = [];
+    const walk = (v0, e0) => {
+      const fwd = Ep[e0] === v0, l = fwd ? El[e0] : Er[e0], r = fwd ? Er[e0] : El[e0];
+      const path = [v0]; let cur = v0, e = e0;
+      for (;;) {
+        used[e] = 1; const nx = Ep[e] === cur ? Eq[e] : Ep[e]; path.push(nx); cur = nx;
+        const a = adj.get(cur); if (a.length !== 2) break;
+        const ne = a[0] === e ? a[1] : a[0]; if (used[ne]) break; e = ne;
+      }
+      chains.push({ v: path, l, r });
+    };
+    adj.forEach((a, v) => { if (a.length !== 2) a.forEach(e => { if (!used[e]) walk(v, e); }); });
+    for (let e = 0; e < nE; e++) if (!used[e]) walk(Ep[e], e);
+    // simplify each chain once (Douglas-Peucker, ends fixed)
+    const xy = v => [v % V, (v - v % V) / V];
+    const dpIdx = (P, tol) => {
+      const keep = new Uint8Array(P.length); keep[0] = 1; keep[P.length - 1] = 1;
+      const stk = [[0, P.length - 1]];
+      while (stk.length) {
+        const [a, b] = stk.pop(); if (b - a < 2) continue;
+        const ax = P[a][0], ay = P[a][1], dx = P[b][0] - ax, dy = P[b][1] - ay, L = Math.hypot(dx, dy);
+        let dm = -1, im = -1;
+        for (let i = a + 1; i < b; i++) { const d = L < 1e-9 ? Math.hypot(P[i][0] - ax, P[i][1] - ay) : Math.abs(dy * (P[i][0] - ax) - dx * (P[i][1] - ay)) / L; if (d > dm) { dm = d; im = i; } }
+        if (dm > tol) { keep[im] = 1; stk.push([a, im], [im, b]); }
+      }
+      return keep;
+    };
+    chains.forEach(ch => {
+      const vs = ch.v, P = vs.map(xy);
+      if (vs.length < 3) { ch.s = vs; return; }
+      const TL = (ch.l && ch.r) ? TOL : TOL_OUT;                            // a line between two runs stays close; an outer edge (60 m from the houses) can be looser
+      if (vs[0] === vs[vs.length - 1]) {                                   // a closed loop: split it at the far point
+        let fi = 1, fd = -1; for (let i = 1; i < P.length - 1; i++) { const d = Math.hypot(P[i][0] - P[0][0], P[i][1] - P[0][1]); if (d > fd) { fd = d; fi = i; } }
+        const k1 = dpIdx(P.slice(0, fi + 1), TL), k2 = dpIdx(P.slice(fi), TL), out = [];
+        for (let i = 0; i <= fi; i++) if (k1[i]) out.push(vs[i]);
+        for (let i = fi + 1; i < vs.length; i++) if (k2[i - fi]) out.push(vs[i]);
+        ch.s = out;
+      } else { const k = dpIdx(P, TL); ch.s = vs.filter((v, i) => k[i]); }
+    });
+    // rings per run: chains oriented with the run on the left, joined end to start
+    const byLab = new Map();
+    chains.forEach((ch, ci) => {
+      if (ch.l) { let a = byLab.get(ch.l); if (!a) byLab.set(ch.l, a = []); a.push({ ci, rev: false }); }
+      if (ch.r) { let a = byLab.get(ch.r); if (!a) byLab.set(ch.r, a = []); a.push({ ci, rev: true }); }
+    });
+    const rings = {}; let nring = 0, nfail = 0;
+    const toLL = v => { const [x, y] = xy(v); return [Math.round(((oy + y * C) / ky) * 1e5) / 1e5, Math.round(((ox + x * C) / kx) * 1e5) / 1e5]; };
+    byLab.forEach((list, L) => {
+      const seq = c => c.rev ? chains[c.ci].s.slice().reverse() : chains[c.ci].s;
+      const starts = new Map();
+      list.forEach(c => { c.pts = seq(c); const a = starts.get(c.pts[0]); if (a) a.push(c); else starts.set(c.pts[0], [c]); c.used = false; });
+      const out = [];
+      list.forEach(first => {
+        if (first.used) return;
+        first.used = true; let ring = first.pts.slice(), cur = first, guard = 0;
+        for (;;) {
+          const end = cur.pts[cur.pts.length - 1];
+          let cands = (starts.get(end) || []).filter(c => !c.used);
+          if (end === first.pts[0]) cands = cands.concat([first]);
+          if (!cands.length) break;
+          let pick = cands[0];
+          if (cands.length > 1) {                                            // pinched: keep to the run's own side (left-most turn)
+            const pv = cur.pts[cur.pts.length - 2], [px, py] = xy(pv), [ex, ey] = xy(end); const ix = ex - px, iy = ey - py; let sc = -1e9;
+            cands.forEach(c => { const [nx, ny] = xy(c.pts[1]); const fx = nx - ex, fy = ny - ey; const cr = (ix * fy - iy * fx) / (Math.hypot(ix, iy) * Math.hypot(fx, fy) || 1); if (cr > sc) { sc = cr; pick = c; } });
+          }
+          if (pick === first) break;
+          pick.used = true; ring = ring.concat(pick.pts.slice(1)); cur = pick;
+          if (++guard > list.length + 5) break;
+        }
+        if (ring[ring.length - 1] === ring[0]) ring.pop(); else { nfail++; return; }
+        if (ring.length < 3) return;
+        let a = 0; const P = ring.map(xy);
+        for (let i = 0; i < P.length; i++) { const p = P[i], q = P[(i + 1) % P.length]; a += p[0] * q[1] - q[0] * p[1]; }
+        if (a > 0) out.push({ a, ring });                                   // counter-clockwise with the run on the left = an outer edge; the rest are holes
+      });
+      out.sort((p, q) => q.a - p.a);
+      if (out.length) { rings[groups[L - 1].key] = out.map(o2 => o2.ring.map(toLL)); nring += out.length; }
+    });
+    return { rings, stats: { cells, C, W, H, absorbed, chains: chains.length, edges: nE, rings: nring, failed: nfail } };
+  };
+
   /* ---- Rebuild every run's boundary from its houses, and share the result ----------------------
      window.lbRebuildAllBoundaries()  traces every run (Garbage / Recycling / FOGO, under the same keys the
                                       map and the property-line builder use) with the tight outline, leaving out
@@ -13801,28 +14015,63 @@ window.addEventListener('DOMContentLoaded', async () => {
     return out;
   };
   const lbR5 = ring => ring.map(p => [Math.round(p.lat * 1e5) / 1e5, Math.round(p.lng * 1e5) / 1e5]);
-  // pure part: what the rebuild would save. { boundaries: {key: ring}, aliases: {shortKey: key}, built, skipped }
+  // pure part: what the rebuild would save. { boundaries: {key: ring}, extras: {key: [ring...]}, aliases: {shortKey: key}, built, ... }
   window.lbBuildAllBoundaries = async function(onProgress) {
-    const groups = [];
-    ['Garbage', 'Recycling', 'FOGO'].forEach(st => { try { window.lbRunGroups(st).forEach(g => groups.push(g)); } catch (e) { console.warn(e); } });
-    const boundaries = {}, aliases = {}; let built = 0, skipped = 0, left = 0;
-    for (let i = 0; i < groups.length; i++) {
-      const g = groups[i], strays = lbStraySites(g.sites), pts = [];
-      g.sites.forEach(s => { if (strays.has(s)) { left++; return; } const p = gps(s.lat, s.lng); if (p) pts.push(p); });
-      if (pts.length < 3) { skipped++; continue; }
-      const ring = lbR5(window.lbTightOutline(pts));
-      if (ring.length < 3) { skipped++; continue; }
-      boundaries[g.borderKey] = ring; built++;
-      (g.extraKeys || []).forEach(k => { aliases[k] = g.borderKey; });
-      if (i % 4 === 3) { if (onProgress) onProgress(i + 1, groups.length); await new Promise(r => setTimeout(r, 0)); }
+    const boundaries = {}, extras = {}, aliases = {}; let built = 0, skipped = 0, total = 0, left = 0, failed = 0;
+    const streams = ['Garbage', 'Recycling', 'FOGO'];
+    for (let si = 0; si < streams.length; si++) {
+      let groups = [];
+      try { groups = window.lbRunGroups(streams[si]); } catch (e) { console.warn(e); }
+      total += groups.length;
+      const items = [];
+      groups.forEach(g => {
+        const strays = lbStraySites(g.sites), pts = [];
+        g.sites.forEach(s => { if (strays.has(s)) { left++; return; } const p = gps(s.lat, s.lng); if (p) pts.push(p); });
+        if (pts.length < 3) { skipped++; return; }
+        items.push({ key: g.borderKey, pts, g });
+      });
+      if (onProgress) onProgress(si, streams.length, streams[si]);
+      await new Promise(r => setTimeout(r, 0));
+      let res = null;
+      try { res = window.lbTessellate(items); } catch (e) { console.warn('tessellate failed', streams[si], e); failed++; }
+      if (!res) continue;
+      items.forEach(it => {
+        const rings = res.rings[it.key];
+        if (!rings || !rings.length) { skipped++; return; }
+        boundaries[it.key] = rings[0]; built++;
+        if (rings.length > 1) extras[it.key] = rings.slice(1);
+        (it.g.extraKeys || []).forEach(k => { aliases[k] = it.key; });
+      });
+      await new Promise(r => setTimeout(r, 0));
     }
-    return { boundaries, aliases, built, skipped, total: groups.length, leftOut: left };
+    return { boundaries, extras, aliases, built, skipped, total, leftOut: left, failed };
   };
+  // extra pieces of a run (a run in two parts): kept beside the boundaries, drawn with them while the boundary is unchanged
+  window.lbBoundaryExtras = window.lbBoundaryExtras || {};
+  window.lbExtraRings = function(key) {
+    const ex = window.lbBoundaryExtras && window.lbBoundaryExtras[key]; if (!ex || !ex.length) return [];
+    const b = lbSharedBase(); const cur = customRunBorders && customRunBorders[key];
+    return (b[key] && cur && lbBorderHash(cur) === b[key]) ? ex : [];
+  };
+  // The property-line builder keeps the separate pieces of a run in its own store; a boundary replaced here must not keep
+  // drawing the old pieces on top of the new one.
+  async function lbClearParcelParts(keys) {
+    try {
+      const live = window.lbParcels && window.lbParcels._t && window.lbParcels._t.getExtras && window.lbParcels._t.getExtras();
+      let d = null; try { d = await loadFromDB('runOutlineExtras'); } catch (e) {}
+      let n = 0;
+      [live, d].forEach(o => { if (o && typeof o === 'object') keys.forEach(k => { if (k in o) { delete o[k]; n++; } }); });
+      if (d && typeof d === 'object' && n) await saveToDB('runOutlineExtras', d);
+    } catch (e) {}
+  }
   function lbPutBoundaries(res) {
-    let put = 0;
-    Object.keys(res.boundaries).forEach(k => { customRunBorders[k] = res.boundaries[k].map(p => p.slice()); put++; });
-    Object.keys(res.aliases).forEach(k => { const src = res.boundaries[res.aliases[k]]; if (src) { customRunBorders[k] = src.map(p => p.slice()); put++; } });
+    let put = 0; const ex = {};
+    Object.keys(res.boundaries).forEach(k => { customRunBorders[k] = res.boundaries[k].map(p => p.slice()); if (res.extras && res.extras[k]) ex[k] = res.extras[k]; put++; });
+    Object.keys(res.aliases).forEach(k => { const t = res.aliases[k], src = res.boundaries[t]; if (src) { customRunBorders[k] = src.map(p => p.slice()); if (ex[t]) ex[k] = ex[t]; put++; } });
+    window.lbBoundaryExtras = ex;
+    lbClearParcelParts(Object.keys(res.boundaries).concat(Object.keys(res.aliases)));
     lbRememberShared(Object.keys(res.boundaries).concat(Object.keys(res.aliases)));
+    try { saveToDB('lbBoundaryExtras', ex); } catch (e) {}
     return put;
   }
   async function lbBackupBoundaries() { try { await saveToDB('customRunBordersBackup', JSON.parse(JSON.stringify(customRunBorders || {}))); } catch (e) {} }
@@ -13844,6 +14093,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     Object.keys(customRunBorders).forEach(k => delete customRunBorders[k]);
     Object.keys(b).forEach(k => { customRunBorders[k] = b[k]; });
     try { localStorage.removeItem(LB_SHARED_KEY); localStorage.removeItem(LB_SHARED_VER); } catch (e) {}
+    window.lbBoundaryExtras = {}; try { await saveToDB('lbBoundaryExtras', {}); } catch (e) {}
     try { await saveToDB('customRunBorders', customRunBorders); await saveToDB('customRunBordersBackup', null); } catch (e) {}
     try { if (typeof activeTab !== 'undefined' && activeTab === 'map') renderMapData(); } catch (e) {}
     return Object.keys(b).length;
@@ -13861,7 +14111,7 @@ window.addEventListener('DOMContentLoaded', async () => {
       const ver = String(f.generated || f.version || '');
       let seen = ''; try { seen = localStorage.getItem(LB_SHARED_VER) || ''; } catch (e) {}
       if (!opts.force && ver && seen === ver) return { same: true, version: ver };
-      const al = f.aliases || {}, valid = { boundaries: {}, aliases: {} };
+      const al = f.aliases || {}, valid = { boundaries: {}, aliases: {}, extras: (f.extras && typeof f.extras === 'object') ? f.extras : {} };
       Object.keys(f.boundaries).forEach(k => { const v = f.boundaries[k]; if (Array.isArray(v) && v.length >= 3) valid.boundaries[k] = v; });
       Object.keys(al).forEach(k => { if (valid.boundaries[al[k]]) valid.aliases[k] = al[k]; });
       const keys = Object.keys(valid.boundaries).concat(Object.keys(valid.aliases));
@@ -13877,7 +14127,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     } catch (e) { return null; }
     finally { lbSharedBusy = false; }
   };
-  lbWhenBordersLoaded(() => { try { window.lbApplySharedBoundaries().then(r => { if (r && r.applied) window.dispatchEvent(new CustomEvent('lb-shared-boundaries', { detail: r })); }); } catch (e) {} }, 1500);
+  lbWhenBordersLoaded(async () => { try { const d = await loadFromDB('lbBoundaryExtras'); if (d && typeof d === 'object') window.lbBoundaryExtras = d; } catch (e) {} try { window.lbApplySharedBoundaries().then(r => { if (r && r.applied) window.dispatchEvent(new CustomEvent('lb-shared-boundaries', { detail: r })); }); } catch (e) {} }, 1500);
   function getRecordsArray() {
     if (typeof siteRecords !== 'undefined' && Array.isArray(siteRecords) && siteRecords.length) return siteRecords;
     if (Array.isArray(window.siteRecords) && window.siteRecords.length) return window.siteRecords;
@@ -17327,8 +17577,8 @@ window.addEventListener('DOMContentLoaded', async () => {
         poly._boundaryKey = borderKey;
         poly.addTo(mapHullsLayer);
         // Separate parts of a run built from property lines (e.g. two estates on one run).
-        if (customBorder && window.lbParcels && window.lbParcels.extraRings) {
-          window.lbParcels.extraRings(borderKey).forEach(ring => {
+        if (customBorder) {
+          ((window.lbParcels && window.lbParcels.extraRings ? window.lbParcels.extraRings(borderKey) : []).concat(window.lbExtraRings ? window.lbExtraRings(borderKey) : [])).forEach(ring => {
             if (!Array.isArray(ring) || ring.length < 3) return;
             L.polygon(ring, { color: runOutlineColor, weight: 2, fillColor: runOutlineColor, fillOpacity: 0.1, lineJoin: 'round', interactive: false }).addTo(mapHullsLayer);
           });
@@ -20286,6 +20536,7 @@ body.lb-on-welcome #lbDrawerTab { display: none; }
       <div class="lb-drawer-sect">Start a job</div>
       ${item('drive',   img('drive.png', isDriving), 'Drive',           'Trail recording · track-up · follows you', isDriving ? 'primary current' : 'primary')}
       ${item('explore', img('map.png', isExploring),   'Check out a run', 'Look over runs without driving them', isExploring ? 'current' : '')}
+      ${item('days', img('calendar.png'), 'Service days', 'Where the runs go, Monday to Friday')}
       ${seasonNote}
       ${item('nearby',  img('navigation.png'), "What's nearby", 'Runs, bins and addresses around you')}
       <div class="lb-drawer-sect">Edit</div>
@@ -20400,6 +20651,12 @@ body.lb-on-welcome #lbDrawerTab { display: none; }
     if (act === 'edit') {
       const openEdit = () => { if (typeof window.lbOpenSettings === 'function') window.lbOpenSettings(); };
       if (typeof activeTab !== 'undefined' && activeTab !== 'map') { switchMainTab('map'); setTimeout(openEdit, 700); } else openEdit();
+      return;
+    }
+    if (act === 'days') {
+      const goDays = () => { if (typeof window.uxDaysOpen === 'function') window.uxDaysOpen(); };
+      if (typeof window.lbDrawerClose === 'function') window.lbDrawerClose();
+      if (typeof activeTab !== 'undefined' && activeTab !== 'map') { switchMainTab('map'); setTimeout(goDays, 700); } else goDays();
       return;
     }
     if (act === 'nearby')     { if (typeof window.lbGoNearby === 'function') window.lbGoNearby(); return; }
@@ -26120,12 +26377,25 @@ html body.ux2 #uxHdrTools #uxBreak[data-level="rest"]{color:var(--ux-info) !impo
 html body.ux2 #uxHdrTools #snailTrailRecLight{position:static !important;margin:0 4px 0 2px !important;flex:none !important;width:10px !important;height:10px !important}
 html body.ux2 .map-header-panel > .lb-break-chip{display:none !important}
 html body.ux2 #mapRunColoredBox .map-run-title{max-width:calc(100% - var(--ux-tools-w, 150px)) !important;overflow:hidden !important;text-overflow:ellipsis !important;white-space:nowrap !important}
-@media (max-width: 699px){html body.ux2 #mapRunColoredBox #uxMsStats{margin-left:0 !important;flex:1 0 100% !important}
+@media (max-width: 899px){html body.ux2 #mapRunColoredBox #uxMsStats{margin-left:0 !important;flex:1 0 100% !important}
 html body.ux2 #mapRunColoredBox #uxMsStats .map-run-stat{height:26px !important}
 html body.ux2 #mapRunColoredBox #uxMsStats .map-run-stat:first-child{padding-left:0 !important}
 html body.ux2 #mapRunColoredBox #uxMsStats .map-run-stat + .map-run-stat::before{top:6px !important;bottom:6px !important}}
 @media (min-width: 900px){html body.ux2 #uxHdrTools{display:none !important}
 html body.ux2 #mapRunColoredBox .map-run-title{max-width:none !important}}
+@media (min-width: 640px) and (max-width: 899px), (min-width: 640px) and (hover: none){html body.ux2 .map-address-telemetry .address-telemetry-grid{grid-template-columns:minmax(96px, max-content) minmax(0, 1fr) auto auto !important;grid-template-areas:"addr meta tabs dist" !important;grid-template-rows:auto !important;gap:0 14px !important;align-items:center !important}
+html body.ux2 .map-address-telemetry #mapAddressMeta.meta-has-flag-note{margin:0 !important;align-self:center !important}
+html body.ux2 .map-address-telemetry #mapRunsAtAddress{align-self:center !important}
+html body.ux2 .map-address-telemetry .map-stream-tabs-row{padding:0 !important}
+html body.ux2 .map-address-telemetry #mapBinsAtAddress{padding:2px 12px 3px 0 !important;gap:2px !important}
+html body.ux2 .map-address-telemetry #mapBinsAtAddress .next-bin-row{min-height:36px !important}
+html body.ux2 .map-address-telemetry #mapBinsAtAddress .next-bin-serial-area{flex-direction:row !important;flex-wrap:wrap !important;align-items:center !important;align-content:center !important;gap:0 12px !important}
+html body.ux2 .map-address-telemetry #mapBinsAtAddress .next-bin-serial-area > div{flex:1 1 250px !important;min-width:0 !important;border-bottom:0 !important}
+html body.ux2 #uxStreetStrip{padding-top:8px !important}
+html body.ux2 #uxStreetStrip #mapStreetOverlay,
+  html body.ux2.lb-map-screen #uxStreetStrip #mapStreetOverlay{height:38px !important}
+html body.ux2 #uxStreetStrip #mapSpeedLimitSign{width:38px !important;height:38px !important;font-size:16px !important}
+html body.ux2 #uxStreetStrip #mapLiveSpeed{font-size:44px !important}}
 /* ---- 15-search.css ---- */
 html body.ux2 .search-card,
 html body.ux2 .search-card[class*="stream-"]{background:none !important;border:0 !important;border-left:3px solid var(--ui-accent) !important;border-radius:0 !important;box-shadow:none !important;padding:2px 0 2px 10px !important;margin:0 0 4px !important}
@@ -26219,6 +26489,35 @@ html body.ux2 .ux-warn-ico{color:var(--ux-bad) !important;display:inline-flex;al
 html body.ux2 .bin-map-marker-icon.ux-stray .bin-dot-inner{border-color:#ff453a !important;box-shadow:0 0 0 3px rgba(255,69,58,.55), 0 0 0 5px rgba(255,255,255,.85) !important}
 html body.ux2 #uxToast{position:fixed !important;left:8px !important;right:8px !important;top:calc(env(safe-area-inset-top, 0px) + 92px) !important;z-index:20500 !important;display:none;padding:10px 12px !important;background:var(--ux-s2, #1a222c) !important;color:var(--ux-text) !important;border:0 !important;border-left:3px solid var(--ui-accent, #f5c518) !important;font:600 13px/1.35 system-ui, -apple-system, 'Segoe UI', sans-serif !important;box-shadow:none !important;border-radius:0 !important;max-width:420px !important;bottom:auto !important;height:auto !important;min-height:0 !important;width:auto !important;inset-block-end:auto !important}
 html body.ux2 #uxToast.on{display:block !important}
+/* ---- 17-days.css ---- */
+html body.ux2 #uxDaysBar{display:none}
+html body.ux2.ux-days #uxDaysBar{display:flex !important;flex-direction:column !important;gap:6px !important;align-self:stretch !important;margin:0 !important;padding:8px 12px 8px 12px !important;pointer-events:auto !important;background:color-mix(in srgb, var(--ux-bg) 92%, transparent) !important;border-left:3px solid var(--ui-accent) !important}
+html body.ux2 #uxDaysBar .uxd-top{display:flex;align-items:baseline !important;gap:10px !important;min-height:26px !important}
+html body.ux2 #uxDaysBar .uxd-top b{font-size:15px !important;font-weight:800 !important;letter-spacing:.06em !important;text-transform:uppercase !important;color:var(--ux-text) !important}
+html body.ux2 #uxDaysBar .uxd-sub{flex:1 1 auto !important;min-width:0 !important;font-size:12px !important;font-weight:600 !important;color:var(--ux-text-2) !important;white-space:nowrap !important;overflow:hidden !important;text-overflow:ellipsis !important}
+html body.ux2 #uxDaysBar .uxd-x{flex:none !important;align-self:center !important;width:32px !important;height:32px !important;padding:0 !important;display:inline-flex;align-items:center !important;justify-content:center !important;background:transparent !important;border:0 !important;color:var(--ux-text-2) !important}
+html body.ux2 #uxDaysBar .uxd-row{display:flex;flex-wrap:wrap !important;gap:3px !important;align-items:center !important}
+html body.ux2 #uxDaysBar .uxd-gap{width:10px !important}
+html body.ux2 #uxDaysBar .uxd-chip{--c:var(--ui-accent);flex:0 0 auto !important;height:32px !important;padding:0 12px !important;display:inline-flex;align-items:center !important;gap:6px !important;background:var(--ux-s2) !important;color:var(--ux-text-2) !important;border:0 !important;border-bottom:3px solid var(--ux-line-2) !important;border-radius:0 !important;font:700 13px/1 system-ui, -apple-system, 'Segoe UI', sans-serif !important;letter-spacing:.02em !important;cursor:pointer !important}
+html body.ux2 #uxDaysBar .uxd-days .uxd-chip:not(:first-child){border-bottom-color:var(--c) !important}
+html body.ux2 #uxDaysBar .uxd-chip i{font-style:normal !important;font-size:11px !important;font-weight:600 !important;opacity:.7}
+html body.ux2 #uxDaysBar .uxd-chip.on{color:var(--ux-text) !important;background:color-mix(in srgb, var(--c) 22%, var(--ux-s2)) !important;border-bottom-color:var(--c) !important}
+html body.ux2 #uxDaysBar .uxd-note{font-size:12px !important;font-weight:600 !important;color:var(--ux-warn) !important}
+@media (max-width: 440px){html body.ux2 #uxDaysBar .uxd-chip{padding:0 9px !important}
+html body.ux2 #uxDaysBar .uxd-days{flex-wrap:nowrap !important}}
+html body.ux2.ux-days #uxCardStack, html body.ux2.ux-days .lb-ss-side, html body.ux2.ux-days #uxStrayChip, html body.ux2.ux-days #uxLowHint,
+html body.ux2.ux-days #mapRunColoredBox .map-run-title, html body.ux2.ux-days #mapRunColoredBox #uxMsStats,
+html body.ux2.ux-days .leaflet-overlay-pane, html body.ux2.ux-days .leaflet-lukez-house-pane, html body.ux2.ux-days .leaflet-lukez-bin-pane,
+html body.ux2.ux-days #uxToast{display:none !important}
+.ux-day-lbl{pointer-events:none !important}
+.ux-day-lbl span{position:absolute !important;left:0 !important;top:0 !important;transform:translate(-50%, -50%);white-space:nowrap !important;font:800 12px/1 system-ui, -apple-system, 'Segoe UI', sans-serif !important;letter-spacing:.02em !important;color:#0b0f14 !important;text-shadow:0 0 3px rgba(255,255,255,.95), 0 0 3px rgba(255,255,255,.95), 0 0 2px rgba(255,255,255,.95) !important}
+html body.ux2 #uxDaysCard{display:none;position:fixed !important;left:8px !important;right:8px !important;max-width:520px !important;z-index:1200 !important;bottom:calc(var(--ux-dock-total, 0px) + env(safe-area-inset-bottom, 0px) + 10px) !important;align-items:center !important;gap:10px !important;padding:8px 6px 8px 12px !important;background:color-mix(in srgb, var(--ux-bg) 94%, transparent) !important;border-left:4px solid var(--c, var(--ui-accent)) !important;color:var(--ux-text) !important}
+html body.ux2 #uxDaysCard.on{display:flex !important}
+html body.ux2 #uxDaysCard .uxc-main{flex:1 1 auto !important;min-width:0 !important;display:flex;flex-direction:column !important;gap:3px !important}
+html body.ux2 #uxDaysCard .uxc-main b{font-size:17px !important;font-weight:800 !important}
+html body.ux2 #uxDaysCard .uxc-main span{font-size:12px !important;font-weight:600 !important;color:var(--ux-text-2) !important}
+html body.ux2 #uxDaysCard .uxc-go{flex:none !important;height:36px !important;padding:0 14px !important;background:var(--ui-accent) !important;color:var(--ux-on-accent, #0b0f14) !important;border:0 !important;border-radius:0 !important;font:800 13px/1 system-ui, -apple-system, 'Segoe UI', sans-serif !important;letter-spacing:.04em !important;text-transform:uppercase !important}
+html body.ux2 #uxDaysCard .uxc-x{flex:none !important;width:32px !important;height:36px !important;padding:0 !important;display:inline-flex;align-items:center !important;justify-content:center !important;background:transparent !important;border:0 !important;color:var(--ux-text-2) !important}
 </style>
 <script id="ux2-script">
 /* UX2 behaviour glue. Everything here is additive: it calls the existing
@@ -27671,6 +27970,212 @@ html body.ux2 #uxToast.on{display:block !important}
 })();
 
 /* =====================================================================
+   Service days: one map of where the runs go, Monday to Friday.
+   Drawn from the run boundaries (which meet along shared lines), one stream at a time:
+     - "All" colours every area by the day it is serviced;
+     - a day shows that day's runs, each in its own colour and labelled, the rest of the week as faint outlines.
+   Tap a run for its houses and a button that opens it on the map. Nothing is changed by looking.
+   ===================================================================== */
+(function(){
+  'use strict';
+  var DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
+  var SHORT = { Monday: 'Mon', Tuesday: 'Tue', Wednesday: 'Wed', Thursday: 'Thu', Friday: 'Fri', Saturday: 'Sat', Sunday: 'Sun' };
+  var DAYCOL = { Monday: '#4c9aff', Tuesday: '#ffb020', Wednesday: '#2dd4bf', Thursday: '#c084fc', Friday: '#ff6b81', Saturday: '#a3e635', Sunday: '#94a3b8' };
+  var RUNCOL = ['#4c9aff', '#ffb020', '#2dd4bf', '#c084fc', '#ff6b81', '#22d3ee', '#f97316', '#a3e635', '#f472b6', '#facc15', '#818cf8', '#34d399', '#fb7185', '#60a5fa', '#e879f9'];
+  var STREAMS = [['Garbage', 'Garbage'], ['Recycling', 'Recycling'], ['FOGO', 'FOGO']];
+  var GF = {};
+  function g(n){ try { return (GF[n] || (GF[n] = new Function('return ' + n)))(); } catch (e) { return undefined; } }
+  function $(id){ return document.getElementById(id); }
+  function esc(s){ return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+  var X = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>';
+
+  var st = { on: false, stream: 'Garbage', day: '', week: '', sel: null };
+  var layer = null, labels = null, bar = null, card = null, polys = [], runsNow = [], houseCache = {}, mapClick = null, lblZoom = null;
+
+  function dayName(d){ d = String(d || ''); return d ? d.charAt(0).toUpperCase() + d.slice(1).toLowerCase() : ''; }
+  function collect(){
+    var b = g('customRunBorders') || {}, out = [];
+    Object.keys(b).forEach(function(k){
+      var p = k.split('#'); if (p[0] !== st.stream) return;
+      var day, week = '', run;
+      if (st.stream === 'Garbage') { if (p.length !== 3) return; day = dayName(p[1]); run = p[2]; }
+      else { if (p.length !== 4) return; day = dayName(p[1]); week = String(p[2]).toUpperCase(); run = p[3]; }
+      if (!DAYCOL[day]) return;
+      var ring = b[k]; if (!Array.isArray(ring) || ring.length < 3) return;
+      var rings = [ring];
+      try { if (window.lbExtraRings) rings = rings.concat(window.lbExtraRings(k)); } catch (e) {}
+      try { if (window.lbParcels && window.lbParcels.extraRings) rings = rings.concat(window.lbParcels.extraRings(k)); } catch (e) {}
+      out.push({ key: k, day: day, week: week, run: run, label: run + week, rings: rings });
+    });
+    out.sort(function(a, c){ return (parseInt(a.run, 10) - parseInt(c.run, 10)) || String(a.label).localeCompare(String(c.label)); });
+    return out;
+  }
+  function inRing(x, y, r){
+    var c = false; for (var i = 0, j = r.length - 1; i < r.length; j = i++) { var yi = r[i][0], xi = r[i][1], yj = r[j][0], xj = r[j][1]; if (((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi)) c = !c; } return c;
+  }
+  function labelPoint(ring){
+    var a = 0, cx = 0, cy = 0;
+    for (var i = 0; i < ring.length; i++) { var p = ring[i], q = ring[(i + 1) % ring.length], f = p[1] * q[0] - q[1] * p[0]; a += f; cx += (p[1] + q[1]) * f; cy += (p[0] + q[0]) * f; }
+    if (Math.abs(a) > 1e-14) { cx /= 3 * a; cy /= 3 * a; if (inRing(cx, cy, ring)) return [cy, cx]; }
+    var la0 = 1e9, la1 = -1e9, ln0 = 1e9, ln1 = -1e9; ring.forEach(function(p){ la0 = Math.min(la0, p[0]); la1 = Math.max(la1, p[0]); ln0 = Math.min(ln0, p[1]); ln1 = Math.max(ln1, p[1]); });
+    var best = null, bd = 1e9, mx = (ln0 + ln1) / 2, my = (la0 + la1) / 2;
+    for (var u = 1; u < 12; u++) for (var v = 1; v < 12; v++) { var y = la0 + (la1 - la0) * u / 12, x = ln0 + (ln1 - ln0) * v / 12; if (inRing(x, y, ring)) { var d = Math.hypot(x - mx, y - my); if (d < bd) { bd = d; best = [y, x]; } } }
+    return best || ring[0];
+  }
+  function area(ring){ var a = 0; for (var i = 0; i < ring.length; i++) { var p = ring[i], q = ring[(i + 1) % ring.length]; a += p[1] * q[0] - q[1] * p[0]; } return Math.abs(a); }
+
+  function houses(cb){
+    if (houseCache[st.stream]) return cb(houseCache[st.stream]);
+    var stream = st.stream;
+    setTimeout(function(){
+      var m = {};
+      try { (window.lbRunGroups ? window.lbRunGroups(stream) : []).forEach(function(gr){ m[gr.borderKey] = gr.sites.length; }); } catch (e) {}
+      houseCache[stream] = m; if (st.on && st.stream === stream) cb(m);
+    }, 30);
+  }
+
+  function ensurePanes(map){
+    if (!map.getPane('ux-days')) { map.createPane('ux-days').style.zIndex = 410; }
+    if (!map.getPane('ux-days-lbl')) { var p = map.createPane('ux-days-lbl'); p.style.zIndex = 415; p.style.pointerEvents = 'none'; }
+  }
+  function clearLayers(){
+    var m = g('leafletMap');
+    if (layer && m) { try { m.removeLayer(layer); } catch (e) {} }
+    if (labels && m) { try { m.removeLayer(labels); } catch (e) {} }
+    layer = labels = null; polys = [];
+  }
+  function draw(fit){
+    var m = g('leafletMap'); if (!m || !window.L) return;
+    ensurePanes(m); clearLayers();
+    var all = collect(), list = all.filter(function(r){ return !st.week || !r.week || r.week === st.week; });
+    runsNow = list;
+    layer = L.layerGroup().addTo(m); labels = L.layerGroup().addTo(m);
+    var bounds = null, k = 0;
+    list.forEach(function(r){
+      var show = !st.day || r.day === st.day, col = st.day ? RUNCOL[(k++) % RUNCOL.length] : DAYCOL[r.day];
+      var parts = r.rings.map(function(x){ return [x]; });            // each separate part is its own polygon, not a hole of the others
+      var style = show
+        ? { pane: 'ux-days', color: '#0b0f14', weight: 1.2, opacity: .85, fillColor: col, fillOpacity: st.day ? .5 : .42, interactive: true, lineJoin: 'round' }
+        : { pane: 'ux-days', color: '#9aa4b2', weight: 1, opacity: .5, dashArray: '2 4', fill: false, interactive: false };
+      var poly = L.polygon(parts, style);
+      poly.addTo(layer); poly._uxRun = r; poly._uxCol = col; polys.push(poly);
+      if (show) {
+        var bb = poly.getBounds(); bounds = bounds ? bounds.extend(bb) : L.latLngBounds(bb.getSouthWest(), bb.getNorthEast());
+        poly.on('click', function(ev){ L.DomEvent.stopPropagation(ev); select(r, poly); });
+        var big = r.rings.slice().sort(function(a, c){ return area(c) - area(a); })[0], lp = labelPoint(big);
+        var ic = L.divIcon({ className: 'ux-day-lbl', html: '<span>' + esc(r.label) + '</span>', iconSize: [0, 0] });
+        var mk = L.marker(lp, { icon: ic, pane: 'ux-days-lbl', interactive: false, keyboard: false }); mk._uxBig = !st.day; mk.addTo(labels);
+      }
+    });
+    syncLabels();
+    if (fit && bounds) { try { m.fitBounds(bounds, { padding: [24, 24], animate: false }); } catch (e) {} }
+    fillBar(all);
+    if (!list.length) note('No run boundaries for ' + st.stream + ' yet. Edit & settings > Data > Rebuild all run boundaries.');
+    else note('');
+  }
+  function syncLabels(){
+    var m = g('leafletMap'); if (!m || !labels) return;
+    var z = m.getZoom(), showAll = !!st.day || z >= 12;
+    labels.eachLayer(function(mk){ var el = mk.getElement && mk.getElement(); if (el) el.style.display = (showAll || !mk._uxBig) ? '' : 'none'; });
+  }
+
+  // ---- the bar ---------------------------------------------------------------------------
+  function chip(cls, label, on, col, data){
+    return '<button type="button" class="uxd-chip' + (on ? ' on' : '') + ' ' + cls + '"' + (col ? ' style="--c:' + col + '"' : '') + ' ' + data + '>' + label + '</button>';
+  }
+  function buildBar(){
+    if (bar && bar.isConnected) return bar;
+    var anchor = $('areaRunsBar'); if (!anchor || !anchor.parentNode) return null;
+    bar = document.createElement('div'); bar.id = 'uxDaysBar';
+    anchor.parentNode.insertBefore(bar, anchor);
+    bar.addEventListener('click', function(ev){
+      var t = ev.target.closest ? ev.target.closest('[data-uxd]') : null; if (!t) return;
+      var a = t.getAttribute('data-uxd'), v = t.getAttribute('data-v');
+      if (a === 'x') { close(); return; }
+      if (a === 'stream') { st.stream = v; st.sel = null; if (v === 'Garbage') st.week = ''; }
+      if (a === 'day') { st.day = v; st.sel = null; }
+      if (a === 'week') { st.week = v; st.sel = null; }
+      hideCard(); draw(true);
+    });
+    return bar;
+  }
+  function fillBar(all){
+    if (!buildBar()) return;
+    var perDay = {}, runs = 0;
+    all.forEach(function(r){ if (st.week && r.week && r.week !== st.week) return; (perDay[r.day] = perDay[r.day] || []).push(r); });
+    var sub = function(hs){
+      var days = st.day ? [st.day] : DAYS, n = 0, h = 0;
+      days.forEach(function(d){ (perDay[d] || []).forEach(function(r){ n++; if (hs) h += hs[r.key] || 0; }); });
+      return (st.day ? st.day + ' · ' : 'Monday to Friday · ') + n + ' run' + (n === 1 ? '' : 's') + (hs ? ' · ' + h.toLocaleString() + ' houses' : '');
+    };
+    var html = '<div class="uxd-top"><b>Service days</b><span class="uxd-sub" id="uxdSub">' + esc(sub(houseCache[st.stream])) + '</span><button type="button" class="uxd-x" data-uxd="x" aria-label="Close">' + X + '</button></div>' +
+      '<div class="uxd-row">' + STREAMS.map(function(s){ return chip('', s[1], st.stream === s[0], '', 'data-uxd="stream" data-v="' + s[0] + '"'); }).join('') +
+      (st.stream !== 'Garbage' ? '<span class="uxd-gap"></span>' + [['', 'Both weeks'], ['A', 'Week A'], ['B', 'Week B']].map(function(w){ return chip('', w[1], st.week === w[0], '', 'data-uxd="week" data-v="' + w[0] + '"'); }).join('') : '') + '</div>' +
+      '<div class="uxd-row uxd-days">' + chip('', 'All', !st.day, '', 'data-uxd="day" data-v=""') +
+      DAYS.map(function(d){ var n = (perDay[d] || []).length; return chip('', SHORT[d] + '<i>' + n + '</i>', st.day === d, DAYCOL[d], 'data-uxd="day" data-v="' + d + '"'); }).join('') + '</div>' +
+      '<div class="uxd-note" id="uxdNote"></div>';
+    bar.innerHTML = html;
+    if (!houseCache[st.stream]) houses(function(hs){ var s = $('uxdSub'); if (s) s.textContent = sub(hs); });
+  }
+  function note(t){ var n = $('uxdNote'); if (n) { n.textContent = t || ''; n.style.display = t ? '' : 'none'; } }
+
+  // ---- a tapped run ------------------------------------------------------------------------
+  function ensureCard(){
+    if (card && card.isConnected) return card;
+    card = document.createElement('div'); card.id = 'uxDaysCard'; document.body.appendChild(card);
+    card.addEventListener('click', function(ev){
+      var t = ev.target.closest ? ev.target.closest('[data-uxc]') : null; if (!t) return;
+      if (t.getAttribute('data-uxc') === 'x') { st.sel = null; hideCard(); restyle(); return; }
+      var r = st.sel; if (!r) return;
+      var open = window.openRunDirectlyOnMap; close();
+      if (typeof open === 'function') try { open(r.run, st.stream, r.day, r.week, false); } catch (e) { console.error(e); }
+    });
+    return card;
+  }
+  function hideCard(){ if (card) card.classList.remove('on'); }
+  function restyle(){ polys.forEach(function(p){ if (!p._uxRun || p.options.fill === false) return; p.setStyle({ weight: st.sel === p._uxRun ? 3.2 : 1.2, color: st.sel === p._uxRun ? '#ffffff' : '#0b0f14' }); if (st.sel === p._uxRun && p.bringToFront) p.bringToFront(); }); }
+  function select(r, poly){
+    st.sel = r; restyle();
+    var c = ensureCard(), col = poly._uxCol;
+    c.style.setProperty('--c', col);
+    var h = houseCache[st.stream] && houseCache[st.stream][r.key];
+    c.innerHTML = '<div class="uxc-main"><b>Run ' + esc(r.label) + '</b><span>' + esc(r.day) + ' · ' + esc(st.stream) + (r.week ? ' · Week ' + esc(r.week) : '') + (h ? ' · ' + h.toLocaleString() + ' houses' : '') + '</span></div>' +
+      '<button type="button" class="uxc-go" data-uxc="go">Open run</button><button type="button" class="uxc-x" data-uxc="x" aria-label="Close">' + X + '</button>';
+    c.classList.add('on');
+    if (!houseCache[st.stream]) houses(function(){ if (st.sel === r) select(r, poly); });
+  }
+
+  // ---- open / close ------------------------------------------------------------------------------
+  function open(tries){
+    var m = g('leafletMap');
+    if (!m) { if ((tries || 0) < 8) setTimeout(function(){ open((tries || 0) + 1); }, 500); return; }
+    try { if (typeof window.lbDisableGpsFollow === 'function') window.lbDisableGpsFollow(); } catch (e) {}
+    st.on = true; st.sel = null; st.day = ''; st.week = '';
+    var cur = ''; try { cur = String(g('activeFilterStream') || ''); } catch (e) {}
+    st.stream = (cur === 'Recycling' || cur === 'FOGO') ? cur : 'Garbage';
+    document.body.classList.add('ux-days');
+    if (!m.__uxDaysBound) { m.__uxDaysBound = true; m.on('zoomend', function(){ if (st.on) syncLabels(); }); m.on('click', function(){ if (st.on && st.sel) { st.sel = null; hideCard(); restyle(); } }); }
+    draw(true);
+    setTimeout(function(){ try { m.invalidateSize(); } catch (e) {} }, 60);
+  }
+  function close(){
+    if (!st.on) return;
+    st.on = false; st.sel = null;
+    document.body.classList.remove('ux-days');
+    clearLayers(); hideCard();
+    if (bar) { bar.remove(); bar = null; }
+    if (card) { card.remove(); card = null; }
+  }
+  window.uxDaysOpen = function(){ if (st.on) return; open(0); };
+  window.uxDaysClose = close;
+  // anything that takes the map somewhere else ends the view
+  ['openRunDirectlyOnMap', 'switchMainTab'].forEach(function(n){
+    var o = window[n]; if (typeof o !== 'function') return;
+    window[n] = function(){ if (st.on && (n !== 'switchMainTab' || (arguments[0] && arguments[0] !== 'map'))) close(); return o.apply(this, arguments); };
+  });
+})();
+
+/* =====================================================================
    Location problems: houses whose pin is nowhere near the rest of their run.
    The detection lives with the boundary code (window.lbStraySites / lbStrayReport);
    this is the part the driver sees:
@@ -27858,12 +28363,12 @@ html body.ux2 #uxToast.on{display:block !important}
       (r.server < countB(borders()) ? '\n\nThe sync holds fewer than this device does: run Sync once to send them, and if that number does not go up, use Export / Import (file) to share them.' : ''));
   }
   async function rebuildB(){
-    var ok = window.customConfirm ? await window.customConfirm('Rebuild the boundary of every run (Garbage, Recycling, FOGO) from its houses? Houses with a wrong-looking location are left out. This replaces the boundaries on this device; the old ones are kept so you can undo it.') : true;
+    var ok = window.customConfirm ? await window.customConfirm('Rebuild the boundary of every run (Garbage, Recycling, FOGO) from its houses, so neighbouring runs meet along the same line? Houses with a wrong-looking location are left out. This replaces the boundaries on this device; the old ones are kept so you can undo it.') : true;
     if (!ok) return;
     var el = $('uxBdRebuild'), lab = el && el.querySelector('.lb-label');
     if (lab) lab.textContent = 'Rebuilding...';
     var res = null;
-    try { res = await window.lbRebuildAllBoundaries(function(i, n){ if (lab) lab.textContent = 'Rebuilding ' + i + ' of ' + n + '...'; }); } catch (e) { console.error(e); }
+    try { res = await window.lbRebuildAllBoundaries(function(i, n, name){ if (lab) lab.textContent = 'Rebuilding ' + (name || '') + '...'; }); } catch (e) { console.error(e); }
     if (lab) lab.textContent = 'Rebuild all run boundaries from the houses';
     var u = $('uxBdUndo'); if (u && res && res.built) u.style.display = '';
     if (!res || !res.built) { alertMsg('Nothing was rebuilt: no runs with enough house locations were found.'); return; }
