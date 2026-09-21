@@ -26520,6 +26520,7 @@ html body.ux2 #uxDaysCard .uxc-go{flex:none !important;height:36px !important;pa
 html body.ux2 #uxDaysCard .uxc-x{flex:none !important;width:32px !important;height:36px !important;padding:0 !important;display:inline-flex;align-items:center !important;justify-content:center !important;background:transparent !important;border:0 !important;color:var(--ux-text-2) !important}
 html body.ux2.ux-days.lb-map-screen #uxStrayChip, html body.ux2.ux-days.lb-map-screen #uxStrayChip.ux-on,
 html body.ux2.ux-days.ux-lowzoom.lb-map-screen #uxLowHint, html body.ux2.ux-days.lb-map-screen #uxLowHint{display:none !important}
+html body.ux2.ux-days #mapRunColoredBox{visibility:hidden !important}
 </style>
 <script id="ux2-script">
 /* UX2 behaviour glue. Everything here is additive: it calls the existing
@@ -28066,13 +28067,14 @@ html body.ux2.ux-days.ux-lowzoom.lb-map-screen #uxLowHint, html body.ux2.ux-days
         poly.on('click', function(ev){ L.DomEvent.stopPropagation(ev); select(r, poly); });
         var big = r.rings.slice().sort(function(a, c){ return area(c) - area(a); })[0], lp = labelPoint(big);
         var ic = L.divIcon({ className: 'ux-day-lbl', html: '<span>' + esc(r.label) + '</span>', iconSize: [0, 0] });
-        var mk = L.marker(lp, { icon: ic, pane: 'ux-days-lbl', interactive: false, keyboard: false }); mk._uxBig = !st.day; mk.addTo(labels);
+        var mk = L.marker(lp, { icon: ic, pane: 'ux-days-lbl', interactive: false, keyboard: false }); mk._uxBig = !st.day; mk._uxA = area(big); mk._uxLen = String(r.label).length; mk.addTo(labels);
       }
     });
     syncLabels(); fillBar(all);
     if (fit && bounds) {
       var top = 24; try { var cb = m.getContainer().getBoundingClientRect(), bb2 = bar && bar.getBoundingClientRect(); if (bb2) top = Math.max(24, Math.round(bb2.bottom - cb.top) + 12); } catch (e) {}
       try { m.fitBounds(bounds, { paddingTopLeft: [24, top], paddingBottomRight: [64, 24], animate: false }); } catch (e) {}
+      syncLabels();
     }
     if (!list.length) note('No run boundaries for ' + st.stream + ' yet. Edit & settings > Data > Rebuild all run boundaries.');
     else note('');
@@ -28091,10 +28093,23 @@ html body.ux2.ux-days.ux-lowzoom.lb-map-screen #uxLowHint, html body.ux2.ux-days
     });
     var cols = {}; Object.keys(out).forEach(function(k){ cols[k] = RUNCOL[out[k]]; }); return cols;
   }
+  // show a label only where it has room: biggest runs first, anything that would sit on top of a label already shown is hidden
   function syncLabels(){
     var m = g('leafletMap'); if (!m || !labels) return;
-    var z = m.getZoom(), showAll = !!st.day || z >= 12;
-    labels.eachLayer(function(mk){ var el = mk.getElement && mk.getElement(); if (el) el.style.display = (showAll || !mk._uxBig) ? '' : 'none'; });
+    var z = m.getZoom(), showAll = !!st.day || z >= 12, arr = [];
+    labels.eachLayer(function(mk){ arr.push(mk); });
+    arr.sort(function(a, b){ return (b._uxA || 0) - (a._uxA || 0); });
+    var taken = [];
+    arr.forEach(function(mk){
+      var el = mk.getElement && mk.getElement(); if (!el) return;
+      var ok = showAll || !mk._uxBig;
+      if (ok) {
+        var p = m.latLngToContainerPoint(mk.getLatLng()), w = (mk._uxLen || 4) * 9 + 10, h = 18, x0 = p.x - w / 2, y0 = p.y - h / 2;
+        for (var i = 0; i < taken.length; i++) { var t = taken[i]; if (x0 < t[2] && x0 + w > t[0] && y0 < t[3] && y0 + h > t[1]) { ok = false; break; } }
+        if (ok) taken.push([x0, y0, x0 + w, y0 + h]);
+      }
+      el.style.display = ok ? '' : 'none';
+    });
   }
 
   // ---- the bar ---------------------------------------------------------------------------
