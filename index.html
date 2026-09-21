@@ -28597,16 +28597,14 @@ html body.ux2 .lb-photo-note{margin:4px 0 10px !important;padding:9px 12px !impo
   function oosFor(truck){ var k = tnorm(truck); if (!k) return null; return oosList().filter(function(o){ return tnorm(o.truck) === k; })[0] || null; }
   function brakeLevel(v){ if (!v) return 'unread'; var m = Math.min.apply(null, v); return m <= BRAKE_STOP ? 'stop' : m < BRAKE_LOW ? 'low' : 'ok'; }
   function sameDay(a, b){ return new Date(a).toDateString() === new Date(b).toDateString(); }
-  /* Brake wear is a weekly job. The week turns over on the brake day (Friday by default; lbBrakeDay 0-6 changes it).
-     A truck is due until it has a reading dated on/after the most recent brake day, so a missed Friday stays due. */
+  /* Brake wear is a Friday job (lbBrakeDay 0-6 changes the day). It is only asked for on that day, and not again once
+     that truck has a reading today. It can still be entered from the Truck menu on any day. */
   function brakeDayNo(){ var d = lsGet('lbBrakeDay', BRAKE_DAYS[0]); d = +d; return d >= 0 && d <= 6 ? d : BRAKE_DAYS[0]; }
-  function weekStart(){ var d = new Date(); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() - ((d.getDay() - brakeDayNo() + 7) % 7)); return d.getTime(); }
-  function isBrakeDay(){ return new Date().getDay() === brakeDayNo(); }
+    function isBrakeDay(){ return new Date().getDay() === brakeDayNo(); }
   function truckBrakes(t){ var k = tnorm(t); return brakes().filter(function(b){ return k ? tnorm(b.truck) === k : b.shiftId === (SH && SH.id); }); }
   function lastBrake(t){ var a = truckBrakes(t).filter(function(b){ return b.vals && b.vals.length === 3; }); return a.length ? a[a.length - 1] : null; }
-  function brakeDoneWeek(){ var w = weekStart(); return truckBrakes(SH && SH.truck).some(function(b){ return b.ts >= w; }); }
-  function brakeDue(){ return !!(SH && !brakeDoneWeek() && !SH.brakeSkipped); }
-  function dayName(i){ return ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'][i]; }
+  function brakeDoneToday(){ return truckBrakes(SH && SH.truck).some(function(b){ return sameDay(b.ts, Date.now()); }); }
+  function brakeDue(){ return !!(SH && isBrakeDay() && !brakeDoneToday() && !SH.brakeSkipped); }
   function depotPos(){ var d = lsGet('lbDepot', null); return d && isFinite(d.lat) ? d : (SH && SH.home) || null; }
 
   var SH = lsGet('lbShift', null);                 // the running shift, or null
@@ -28847,13 +28845,13 @@ html body.ux2 .lb-photo-note{margin:4px 0 10px !important;padding:9px 12px !impo
           '<button type="button" data-a="dashrep">' + I.warn + '<span><b>Fault light or message on the dash</b><em>Photo goes to your leading hand. No reply in ' + Math.round(DASH_ESCALATE_MS / 60000) + ' min, it goes to the mechanic</em></span></button>' +
           '<button type="button" data-a="newdef">' + I.truck + '<span><b>Truck defect</b><em>Tyres, lights, leaks, anything wrong. Photo or voice note</em></span></button>' +
           '<button type="button" data-a="accident">' + I.warn + '<span><b>Accident</b><em>Alert leading hand, operations and mechanic · photos · what to give the other party</em></span></button>' +
-          '<button type="button" data-a="brakes">' + I.clock + '<span><b>Brake wear</b><em>Three numbers from the dash, once a week' + (SH && brakeDue() ? ' · due this week' : '') + '</em></span></button>' +
+          '<button type="button" data-a="brakes">' + I.clock + '<span><b>Brake wear</b><em>Axle 1, 2 and 3 from the dash · Fridays' + (SH && brakeDue() ? ' · due today' : '') + '</em></span></button>' +
         '</div>' + dashListHtml();
     } else if (view === 'brakes') {
       title = 'Brake wear';
       var bd = brakeDraft || (brakeDraft = newBrake('manual')), okB = !!brakeVals(bd);
       h = '<div class="drv-note-top">' + I.truck + '<span>' + esc((SH && SH.truck) || me().truck || 'Truck') + (bd.why === 'depot' ? ' · back at the depot' : '') + '</span></div>' +
-        '<div class="drv-hint2">Once a week. Brake lining left, as the dash shows it (top to bottom)' + (bd.prev ? '. Filled in from last week (' + esc(dateStr(bd.prev.ts)) + '): change any that have moved' : '') + '. Below ' + BRAKE_LOW + '% tells the workshop. ' + BRAKE_STOP + '% or less: the truck is not to be used.</div>' +
+        '<div class="drv-hint2">Brake wear on Fridays. Brake lining left, as the dash shows it (top to bottom)' + (bd.prev ? '. Filled in from last week (' + esc(dateStr(bd.prev.ts)) + '): change any that have moved' : '') + '. Below ' + BRAKE_LOW + '% tells the workshop. ' + BRAKE_STOP + '% or less: the truck is not to be used.</div>' +
         '<div class="drv-row3">' + field('uxsBA', 'Axle 1', bd.a, 'number', '65') + field('uxsBB', 'Axle 2', bd.b, 'number', '68') + field('uxsBC', 'Axle 3', bd.c, 'number', '70') + '</div>' +
         '<div class="drv-eval" id="uxsBEval" data-l="' + brakeLevel(brakeVals(bd)) + '">' + evalHtml(bd) + '</div>' +
         '<div class="drv-photo">' + (bd.photo ? thumb(bd.photo, true) : '') + '<button type="button" class="drv-btn" data-a="bphoto">' + I.cam + (bd.photo ? 'Retake photo' : 'Photo of the dash (optional)') + '</button></div>' +
@@ -28920,7 +28918,7 @@ html body.ux2 .lb-photo-note{margin:4px 0 10px !important;padding:9px 12px !impo
           : '<div class="drv-warnbox">' + I.warn + '<span>Pre-start check not done.</span><button type="button" class="drv-link" data-a="prestart">Do it now</button></div>') +
         '<div class="drv-sect"><span>Truck defects</span><em>' + dfs.length + '</em></div>' +
         (dfs.length ? '<div class="drv-list">' + dfs.map(function(x){ return '<div class="drv-li' + (x.sev === 'stop' ? ' bad' : '') + '"><b>' + esc(x.label) + '</b><span>' + esc(clock(x.ts)) + (x.note ? ' · ' + esc(x.note) : '') + '</span>' + (x.media && x.media.length ? '<button type="button" data-a="media" data-ids="' + esc(x.media.join(',')) + '">' + I.cam + x.media.length + '</button>' : '') + '</div>'; }).join('') + '</div>' : '') +
-        (brakeDue() ? '<div class="drv-warnbox">' + I.warn + '<span>Weekly brake wear is due' + (isBrakeDay() ? ' today' : ' (missed ' + dayName(brakeDayNo()) + ')') + '. Enter it when you’re back at the depot.</span><button type="button" class="drv-link" data-a="brakes">Enter now</button></div>' : '') +
+        (brakeDue() ? '<div class="drv-warnbox">' + I.warn + '<span>Friday: brake wear is due. Enter it when you’re back at the depot.</span><button type="button" class="drv-link" data-a="brakes">Enter now</button></div>' : '') +
         (oosFor(SH.truck) ? '<div class="drv-stopbox">' + I.warn + '<span><b>This truck is marked out of service.</b> Tell your leading hand.</span></div>' : '') +
         dashListHtml() +
         '<div class="drv-acts"><button type="button" class="drv-btn drv-warnb" data-a="dashrep">' + I.warn + 'Dash warning</button><button type="button" class="drv-btn" data-a="newdef">' + I.truck + 'Truck defect</button><button type="button" class="drv-btn' + (brakeDue() ? ' drv-due' : '') + '" data-a="brakes">' + I.clock + 'Brake wear</button><button type="button" class="drv-btn" data-a="issues">' + I.list + 'Issues (' + iss.length + ')</button></div>' +
@@ -29941,7 +29939,7 @@ html body.ux2 .lb-photo-note{margin:4px 0 10px !important;padding:9px 12px !impo
   function cardLines(){
     var c = cfg();
     return [
-      ['Company', c.company && !/PUT YOUR/.test(c.company) ? c.company : 'Ask your leading hand for the company name'],
+      ['Company', c.company && !/PUT YOUR/.test(c.company) ? c.company : 'Solo Resource Recovery'],
       c.opsPhone ? ['Company phone', c.opsPhone] : null,
       ['Truck', (A.truck ? 'Fleet no. ' + A.truck : '') + (A.rego ? (A.truck ? ' · ' : '') + 'Rego ' + A.rego : '') || 'Add the truck rego (Details)'],
       ['Reference', ref() + ' · ' + clock(A.ts)],
