@@ -7479,7 +7479,7 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
             const housePoint=gps(site.lat,site.lng);
             // Prefer a valid flip location; otherwise use that property's
             // house location so a property with no recorded flip is retained.
-            if(binPoint) boundaryPoints.push(binPoint);
+            if(binPoint && !(housePoint && getDistanceMeters(binPoint.lat,binPoint.lng,housePoint.lat,housePoint.lng)>LB_BIN_FAR_M)) boundaryPoints.push(binPoint);
             else if(housePoint) boundaryPoints.push(housePoint);
           });
           // A summer property may legitimately have no bin record.
@@ -8975,7 +8975,7 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
     }
 
     const layers = [];
-    if (mapMarkersLayer) layers.push(...mapMarkersLayer.getLayers());
+    if (mapMarkersLayer) layers.push(...mapMarkersLayer.getLayers().filter(l => !(l.options && l.options.icon && /ux-stray/.test(String(l.options.icon.options.className || '')))));
     if (mapHullsLayer) layers.push(...mapHullsLayer.getLayers());
     if (layers.length > 0) {
       const group = new L.featureGroup(layers);
@@ -13359,8 +13359,14 @@ window.addEventListener('DOMContentLoaded', async () => {
      least LB_STRAY_SMALL_GAP_M from it. A run that is genuinely in two or three big pieces is left
      alone, and so is a run that is spread so thin (rural) that no patch holds most of it. Strays are
      never deleted or moved: they are left out of the boundary / framing, drawn with a red ring, and
-     listed for export so they can be fixed at the source. */
+     listed for export so they can be fixed at the source.
+
+     Bins are judged more simply: the map draws every bin at its OWN recorded pin, so a bin whose pin
+     is more than LB_BIN_FAR_M from its house shows up as a dot out in the middle of nowhere. Those
+     are ringed and exported too, and never used for framing or for a boundary. */
   const LB_STRAY_LINK_M = 600, LB_STRAY_TINY_GAP_M = 1000, LB_STRAY_SMALL_GAP_M = 2500;
+  const LB_BIN_FAR_M = 250;      // a bin pin further than this from its own house is a wrong pin (bins sit at the kerb)
+  window.lbStrayBins = window.lbStrayBins || new Set();
   window.lbStrayIds = window.lbStrayIds || new Set();
   window.lbStrayView = window.lbStrayView || { count: 0, groups: 0, sites: [] };
 
@@ -13435,20 +13441,48 @@ window.addEventListener('DOMContentLoaded', async () => {
   }
   window.lbStraySites = lbStraySites;
 
-  // Called by renderMapData with the run groups it is about to draw: remembers which houses are strays
-  // (so their markers get the red ring) and how many, for the warning on the map.
+  // The bins of one house (for one stream) whose pin is not where the house is. Collection-point houses
+  // are left alone: their bins are meant to sit away from the house.
+  function lbFarBins(site, stream, house) {
+    const out = [];
+    if (!house || collectionPointForSite(site)) return out;
+    const bs = stream === 'SummerRecycling' ? 'Recycling' : stream;
+    [['solo', site.soloStreams], ['council', site.councilStreams]].forEach(([src, obj]) => {
+      ((obj || {})[bs] || []).forEach((bin, idx) => {
+        const bp = gps(bin.lat, bin.lng); if (!bp) return;
+        const d = getDistanceMeters(house.lat, house.lng, bp.lat, bp.lng);
+        if (d > LB_BIN_FAR_M) out.push({ src, idx, bin, d, stream: bs });
+      });
+    });
+    return out;
+  }
+  function lbBinKey(site, src, stream, idx) { return String(site.propId || site.siteId || site.addressText || '') + '|' + src + '|' + stream + '|' + idx; }
+
+  // Called by renderMapData with the run groups it is about to draw: remembers which houses / bins are
+  // strays (so their markers get the red ring) and how many, for the warning on the map.
   function lbStrayMarkGroups(groups, total) {
-    const ids = window.lbStrayIds; ids.clear();
-    const view = { count: 0, groups: 0, sites: [], skipped: false };
+    const ids = window.lbStrayIds, bins = window.lbStrayBins; ids.clear(); bins.clear();
+    const view = { count: 0, groups: 0, sites: [], houses: 0, bins: 0, skipped: false };
     window.lbStrayView = view;
     if (total > 8000) { view.skipped = true; return; }   // "all runs" is too big to judge live: use the export
-    const seen = new Set();
+    const seen = new Set(), seenBin = new Set();
     groups.forEach(g => {
       view.groups++;
-      lbStraySites(g.sites).forEach((gap, s) => {
-        ids.add(String(s.propId || s.siteId || ''));
-        if (seen.has(s)) return; seen.add(s);
-        view.sites.push({ site: s, gap, stream: g.stream, run: g.run });
+      const strays = lbStraySites(g.sites);
+      g.sites.forEach(site => {
+        const house = gps(site.lat, site.lng);
+        const far = lbFarBins(site, g.stream, house);
+        const isStray = strays.has(site);
+        if (isStray) {
+          ids.add(String(site.propId || site.siteId || ''));
+          const bs = g.stream === 'SummerRecycling' ? 'Recycling' : g.stream;
+          [['solo', site.soloStreams], ['council', site.councilStreams]].forEach(([src, obj]) => ((obj || {})[bs] || []).forEach((b, idx) => bins.add(lbBinKey(site, src, bs, idx))));
+        }
+        far.forEach(f => { bins.add(lbBinKey(site, f.src, f.stream, f.idx)); if (!seenBin.has(f.bin)) { seenBin.add(f.bin); view.bins++; } });
+        if (isStray || far.length) {
+          if (isStray && !seen.has(site)) view.houses++;
+          if (!seen.has(site)) { seen.add(site); view.sites.push({ site, gap: strays.get(site) || 0, stream: g.stream, run: g.run }); }
+        }
       });
     });
     view.count = view.sites.length;
@@ -13503,11 +13537,9 @@ window.addEventListener('DOMContentLoaded', async () => {
           if (cd > 800) { rows.push(Object.assign({}, base, { problem: 'Collection point far from house', detail: 'Its collection point is ' + Math.round(cd) + ' m from the house', meters: Math.round(cd), site })); out.cpFar++; }
           return;
         }
-        const bins = ((site.soloStreams || {})[g.stream] || []);
-        bins.forEach(bin => {
-          const bp = gps(bin.lat, bin.lng); if (!bp) return;
-          const d = getDistanceMeters(house.lat, house.lng, bp.lat, bp.lng);
-          if (d > 250) { rows.push(Object.assign({}, base, { problem: 'Bin pin far from house', detail: 'Bin pin is ' + Math.round(d) + ' m from its house', meters: Math.round(d), site, bin })); out.binFar++; }
+        lbFarBins(site, g.stream, house).forEach(f => {
+          rows.push(Object.assign({}, base, { problem: 'Bin pin far from house', detail: 'Bin pin is ' + (f.d >= 1000 ? (f.d / 1000).toFixed(1) + ' km' : Math.round(f.d) + ' m') + ' from its house' + (f.src === 'council' ? ' (council data)' : ''), meters: Math.round(f.d), site, bin: f.bin }));
+          out.binFar++;
         });
       });
     });
@@ -17022,7 +17054,7 @@ window.addEventListener('DOMContentLoaded', async () => {
             let originalDragPos = null;
             
             const binMarkerIcon = L.divIcon({
-              className: 'bin-map-marker-icon',
+              className: 'bin-map-marker-icon' + (window.lbStrayBins && window.lbStrayBins.has(lbBinKey(site, src, binStream, idx)) ? ' ux-stray' : ''),
               html: `
                 <div style="width:30px; height:30px; display:flex; align-items:center; justify-content:center;">
                   <div class="bin-dot-inner" style="
@@ -25819,6 +25851,7 @@ html body.ux2 #uxStraySheet .uxs-btn:disabled{opacity:.4;cursor:default !importa
 html body.ux2 #uxStraySheet .uxs-btn:active{background:var(--ux-s3) !important}
 @media (min-width: 720px){html body.ux2 #uxStraySheet .uxs-panel{left:50% !important;right:auto !important;bottom:50% !important;width:560px !important;max-height:76vh !important;transform:translate(-50%, 50%)}}
 html body.ux2 .ux-warn-ico{color:var(--ux-bad) !important;display:inline-flex;align-items:center !important;justify-content:center !important}
+html body.ux2 .bin-map-marker-icon.ux-stray .bin-dot-inner{border-color:#ff453a !important;box-shadow:0 0 0 3px rgba(255,69,58,.55), 0 0 0 5px rgba(255,255,255,.85) !important}
 </style>
 <script id="ux2-script">
 /* UX2 behaviour glue. Everything here is additive: it calls the existing
@@ -27297,7 +27330,7 @@ html body.ux2 .ux-warn-ico{color:var(--ux-bad) !important;display:inline-flex;al
     if (!t || !t.parentNode) return null;
     chip = document.createElement('button');
     chip.type = 'button'; chip.id = 'uxStrayChip';
-    chip.setAttribute('aria-label', 'Houses with a wrong-looking location');
+    chip.setAttribute('aria-label', 'Houses or bins with a wrong-looking location');
     var anchor = $('uxLowHint') || t;
     anchor.parentNode.insertBefore(chip, anchor.nextSibling);
     chip.addEventListener('click', function(){ openSheet(); });
@@ -27307,7 +27340,7 @@ html body.ux2 .ux-warn-ico{color:var(--ux-bad) !important;display:inline-flex;al
     var v = window.lbStrayView, c = ensureChip(); if (!c) return;
     var n = v && v.count || 0;
     c.classList.toggle('ux-on', n > 0);
-    if (n > 0) c.innerHTML = WARN + '<span>' + n + (n === 1 ? ' house' : ' houses') + ' far from the run</span>';
+    if (n > 0) c.innerHTML = WARN + '<span>' + n + (n === 1 ? ' location looks' : ' locations look') + ' wrong</span>';
   }
 
   // ---- CSV -------------------------------------------------------------------------
@@ -27389,7 +27422,7 @@ html body.ux2 .ux-warn-ico{color:var(--ux-bad) !important;display:inline-flex;al
     var html = '';
     if (!r.rows.length) html = '<p class="uxs-empty">No house in this view has a location that looks wrong. Use Export all runs to check every run.</p>';
     else {
-      html += '<p class="uxs-help">Houses far from the run are left out of the boundary and the Check out a run view, and ringed in red on the map. Nothing has been changed: export the list, fix the pin (or the run number) at the source, and it clears on the next refresh.</p>';
+      html += '<p class="uxs-help">Houses far from the run, and bins pinned far from their own house, are left out of the boundary and the framing, and ringed in red on the map. Nothing has been changed: export the list, fix the pin (or the run number) at the source, and it clears on the next refresh.</p>';
       r.rows.slice(0, 40).forEach(function(row, i){
         var s = row.site || {}, has = !!(s.lat && s.lng && +s.lat && +s.lng);
         html += '<button type="button" class="uxs-row' + (has ? '' : ' nofly') + '"' + (has ? ' data-uxs-go="' + i + '"' : '') + '>' +
