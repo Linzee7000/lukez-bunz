@@ -13788,7 +13788,7 @@ window.addEventListener('DOMContentLoaded', async () => {
      the rest are separate pieces); a ring is [[lat, lng], ...]. groups: [{ key, pts: [{lat, lng}] }]. */
   window.lbTessellate = function lbTessellate(groups, o) {
     o = o || {};
-    const D_OUT = o.outM || 60, D_MEET = o.meetM || 140, MIN_H = o.minHouses || 5, TOL = o.tol || 0.8, TOL_OUT = o.tolOut || 2;
+    const D_OUT = o.outM || 60, D_MEET = o.meetM || 240, MIN_H = o.minHouses || 5, TOL = o.tol || 0.8, TOL_OUT = o.tolOut || 2;
     let cnt = 0, lat0 = 0;
     groups.forEach(g => g.pts.forEach(p => { lat0 += p.lat; cnt++; }));
     if (!cnt) return { rings: {}, stats: { cells: 0 } };
@@ -13853,6 +13853,31 @@ window.addEventListener('DOMContentLoaded', async () => {
       const b = bestD[c];
       if (reach[c] || (b <= MEET4 && secD[c] <= MEET4)) cells++; else lab[c] = 0;
     }
+    // 2b. ground with a run on every side (a park or a school inside a suburb) goes to the runs around it, so no hole is left
+    const VMAX = Math.round((o.voidHa || 60) * 10000 / (C * C));
+    let voided = 0;
+    {
+      const vm = new Uint8Array(N), qq = new Int32Array(N), cells2 = [];
+      for (let s0 = 0; s0 < N; s0++) {
+        if (lab[s0] || vm[s0]) continue;
+        let head = 0, tail = 0, touch = false; vm[s0] = 1; qq[tail++] = s0;
+        while (head < tail) {
+          const c = qq[head++], x = c % W, y = (c - x) / W;
+          if (x === 0 || y === 0 || x === W - 1 || y === H - 1) touch = true;
+          if (x > 0 && !lab[c - 1] && !vm[c - 1]) { vm[c - 1] = 1; qq[tail++] = c - 1; }
+          if (x < W - 1 && !lab[c + 1] && !vm[c + 1]) { vm[c + 1] = 1; qq[tail++] = c + 1; }
+          if (y > 0 && !lab[c - W] && !vm[c - W]) { vm[c - W] = 1; qq[tail++] = c - W; }
+          if (y < H - 1 && !lab[c + W] && !vm[c + W]) { vm[c + W] = 1; qq[tail++] = c + W; }
+        }
+        if (!touch && tail <= VMAX) for (let i = 0; i < tail; i++) { vm[qq[i]] = 2; cells2.push(qq[i]); }
+      }
+      let head = 0, tail = 0;
+      cells2.forEach(c => { const x = c % W; [x > 0 ? c - 1 : -1, x < W - 1 ? c + 1 : -1, c >= W ? c - W : -1, c + W < N ? c + W : -1].forEach(q => { if (q >= 0 && lab[q]) qq[tail++] = q; }); });
+      while (head < tail) {
+        const c = qq[head++], L = lab[c], x = c % W;
+        [x > 0 ? c - 1 : -1, x < W - 1 ? c + 1 : -1, c >= W ? c - W : -1, c + W < N ? c + W : -1].forEach(q => { if (q >= 0 && vm[q] === 2 && !lab[q]) { lab[q] = L; qq[tail++] = q; voided++; } });
+      }
+    }
     // 3. pieces with almost no houses go to the run around them
     const comp = bestD; comp.fill(0);                       // reuse the array
     const csize = [0], clab = [0]; let nc = 0; const st = [];
@@ -13884,6 +13909,35 @@ window.addEventListener('DOMContentLoaded', async () => {
       let best = 0, bn = 0; tally.forEach((v, l) => { if (v > bn) { bn = v; best = l; } });
       arr.forEach(c => { lab[c] = best; }); absorbed++;
     });
+    // 3b. smooth the lines: a cell goes to whichever run holds most of the 5 x 5 squares around it (twice), which takes out
+    //     spikes, thin fingers and one-square notches. The square each house stands in is never changed.
+    const SMOOTH = o.smooth === undefined ? 2 : o.smooth;
+    if (SMOOTH > 0) {
+      const hold = new Uint8Array(N);
+      groups.forEach((g, gi) => g.pts.forEach(p => { const x = Math.floor((p.lng * kx - ox) / C), y = Math.floor((p.lat * ky - oy) / C); if (x >= 0 && x < W && y >= 0 && y < H && lab[y * W + x] === gi + 1) hold[y * W + x] = 1; }));
+      let src = lab, dst = new Uint16Array(N); const tv = new Uint16Array(25), tn = new Uint8Array(25);
+      for (let pass = 0; pass < SMOOTH; pass++) {
+        dst.set(src);
+        for (let y = 2; y < H - 2; y++) {
+          const row = y * W;
+          for (let x = 2; x < W - 2; x++) {
+            const c = row + x; if (hold[c]) continue;
+            const v0 = src[c];
+            if (src[c - 1] === v0 && src[c + 1] === v0 && src[c - W] === v0 && src[c + W] === v0 && src[c - W - 1] === v0 && src[c - W + 1] === v0 && src[c + W - 1] === v0 && src[c + W + 1] === v0) continue;
+            let n = 0;
+            for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
+              const v = src[c + dy * W + dx]; let i = 0; while (i < n && tv[i] !== v) i++;
+              if (i === n) { tv[n] = v; tn[n++] = 1; } else tn[i]++;
+            }
+            let best = v0, bc = 0; for (let i = 0; i < n; i++) if (tv[i] === v0) bc = tn[i];
+            for (let i = 0; i < n; i++) if (tn[i] > bc) { bc = tn[i]; best = tv[i]; }
+            dst[c] = best;
+          }
+        }
+        const t = src; src = dst; dst = t;
+      }
+      if (src !== lab) lab.set(src);
+    }
     // 4. the lines between runs, traced once
     const V = W + 1;
     const Ep = [], Eq = [], El = [], Er = [], adj = new Map();
@@ -13984,7 +14038,7 @@ window.addEventListener('DOMContentLoaded', async () => {
       out.sort((p, q) => q.a - p.a);
       if (out.length) { rings[groups[L - 1].key] = out.map(o2 => o2.ring.map(toLL)); nring += out.length; }
     });
-    return { rings, stats: { cells, C, W, H, absorbed, chains: chains.length, edges: nE, rings: nring, failed: nfail } };
+    return { rings, stats: { cells, C, W, H, absorbed, voided, chains: chains.length, edges: nE, rings: nring, failed: nfail } };
   };
 
   /* ---- Rebuild every run's boundary from its houses, and share the result ----------------------
