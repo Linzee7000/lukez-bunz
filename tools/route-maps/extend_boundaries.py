@@ -333,6 +333,74 @@ def resolve_group(keys):
             final_by_key[k] = new_shape; changed_keys.append(k)
     return len(changed_keys), changed_keys
 
+# ---------------------------------------------------------------------------------------------
+# Out to the shoreline.
+#
+# A run's ground stops at the last property line, so along the coast it stops at the houses on the
+# inland side of the beach road and leaves the foreshore - reserve, car parks, the strip of bins
+# along the beach - belonging to nobody. On the map that reads as the run petering out short of the
+# water. These runs do work that ground, so the boundary should reach the water.
+#
+# Which side of the coastline is land isn't taken from the data's winding order (easy to get
+# backwards, and this coastline is 80 separate ways): the run's existing shape is known to be on
+# land, so the area near the coast is cut along the coastline and only the pieces still connected to
+# the run's own ground are kept. Anything on the far side of the water is a separate piece and is
+# dropped. Nothing is taken from another run here - where two runs both reach the same stretch of
+# foreshore they both claim it, and the overlap split below then divides it the same way it divides
+# a shared road.
+COAST_REACH_M = float(os.environ.get('COAST_REACH_M', 120.0))
+COAST_MIN_GAIN_M2 = 300.0
+COAST_MAX_GROWTH = 0.15     # a foreshore strip, not a land grab - cap what any one run can gain
+
+def load_coastline():
+    try:
+        raw = json.load(open(f'{WORK}/coastline.json'))
+    except FileNotFoundError:
+        print('  (no work/coastline.json - skipping the shoreline step; see the README to fetch it)')
+        return None
+    lines = []
+    for l in raw:
+        pts = [to_m(la, ln) for la, ln in l]
+        if len(pts) >= 2: lines.append(LineString(pts))
+    return unary_union(lines) if lines else None
+
+def geoms_of(g):
+    if g.is_empty: return []
+    return list(g.geoms) if g.geom_type.startswith('Multi') or g.geom_type == 'GeometryCollection' else [g]
+
+def extend_to_coast(coast):
+    """Grow every run that ends near the shoreline out to the water. Returns [(key, gained m2)]."""
+    gained_report = []
+    coast_band = coast.buffer(COAST_REACH_M + 50)
+    cut_line = coast.buffer(0.5)
+    for keys in by_group.values():
+        shapes = {k: (final_by_key.get(k) or run_geom(k)) for k in keys}
+        shapes = {k: g for k, g in shapes.items() if g is not None and not g.is_empty}
+        for k, cur in shapes.items():
+            if not cur.intersects(coast_band): continue
+            # the strip that is within reach of BOTH this run's own ground and the water - i.e. the
+            # foreshore in front of it, not a ring of new ground all the way around it
+            candidate = cur.buffer(COAST_REACH_M).intersection(coast.buffer(COAST_REACH_M))
+            if candidate.is_empty: continue
+            # cut along the coastline, then keep only what is still joined to this run's own land,
+            # so nothing reaches across the water to the far shore
+            landward = unary_union([p for p in geoms_of(candidate.difference(cut_line))
+                                    if p.geom_type == 'Polygon' and p.intersects(cur)])
+            if landward.is_empty: continue
+            gain = landward.difference(cur)
+            gain = unary_union([p for p in geoms_of(gain)
+                                if p.geom_type == 'Polygon' and p.area >= COAST_MIN_GAIN_M2])
+            if gain.is_empty: continue
+            if gain.area > cur.area * COAST_MAX_GROWTH: continue
+            merged = unary_union([cur, gain])
+            if not merged.is_valid: merged = merged.buffer(0)
+            final_by_key[k] = merged
+            gained_report.append((k, gain.area))
+    return gained_report
+
+coast = load_coastline()
+coast_report = extend_to_coast(coast) if coast is not None else []
+
 overlap_report = []
 for gk, keys in by_group.items():
     n, touched = resolve_group(keys)
@@ -361,6 +429,12 @@ for key, n, length, growth in report:
     if n: print(f'{key:34s} +{n:2d} street pieces ({length:6.0f} m)  area +{growth*100:4.0f}%')
 print(f'\nruns with a route map: {len(per_run)}   grown: {len(report) - len([r for r in report if not r[1]])}   already covered: {len([r for r in report if not r[1]])}   left alone: {len(skipped)}')
 for k, why in skipped: print('  skipped', k, '-', why)
+if coast is not None:
+    tot = sum(a for _, a in coast_report)
+    print(f'\nreached out to the shoreline: {len(coast_report)} run(s), {tot/1e6:.2f} km2 of foreshore added')
+    for k, a in sorted(coast_report, key=lambda t: -t[1])[:10]:
+        print(f'  {k:34s} +{a/1e4:6.1f} ha')
+
 print(f'\n(stream, day) groups with an overlap from extension, split down the middle: {len(overlap_report)}')
 for gk, touched in overlap_report:
     print(f'  {gk[0]} {gk[1]}: {len(touched)} run(s) reshaped - {", ".join(touched)}')
