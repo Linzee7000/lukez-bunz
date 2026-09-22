@@ -5236,6 +5236,11 @@ const STREET_LITTER_SERVICE_LEVELS = {"seasons":[{"key":"tourist1","label":"Tour
   let driveStreetSortMode = localStorage.getItem('lukezBunzDriveStreetSort') || 'nearby';
   // Safety cap for the Drive page's street list - see updateDriverHud.
   const DRIVE_LIST_MAX_PROPERTIES = 1500;
+  // The Drive street list is a multi-megabyte innerHTML render, so on the
+  // GPS path it's rebuilt at most this often, and only while the Drive
+  // page is actually on screen. See the rebuild gate in updateDriverHud.
+  const DRIVE_LIST_MIN_REBUILD_MS = 3000;
+  let lastDriveListBuildAt = 0;
   // Which single tab (if any) is expanded on each Drive street card -
   // streetKey -> 'houses' | 'gar' | 'rec' | 'fog'. Read/written by
   // toggleStreetTab and rendered straight into the street card markup in
@@ -16694,7 +16699,67 @@ window.addEventListener('DOMContentLoaded', async () => {
     `;
   }
 
-  window.updateDriverHud = function() {
+  // Per-street run badges and house/bin tallies, plus each record's street
+  // key/label. All of this is built from EVERY record regardless of filter,
+  // search or GPS, so it only changes when the underlying data changes -
+  // yet it was being rebuilt from scratch on every Drive list render (which
+  // happens on a GPS fix, a tab opening, a bin being serviced...). Walking
+  // all ~57k records for it was ~800ms a render on a laptop, and a good
+  // deal worse on a phone. Build it once per dataset and reuse it.
+  let driveStreetIndexCache = null;
+  function getDriveStreetIndex(records) {
+    let editStamp = 0;
+    try { editStamp = masterEditsLog.length; } catch (e) {}
+    const stamp = records.length + '|' + editStamp;
+    if (driveStreetIndexCache && driveStreetIndexCache.records === records && driveStreetIndexCache.stamp === stamp) {
+      return driveStreetIndexCache;
+    }
+    const keys = new Array(records.length), labels = new Array(records.length);
+    const badges = new Map();   // streetKey -> Map("Garbage|4" -> {stream, run, day, weekLetter, isSummer, lat, lng})
+    const stats = new Map();    // streetKey -> Map("Garbage|4" -> {houses:Set, bins:Number})
+    for (let i = 0; i < records.length; i++) {
+      const site = records[i];
+      const rawStreetLine = (site.baseStreetLine || cleanStreetAddress(site.addressText) || '').trim();
+      const streetLabel = streetNameOnly(rawStreetLine) || rawStreetLine;
+      if (!streetLabel) { keys[i] = ''; continue; }
+      const streetKey = streetLabel.toLowerCase();
+      keys[i] = streetKey; labels[i] = streetLabel;
+
+      if (!badges.has(streetKey)) badges.set(streetKey, new Map());
+      const badgeMap = badges.get(streetKey);
+      if (!stats.has(streetKey)) stats.set(streetKey, new Map());
+      const statsMap = stats.get(streetKey);
+      const siteHouseKey = String(site.propId || site.siteId || site.addressText || '');
+      const sch = site.soloSchedule || {};
+      [
+        ['Garbage', sch.garRun, false],
+        ['Recycling', sch.recRun, false],
+        ['FOGO', sch.fogRun, false],
+        ['SummerRecycling', sch.recSummerRun, true]
+      ].forEach(([stream, run, isSummer]) => {
+        run = String(run || '').trim();
+        if (!run) return;
+        const badgeKey = stream + '|' + run.toLowerCase();
+        if (!badgeMap.has(badgeKey)) {
+          badgeMap.set(badgeKey, { stream, run, day: sch.day || '', weekLetter: sch.weekLetter || '', isSummer, lat: site.lat, lng: site.lng });
+        }
+        if (!statsMap.has(badgeKey)) statsMap.set(badgeKey, { houses: new Set(), bins: 0 });
+        const rs = statsMap.get(badgeKey);
+        if (!rs.houses.has(siteHouseKey)) {
+          rs.houses.add(siteHouseKey);
+          rs.bins += binCountForStreamAtSite(site, stream);
+        }
+      });
+    }
+    driveStreetIndexCache = { records, stamp, keys, labels, badges, stats };
+    return driveStreetIndexCache;
+  }
+  // Anything that rewrites the dataset wholesale (a fresh master load, a
+  // CSV import) hands back a different array, which the identity check
+  // above catches on its own - this is for in-place changes.
+  window.invalidateDriveStreetIndex = function(){ driveStreetIndexCache = null; };
+
+  window.updateDriverHud = function(opts) {
     const listContainer = q('hudStreetList');
     if (!listContainer) return;
 
@@ -16733,90 +16798,17 @@ window.addEventListener('DOMContentLoaded', async () => {
 
     const searchQuery = clean(q('searchInput')?.value).toLowerCase();
     const records = getRecordsArray();
-
-    // Group every property on the current run (matching active filters +
-    // search) by street name alone (house number stripped - see
-    // streetNameOnly - so "1 Besgrove Street" and "14 Besgrove Street"
-    // land in the same card instead of one street per house). Also tally,
-    // across ALL records regardless of filter, every run (by stream) that
-    // services each street - shown as run-number badges on the summary
-    // card (see streetRunBadgesByStreet below), same as the per-address
-    // badges further down - plus, for each of those runs, how many
-    // houses/bins on THIS street it services (streetRunStatsByStreet),
-    // used to build the per-run breakdown inside each stream's tab panel.
-    const streetGroups = new Map();   // streetKey -> { label, sites: [] }
-    const streetRunBadgesByStreet = new Map(); // streetKey -> Map("Garbage|4" -> {stream, run, day, weekLetter, isSummer, lat, lng})
-    const streetRunStatsByStreet = new Map();  // streetKey -> Map("Garbage|4" -> {houses:Set, bins:Number})
-    let matchedPropertyCount = 0;
-
-    for (const site of records) {
-      const rawStreetLine = (site.baseStreetLine || cleanStreetAddress(site.addressText) || '').trim();
-      const streetLabel = streetNameOnly(rawStreetLine) || rawStreetLine;
-      if (!streetLabel) continue;
-      const streetKey = streetLabel.toLowerCase();
-
-      if (!streetRunBadgesByStreet.has(streetKey)) streetRunBadgesByStreet.set(streetKey, new Map());
-      const badgeMap = streetRunBadgesByStreet.get(streetKey);
-      if (!streetRunStatsByStreet.has(streetKey)) streetRunStatsByStreet.set(streetKey, new Map());
-      const statsMap = streetRunStatsByStreet.get(streetKey);
-      const siteHouseKey = String(site.propId || site.siteId || site.addressText || '');
-      const sch = site.soloSchedule || {};
-      [
-        ['Garbage', sch.garRun, false],
-        ['Recycling', sch.recRun, false],
-        ['FOGO', sch.fogRun, false],
-        ['SummerRecycling', sch.recSummerRun, true]
-      ].forEach(([stream, run, isSummer]) => {
-        run = String(run || '').trim();
-        if (!run) return;
-        const badgeKey = stream + '|' + run.toLowerCase();
-        if (!badgeMap.has(badgeKey)) {
-          badgeMap.set(badgeKey, { stream, run, day: sch.day || '', weekLetter: sch.weekLetter || '', isSummer, lat: site.lat, lng: site.lng });
-        }
-        if (!statsMap.has(badgeKey)) statsMap.set(badgeKey, { houses: new Set(), bins: 0 });
-        const rs = statsMap.get(badgeKey);
-        if (!rs.houses.has(siteHouseKey)) {
-          rs.houses.add(siteHouseKey);
-          rs.bins += binCountForStreamAtSite(site, stream);
-        }
-      });
-
-
-      if (!siteMatchesAllActiveFilters(site)) continue;
-
-      if (searchQuery) {
-        const addrMatch = clean(site.addressText).toLowerCase().includes(searchQuery) ||
-                          clean(site.propId).toLowerCase().includes(searchQuery) ||
-                          clean(site.siteId).toLowerCase().includes(searchQuery) ||
-                          clean(site.baseStreetLine).toLowerCase().includes(searchQuery);
-        if (!addrMatch) continue;
-      }
-
-      const eligibleStreams = getDriveEligibleStreams(site);
-      if (!eligibleStreams.length) continue;
-
-      if (!streetGroups.has(streetKey)) streetGroups.set(streetKey, { label: streetLabel, sites: [] });
-      streetGroups.get(streetKey).sites.push(site);
-      matchedPropertyCount++;
-
-      // Safety cap: even with a run selected, a bad/overly-broad filter
-      // could still match thousands of properties and hang the browser
-      // trying to build that much HTML. Bail out early and ask for a
-      // narrower filter rather than freezing the app.
-      if (matchedPropertyCount > DRIVE_LIST_MAX_PROPERTIES) {
-        listContainer.innerHTML = `<div style="text-align:center; padding:30px; color:#64748b; font-weight:700;">
-          That filter matches ${matchedPropertyCount.toLocaleString()}+ properties - too many to list here.<br>
-          <span style="font-weight:400; font-size:13px;">Narrow it down (day, week, or a single run) and it'll appear here.</span>
-        </div>`;
-        return;
-      }
-    }
-
-    // The Map page's own telemetry banner (#mapLiveStreet etc.) still comes
-    // from GPS proximity to the nearest property, same as before - it just
-    // no longer drives the Drive page's street list, or its street name
-    // (that's now the real GPS street - see updateLiveStreetFromGps /
-    // updateMapStreetOverlay, which write #hudStreetName directly).
+    // ---- Live part: nearest property + telemetry ----------------------
+    // This is the bit that has to keep up with the GPS (it feeds the speed
+    // readout, the street name and the next-bin card), so it runs on every
+    // call, before the expensive street-list rebuild below - which is now
+    // allowed to be skipped. See the rebuild gate further down.
+    //
+    // The Map page's own telemetry banner (#mapLiveStreet etc.) comes
+    // from GPS proximity to the nearest property - it doesn't drive the
+    // Drive page's street list, or its street name (that's the real GPS
+    // street - see updateLiveStreetFromGps / updateMapStreetOverlay,
+    // which write #hudStreetName directly).
     //
     // Which side of the road a site sits on right now, relative to the
     // direction of travel (not a fixed compass side) - same +/-70deg
@@ -16873,6 +16865,78 @@ window.addEventListener('DOMContentLoaded', async () => {
       mapLiveStreet.innerText = toSentenceCaseLabel(propStreetName);
     }
     renderCurrentAddressTelemetry(currentSite);
+    // ---- Rebuild gate -------------------------------------------------
+    // Everything below builds the street list: several megabytes of HTML
+    // and tens of thousands of DOM nodes. Doing that on every GPS fix was
+    // costing ~200ms a second on a laptop (worse on a phone), which is
+    // what made the clock and speed readouts visibly stutter - and it was
+    // happening even while the Drive page was closed and nobody could see
+    // the list. So on the GPS path, only rebuild while the Drive page is
+    // actually showing, and no more often than DRIVE_LIST_MIN_REBUILD_MS
+    // (the distance labels and "Nearby" order do drift as you drive, they
+    // just don't need to be redrawn at GPS rate). Every other caller is a
+    // real state change (run picked, filter changed, tab opened, bin
+    // serviced) and still rebuilds immediately.
+    if (opts && opts.gpsOnly) {
+      const hudVisible = !!document.getElementById('driverHudScreen')?.classList.contains('active');
+      const now = Date.now();
+      if (!hudVisible || now - lastDriveListBuildAt < DRIVE_LIST_MIN_REBUILD_MS) return;
+      lastDriveListBuildAt = now;
+    } else {
+      lastDriveListBuildAt = Date.now();
+    }
+
+    // Group every property on the current run (matching active filters +
+    // search) by street name alone (house number stripped - see
+    // streetNameOnly - so "1 Besgrove Street" and "14 Besgrove Street"
+    // land in the same card instead of one street per house). Also tally,
+    // across ALL records regardless of filter, every run (by stream) that
+    // services each street - shown as run-number badges on the summary
+    // card (see streetRunBadgesByStreet below), same as the per-address
+    // badges further down - plus, for each of those runs, how many
+    // houses/bins on THIS street it services (streetRunStatsByStreet),
+    // used to build the per-run breakdown inside each stream's tab panel.
+    const streetGroups = new Map();   // streetKey -> { label, sites: [] }
+    const streetIndex = getDriveStreetIndex(records);
+    const streetRunBadgesByStreet = streetIndex.badges;
+    const streetRunStatsByStreet = streetIndex.stats;
+    let matchedPropertyCount = 0;
+
+    for (let i = 0; i < records.length; i++) {
+      const site = records[i];
+      const streetKey = streetIndex.keys[i];
+      if (!streetKey) continue;
+      const streetLabel = streetIndex.labels[i];
+
+      if (!siteMatchesAllActiveFilters(site)) continue;
+
+      if (searchQuery) {
+        const addrMatch = clean(site.addressText).toLowerCase().includes(searchQuery) ||
+                          clean(site.propId).toLowerCase().includes(searchQuery) ||
+                          clean(site.siteId).toLowerCase().includes(searchQuery) ||
+                          clean(site.baseStreetLine).toLowerCase().includes(searchQuery);
+        if (!addrMatch) continue;
+      }
+
+      const eligibleStreams = getDriveEligibleStreams(site);
+      if (!eligibleStreams.length) continue;
+
+      if (!streetGroups.has(streetKey)) streetGroups.set(streetKey, { label: streetLabel, sites: [] });
+      streetGroups.get(streetKey).sites.push(site);
+      matchedPropertyCount++;
+
+      // Safety cap: even with a run selected, a bad/overly-broad filter
+      // could still match thousands of properties and hang the browser
+      // trying to build that much HTML. Bail out early and ask for a
+      // narrower filter rather than freezing the app.
+      if (matchedPropertyCount > DRIVE_LIST_MAX_PROPERTIES) {
+        listContainer.innerHTML = `<div style="text-align:center; padding:30px; color:#64748b; font-weight:700;">
+          That filter matches ${matchedPropertyCount.toLocaleString()}+ properties - too many to list here.<br>
+          <span style="font-weight:400; font-size:13px;">Narrow it down (day, week, or a single run) and it'll appear here.</span>
+        </div>`;
+        return;
+      }
+    }
 
     // Street list itself: one card per street, either alphabetical or by
     // distance from the truck's current GPS position (see
@@ -16956,7 +17020,7 @@ window.addEventListener('DOMContentLoaded', async () => {
 
       const streetId = `street_${key.replace(/[^a-z0-9]/gi, '_')}`;
 
-      const addressCardsHtml = group.sites
+      const addressCardsHtml = () => group.sites
         .slice()
         .sort((a, b) => clean(a.addressText).localeCompare(clean(b.addressText), undefined, { numeric: true }))
         .map(site => renderDriveAddressCard(site))
@@ -16967,7 +17031,7 @@ window.addEventListener('DOMContentLoaded', async () => {
       // bin count and expands its own panel below (see .street-tab-btn /
       // toggleStreetTab). Only one tab open per card at a time.
       const openTab = openStreetTabByStreet.get(key) || '';
-      const tabDefs = [{ key: 'houses', cls: 'street-tab-houses', icon: 'houses.png', count: houseIds.size, panel: () => addressCardsHtml }];
+      const tabDefs = [{ key: 'houses', cls: 'street-tab-houses', icon: 'houses.png', count: houseIds.size, panel: addressCardsHtml }];
       if (garCount) tabDefs.push({ key: 'gar', cls: 'street-tab-gar', icon: 'garbage.png', count: garCount, panel: () => runRowsHtml(['Garbage']) });
       if (recCount) tabDefs.push({ key: 'rec', cls: 'street-tab-rec', icon: 'recycle.png', count: recCount, panel: () => runRowsHtml(['Recycling', 'SummerRecycling']) });
       if (fogCount) tabDefs.push({ key: 'fog', cls: 'street-tab-fog', icon: 'fogo.png', count: fogCount, panel: () => runRowsHtml(['FOGO']) });
@@ -16977,9 +17041,16 @@ window.addEventListener('DOMContentLoaded', async () => {
         return `<button type="button" class="street-tab-btn ${t.cls}${isOpen ? ' tab-open' : ''}" onclick="event.stopPropagation(); window.toggleStreetTab('${key}', '${t.key}')"><img class="icon-img" src="${t.icon}" alt=""><span class="street-tab-count">${t.count}</span><span class="street-tab-arrow">${isOpen ? '▲' : '▼'}</span></button>`;
       }).join('');
 
+      // Only the open panel's contents get built. A collapsed panel is
+      // display:none anyway (see .street-group-body), and rendering every
+      // tab of every street card was most of the Drive list's multi-megabyte
+      // render - with a full run selected that was ~6MB of HTML and ~47k DOM
+      // nodes thrown away and rebuilt each time. Opening a tab goes through
+      // toggleStreetTab, which re-renders, so the content is there the
+      // moment it's actually needed.
       const panelsHtml = tabDefs.map(t => {
         const isOpen = openTab === t.key;
-        return `<div class="street-group-body panel-${t.key}${isOpen ? ' open' : ''}" id="${streetId}_${t.key}">${t.panel()}</div>`;
+        return `<div class="street-group-body panel-${t.key}${isOpen ? ' open' : ''}" id="${streetId}_${t.key}">${isOpen ? t.panel() : ''}</div>`;
       }).join('');
 
       return `
@@ -17287,7 +17358,10 @@ window.addEventListener('DOMContentLoaded', async () => {
     if (movedDist >= 2.0 || !lastTelemetrySite) {
       lastGpsCoords = { ...userCurrentLocation };
       if (activeTab === 'search') handleSearch();
-      updateDriverHud();
+      // gpsOnly: always refresh the live telemetry (speed, street, next
+      // bin), but leave the heavy street-list rebuild to the gate inside
+      // updateDriverHud - see DRIVE_LIST_MIN_REBUILD_MS.
+      updateDriverHud({ gpsOnly: true });
     }
   };
 
@@ -22898,6 +22972,82 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
   // parcels: id -> { s: spi, l: lot, n: plan, o: outer ring, h: holes, b: bbox, a: area m2 }
   // sites:   siteKey -> { p: parcelId, m: 0|1, d: metres, q: [lat,lng] pin used }  or { x: 1, q } = looked up, nothing found
   let store = { v: 1, parcels: {}, sites: {} };
+
+  /* ---------------- where things are (so a redraw only looks at what's on screen) ----------------
+     Everything here used to be found by scanning the lot: every redraw walked all ~97k houses twice AND
+     every cached parcel (77k+ once a run has been matched) to pick out the few hundred actually in view,
+     and every newly loaded tile scanned all the houses again. On a phone that is a few hundred ms of
+     blocked main thread each time - which is what made the clock and speed lag while driving - and the
+     rubbish it generated (a fresh 77k-long key array every redraw) is what eventually ran the tab out of
+     memory. Both are now bucketed into a grid of TILE_DEG cells, so only the cells under the viewport are
+     looked at. Parcels bigger than BIG_SPAN_CELLS (bay and Crown-land polygons) go in a small always-checked
+     list instead of being written into hundreds of cells. */
+  const BIG_SPAN_CELLS = 16;
+  let parcelCells = new Map(), parcelBig = [], parcelIndexed = false;
+  let siteCells = new Map(), siteCellCount = -1;
+  const cellKey = (lng, lat) => Math.floor(lng / TILE_DEG) + ':' + Math.floor(lat / TILE_DEG);
+  function cellsOf(b) {                        // b = [minLng, minLat, maxLng, maxLat]
+    const x0 = Math.floor(b[0] / TILE_DEG), x1 = Math.floor(b[2] / TILE_DEG);
+    const y0 = Math.floor(b[1] / TILE_DEG), y1 = Math.floor(b[3] / TILE_DEG);
+    return { x0, x1, y0, y1, span: (x1 - x0 + 1) * (y1 - y0 + 1) };
+  }
+  function indexParcel(id, P) {
+    if (!P || !P.b) return;
+    const c = cellsOf(P.b);
+    if (c.span > BIG_SPAN_CELLS) { parcelBig.push(id); return; }
+    for (let x = c.x0; x <= c.x1; x++) for (let y = c.y0; y <= c.y1; y++) {
+      const k = x + ':' + y, a = parcelCells.get(k);
+      if (a) a.push(id); else parcelCells.set(k, [id]);
+    }
+  }
+  function buildParcelIndex() {
+    parcelCells = new Map(); parcelBig = [];
+    const ids = Object.keys(store.parcels);
+    for (let i = 0; i < ids.length; i++) indexParcel(ids[i], store.parcels[ids[i]]);
+    parcelIndexed = true;
+  }
+  let handDrawnSites = [];
+  function buildSiteIndex() {
+    siteCells = new Map(); handDrawnSites = [];
+    const list = allSites();
+    for (let i = 0; i < list.length; i++) {
+      const s = list[i];
+      // a boundary drawn by hand can reach past its own house's pin, so those are kept as one short list
+      // and always checked rather than being found through the grid
+      if (Array.isArray(s.boundary) && s.boundary.length >= 3) handDrawnSites.push(s);
+      const p = sitePoint(s); if (!p) continue;
+      const k = cellKey(p.lng, p.lat), a = siteCells.get(k);
+      if (a) a.push(s); else siteCells.set(k, [s]);
+    }
+    siteCellCount = list.length;
+  }
+  function sitesIndexed() {
+    if (siteCellCount !== allSites().length) buildSiteIndex();
+    return siteCells;
+  }
+  // every house whose pin falls in the cells covering v (plus a ring of neighbours, so nothing on the edge is missed)
+  function sitesInView(v) {
+    const idx = sitesIndexed(), out = [];
+    const x0 = Math.floor(v.w / TILE_DEG) - 1, x1 = Math.floor(v.e / TILE_DEG) + 1;
+    const y0 = Math.floor(v.s / TILE_DEG) - 1, y1 = Math.floor(v.n / TILE_DEG) + 1;
+    for (let x = x0; x <= x1; x++) for (let y = y0; y <= y1; y++) {
+      const a = idx.get(x + ':' + y); if (a) for (let i = 0; i < a.length; i++) out.push(a[i]);
+    }
+    return out;
+  }
+  function parcelIdsInView(v) {
+    if (!parcelIndexed) buildParcelIndex();
+    const seen = new Set();
+    const x0 = Math.floor(v.w / TILE_DEG) - 1, x1 = Math.floor(v.e / TILE_DEG) + 1;
+    const y0 = Math.floor(v.s / TILE_DEG) - 1, y1 = Math.floor(v.n / TILE_DEG) + 1;
+    for (let x = x0; x <= x1; x++) for (let y = y0; y <= y1; y++) {
+      const a = parcelCells.get(x + ':' + y); if (!a) continue;
+      for (let i = 0; i < a.length; i++) seen.add(a[i]);
+    }
+    for (let i = 0; i < parcelBig.length; i++) seen.add(parcelBig[i]);
+    return seen;
+  }
+
   let dataVer = 0;               // bumped whenever matches / cached tiles change, so the map knows a redraw is really needed
   // Which houses to outline. null = nothing is filtered, so outline everything (as before). Otherwise a Set of
   // siteKeys: only the houses the map is currently showing for the filtered run get their boundary drawn.
@@ -22908,7 +23058,7 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     if (!loadPromise) {
       loadPromise = Promise.resolve()
         .then(() => (typeof loadFromDB === 'function') ? loadFromDB(DB_KEY) : null)
-        .then(d => { if (d && d.v === 1 && d.parcels && d.sites) store = d; })
+        .then(d => { if (d && d.v === 1 && d.parcels && d.sites) { store = d; parcelIndexed = false; } })
         .then(() => loadExtras())
         .catch(e => console.warn('Parcel cache load failed:', e))
         .then(() => { refreshSettingsUI(); });
@@ -22950,6 +23100,7 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     const pid = P.parts.length > 1 ? P.id + '#' + m.part.i : P.id;
     if (!store.parcels[pid]) {
       store.parcels[pid] = { s: P.spi, l: P.lot, n: P.plan, o: m.part.o, h: m.part.h, b: m.part.b, a: Math.round(m.part.a) };
+      if (parcelIndexed) indexParcel(pid, store.parcels[pid]);   // keep the grid in step as new lots come in
     }
     store.sites[key] = { p: pid, m: m.m, d: Math.round(m.d * 10) / 10, q };
   }
@@ -23045,13 +23196,10 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
   }
 
   function allSites() { return (typeof siteRecords !== 'undefined' && Array.isArray(siteRecords)) ? siteRecords : []; }
+  // The grid cells are TILE_DEG too, so a tile IS one cell - no scan of every house needed (this used to
+  // run over all ~97k of them for every tile loaded, and driving loads tiles constantly).
   function sitesInTile(ix, iy) {
-    const out = [], list = allSites();
-    for (let i = 0; i < list.length; i++) {
-      const p = sitePoint(list[i]);
-      if (p && Math.floor(p.lng / TILE_DEG) === ix && Math.floor(p.lat / TILE_DEG) === iy) out.push(list[i]);
-    }
-    return out;
+    return (sitesIndexed().get(ix + ':' + iy) || []).slice();
   }
   // Matches every listed site that still needs it against one tile's parcels.
   function matchList(parcels, sites, retryNegatives) {
@@ -23145,7 +23293,9 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     };
     // 1. Hand-drawn boundaries (win over everything)
     const only = runKeys;   // null = draw everything
-    allSites().forEach(s => {
+    const nearby = sitesInView(v);   // only the houses whose pin is in/next to the view, not all ~97k
+    sitesIndexed();                  // makes sure handDrawnSites is current
+    handDrawnSites.forEach(s => {
       if (only && !only.has(siteKey(s))) return;
       if (!Array.isArray(s.boundary) || s.boundary.length < 3) return;
       let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
@@ -23160,16 +23310,16 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
       const ids = new Set();
       only.forEach(k => { const e = store.sites[k]; if (e && e.p) ids.add(e.p); });
       parcelIds = Array.from(ids);
-    } else parcelIds = Object.keys(store.parcels);
-    for (let i = 0; i < parcelIds.length; i++) {
-      const P = store.parcels[parcelIds[i]];
+    } else parcelIds = parcelIdsInView(v);   // was Object.keys(store.parcels) - a fresh 77k-long array every redraw
+    for (const pid of parcelIds) {
+      const P = store.parcels[pid];
       if (P && hits(P.b, v)) add(P.o, P.h, st.hit);
       if (n >= MAX_DRAW) break;
     }
     // 2b. Houses whose pin isn't in any lot: red ring = no lot within 25 m, orange = pin outside its lot
     //     (nearest lot used). Those pins are probably in the wrong place - select the house and drag it.
     const inV = pt => pt.lng >= v.w && pt.lng <= v.e && pt.lat >= v.s && pt.lat <= v.n;
-    allSites().forEach(s => {
+    nearby.forEach(s => {
       if (n >= MAX_DRAW) return;
       if (only && !only.has(siteKey(s))) return;
       const e = store.sites[siteKey(s)];
@@ -23362,6 +23512,7 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     if (!ok) return;
     await ensureLoaded();
     store = { v: 1, parcels: {}, sites: {} };
+    parcelCells = new Map(); parcelBig = []; parcelIndexed = true;
     tiles.clear();
     await saveNow(); redraw(); refreshSettingsUI();
   }
@@ -24062,7 +24213,9 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     // exposed for the test harness only
     _t: { setRunSites, getRunKeys: () => runKeys, ingest, matchPoint, ringContains, distRingM, queryURL, fetchEnvelope, fetchTile, loadTile, applyMatch, needsMatch,
           matchList, groupByTile, runBatch, redraw, computeOutline, computeOutlineWindowed, WIN, ringsFromEdges, openMask, closeMask, boxMorph, buildRunOutlines, applyOutlines, traceMask, ringSignedArea, simplifyClosed, fillRings, makeGrid, OUT, outBuild, getExtras: () => extras, cfg, tiles, failedTiles, batch, getStore: () => store, setStore: s => { store = s; },
-          saveNow, tileOf, tkey, toLatLngs, lastDraw: () => lastDrawCount, resetMap: () => { map = null; } }
+          saveNow, tileOf, tkey, toLatLngs, lastDraw: () => lastDrawCount, resetMap: () => { map = null; },
+          parcelIdsInView, sitesInView, sitesInTile, buildParcelIndex, buildSiteIndex,
+          indexSizes: () => ({ parcelCells: parcelCells.size, parcelBig: parcelBig.length, siteCells: siteCells.size, handDrawn: handDrawnSites.length }) }
   };
 
   /* ---------------- follow the map's filtered houses ---------------- */
