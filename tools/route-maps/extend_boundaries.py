@@ -27,6 +27,12 @@ LAT0, LNG0 = -38.30, 144.95
 KX = 111320 * math.cos(math.radians(LAT0)); KY = 110540.0
 GAP_M, MIN_PIECE_M, BUFFER_M, MAX_FIT_M, MAX_GROWTH = 8.0, 15.0, 14.0, 15.0, 0.6
 OVERLAP_MIN_M2, OVERLAP_GROWTH_M2 = 50.0, 100.0   # ignore trivial overlaps, and ones extension didn't meaningfully worsen
+# Two runs of the same stream, day AND week can't both service the same ground, so with the split no
+# longer zigzagging there's no reason to leave those overlaps alone just because they came in with
+# the base shapes rather than from the street extension. Runs of different weeks (A vs B) are
+# different fortnights and may legitimately sit on top of each other, so they're never split.
+RESOLVE_ALL = os.environ.get('RESOLVE_ALL_OVERLAPS', '1') != '0'
+RESOLVE_ALL_MIN_M2 = 2000.0    # only worth reshaping a run for a substantial shared area
 DAY = {'Mon': 'Monday', 'Tue': 'Tuesday', 'Wed': 'Wednesday', 'Thu': 'Thursday', 'Fri': 'Friday'}
 
 def to_m(lat, lng): return ((lng - LNG0) * KX, (lat - LAT0) * KY)
@@ -112,24 +118,87 @@ by_group = {}
 for key in bd['boundaries']:
     by_group.setdefault(group_key(key), []).append(key)
 
-# This run's own houses - the boundary this app uses everywhere else is itself a nearest-HOUSE tessellation,
-# so splitting disputed ground by nearest house (not nearest boundary edge) matches that and never reassigns
-# a house that is genuinely this run's own to a neighbour just because the neighbour's edge is a bit closer.
+# ---------------------------------------------------------------------------------------------
+# The lots each run services.
+#
+# Splitting disputed road by nearest HOUSE PIN is what made the boundaries zigzag: houses on
+# opposite sides of a street are staggered, so the bisector between two rows of points is a
+# sawtooth of perpendicular bisectors rather than a line down the road. Between two rows of
+# *frontages* - straight lines - the bisector is the road's centreline, which is what the maps
+# actually mean and what a driver expects to see.
+#
+# So the sites for the split are dense samples along each run's own lot outlines (from the shipped
+# data/parcels.json), not its house pins. This also means a run's edge follows real property lines
+# rather than cutting through back yards.
+_lots_by_key = {}      # run key -> [parcel id, ...]
+_lot_ring = {}         # parcel id -> [(x, y), ...] in metres, decoded on demand
+_lot_bbox = {}         # parcel id -> (minx, miny, maxx, maxy) in metres
+_parcel_src = {}
+
+
+def _load_parcels():
+    """Read data/parcels.json: every lot's outline, and which lot each house sits on."""
+    path = os.path.abspath(os.path.join(HERE, '..', '..', 'data', 'parcels.json'))
+    try:
+        pj = json.load(open(path))
+    except FileNotFoundError:
+        print('  (no data/parcels.json - overlap split will fall back to house pins)')
+        return None
+    sc = pj.get('scale', 100000)
+    for pid, rec in pj['parcels'].items():
+        _parcel_src[pid] = (rec[0], sc)
+        # bbox straight off the deltas, without building the ring - most lots are nowhere near a
+        # dispute and never need decoding at all
+        x = y = 0; xs0 = ys0 = 10 ** 9; xs1 = ys1 = -10 ** 9
+        d = rec[0]
+        for i in range(0, len(d) - 1, 2):
+            x += d[i]; y += d[i + 1]
+            if x < xs0: xs0 = x
+            if x > xs1: xs1 = x
+            if y < ys0: ys0 = y
+            if y > ys1: ys1 = y
+        a = to_m(ys0 / sc, xs0 / sc); b = to_m(ys1 / sc, xs1 / sc)
+        _lot_bbox[pid] = (min(a[0], b[0]), min(a[1], b[1]), max(a[0], b[0]), max(a[1], b[1]))
+    return {k: (v[0] if v != 0 else None) for k, v in pj['sites'].items()}
+
+
+def _ring_of(pid):
+    if pid not in _lot_ring:
+        d, sc = _parcel_src[pid]
+        pts = []; x = y = 0
+        for i in range(0, len(d) - 1, 2):
+            x += d[i]; y += d[i + 1]
+            pts.append(to_m(y / sc, x / sc))
+        _lot_ring[pid] = pts
+    return _lot_ring[pid]
+
+
 _houses_by_key = {}
 CSV_FIELD_OF_STREAM = {'Recycling': 'Solo Recycling Run', 'FOGO': 'Solo FOGO Run', 'Garbage': 'Solo Garbage Run'}
+_site_lot = _load_parcels()
+_no_lot = 0
 try:
     with open(f'{WORK}/master.csv', newline='', encoding='utf8') as f:
         for row in csv.DictReader(f):
             try: lat, lng = float(row['Lat']), float(row['Lng'])
             except Exception: continue
             day = row['Solo Collection Day'].strip(); week = row['Solo Week Cycle'].strip().upper()
+            # the app keys a house by Property ID, falling back to Site Id - match that exactly, or
+            # the lot lookup silently misses
+            site_key = (row.get('Property ID') or '').strip() or (row.get('Site Id') or '').strip()
+            lot = _site_lot.get(site_key) if _site_lot else None
+            if _site_lot is not None and not lot: _no_lot += 1
             for stream, field in CSV_FIELD_OF_STREAM.items():
                 run = (row.get(field) or '').strip()
                 if not run: continue
                 k = f'{stream}#{day}#{run}' if stream in NO_WEEK_STREAMS else f'{stream}#{day}#{week}#{run}'
                 _houses_by_key.setdefault(k, []).append(to_m(lat, lng))
+                if lot: _lots_by_key.setdefault(k, []).append(lot)
 except FileNotFoundError:
     print('  (no work/master.csv - overlap split will use boundary edges only, not houses)')
+if _site_lot is not None:
+    have = sum(len(set(v)) for v in _lots_by_key.values())
+    print(f'  lots: {len(_lot_bbox)} known, {have} run-lot links, {_no_lot} houses with no matched lot')
 
 def sample_boundary(poly, near, step=5.0):
     """Points every `step` m along poly's exterior(s), kept only where they fall inside `near`."""
@@ -145,12 +214,41 @@ def sample_boundary(poly, near, step=5.0):
                 if near.contains(Point(x, y)): pts.append((x, y))
     return pts
 
+LOT_STEP_M = 2.0     # how finely a lot outline is sampled; the finer this is, the closer the split
+                     # sits to the true middle of the road (2m is well under a lane width)
+
+def lot_points(key, near):
+    """Dense points along this run's own lot outlines, within `near`.
+
+    These are what make the split follow the road: sampled finely enough, a straight frontage
+    behaves like a line rather than a point, so the bisector between the frontages facing each
+    other across a street lands on the street's centreline instead of zigzagging between houses."""
+    b = near.bounds
+    pts = []
+    for pid in set(_lots_by_key.get(key, ())):
+        lb = _lot_bbox.get(pid)
+        if not lb or lb[2] < b[0] or lb[0] > b[2] or lb[3] < b[1] or lb[1] > b[3]: continue
+        ring = _ring_of(pid)
+        for (x0, y0), (x1, y1) in zip(ring, ring[1:] + ring[:1]):
+            L = math.hypot(x1 - x0, y1 - y0)
+            n = max(1, int(L / LOT_STEP_M))
+            for k in range(n):
+                x, y = x0 + (x1 - x0) * k / n, y0 + (y1 - y0) * k / n
+                if b[0] <= x <= b[2] and b[1] <= y <= b[3] and near.contains(Point(x, y)):
+                    pts.append((x, y))
+    return pts
+
 def generator_points(key, near):
-    """Points that stand for "this is run `key`'s own ground" near the disputed area: its own houses first
-    (matching the nearest-house tessellation the rest of the app's boundaries are built from), topped up with
-    a sparse sample of its original boundary so the split still has something to go on wherever a run's
-    houses don't quite reach the disputed edge (e.g. the edge is a street with no houses on this side)."""
-    pts = [(x, y) for x, y in _houses_by_key.get(key, []) if near.contains(Point(x, y))]
+    """Points that stand for "this is run `key`'s own ground" near the disputed area.
+
+    Its own lots, sampled densely, so the resulting edge follows property lines and runs down the
+    middle of shared roads. Where a run has no matched lots near the dispute (an unmatched new
+    estate, or a stretch of road with no houses on this side at all) this falls back to the old
+    behaviour - house pins plus a sparse sample of the run's own pre-extension boundary - so those
+    places are no worse than before rather than left with nothing to go on."""
+    pts = lot_points(key, near)
+    if len(pts) >= 20: return pts
+    pts += [(x, y) for x, y in _houses_by_key.get(key, []) if near.contains(Point(x, y))]
     ok = run_geom(key)
     if ok is not None: pts += sample_boundary(ok, near, step=15.0)
     return pts
@@ -171,23 +269,38 @@ def resolve_group(keys):
         if a not in shapes: continue
         for b in keys[i + 1:]:
             if b not in shapes: continue
-            if a not in extended and b not in extended: continue   # extension touched neither - nothing to fix
+            pa, pb = a.split('#'), b.split('#')
+            same_week = (len(pa) != 4 and len(pb) != 4) or (len(pa) == 4 and len(pb) == 4 and pa[2] == pb[2])
+            if a not in extended and b not in extended and not (RESOLVE_ALL and same_week):
+                continue   # extension touched neither, and we're not sweeping pre-existing overlaps
             ga, gb = shapes[a], shapes[b]
             if not ga.intersects(gb): continue
             new_ov = ga.intersection(gb)
             if new_ov.is_empty or new_ov.area < OVERLAP_MIN_M2: continue
             oa, ob = run_geom(a), run_geom(b)
             old_ov = oa.intersection(ob).area if (oa is not None and ob is not None) else 0.0
-            if new_ov.area - old_ov < OVERLAP_GROWTH_M2: continue   # not something our extension introduced
+            if new_ov.area - old_ov < OVERLAP_GROWTH_M2:
+                # not something our extension introduced - only take it on if it's a real same-week
+                # conflict big enough to be worth reshaping for
+                if not (RESOLVE_ALL and same_week and new_ov.area >= RESOLVE_ALL_MIN_M2): continue
             disputes.append((a, b, new_ov))
     if not disputes: return 0, []
 
     dispute_zone = unary_union([d[2] for d in disputes]).buffer(120)
     in_play = sorted({k for a, b, _ in disputes for k in (a, b)})
     near = dispute_zone.buffer(300)
-    pts = []
+    # Adjacent lots share an edge, so sampling lot outlines produces the same point twice - and a
+    # duplicate point makes shapely's Voronoi fail outright ("Invalid number of points in
+    # LinearRing found 2"), which silently left whole groups unsplit. Snap to 10cm and drop any
+    # point two runs both claim: that's a shared property line, where neither side has a better
+    # claim than the other, so it shouldn't vote either way.
+    owner = {}
     for k in in_play:
-        for x, y in generator_points(k, near): pts.append((x, y, k))
+        for x, y in generator_points(k, near):
+            q = (round(x, 1), round(y, 1))
+            if q in owner and owner[q] != k: owner[q] = None
+            elif q not in owner: owner[q] = k
+    pts = [(q[0], q[1], k) for q, k in owner.items() if k is not None]
     if len(pts) < 2 * len(in_play): return 0, []   # too sparse to trust a partition here
     try:
         vd = voronoi_diagram(MultiPoint([(x, y) for x, y, _ in pts]), envelope=dispute_zone.buffer(50))

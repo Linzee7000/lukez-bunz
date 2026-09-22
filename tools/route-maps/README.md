@@ -12,14 +12,13 @@ good to roughly 5-20 m. Pages that show only part of a run (zoomed detail pages)
 `compare.py` reads day/run/week straight off the page text.
 
 **Garbage** PDFs (the ones from `1.0 GARBAGE - Apr26.zip`, exported to PDF one file per day) have a broken
-font export: every letter - including digits - decodes to an unrelated Unicode codepoint, so the run number
-can't be read from the page text at all. `identify_garbage.py` works around this by geometry instead: it
-gets the day from the PDF's filename (plain text, unaffected), then fits each page's route against *every*
-Garbage run that services that day and keeps the match only if one run wins clearly and precisely (a cheap
-normalised-correlation pass ranks all candidates, then a precise fit is run on just the top few, and the
-winner must beat the runner-up by a wide margin). Most pages come back "ambiguous" and are skipped - that's
-expected, not a bug; only genuinely confident matches feed into the boundary/street-mode data, since a wrong
-guess here would inject a wrong route into a run's data.
+font export: every character decodes to an unrelated Unicode codepoint, so "Monday Run 201 Garbage" extracts
+as `DŽŶĚĂǇZƵŶϮϬϭ'ĂƌďĂŐĞ`. It looks like gibberish but the substitution is *consistent* and the same in all
+five day files, so `garbage_font.py` simply undoes it and `identify_garbage.py` reads the run number straight
+off the page - 93 of 96 pages. Geometry is then only used to place the page on the ground. Pages with no
+title block (zoomed detail pages) still fall back to the old approach of identifying the run by fitting the
+route against every run that services that day and keeping only a clear, precise winner. Pages that can't be
+*placed* well (fit > 15 m) are still skipped even when their run is known.
 
 Needs: `poppler` (`brew install poppler`) and Python with `numpy scipy shapely`.
 
@@ -30,7 +29,7 @@ mkdir -p work && curl -sL "<SCRIPT_URL>?download=csv" -o work/master.csv     # t
 venv/bin/python compare.py                    # Recycling + FOGO -> work/compare-results-{REC,ORG}.json, work/routes-m-{REC,ORG}.json
 venv/bin/python identify_garbage.py           # Garbage (geometry-identified) -> work/compare-results-GAR*.json, work/routes-m-GAR*.json
 venv/bin/python modes_export.py --write       # merge all three -> data/street-modes.json
-venv/bin/python extend_boundaries.py --write  # stretch every stream's boundaries to the streets driven, split any resulting overlap down the middle -> data/run-boundaries.json (new `generated`)
+venv/bin/python extend_boundaries.py --write  # stretch every stream's boundaries to the streets driven, split shared road down the middle -> data/run-boundaries.json (new `generated`)
 venv/bin/python cover.py                      # Recycling only: how many of each run's houses sit inside its boundary
 ```
 
@@ -47,5 +46,14 @@ Notes:
 - `extend_boundaries.py` reads `ROUTEMAP_BASE_BOUNDARIES` (default: the live `data/run-boundaries.json`) as the
   boundaries to extend from - point it at an older snapshot to redo an extension from scratch rather than stacking
   on an already-extended file.
+- The overlap split uses each run's own **lot outlines** (from `data/parcels.json`, see `tools/parcels/`)
+  as the Voronoi sites, sampled every 2 m - not its house pins. Houses on opposite sides of a street are
+  staggered, so a bisector between two rows of *points* is a sawtooth; between two rows of *frontages* it is
+  the road's centreline, which is what the maps mean and what the driver expects. Points two runs both claim
+  (a shared property line) are dropped, and duplicates are snapped out first - a duplicate point makes
+  shapely's Voronoi fail outright, which silently left whole groups unsplit.
+- `RESOLVE_ALL_OVERLAPS=0` restricts the split to overlaps the street-extension itself created. The default
+  also sweeps up overlaps that were already in the base shapes, but only between runs of the same stream,
+  day **and** week - A and B weeks are different fortnights and may legitimately sit on top of each other.
 - `lib.py` holds the shared geometry helpers (PDF parsing, the coarse+precise fit, the boundary/house loaders) that
   `compare.py`, `identify_garbage.py`, `modes_export.py` and `extend_boundaries.py` all import.
