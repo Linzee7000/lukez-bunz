@@ -56,12 +56,26 @@ def run_geom(key):
     _geom_cache[key] = g
     return g
 
+# Two tag formats can be present in work/: the original Recycling-only "1.1 p1 Mon A 219" (space-separated,
+# from before compare.py grew to handle several streams) and the newer "REC|Monday|A|219|..." (pipe-delimited,
+# stream-coded). Recycling done the old way is already folded into BASE, so only the new-format tags (any
+# stream not yet extended) are turned into route lines here.
+STREAM_OF_CODE = {'REC': 'Recycling', 'ORG': 'FOGO', 'GAR': 'Garbage'}
+NO_WEEK_STREAMS = {'Garbage'}
+
+def key_of_tag(tag):
+    if '|' not in tag: return None   # old-format Recycling tag - already handled, skip
+    code, day, week, run_no, _src = tag.split('|', 4)
+    stream = STREAM_OF_CODE.get(code)
+    if not stream: return None
+    return f'{stream}#{day}#{run_no}' if stream in NO_WEEK_STREAMS else f'{stream}#{day}#{week}#{run_no}'
+
 # route lines per run key (all pages of that run that were placed well)
 per_run = {}
 for tag, cols in routes.items():
     if fits.get(tag, 999) > MAX_FIT_M: continue
-    parts = tag.split()                      # e.g. "1.1 p1 Mon A 219"
-    key = f'Recycling#{DAY[parts[2]]}#{parts[3]}#{parts[4]}'
+    key = key_of_tag(tag)
+    if key is None: continue
     for name, polys in cols.items():
         for pl in polys:
             xy = [(x * KX, y * KY) for x, y in pl]
@@ -102,15 +116,18 @@ for key in bd['boundaries']:
 # so splitting disputed ground by nearest house (not nearest boundary edge) matches that and never reassigns
 # a house that is genuinely this run's own to a neighbour just because the neighbour's edge is a bit closer.
 _houses_by_key = {}
+CSV_FIELD_OF_STREAM = {'Recycling': 'Solo Recycling Run', 'FOGO': 'Solo FOGO Run', 'Garbage': 'Solo Garbage Run'}
 try:
     with open(f'{WORK}/master.csv', newline='', encoding='utf8') as f:
         for row in csv.DictReader(f):
-            run = (row.get('Solo Recycling Run') or '').strip()
-            if not run: continue
             try: lat, lng = float(row['Lat']), float(row['Lng'])
             except Exception: continue
-            k = f"Recycling#{row['Solo Collection Day'].strip()}#{row['Solo Week Cycle'].strip().upper()}#{run}"
-            _houses_by_key.setdefault(k, []).append(to_m(lat, lng))
+            day = row['Solo Collection Day'].strip(); week = row['Solo Week Cycle'].strip().upper()
+            for stream, field in CSV_FIELD_OF_STREAM.items():
+                run = (row.get(field) or '').strip()
+                if not run: continue
+                k = f'{stream}#{day}#{run}' if stream in NO_WEEK_STREAMS else f'{stream}#{day}#{week}#{run}'
+                _houses_by_key.setdefault(k, []).append(to_m(lat, lng))
 except FileNotFoundError:
     print('  (no work/master.csv - overlap split will use boundary edges only, not houses)')
 
@@ -219,11 +236,13 @@ for key, rs in changed.items():
     out['boundaries'][key] = rs[0]
     if len(rs) > 1: out['extras'][key] = rs[1:]
     else: out.get('extras', {}).pop(key, None)
-out['version'] = 5
+streams_touched = sorted({k.split('#')[0] for k in changed})
+out['version'] = int(bd.get('version', 0)) + 1
 out['generated'] = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%MZ')
 out['note'] = ('Run boundaries from Vicmap property lines (each run covers its own lots and meets its neighbour down the middle of the road), '
-               'stretched to include the streets the recycling trucks drive, read off the route-map PDFs; where two runs\' streets share the '
-               'same road, that stretch is split down the middle. Keys are stream#day#week#run. Loaded by the app on start.')
+               f'stretched to include the streets the truck drives ({", ".join(streams_touched) or "no streams this run"}), read off the '
+               'route-map PDFs; where two runs\' streets share the same road, that stretch is split down the middle. '
+               'Keys are stream#day#week#run (Garbage has no week). Loaded by the app on start.')
 
 for key, n, length, growth in report:
     if n: print(f'{key:34s} +{n:2d} street pieces ({length:6.0f} m)  area +{growth*100:4.0f}%')
