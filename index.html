@@ -15487,8 +15487,64 @@ window.addEventListener('DOMContentLoaded', async () => {
       hasAutoCenteredTruck = true;
     }
     applyMapHeadingRotation();
+    updateMapFollowModeButton();
   };
   window.toggleMapSideView = window.toggleTruckFollow;
+
+  /* One button, pressed round a three-step cycle, instead of a separate "focus on me" and
+     "lock track up". Track-Up only means anything while the map is following you - the fourth
+     combination (track-up without follow) was never useful - so the states are:
+
+       free      map stays where you put it, north up          (target icon)
+       follow    map follows you, north up                     (navigation arrow)
+       track-up  map follows you and turns to your heading      (compass)
+
+     and pressing a third time comes back to free. Each step reuses the existing toggles rather
+     than reimplementing them, so everything else that calls toggleTruckFollow / disableGpsFollow
+     (boundary editing, the pre-start flow) keeps working unchanged. */
+  window.cycleMapFollowMode = function(ev) {
+    if (ev) ev.stopPropagation();
+    const follow = isTruckFollowEnabled, trackUp = isTrackUpEnabled;
+    if (!follow) {
+      if (trackUp) window.toggleTrackUpOrientation();      // shouldn't happen; normalise
+      window.toggleTruckFollow();                          // free -> follow
+    } else if (!trackUp) {
+      window.toggleTrackUpOrientation();                   // follow -> track-up
+    } else {
+      window.toggleTrackUpOrientation();                   // track-up -> free
+      window.toggleTruckFollow();
+    }
+    updateMapFollowModeButton();
+  };
+
+  // Which icon the merged follow button should be showing. Shared with maskSideIcons(), which
+  // swaps the <img> for a masked <span> and would otherwise force it back to a two-state icon.
+  window.mapFollowIcon = function () {
+    if (!isTruckFollowEnabled) return 'target.png';
+    return isTrackUpEnabled ? 'compass.png' : 'navigation.png';
+  };
+
+  function updateMapFollowModeButton() {
+    const btn = document.getElementById('btnTruckFollowTarget');
+    if (!btn) return;
+    const on = isTruckFollowEnabled, up = isTrackUpEnabled;
+    const want = window.mapFollowIcon();
+    const icon = btn.querySelector('img');
+    if (icon) icon.src = want;
+    // ...and the masked-span form the icon layer replaces it with
+    const span = btn.querySelector('.lb-mask-ico');
+    if (span && span.dataset.src !== want) {
+      span.dataset.src = want;
+      span.style.webkitMaskImage = 'url("' + want + '")';
+      span.style.maskImage = 'url("' + want + '")';
+    }
+    btn.classList.toggle('active', on);
+    btn.classList.toggle('track-up', on && up);
+    btn.title = on
+      ? (up ? 'Following you, map turns with you — tap for off' : 'Following you, north up — tap for track-up')
+      : 'Map stays put — tap to follow you';
+  }
+  window.updateMapFollowModeButton = updateMapFollowModeButton;
 
   // Turns off GPS follow ("locate me") the same way tapping the follow
   // button off does, without toggling it back on if it's already off.
@@ -15498,6 +15554,9 @@ window.addEventListener('DOMContentLoaded', async () => {
   // they're trying to drag or tap.
   function disableGpsFollow() {
     if (!isTruckFollowEnabled) return;
+    // Track-Up has no meaning once nothing is following, and leaving the map rotated under a
+    // driver who is about to drag a boundary point is worse than useless.
+    if (isTrackUpEnabled && typeof window.toggleTrackUpOrientation === 'function') window.toggleTrackUpOrientation();
     isTruckFollowEnabled = false;
     hasAutoCenteredTruck = false;
     mapManualOverrideActive = false;
@@ -15508,6 +15567,7 @@ window.addEventListener('DOMContentLoaded', async () => {
       const icon = btn.querySelector('img');
       if (icon) icon.src = 'target.png';
     }
+    updateMapFollowModeButton();
   }
 
   // Track-Up / North-Up Toggle
@@ -15524,13 +15584,14 @@ window.addEventListener('DOMContentLoaded', async () => {
     // next time Track-Up is turned off again.
     if (!isTrackUpEnabled) manualMapRotationDeg = 0;
 
-    const btn = document.getElementById('btnTrackUpOrientation');
+    const btn = document.getElementById('btnTrackUpOrientation');   // gone since the buttons merged; harmless if a build still has it
     if (btn) {
       btn.classList.toggle('active', isTrackUpEnabled);
       btn.setAttribute('title', isTrackUpEnabled ? 'Track-Up (Driving Ahead)' : 'North-Up');
     }
 
     applyMapHeadingRotation();
+    updateMapFollowModeButton();
   };
 
   // Switches the map into Track-Up orientation without toggling it back off
@@ -16147,13 +16208,10 @@ window.addEventListener('DOMContentLoaded', async () => {
         <!-- Fit to visible runs -->
         <button type="button" id="btnFitMapView" class="map-side-follow-toggle" onclick="fitMapToVisibleRuns()" title="Fit map to visible runs"><img class="icon-img" src="fit.png" alt=""></button>
 
-        <!-- Follow GPS -->
-        <button type="button" id="btnTruckFollowTarget" class="map-side-follow-toggle ${isTruckFollowEnabled ? 'active' : ''}" onclick="toggleTruckFollow(event)" title="Follow GPS Position"><img class="icon-img" src="${isTruckFollowEnabled ? 'navigation.png' : 'target.png'}" alt=""></button>
-
-        <!-- Track-Up Orientation -->
-        <button type="button" id="btnTrackUpOrientation" class="map-side-track-toggle ${isTrackUpEnabled ? 'active' : ''}" onclick="toggleTrackUpOrientation(event)" title="Track-Up / Heading Arrow">
-          <img class="icon-img" id="trackUpCompassIcon" src="compass.png" alt="" style="width:20px; height:20px; margin:0; display:block;">
-        </button>
+        <!-- Follow GPS / Track-Up: one button, three states (see cycleMapFollowMode).
+             Track-Up is only ever useful while the map is following you, so these used to be
+             two buttons where one of the four combinations was meaningless. -->
+        <button type="button" id="btnTruckFollowTarget" class="map-side-follow-toggle ${isTruckFollowEnabled ? 'active' : ''}" onclick="cycleMapFollowMode(event)" title="Follow GPS Position"><img class="icon-img" src="${isTruckFollowEnabled ? (isTrackUpEnabled ? 'compass.png' : 'navigation.png') : 'target.png'}" alt=""></button>
 
       `;
 
@@ -22645,12 +22703,15 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
       span.dataset.src = src;
       img.replaceWith(span);
     });
-    // The follow button swaps its icon between target.png and
-    // navigation.png as it toggles; the mask has to follow suit.
+    // The follow button cycles its icon through target / navigation / compass as it is pressed
+    // (see cycleMapFollowMode); the mask has to follow suit. The icon is decided in one place so
+    // this interval can't fight the button and force it back to a two-state icon.
     const follow = document.getElementById('btnTruckFollowTarget');
     if (follow) {
       const span = follow.querySelector('.lb-mask-ico');
-      const want = follow.classList.contains('active') ? 'navigation.png' : 'target.png';
+      const want = (typeof window.mapFollowIcon === 'function')
+        ? window.mapFollowIcon()
+        : (follow.classList.contains('active') ? 'navigation.png' : 'target.png');
       if (span && span.dataset.src !== want) {
         span.dataset.src = want;
         span.style.webkitMaskImage = 'url("' + want + '")';
