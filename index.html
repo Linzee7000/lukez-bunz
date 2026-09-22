@@ -23054,11 +23054,84 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
   let runKeys = null, runVer = 0;
   let loadPromise = null, saveTimer = null;
 
+  /* ---------------- shipped lot boundaries ----------------
+     Lot lines barely change, so the whole service area travels with the app as data/parcels.json
+     instead of every phone fetching it a tile at a time from the Vicmap ArcGIS service. That fetch
+     still exists and still runs for anything the file doesn't cover (a new estate, an area nobody
+     has driven yet) - this just means a fresh phone, or one with no signal, starts with the lots
+     already there rather than grinding through thousands of calls.
+
+     Coordinates are stored as deltas scaled by SHARED_SCALE (~1m, worst measured error 0.71m) and
+     everything derivable is left out: the bounding box is rebuilt here, and the SPI is only stored
+     for the lots where it isn't just "lot\plan". See tools/parcels/pack.py, which writes it. */
+  const SHARED_PARCELS_URL = 'data/parcels.json';
+  function decodeRing(deltas, scale) {
+    const out = new Array(deltas.length);
+    let x = 0, y = 0;
+    for (let i = 0; i < deltas.length; i += 2) {
+      x += deltas[i]; y += deltas[i + 1];
+      out[i] = x / scale; out[i + 1] = y / scale;
+    }
+    return out;
+  }
+  function bboxOfRing(o) {
+    let w = Infinity, s = Infinity, e = -Infinity, n = -Infinity;
+    for (let i = 0; i < o.length; i += 2) {
+      if (o[i] < w) w = o[i];
+      if (o[i] > e) e = o[i];
+      if (o[i + 1] < s) s = o[i + 1];
+      if (o[i + 1] > n) n = o[i + 1];
+    }
+    return [w, s, e, n];
+  }
+  // Merges the shipped file into whatever this phone already has. Anything already matched here
+  // wins - a device that has driven a new estate keeps its own newer lots - so this only ever
+  // fills gaps. Runs once per file version (store.shared records which), not on every load.
+  async function loadSharedParcels() {
+    if (typeof fetch !== 'function') return;
+    let j;
+    try {
+      const res = await fetch(SHARED_PARCELS_URL, { cache: 'force-cache' });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      j = await res.json();
+    } catch (e) { console.warn('Shared parcels not loaded:', e && e.message); return; }
+    if (!j || !j.parcels || !j.sites) return;
+    const stamp = String(j.generated || j.version || '');
+    if (store.shared === stamp) return;
+    const scale = j.scale || 100000;
+    let addedP = 0, addedS = 0;
+    for (const pid in j.parcels) {
+      if (store.parcels[pid]) continue;
+      const rec = j.parcels[pid];
+      const o = decodeRing(rec[0], scale);
+      const lot = rec[2], plan = rec[3];
+      const holes = (rec.length === 6) ? rec[5].map(h => decodeRing(h, scale)) : [];
+      const spi = (rec.length === 6) ? (rec[4] || (lot + '\\' + plan))
+                : (rec.length === 5) ? rec[4]
+                : (lot + '\\' + plan);
+      store.parcels[pid] = { s: spi, l: lot, n: plan, o, h: holes, b: bboxOfRing(o), a: rec[1] };
+      addedP++;
+    }
+    for (const key in j.sites) {
+      if (store.sites[key]) continue;
+      const v = j.sites[key];
+      // q (the pin the match was made from) isn't shipped - it's only used to notice a pin has
+      // been moved since, and leaving it off just means the first check re-matches that house.
+      store.sites[key] = (v === 0) ? { x: 1 } : { p: v[0], m: v[1], d: v[2] };
+      addedS++;
+    }
+    store.shared = stamp;
+    if (addedP || addedS) { parcelIndexed = false; dataVer++; }
+    console.log(`Shared parcels: +${addedP} lots, +${addedS} house matches (${stamp})`);
+    scheduleSave();
+  }
+
   function ensureLoaded() {
     if (!loadPromise) {
       loadPromise = Promise.resolve()
         .then(() => (typeof loadFromDB === 'function') ? loadFromDB(DB_KEY) : null)
         .then(d => { if (d && d.v === 1 && d.parcels && d.sites) { store = d; parcelIndexed = false; } })
+        .then(() => loadSharedParcels())
         .then(() => loadExtras())
         .catch(e => console.warn('Parcel cache load failed:', e))
         .then(() => { refreshSettingsUI(); });
