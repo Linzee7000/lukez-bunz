@@ -20869,6 +20869,7 @@ body.lb-on-welcome #lbDrawerTab { display: none; }
       ${seasonNote}
       ${item('nearby',  img('navigation.png'), "What's nearby", 'Runs, bins and addresses around you')}
       <div class="lb-drawer-sect">Edit</div>
+      ${item('layers', img('layers.png'), 'Layers', 'What shows on the map \u00b7 boundaries, bins, trail, run timer')}
       ${item('edit', img('edit.png'), 'Edit & settings', 'Bins, houses, boundaries, geofences, KML files')}
       <div class="lb-drawer-sect">Screens</div>
       ${item('go-map',  img('map.png', cur==='map'),   'Map',          '', cur==='map'?'current':'')}
@@ -20975,6 +20976,12 @@ body.lb-on-welcome #lbDrawerTab { display: none; }
         setTimeout(() => { try { inp.focus(); } catch(e){} }, 60);
       }
       renderBody();
+      return;
+    }
+    if (act === 'layers') {
+      // Layers lives in this menu now; the edge button is only a shortcut to the same panel.
+      const openLayers = () => { if (typeof window.lbOpenLayers === 'function') window.lbOpenLayers(); };
+      if (typeof activeTab !== 'undefined' && activeTab !== 'map') { switchMainTab('map'); setTimeout(openLayers, 700); } else openLayers();
       return;
     }
     if (act === 'edit') {
@@ -22697,11 +22704,61 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
       html += `<div class="lb-layers-sect">${esc(sec.title)}</div>`;
       btns.forEach(b => { html += rowHtml(b, sources.length); sources.push(b); });
     });
+    const side = quickSide();
+    html += `<div class="lb-layers-sect">App layout</div>
+      <button type="button" class="lb-layer-btn" data-lbquickside="${side === 'right' ? 'left' : 'right'}">
+        <span class="lb-ico">\u21c6</span>
+        <span class="lb-label">Quick buttons on the ${side}<span class="lb-sub">Layers and map settings shortcuts \u00b7 tap to move them to the ${side === 'right' ? 'left' : 'right'}</span></span>
+      </button>`;
     body.innerHTML = html || `<div class="lb-drawer-empty">No map settings available yet.</div>`;
     if (typeof window.lbCollapseSections === 'function') {
       window.lbCollapseSections(body, '.lb-layers-sect', 'lbSect:settings');
     }
   }
+
+  /* ---------- which edge the quick buttons sit on ----------
+     Layers and Map settings now have full rows in the main side menu, so these edge tabs are
+     shortcuts rather than the only way in. The side menu slides in from the left, so they default
+     to the opposite edge where they aren't under the menu you just opened - and either way it's a
+     preference, because which thumb is free depends on the truck. */
+  const QUICK_SIDE_KEY = 'lukezBunzQuickBtnSide';
+  function quickSide() {
+    try { return localStorage.getItem(QUICK_SIDE_KEY) === 'right' ? 'right' : 'left'; } catch (e) { return 'left'; }
+  }
+  // On the left, the shortcut is a button of its own on that edge and the one inside the
+  // right-hand cluster is hidden, so there is only ever one Layers button on screen.
+  function quickBtn() {
+    let b = document.getElementById('lbLayersQuick');
+    if (b) return b;
+    b = document.createElement('button');
+    b.type = 'button';
+    b.id = 'lbLayersQuick';
+    b.title = 'Layers: what shows on the map';
+    b.setAttribute('aria-label', 'Layers');
+    b.innerHTML = '<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" ' +
+      'stroke-width="2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true">' +
+      '<path d="M12 3 2 8l10 5 10-5-10-5z"/><path d="M2 13l10 5 10-5"/></svg>';
+    b.addEventListener('click', function(ev){
+      ev.stopPropagation();
+      if (typeof window.lbOpenLayers === 'function') window.lbOpenLayers();
+    });
+    document.body.appendChild(b);
+    return b;
+  }
+  function applyQuickSide() {
+    const right = quickSide() === 'right';
+    document.body.classList.toggle('lb-quick-right', right);
+    document.body.classList.toggle('lb-quick-left', !right);
+    if (!right) quickBtn();
+  }
+  function setQuickSide(side) {
+    try { localStorage.setItem(QUICK_SIDE_KEY, side === 'left' ? 'left' : 'right'); } catch (e) {}
+    applyQuickSide();
+  }
+  window.lbQuickSide = quickSide;
+  window.lbSetQuickSide = setQuickSide;
+  applyQuickSide();
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', applyQuickSide);
 
   function openSettings() {
     if (typeof window.lbCloseDrawer === 'function') window.lbCloseDrawer();
@@ -22717,6 +22774,8 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     const t = ev.target;
     if (!t || !t.closest) return;
     if (t.closest('#lbSettingsCloseBtn')) { ev.preventDefault(); closeSettings(); return; }
+    const sideRow = t.closest('.lb-layer-btn[data-lbquickside]');
+    if (sideRow) { ev.preventDefault(); setQuickSide(sideRow.dataset.lbquickside); renderSettings(); return; }
     const row = t.closest('.lb-layer-btn[data-lbset]');
     if (!row) return;
     ev.preventDefault();
@@ -25148,6 +25207,17 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     const m = Math.max(0, Math.floor(ms / MIN));
     return Math.floor(m / 60) + ':' + pad(m % 60);
   }
+  // Same as hms but with split seconds, for the big "break due" clock - at a glance a moving
+  // tenths digit is what makes it read as running rather than as a static warning you've already
+  // dismissed in your head.
+  function hmst(ms) {
+    const neg = ms < 0;
+    const t = Math.abs(ms);
+    const total = Math.floor(t / 1000);
+    const h = Math.floor(total / 3600), m = Math.floor((total % 3600) / 60), sec = total % 60;
+    const tenth = Math.floor((t % 1000) / 100);
+    return (neg ? '+' : '') + (h ? h + ':' : '') + pad(m) + ':' + pad(sec) + '.' + tenth;
+  }
   function clock(ts) {
     try { return new Date(ts).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }); } catch (e) { return ''; }
   }
@@ -25220,6 +25290,12 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
       chip.style.display = show ? '' : 'none';
       if (show) { chip.dataset.level = level; setText('lbBreakChipText', text); }
     }
+
+    // ---- big "break due" clock, centred in the top half of the screen ----
+    // The header chip is easy to miss while driving. Once a break is actually due (or nearly),
+    // the countdown goes up large and centred where it can't be overlooked, and keeps running
+    // in tenths so it's obviously live.
+    paintBigBreak(v);
 
     // ---- layers panel ----
     const box = document.getElementById('lbBreakBox');
@@ -25304,6 +25380,51 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
       try { onGo(); paint(); } catch (e) { console.warn('Break clock:', e); }
       return out;
     };
+  }
+
+  /* ---------- big "break due" clock ---------- */
+  // Shown while a break is within RED_MS or already overdue. Lives in the top half of the screen,
+  // centred, clear of the next-bin card and the bottom nav. Pointer-events off so it can never
+  // swallow a tap meant for the map; tapping the header chip is still how you open the clock.
+  let bigEl = null, bigRaf = 0, bigOn = false, bigBase = { remaining: 0, at: 0 };
+  function bigBreakEl() {
+    if (bigEl && bigEl.parentNode) return bigEl;
+    bigEl = document.createElement('div');
+    bigEl.id = 'lbBreakBig';
+    bigEl.setAttribute('aria-live', 'polite');
+    bigEl.innerHTML = '<div class="lb-bb-label"></div><div class="lb-bb-time"></div>';
+    document.body.appendChild(bigEl);
+    return bigEl;
+  }
+  function paintBigBreak(v) {
+    const overdue = v.mode === 'working' && v.remaining <= 0;
+    const soon = v.mode === 'working' && v.remaining > 0 && v.remaining <= RED_MS;
+    const want = overdue || soon;
+    if (!want) {
+      if (bigOn) { bigOn = false; if (bigEl) bigEl.style.display = 'none'; cancelAnimationFrame(bigRaf); bigRaf = 0; }
+      return;
+    }
+    const el = bigBreakEl();
+    el.style.display = '';
+    el.dataset.level = overdue ? 'over' : 'red';
+    el.querySelector('.lb-bb-label').textContent = overdue ? 'BREAK OVERDUE' : 'BREAK DUE IN';
+    // view() only recomputes on the 1s tick - its `remaining` is a whole number of seconds and
+    // doesn't move in between - so the tenths are carried by counting down from the last real
+    // value. Every paint() re-anchors this, so it can't drift away from the true clock.
+    bigBase = { remaining: v.remaining, at: Date.now() };
+    if (!bigOn) {
+      bigOn = true;
+      const step = () => {
+        if (!bigOn) { bigRaf = 0; return; }
+        try {
+          const live = bigBase.remaining - (Date.now() - bigBase.at);
+          const t = el.querySelector('.lb-bb-time');
+          if (t) t.textContent = hmst(live <= 0 ? -live : live);
+        } catch (e) {}
+        bigRaf = requestAnimationFrame(step);
+      };
+      bigRaf = requestAnimationFrame(step);
+    }
   }
 
   let saveAt = 0;
@@ -27385,14 +27506,59 @@ html body.ux2 #uxStrayChip{margin-left:0 !important;border-radius:0 6px 6px 0 !i
    position:fixed and floated ABOVE the street name it describes; it is in the flow now, directly
    under the street. The hazard button gets its own row above the street so reporting is always
    one tap away and never depends on the bin box. */
-html body.ux2 #uxHazardRow{display:flex;justify-content:flex-start;padding:0 0 2px 4px;pointer-events:none}
-html body.ux2 #uxHazardBtn{pointer-events:auto;min-width:52px;min-height:44px;font-size:24px;line-height:1;border:0;cursor:pointer;border-radius:var(--ux-rad, 6px);background:color-mix(in srgb, var(--ux-warn, #f59e0b) 26%, transparent);color:var(--ux-text, #e8edf3);box-shadow:0 1px 0 rgba(0,0,0,.35)}
+html body.ux2 #uxHazardRow{display:flex;justify-content:flex-start;padding:0 0 4px 4px;pointer-events:none}
+/* Matches the zoom / follow / layers buttons in #mapFixedSideControls: same 48px square, same
+   dark plate, same 4px radius - just on the left, where the thumb that isn't steering can reach. */
+html body.ux2 #uxHazardBtn{pointer-events:auto;width:48px;height:48px;display:inline-flex;
+  align-items:center;justify-content:center;padding:0;border:0;cursor:pointer;
+  border-radius:4px;background:#0a0e13;color:var(--ux-warn, #fbbf24)}
+html body.ux2 #uxHazardBtn svg{display:block;width:24px;height:24px}
 html body.ux2 #uxHazardBtn:active{transform:scale(.94)}
 html body.ux2 #uxCardStack #uxNerdStrip{position:static !important;left:auto !important;bottom:auto !important;margin:0 !important;padding:2px 8px 3px 6px !important;border-left:0 !important;border-radius:0 !important;background:transparent !important;max-width:100% !important}
 /* Street name: this is the single most-looked-at thing on the screen while driving. */
 html body.ux2 #uxStreetStrip #mapStreetOverlay,
 html body.ux2.lb-map-screen #uxStreetStrip #mapStreetOverlay{font-size:27px !important;font-weight:400 !important;height:auto !important;line-height:1.12 !important;padding-top:2px !important;padding-bottom:2px !important}
 html body.ux2 #uxStreetStrip{padding-top:8px !important;padding-bottom:0 !important}
+
+/* ---- Big "break due" clock -------------------------------------------------------
+   The header chip was easy to drive straight past. Once a break is actually due this goes up
+   large in the middle of the TOP half, where nothing else competes with it, and runs in tenths
+   so it reads as live rather than as a warning already gone stale. Never takes a tap. */
+#lbBreakBig{position:fixed;left:50%;top:26%;transform:translate(-50%,-50%);z-index:5000;
+  display:flex;flex-direction:column;align-items:center;gap:2px;padding:14px 26px;
+  border-radius:16px;pointer-events:none;text-align:center;
+  background:color-mix(in srgb, #000 62%, transparent);
+  box-shadow:0 8px 30px rgba(0,0,0,.55);backdrop-filter:blur(2px)}
+#lbBreakBig .lb-bb-label{font-size:13px;font-weight:800;letter-spacing:.16em;opacity:.95}
+#lbBreakBig .lb-bb-time{font:800 54px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-variant-numeric:tabular-nums;letter-spacing:.01em}
+#lbBreakBig[data-level="red"]{color:#fbbf24;border:2px solid #fbbf24}
+#lbBreakBig[data-level="over"]{color:#f87171;border:2px solid #ef4444;animation:lbBreakPulse 1.1s ease-in-out infinite}
+@keyframes lbBreakPulse{0%,100%{box-shadow:0 8px 30px rgba(0,0,0,.55)}50%{box-shadow:0 8px 30px rgba(239,68,68,.55),0 0 0 6px rgba(239,68,68,.16)}}
+@media (max-width:420px){#lbBreakBig .lb-bb-time{font-size:44px}#lbBreakBig{padding:12px 18px}}
+/* Only on screens you drive from - it would be noise on Search or the home page. */
+body:not(.lb-map-screen) #lbBreakBig{display:none !important}
+
+/* ---- Layers quick button: which edge ---------------------------------------------
+   Layers has a proper row in the side menu now, so this is a shortcut. By default it sits on the
+   LEFT - the opposite edge from the cluster it used to live in - and the row in Map settings >
+   App layout moves it back to the right, where it simply rejoins that cluster and this standalone
+   button is hidden. Only ever one Layers button on screen either way. */
+#lbLayersQuick{position:fixed;top:50%;transform:translateY(-50%);z-index:4200;
+  width:48px;height:48px;display:none;align-items:center;justify-content:center;
+  padding:0;border:0;cursor:pointer;border-radius:4px;background:#0a0e13;
+  color:var(--ux-text, #f1f5f9);-webkit-tap-highlight-color:transparent;
+  box-shadow:2px 2px 8px rgba(0,0,0,.5)}
+#lbLayersQuick svg{display:block}
+#lbLayersQuick:active{transform:translateY(-50%) scale(.94)}
+body.lb-quick-left.lb-map-screen #lbLayersQuick{display:flex;left:0;border-radius:0 4px 4px 0}
+/* A tab peeking out from under an open panel just looks broken. */
+body.lb-quick-left.lb-drawer-open #lbLayersQuick,
+body.lb-quick-left.lb-layers-open #lbLayersQuick,
+body.lb-quick-left.map-settings-open #lbLayersQuick,
+body.lb-quick-left.lb-settings-open #lbLayersQuick{display:none}
+/* On the left, the cluster's own Layers button steps aside so there aren't two. */
+body.lb-quick-left #uxSideLayers{display:none !important}
 
 /* Report button on a collapsed stream tab. Tapping the run number hides that stream's serial
    rows, and the report button used to go with them - so a driver running with serials off could
@@ -31311,8 +31477,13 @@ html body.ux2 .map-stream-report-btn{min-width:38px;min-height:34px}
     if (!hz) {
       hz = document.createElement('div');
       hz.id = 'uxHazardRow';
+      // Same look as the zoom / follow / layers cluster on the right, just on the left - it is
+      // the same kind of control, so it shouldn't read as a different species of button.
       hz.innerHTML = '<button type="button" id="uxHazardBtn" title="Report a problem here" ' +
-        'aria-label="Report a problem here">⚠️</button>';
+        'aria-label="Report a problem here">' +
+        '<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" ' +
+        'stroke-width="2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true">' +
+        '<path d="M12 3 2.5 20h19L12 3z"/><path d="M12 10v5M12 17.6v.4"/></svg></button>';
       hz.querySelector('#uxHazardBtn').addEventListener('click', function(ev){
         ev.stopPropagation();
         if (typeof window.uxOpenIssue === 'function') window.uxOpenIssue('bin', {});
