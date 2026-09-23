@@ -29334,7 +29334,7 @@ html body.ux2 .map-stream-report-btn{min-width:38px;min-height:34px}
 
   function startShift(o){
     var s = clockState(), now = Date.now();
-    SH = { id: 's_' + uid(), start: now, driver: o.driver || '', truck: o.truck || '', startKm: o.km, startHrs: o.hrs, startPhoto: o.photo || null,
+    SH = { id: 's_' + uid(), start: now, driver: o.driver || '', truck: o.truck || '', rego: o.rego || '', startKm: o.km, startHrs: o.hrs, startPhoto: o.photo || null,
       prestart: o.prestart || null, defects: [], dist: 0, bins: 0, binTs: [], auto: !!o.auto, synced: false };
     if (o.auto && s && s.start) SH.start = s.start;
     saveSh();
@@ -29489,7 +29489,7 @@ html body.ux2 .map-stream-report-btn{min-width:38px;min-height:34px}
     if (!SH) return 'Start, breaks, end · pre-start check';
     return (onBreak() ? 'On a break' : 'On shift') + ' since ' + clock(SH.start) + (SH.prestart ? '' : ' · pre-start not done') + (brakeDue() ? ' · brake wear due' : '');
   };
-  function newDraft(){ var d = me(); draft = draft || { driver: d.name || '', truck: d.truck || '', km: '', hrs: '', photo: null, checks: {} }; }
+  function newDraft(){ var d = me(), rg = lsGet('lbRegos', {}) || {}; draft = draft || { driver: d.name || '', truck: d.truck || '', rego: rg[String(d.truck || '').toLowerCase()] || '', km: '', hrs: '', photo: null, checks: {} }; }
   var brakeDraft = null, dashDraft = null, brakeRes = null, pendingEnd = false;
   function newBrake(why){
     var lb = lastBrake(SH && SH.truck || me().truck), p = lb ? lb.vals.map(String) : null;   /* keep last week's three numbers; change them if the dash reads different */
@@ -29601,7 +29601,8 @@ html body.ux2 .map-stream-report-btn{min-width:38px;min-height:34px}
       newDraft(); var dr = draft, n = Object.keys(dr.checks).length, faults = Object.keys(dr.checks).filter(function(k){ return dr.checks[k] === 'fault'; });
       var oosT = oosFor(dr.truck);
       var ready = dr.driver.trim() && n === CHECKS.length && ((dr.km !== '' && dr.hrs !== '') || dr.photo) && (!oosT || isLead());
-      h = '<div class="drv-row2">' + field('uxsName', 'Driver', dr.driver, 'text', 'Your name') + field('uxsTruck', 'Truck', dr.truck, 'text', 'Fleet no. or rego') + '</div>' +
+      h = '<div class="drv-row2">' + field('uxsName', 'Driver', dr.driver, 'text', 'Your name') + field('uxsTruck', 'Unit number', dr.truck, 'text', 'Fleet no.') + '</div>' +
+        '<div class="drv-row2">' + field('uxsRego', 'Unit rego', dr.rego || '', 'text', 'Number plate') + '</div>' +
         (oosT ? '<div class="drv-stopbox">' + I.warn + '<span><b>' + esc(oosT.truck) + ' is out of service.</b> Brakes were at ' + oosT.min + '% on ' + esc(dateStr(oosT.ts)) + '. Do not use it until the brakes are replaced and your leading hand clears it.</span></div>' : '') +
         '<div class="drv-sect"><span>Truck at the start</span></div>' + readingsHtml(dr, 'uxsS') + checksHtml(dr.checks) +
         (faults.length ? '<div class="drv-warnbox">' + I.warn + '<span>' + faults.length + ' fault' + (faults.length > 1 ? 's' : '') + ': ' + esc(faults.map(function(k){ return CHK[k]; }).join(', ')) + '. Log each one as a defect (you’ll be asked after starting).</span></div>' : '') +
@@ -29677,7 +29678,7 @@ html body.ux2 .map-stream-report-btn{min-width:38px;min-height:34px}
   function onInput(ev){
     var t = ev.target, id = t.id;
     if (view === 'main' && !SH && draft) {
-      if (id === 'uxsName') draft.driver = t.value; else if (id === 'uxsTruck') draft.truck = t.value;
+      if (id === 'uxsName') draft.driver = t.value; else if (id === 'uxsTruck') draft.truck = t.value; else if (id === 'uxsRego') draft.rego = t.value;
       else if (id === 'uxsSKm') draft.km = t.value; else if (id === 'uxsSHrs') draft.hrs = t.value; else return;
       paintSoon();
     } else if (view === 'end' && endDraft) {
@@ -29729,8 +29730,10 @@ html body.ux2 .map-stream-report-btn{min-width:38px;min-height:34px}
     if (a === 'start') {
       var dr = draft;
       lsSet('lbDriver', { name: dr.driver.trim(), truck: dr.truck.trim() });
+      // The rego is remembered per unit, so the next shift on the same truck (and the accident card) fill it in.
+      if (dr.truck && dr.rego) { var rgS = lsGet('lbRegos', {}) || {}; rgS[String(dr.truck).trim().toLowerCase()] = String(dr.rego).trim().toUpperCase(); lsSet('lbRegos', rgS); }
       var faults = Object.keys(dr.checks).filter(function(k){ return dr.checks[k] === 'fault'; });
-      startShift({ driver: dr.driver.trim(), truck: dr.truck.trim(), km: num(dr.km), hrs: num(dr.hrs), photo: dr.photo, prestart: { ts: Date.now(), checks: dr.checks, faults: faults } });
+      startShift({ driver: dr.driver.trim(), truck: dr.truck.trim(), rego: String(dr.rego || '').trim().toUpperCase(), km: num(dr.km), hrs: num(dr.hrs), photo: dr.photo, prestart: { ts: Date.now(), checks: dr.checks, faults: faults } });
       draft = null; localStorage.removeItem('lbShiftNoAuto');
       if (faults.length) { view = 'defect'; newDefect(faults[0]); pendingFaults = faults.slice(1); }
       else { view = 'main'; toast('Shift started'); }
@@ -30484,7 +30487,7 @@ html body.ux2 .map-stream-report-btn{min-width:38px;min-height:34px}
   function shiftInfo(){ try { var s = window.uxShiftState && window.uxShiftState(); return s || {}; } catch (e) { return {}; } }
   function fresh(){
     var m = me(), sh = shiftInfo(), l = here(), regos = lsGet('lbRegos', {}) || {}, truck = sh.truck || m.truck || '';
-    return { id: 'a_' + uid(), ts: Date.now(), driver: sh.driver || m.name || '', truck: truck, rego: regos[String(truck).toLowerCase()] || '', lat: l && l.lat, lng: l && l.lng,
+    return { id: 'a_' + uid(), ts: Date.now(), driver: sh.driver || m.name || '', truck: truck, rego: sh.rego || regos[String(truck).toLowerCase()] || '', lat: l && l.lat, lng: l && l.lng,
       alertSent: false, finalSent: false, hurt: '', other: 'yes', oRego: '', oName: '', oPhone: '', oInsurer: '', police: '', policeNo: '', witness: '', note: '',
       photos: { scene: [], other: [], truck: [], more: [] }, voice: [], step: 'safety', synced: false, closed: false };
   }
@@ -30641,18 +30644,23 @@ html body.ux2 .map-stream-report-btn{min-width:38px;min-height:34px}
      who to contact at Solo, then the four details the driver quotes, then the "without
      prejudice" line. The contact numbers and email are Solo's MVA line, not operations. */
   var MVA = { phone: '0409 119 692 / 0266 747 679', email: 'mva@solo.com.au' };
-  function mvaDriver(){
-    if (A.driver) return A.driver;
-    try { return JSON.parse(localStorage.getItem('lbDriver') || '{}').name || ''; } catch (e) { return ''; }
+  // Prefilled from the shift start: an accident record keeps what it was created with, but anything
+  // it's missing falls back to the current shift, then to the last driver/truck used on this phone.
+  function mvaInfo(){
+    var sh = shiftInfo(), m = me(), rg = lsGet('lbRegos', {}) || {};
+    var truck = A.truck || sh.truck || m.truck || '';
+    return { driver: A.driver || sh.driver || m.name || '', truck: truck,
+             rego: A.rego || sh.rego || rg[String(truck).toLowerCase()] || '' };
   }
+  function mvaDriver(){ return mvaInfo().driver; }
   function mvaDate(ts){ try { return new Date(ts || Date.now()).toLocaleDateString('en-AU', { day: '2-digit', month: '2-digit', year: 'numeric' }); } catch (e) { return ''; } }
   function cardLines(){
     return [
       ['Ph', MVA.phone],
       ['Email', MVA.email],
       ["Our driver's name", mvaDriver() || '—'],
-      ['Unit rego number', A.rego ? '#' + A.rego : '# — add in Details'],
-      ['Unit number', A.truck ? '#' + A.truck : '# — add in Details'],
+      ['Unit rego number', mvaInfo().rego ? '#' + mvaInfo().rego : '# — add at shift start'],
+      ['Unit number', mvaInfo().truck ? '#' + mvaInfo().truck : '# — add at shift start'],
       ['Date', mvaDate(A.ts)],
       ['Time', (function(){ try { return new Date(A.ts || Date.now()).toLocaleTimeString('en-AU', { hour: 'numeric', minute: '2-digit' }); } catch (e) { return ''; } })()]
     ];
