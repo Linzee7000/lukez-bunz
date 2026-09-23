@@ -4267,6 +4267,10 @@ body:not(.dark-mode) .welcome-go-wrap {
 
       <!-- FIXED SIDE CONTROLS OVERLAY -->
       <div id="mapFixedSideControls" class="map-fixed-side-overlay"></div>
+      <!-- Mirror of the above on the left: menu / hazard / layers, built by ux2-script so it
+           lifts and lowers in sync with the right cluster (shares --ux-side-lift) and can never
+           be covered by the address card growing underneath it. -->
+      <div id="mapFixedLeftControls" class="map-fixed-side-overlay-left"></div>
 
       <!-- MAP BIN TOOLS: one consistent panel for selecting/moving/deleting
            bins, whether opened globally (checkbox icon in the side
@@ -7395,7 +7399,10 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
     const streamUsesWeek=(stream==='Recycling'||stream==='FOGO');
     if(displayRun&&week&&streamUsesWeek&&!/[A-Z]$/.test(displayRun)) displayRun+=week;
     const day=String(activeFilterDay||'').trim();
-    const dayShort=day ? day.slice(0,3).toUpperCase() : '';
+    // The day badge is redundant once a shift is running - you already know what day it is when
+    // you're on shift, and it's just clutter next to the run number.
+    const onShift=(function(){ try { return !!(window.uxShiftState && window.uxShiftState()); } catch(e){ return false; } })();
+    const dayShort=(day && !onShift) ? day.slice(0,3).toUpperCase() : '';
     if(displayRun) return `${icon} ${displayRun}${dayShort?` · ${dayShort}`:''}`;
     if(stream) return `${icon} ${stream==='SummerRecycling'?'Summer Recycle':stream}${dayShort?` · ${dayShort}`:''}`;
     return dayShort ? `🌏 All Runs · ${dayShort}` : 'Select run';
@@ -22775,7 +22782,10 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
       ev.stopPropagation();
       if (typeof window.lbOpenLayers === 'function') window.lbOpenLayers();
     });
-    document.body.appendChild(b);
+    // Lives in the fixed left column with the menu and hazard buttons (see ensureLeftCluster in
+    // ux2-script) once that column exists; falls back to the body so it still works on a build
+    // that predates it.
+    (document.getElementById('mapFixedLeftControls') || document.body).appendChild(b);
     return b;
   }
   function applyQuickSide() {
@@ -22790,6 +22800,7 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
   }
   window.lbQuickSide = quickSide;
   window.lbSetQuickSide = setQuickSide;
+  window.lbQuickBtn = quickBtn;   // used by ux2-script to place it in the fixed left column
   applyQuickSide();
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', applyQuickSide);
 
@@ -27524,7 +27535,7 @@ html body.ux2 .lb-photo-note{margin:4px 0 10px !important;padding:9px 12px !impo
 html body.ux2 .app-header{padding-left:2px !important}
 html body.ux2 .map-top-bar, html body.ux2 .map-summary-bar{padding-left:0 !important}
 html body.ux2 #uxNavBtn, html body.ux2 #uxMapSearchBtn{margin-left:0 !important}
-html body.ux2 #lbStreetSides{left:0 !important;margin-left:0 !important;padding-left:2px !important;border-radius:0 !important}
+html body.ux2 #lbStreetSides{left:0 !important;right:0 !important;margin-left:0 !important;margin-right:0 !important;padding-left:2px !important;padding-right:2px !important;border-radius:0 !important}
 html body.ux2 #uxStreetStrip{left:0 !important;margin-left:0 !important;padding-left:6px !important;border-radius:0 !important}
 html body.ux2 #uxNerdStrip{left:0 !important;margin-left:0 !important;padding-left:5px !important;border-left-width:0 !important;border-radius:0 !important}
 html body.ux2 #mapStreetOverlay{padding-left:2px !important}
@@ -27604,25 +27615,32 @@ html body.ux2 .welcome-q{
   opacity:1 !important;
 }
 
-/* ---- Layers quick button: which edge ---------------------------------------------
-   Layers has a proper row in the side menu now, so this is a shortcut. By default it sits on the
-   LEFT - the opposite edge from the cluster it used to live in - and the row in Map settings >
-   App layout moves it back to the right, where it simply rejoins that cluster and this standalone
-   button is hidden. Only ever one Layers button on screen either way. */
-#lbLayersQuick{position:fixed;top:50%;transform:translateY(-50%);z-index:4200;
-  width:48px;height:48px;display:none;align-items:center;justify-content:center;
-  padding:0;border:0;cursor:pointer;border-radius:4px;background:#0a0e13;
-  color:var(--ux-text, #f1f5f9);-webkit-tap-highlight-color:transparent;
-  box-shadow:2px 2px 8px rgba(0,0,0,.5)}
-#lbLayersQuick svg{display:block}
-#lbLayersQuick:active{transform:translateY(-50%) scale(.94)}
-body.lb-quick-left.lb-map-screen #lbLayersQuick{display:flex;left:0;border-radius:0 4px 4px 0}
-/* A tab peeking out from under an open panel just looks broken. */
-body.lb-quick-left.lb-drawer-open #lbLayersQuick,
-body.lb-quick-left.lb-layers-open #lbLayersQuick,
-body.lb-quick-left.map-settings-open #lbLayersQuick,
-body.lb-quick-left.lb-settings-open #lbLayersQuick{display:none}
-/* On the left, the cluster's own Layers button steps aside so there aren't two. */
+/* ---- Fixed LEFT column: menu / hazard / layers ------------------------------------
+   Mirrors #mapFixedSideControls on the right: same size, same transparent-plate look, same
+   vertical-centring transform (it shares --ux-side-lift, so it rises and falls in step with the
+   right column and can never end up under the address card). Buttons used to be scattered - the
+   menu button in the header, the hazard button inline above the street name, Layers floating on
+   its own - and a taller card could push the inline ones down and off screen. Fixed beats that
+   outright: nothing in the document flow can cover a position:fixed column pinned to the edge. */
+#mapFixedLeftControls{position:fixed;top:50%;left:8px;z-index:3200;
+  display:flex;flex-direction:column;align-items:center;gap:6px;
+  transform:translateY(calc(-50% - var(--ux-side-lift, 0px)));}
+body:not(.lb-map-screen) #mapFixedLeftControls{display:none}
+@media (orientation: landscape) and (max-height: 520px){#mapFixedLeftControls{transform:translateY(-50%);top:50%}}
+/* Map buttons set to the left (Customize) moves the RIGHT cluster over here - swap this one to
+   the right in that case so the two columns don't collide. */
+body.ux2.ux-lefty #mapFixedLeftControls{left:auto;right:8px}
+
+#mapFixedLeftControls > button{width:48px;height:48px;display:inline-flex;align-items:center;
+  justify-content:center;padding:0;border:0;cursor:pointer;border-radius:4px;
+  color:var(--ux-text, #f1f5f9);-webkit-tap-highlight-color:transparent;}
+#mapFixedLeftControls > button svg{display:block}
+#mapFixedLeftControls > button:active{transform:scale(.94)}
+
+/* Layers has a proper row in the side menu now, so this is a shortcut. By default it sits in
+   this column; the row in Map settings > App layout moves it back to the right cluster instead,
+   where the cluster's own Layers button un-hides - only ever one Layers button on screen. */
+body:not(.lb-quick-left) #lbLayersQuick{display:none}
 body.lb-quick-left #uxSideLayers{display:none !important}
 
 /* Report button on a collapsed stream tab. Tapping the run number hides that stream's serial
@@ -27633,6 +27651,71 @@ body.lb-quick-left #uxSideLayers{display:none !important}
 .map-stream-report-btn{display:inline-flex;align-items:center;justify-content:center;min-width:34px;padding:0 6px;border:0;cursor:pointer;font-size:15px;line-height:1;background:color-mix(in srgb, var(--ux-text, #e8edf3) 14%, transparent);color:inherit;border-radius:0 var(--ux-rad, 6px) var(--ux-rad, 6px) 0}
 .map-stream-report-btn:active{transform:scale(.94)}
 html body.ux2 .map-stream-report-btn{min-width:38px;min-height:34px}
+
+/* ---- A slight bit of transparency on the map's floating chrome ------------------
+   The side buttons, the fixed left column and the top bar were fully opaque #0a0e13 / --ux-bg
+   plates - flat black slabs sitting on top of the map. A little see-through (with a blur so text
+   under them doesn't turn to noise) reads as chrome floating over the map instead of a solid lid
+   dropped on it, and matches across every one of these controls rather than some being solid and
+   some not. */
+:root{--ux-chrome-glass: color-mix(in srgb, #0a0e13 80%, transparent)}
+body.ux2:not(.dark-mode){--ux-chrome-glass: color-mix(in srgb, #ffffff 82%, transparent)}
+html body.ux2 #mapScreenContainer .map-fixed-side-overlay > button,
+html body.ux2 #mapScreenContainer .map-side-layers-toggle,
+html body.ux2 #mapScreenContainer .map-side-follow-toggle,
+html body.ux2 #mapScreenContainer .map-side-track-toggle,
+html body.ux2 #mapScreenContainer .leaflet-control-zoom a,
+html body.ux2 #mapZoomLevelDisplay,
+html body.ux2 #mapFixedLeftControls > button{
+  background:var(--ux-chrome-glass) !important;
+  -webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);
+}
+html body.ux2 .map-header-panel .map-top-bar,
+html body.ux2 .map-header-panel #mapNormalTopBar,
+html body.ux2 .map-header-panel .map-context-bar,
+html body.ux2 .map-header-panel .map-settings-bar{
+  background:var(--ux-chrome-glass) !important;
+  -webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px);
+}
+html body.ux2 .app-header{background:var(--ux-chrome-glass) !important;-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px)}
+
+/* ---- Menu button moves down to the left column, off the top bar ------------------
+   #uxMapSearchBtn stays in the markup (other builds / non-ux2 styling still use it) but on the
+   map screen its job is done by #uxMapMenuQuick in the fixed left column instead, right where
+   the hazard and layers buttons already are. */
+html body.ux2.lb-map-screen #uxMapSearchBtn{display:none !important}
+
+/* ---- GPS readout: legible again -----------------------------------------------
+   Folding this into the card stack made it plain transparent with dim text, which is what made it
+   unreadable over a busy map. It needs a background to sit on, just not a hard-edged box - a
+   fade behind the text, same idea as the street-name strip above it. */
+html body.ux2 #uxCardStack #uxNerdStrip{
+  background:linear-gradient(90deg, color-mix(in srgb, var(--ux-bg) 68%, transparent) 0%, color-mix(in srgb, var(--ux-bg) 30%, transparent) 75%, transparent 100%) !important;
+  color:var(--ux-text) !important;
+  font-size:12px !important;
+}
+
+/* ---- Speedo: bigger, not bold ----------------------------------------------------
+   #mapLiveSpeed moved inside #uxStreetStrip (see buildStrip in ux2-script), so every rule
+   written against plain "#mapLiveSpeed" loses to the two-ID "#uxStreetStrip #mapLiveSpeed" rules
+   above regardless of source order - matching that same shape is the only way to actually win. */
+html body.ux2 .map-address-telemetry .address-telemetry-speed span,
+html body.ux2 #mapLiveSpeed,
+html body.ux2 #uxStreetStrip #mapLiveSpeed{font-size:76px !important;font-weight:400 !important}
+@media (orientation: landscape) and (max-height: 520px){
+  html body.ux2 .map-address-telemetry .address-telemetry-speed span,
+  html body.ux2 #mapLiveSpeed,
+  html body.ux2 #uxStreetStrip #mapLiveSpeed{font-size:58px !important}
+}
+
+/* ---- Next-bin row: solid behind the size label, THEN fade -----------------------
+   The row's own colour used to start fading from x=0, so by the edge of the "80L" label the
+   colour was already noticeably washed out even though that label sits on its own solid plate.
+   Pinning the first stop in px (not %) to the label's own width keeps the colour solid exactly
+   as far as that label goes, and only starts fading once the serial text begins. */
+html body.ux2 .map-address-telemetry #mapBinsAtAddress .next-bin-row.next-bin-stream-garbage{background:linear-gradient(90deg, rgba(220,38,38,.85) 0px, rgba(220,38,38,.85) 62px, rgba(220,38,38,.14) 100%) !important}
+html body.ux2 .map-address-telemetry #mapBinsAtAddress .next-bin-row.next-bin-stream-recycling{background:linear-gradient(90deg, rgba(234,179,8,.72) 0px, rgba(234,179,8,.72) 62px, rgba(234,179,8,.1) 100%) !important}
+html body.ux2 .map-address-telemetry #mapBinsAtAddress .next-bin-row.next-bin-stream-fogo{background:linear-gradient(90deg, rgba(22,163,74,.85) 0px, rgba(22,163,74,.85) 62px, rgba(22,163,74,.14) 100%) !important}
 </style>
 <script id="ux2-script">
 /* UX2 behaviour glue. Everything here is additive: it calls the existing
@@ -31575,34 +31658,71 @@ html body.ux2 .map-stream-report-btn{min-width:38px;min-height:34px}
       var info = $('mapStreetInfoOverlay'); if (info) strip.appendChild(info);
       var spd = card.querySelector('.address-telemetry-speed'); if (spd) strip.appendChild(spd);
     }
-    // Hazard button sits on its own row directly ABOVE the street name, rather than being tucked
-    // into the next-bin box. It is always there, whatever the bin box is showing, so reporting
-    // never depends on which stream happens to be expanded.
-    var hz = $('uxHazardRow');
-    if (!hz) {
-      hz = document.createElement('div');
-      hz.id = 'uxHazardRow';
-      // Same look as the zoom / follow / layers cluster on the right, just on the left - it is
-      // the same kind of control, so it shouldn't read as a different species of button.
-      hz.innerHTML = '<button type="button" id="uxHazardBtn" title="Report a problem here" ' +
-        'aria-label="Report a problem here">' +
-        '<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" ' +
-        'stroke-width="2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true">' +
-        '<path d="M12 3 2.5 20h19L12 3z"/><path d="M12 10v5M12 17.6v.4"/></svg></button>';
-      hz.querySelector('#uxHazardBtn').addEventListener('click', function(ev){
-        ev.stopPropagation();
-        if (typeof window.uxOpenIssue === 'function') window.uxOpenIssue('bin', {});
-        else if (typeof window.toggleBinIssueMenu === 'function') window.toggleBinIssueMenu(ev, '');
-      });
-    }
+    // Hazard button, menu button and the Layers quick button live together in the fixed left
+    // column (#mapFixedLeftControls), mirroring the zoom/follow/layers column on the right - see
+    // leftCluster() below. They used to sit inline above the street name, which meant a taller
+    // address card (a flag note, three stream tabs, several bins) could push them down and off
+    // whatever the driver was trying to reach; a fixed column can never be covered that way.
+    ensureLeftCluster();
     // The GPS readout (accuracy, position, zoom) belongs under the street name it describes, so
     // it moves into this column too instead of floating above the street.
     var nerd = $('uxNerdStrip');
-    if (hz.parentNode !== stack) stack.appendChild(hz);
     if (strip.parentNode !== stack) stack.appendChild(strip);
     if (nerd && nerd.parentNode !== stack) stack.appendChild(nerd);
     if (card.parentNode !== stack) stack.appendChild(card);
     return strip;
+  }
+
+  // ---- fixed left column: menu / hazard / layers --------------------------------------
+  // Built once, in this order top to bottom. The Layers button is the same #lbLayersQuick the
+  // quick-side setting already manages (see the "which edge" block below) - when that setting
+  // points it at the right instead, it hides here and its usual right-cluster copy takes over,
+  // exactly as before this column existed.
+  var leftClusterBuilt = false;
+  function ensureLeftCluster() {
+    var host = document.getElementById('mapFixedLeftControls');
+    if (!host || leftClusterBuilt) { if (host) reparentIfNeeded(host); return; }
+    leftClusterBuilt = true;
+
+    var menu = document.createElement('button');
+    menu.type = 'button'; menu.id = 'uxMapMenuQuick';
+    menu.title = 'Menu: find, start a job, screens';
+    menu.setAttribute('aria-label', 'Menu');
+    menu.innerHTML = '<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" ' +
+      'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+      '<path d="M4 6h16M4 12h16M4 18h16"/></svg>';
+    menu.addEventListener('click', function(ev){
+      ev.stopPropagation();
+      if (typeof window.uxOpenPanel === 'function') window.uxOpenPanel('search');
+      else { var real = document.getElementById('uxMapSearchBtn'); if (real) real.click(); }
+    });
+
+    var hazard = document.createElement('button');
+    hazard.type = 'button'; hazard.id = 'uxHazardBtn';
+    hazard.title = 'Report a problem here'; hazard.setAttribute('aria-label', 'Report a problem here');
+    hazard.innerHTML = '<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" ' +
+      'stroke-width="2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true">' +
+      '<path d="M12 3 2.5 20h19L12 3z"/><path d="M12 10v5M12 17.6v.4"/></svg>';
+    hazard.addEventListener('click', function(ev){
+      ev.stopPropagation();
+      if (typeof window.uxOpenIssue === 'function') window.uxOpenIssue('bin', {});
+      else if (typeof window.toggleBinIssueMenu === 'function') window.toggleBinIssueMenu(ev, '');
+    });
+
+    reorderLeftCluster(host, menu, hazard);
+  }
+  // Enforced every time, rather than relied on from call order: applyQuickSide() (a different,
+  // earlier script) can create and place #lbLayersQuick in this column before this function ever
+  // runs, and appendChild only appends - it doesn't of itself guarantee menu-then-hazard-then-
+  // layers, so the order is fixed explicitly here instead of assumed.
+  function reorderLeftCluster(host, menu, hazard) {
+    menu = menu || document.getElementById('uxMapMenuQuick');
+    hazard = hazard || document.getElementById('uxHazardBtn');
+    var layers = (typeof window.lbQuickBtn === 'function') ? window.lbQuickBtn() : document.getElementById('lbLayersQuick');
+    [menu, hazard, layers].forEach(function(el){ if (el) host.appendChild(el); });
+  }
+  function reparentIfNeeded(host) {
+    reorderLeftCluster(host, null, null);
   }
 
   // ---- 3. geometry: card height -> strip position -> side column lift --------------
@@ -31680,8 +31800,11 @@ html body.ux2 .map-stream-report-btn{min-width:38px;min-height:34px}
     timerEl = document.createElement('button');
     timerEl.type = 'button'; timerEl.id = 'uxTimer'; timerEl.setAttribute('data-s', 'idle');
     timerEl.title = 'Run timer. Tap to start, pause or resume; reset is in Layers.';
-    timerEl.innerHTML = '<b id="uxTimerRead">00:00</b>' +
-      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true"><g id="uxTimerGlyph">' + ICON_PLAY + '</g></svg>';
+    // Icon before the time (not after): a glyph reads faster than a moving number when you're
+    // glancing sideways at it, so it belongs at the leading edge, not trailing behind the digits.
+    timerEl.innerHTML =
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true"><g id="uxTimerGlyph">' + ICON_PLAY + '</g></svg>' +
+      '<b id="uxTimerRead">00:00</b>';
     bar.parentNode.insertBefore(timerEl, bar);
     timerEl.addEventListener('click', function(ev){
       ev.stopPropagation();
