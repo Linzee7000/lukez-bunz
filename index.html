@@ -6537,6 +6537,14 @@ const STREET_LITTER_SERVICE_LEVELS = {"seasons":[{"key":"tourist1","label":"Tour
 
   function recordSnailTrailPoint(lat, lng) {
     if (snailTrailPaused) return;
+    // Rolled over to a new day with the app still open (left running overnight, or a very early
+    // start): yesterday's line would otherwise keep drawing and make streets look already done.
+    // The same clear happens on load for the ordinary case of reopening the app next morning.
+    const lastAt = gpsTrailTimes[gpsTrailTimes.length - 1];
+    if (typeof lastAt === 'number' && lastAt > 0 &&
+        new Date(lastAt).toDateString() !== new Date().toDateString()) {
+      clearSnailTrail();
+    }
     const pos = [lat, lng];
     const previous = gpsTrailPoints[gpsTrailPoints.length - 1];
     const moved = previous ? getDistanceMeters(previous[0], previous[1], lat, lng) : Infinity;
@@ -9094,7 +9102,13 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
 
     gpsWatchId = navigator.geolocation.watchPosition(onGpsPositionSuccess, onGpsPositionError, {
       enableHighAccuracy: true,
-      maximumAge: 30000,
+      // maximumAge was 30000, which told the browser a position up to THIRTY SECONDS old was
+      // acceptable - so it was free to keep handing back a cached fix, with that fix's stale
+      // speed, instead of reading the GPS. That is why the speed readout lagged, and why
+      // reversing slowly up a street looked like the truck wasn't moving at all: the position
+      // being replayed was from before the reverse started, so the snail trail never went in.
+      // 0 means never reuse a cached fix - always take a fresh reading.
+      maximumAge: 0,
       timeout: 27000
     });
   }
@@ -11873,16 +11887,6 @@ let siteReminders = JSON.parse(localStorage.getItem('siteReminders') || '{}');
      back on first. A collapsed tab therefore carries its own report button, flagging against that
      stream's first bin at this address (the menu id is the same "binMenu_<propId>_<Stream>_<idx>"
      shape setBinIssue already parses, so the flag is logged exactly as it is from the row). */
-  function collapsedStreamReportHtml(site, streamKey) {
-    const propId = String((site && (site.propId || site.siteId)) || '');
-    if (!propId) return '';
-    // Same id shape the serial row's own report button uses, so toggleBinIssueMenu resolves this
-    // stream's bin (serial + stream) and opens the real report screen already set to it.
-    const binId = `binMenu_${propId}_${streamKey}_0`.replace(/[^a-zA-Z0-9_]/g, '_');
-    return `<button type="button" class="map-stream-report-btn" title="Report a ${streamKey} bin here"
-      onclick="event.stopPropagation(); window.toggleBinIssueMenu(event, '${binId}')">\u26a0\ufe0f</button>`;
-  }
-
   function buildStreamTabsRow(site) {
     if (!site) return '';
     const displaySources = (typeof activeFilterDataSource !== 'undefined' && activeFilterDataSource === 'council')
@@ -11912,7 +11916,7 @@ let siteReminders = JSON.parse(localStorage.getItem('siteReminders') || '{}');
           <img class="icon-img" src="${sd.icon}" alt="">
           <span class="map-stream-tab-run">${esc(run)}</span>
           <span class="map-stream-tab-arrow">${arrow}</span>
-        </button>${sd.shown ? '' : collapsedStreamReportHtml(site, sd.key)}
+        </button>
         </span>`;
     }).join('')}</div>`;
   }
@@ -12066,7 +12070,7 @@ let siteReminders = JSON.parse(localStorage.getItem('siteReminders') || '{}');
           <img class="icon-img" src="${sd.icon}" alt="">
           <span class="map-stream-tab-run">${esc(run)}</span>
           <span class="map-stream-tab-arrow">${arrow}</span>
-        </button>${isShown ? '' : collapsedStreamReportHtml(site, sd.key)}
+        </button>
         </span>`;
     }).join('')}${settingsTabHtml}</div>`;
   }
@@ -12199,6 +12203,33 @@ window.addEventListener('DOMContentLoaded', async () => {
       // so the next fix this session starts a new segment from wherever
       // the truck actually is now, instead of drawing a line back to
       // wherever it was when the app was last closed.
+      // Yesterday's driving is not today's. The trail is the record of where this shift has
+      // been - it's what tells you whether you actually went up a street - so carrying last
+      // night's line into this morning makes streets look done that haven't been started.
+      // Anything recorded before midnight today is dropped on load; only the current day's
+      // points are restored. (Points with no timestamp are from a save format that predates
+      // gpsTrailTimes and are treated as old.)
+      if (Array.isArray(cachedTrail) && cachedTrail.length > 0 && Array.isArray(cachedTrailTimes)) {
+        const startOfToday = new Date(); startOfToday.setHours(0, 0, 0, 0);
+        const cutoff = startOfToday.getTime();
+        const keep = [];
+        for (let i = 0; i < cachedTrail.length; i++) {
+          const t = cachedTrailTimes[i];
+          if (typeof t === 'number' && t >= cutoff) keep.push(i);
+        }
+        if (keep.length < cachedTrail.length) {
+          const dropped = cachedTrail.length - keep.length;
+          cachedTrail = keep.map(i => cachedTrail[i]);
+          cachedTrailTimes = keep.map(i => cachedTrailTimes[i]);
+          cachedTrailBreaks = Array.isArray(cachedTrailBreaks) ? keep.map(i => cachedTrailBreaks[i]) : null;
+          if (cachedTrail.length) cachedTrailBreaks && (cachedTrailBreaks[0] = true);   // first kept point starts a fresh line
+          console.log(`Snail trail: dropped ${dropped} point(s) from before today`);
+          saveToDB('gpsTrailPoints', cachedTrail).catch(() => {});
+          saveToDB('gpsTrailTimes', cachedTrailTimes).catch(() => {});
+          if (cachedTrailBreaks) saveToDB('gpsTrailBreaks', cachedTrailBreaks).catch(() => {});
+        }
+      }
+
       if (Array.isArray(cachedTrail) && cachedTrail.length > 0) {
         gpsTrailPoints = cachedTrail.slice(-GPS_TRAIL_MAX_POINTS);
         gpsTrailBreaks = Array.isArray(cachedTrailBreaks)
@@ -27349,6 +27380,20 @@ html body.ux2 .map-address-telemetry #mapRunsAtAddress{padding-left:6px !importa
 html body.ux2 .map-run-colored-box{margin-left:0 !important;padding-left:6px !important}
 html body.ux2 #uxStrayChip{margin-left:0 !important;border-radius:0 6px 6px 0 !important}
 
+/* ---- Bottom column: hazard / street / GPS readout / next-bin card ----------------
+   These are now one stacked column (see buildStrip). The GPS readout used to be
+   position:fixed and floated ABOVE the street name it describes; it is in the flow now, directly
+   under the street. The hazard button gets its own row above the street so reporting is always
+   one tap away and never depends on the bin box. */
+html body.ux2 #uxHazardRow{display:flex;justify-content:flex-start;padding:0 0 2px 4px;pointer-events:none}
+html body.ux2 #uxHazardBtn{pointer-events:auto;min-width:52px;min-height:44px;font-size:24px;line-height:1;border:0;cursor:pointer;border-radius:var(--ux-rad, 6px);background:color-mix(in srgb, var(--ux-warn, #f59e0b) 26%, transparent);color:var(--ux-text, #e8edf3);box-shadow:0 1px 0 rgba(0,0,0,.35)}
+html body.ux2 #uxHazardBtn:active{transform:scale(.94)}
+html body.ux2 #uxCardStack #uxNerdStrip{position:static !important;left:auto !important;bottom:auto !important;margin:0 !important;padding:2px 8px 3px 6px !important;border-left:0 !important;border-radius:0 !important;background:transparent !important;max-width:100% !important}
+/* Street name: this is the single most-looked-at thing on the screen while driving. */
+html body.ux2 #uxStreetStrip #mapStreetOverlay,
+html body.ux2.lb-map-screen #uxStreetStrip #mapStreetOverlay{font-size:27px !important;font-weight:400 !important;height:auto !important;line-height:1.12 !important;padding-top:2px !important;padding-bottom:2px !important}
+html body.ux2 #uxStreetStrip{padding-top:8px !important;padding-bottom:0 !important}
+
 /* Report button on a collapsed stream tab. Tapping the run number hides that stream's serial
    rows, and the report button used to go with them - so a driver running with serials off could
    not flag a bin without turning them back on. The tab keeps one. */
@@ -31237,8 +31282,15 @@ html body.ux2 .map-stream-report-btn{min-width:38px;min-height:34px}
   // never end up underneath it. (It used to be placed by measuring the card, and on a phone the
   // measurement could go stale and leave the street name and speed hidden behind the card.)
   var strip = null, card = null, stack = null;
+  // The GPS readout is created by a different block and can appear after this column is already
+  // built, so re-home it whenever it turns up rather than only once at build time.
+  function homeNerdStrip(){
+    var nerd = $('uxNerdStrip'), c = $('uxCardStack'), st = $('uxStreetStrip');
+    if (!nerd || !c || !st || nerd.parentNode === c) return;
+    st.insertAdjacentElement('afterend', nerd);
+  }
   function buildStrip(){
-    if (strip && strip.parentNode && stack && stack.contains(card)) return strip;
+    if (strip && strip.parentNode && stack && stack.contains(card)) { homeNerdStrip(); return strip; }
     card = card || document.querySelector('.map-address-telemetry');
     if (!card || !card.parentNode) return null;
     if (!stack) {
@@ -31252,7 +31304,27 @@ html body.ux2 .map-stream-report-btn{min-width:38px;min-height:34px}
       var info = $('mapStreetInfoOverlay'); if (info) strip.appendChild(info);
       var spd = card.querySelector('.address-telemetry-speed'); if (spd) strip.appendChild(spd);
     }
+    // Hazard button sits on its own row directly ABOVE the street name, rather than being tucked
+    // into the next-bin box. It is always there, whatever the bin box is showing, so reporting
+    // never depends on which stream happens to be expanded.
+    var hz = $('uxHazardRow');
+    if (!hz) {
+      hz = document.createElement('div');
+      hz.id = 'uxHazardRow';
+      hz.innerHTML = '<button type="button" id="uxHazardBtn" title="Report a problem here" ' +
+        'aria-label="Report a problem here">⚠️</button>';
+      hz.querySelector('#uxHazardBtn').addEventListener('click', function(ev){
+        ev.stopPropagation();
+        if (typeof window.uxOpenIssue === 'function') window.uxOpenIssue('bin', {});
+        else if (typeof window.toggleBinIssueMenu === 'function') window.toggleBinIssueMenu(ev, '');
+      });
+    }
+    // The GPS readout (accuracy, position, zoom) belongs under the street name it describes, so
+    // it moves into this column too instead of floating above the street.
+    var nerd = $('uxNerdStrip');
+    if (hz.parentNode !== stack) stack.appendChild(hz);
     if (strip.parentNode !== stack) stack.appendChild(strip);
+    if (nerd && nerd.parentNode !== stack) stack.appendChild(nerd);
     if (card.parentNode !== stack) stack.appendChild(card);
     return strip;
   }
@@ -31361,7 +31433,7 @@ html body.ux2 .map-stream-report-btn{min-width:38px;min-height:34px}
     }
     window.addEventListener('resize', schedule);
     window.addEventListener('orientationchange', function(){ setTimeout(schedule, 300); });
-    setInterval(function(){ if (document.body.getAttribute('data-ux-screen') === 'map' && !document.hidden) { ensureSide(); schedule(); } }, 1500);
+    setInterval(function(){ if (document.body.getAttribute('data-ux-screen') === 'map' && !document.hidden) { ensureSide(); homeNerdStrip(); schedule(); } }, 1500);
     // tab changes and map zoom/move
     var prevTab = window.switchMainTab;
     if (typeof prevTab === 'function') {
