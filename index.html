@@ -4027,6 +4027,10 @@ body:not(.dark-mode) .welcome-go-wrap {
   #uxIssue .uxi-pick-list small { opacity: .7; white-space: nowrap; }
   #uxIssue .uxi-pick-none { padding: 10px; opacity: .7; }
 </style>
+<style>
+  #uxMyRunChip { position: fixed; left: 50%; transform: translateX(-50%); top: calc(env(safe-area-inset-top, 0px) + 56px); z-index: 1500; min-height: 44px; padding: 0 16px; font: 700 14px/1 system-ui, sans-serif; color: #111; background: #fbbf24; border: 0; border-radius: var(--ux-rad, 6px); box-shadow: 0 4px 14px rgba(0,0,0,.35); }
+  .drv-runseg { flex-wrap: wrap; }
+</style>
 <div class="search-card" id="searchCard" style="display:none;">
     <div class="search-input-wrapper">
       <input type="text" id="searchInput" class="main-search-input" placeholder="Type street, serial, PID, or Run..." oninput="handleSearch()">
@@ -29532,9 +29536,30 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       recent: (function(){ var t = Date.now() - 30 * 60000, c = (SH.binTs || []).filter(function(x){ return x > t; }).length; return w >= 30 * 60000 ? c * 2 : null; })() };
   }
 
+  /* ---- the shift's own run: stream picked at the start; day and week are today's, so only the run number is asked ---- */
+  var SHIFT_STREAMS = [['Garbage', 'Garbage'], ['Recycling', 'Recycling'], ['FOGO', 'FOGO'], ['SummerRecycling', 'Summer recycling']];
+  function shiftStreams(){ var su = window.uxSummerSeason ? window.uxSummerSeason() : false; return SHIFT_STREAMS.filter(function(x){ return x[0] !== 'SummerRecycling' || su; }); }
+  function todayDay(){ return ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][new Date().getDay()]; }
+  function todayWeek(stream){
+    if (stream !== 'Recycling' && stream !== 'FOGO') return '';
+    var w = ''; try { w = getActiveRecycleWeekForDate(new Date()); } catch (e) {}
+    return !w ? '' : stream === 'FOGO' ? (w === 'A' ? 'B' : 'A') : w;
+  }
+  function todaysRuns(stream){
+    if (!stream || typeof window.lbRunsFor !== 'function') return [];
+    try { return window.lbRunsFor(stream === 'SummerRecycling' ? 'Recycling' : stream, todayDay(), todayWeek(stream)) || []; } catch (e) { return []; }
+  }
+  function shiftRun(){ return (SH && SH.run) ? { run: SH.run, stream: SH.stream, day: SH.day, week: SH.week } : null; }
+  function openShiftRun(){
+    var r = shiftRun(); if (!r || typeof window.openRunDirectlyOnMap !== 'function') return;
+    window.openRunDirectlyOnMap(r.run, r.stream === 'SummerRecycling' ? 'Recycling' : r.stream, r.day, r.week, r.stream === 'SummerRecycling');
+  }
+  window.lbShiftRun = shiftRun;
+  window.lbOpenShiftRun = openShiftRun;
+
   function startShift(o){
     var s = clockState(), now = Date.now();
-    SH = { id: 's_' + uid(), start: now, driver: o.driver || '', truck: o.truck || '', rego: o.rego || '', startKm: o.km, startHrs: o.hrs, startPhoto: o.photo || null,
+    SH = { id: 's_' + uid(), start: now, stream: o.stream || '', run: o.run || '', day: o.run ? todayDay() : '', week: o.run ? todayWeek(o.stream) : '', driver: o.driver || '', truck: o.truck || '', rego: o.rego || '', startKm: o.km, startHrs: o.hrs, startPhoto: o.photo || null,
       prestart: o.prestart || null, defects: [], dist: 0, bins: 0, binTs: [], auto: !!o.auto, synced: false };
     if (o.auto && s && s.start) SH.start = s.start;
     saveSh();
@@ -29800,14 +29825,20 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       title = 'Start shift';
       newDraft(); var dr = draft, n = Object.keys(dr.checks).length, faults = Object.keys(dr.checks).filter(function(k){ return dr.checks[k] === 'fault'; });
       var oosT = oosFor(dr.truck);
-      var ready = dr.driver.trim() && n === CHECKS.length && ((dr.km !== '' && dr.hrs !== '') || dr.photo) && (!oosT || isLead());
+      var runOk = !!dr.run || (!!dr.stream && !todaysRuns(dr.stream).length);
+      var ready = runOk && dr.driver.trim() && n === CHECKS.length && ((dr.km !== '' && dr.hrs !== '') || dr.photo) && (!oosT || isLead());
       h = '<div class="drv-row2">' + field('uxsName', 'Driver', dr.driver, 'text', 'Your name') + field('uxsTruck', 'Unit number', dr.truck, 'text', 'Fleet no.') + '</div>' +
         '<div class="drv-row2">' + field('uxsRego', 'Unit rego', dr.rego || '', 'text', 'Number plate') + '</div>' +
         (oosT ? '<div class="drv-stopbox">' + I.warn + '<span><b>' + esc(oosT.truck) + ' is out of service.</b> Brakes were at ' + oosT.min + '% on ' + esc(dateStr(oosT.ts)) + '. Do not use it until the brakes are replaced and your leading hand clears it.</span></div>' : '') +
+        '<div class="drv-sect"><span>Your run · ' + esc(todayDay()) + (dr.stream && todayWeek(dr.stream) ? ' · Week ' + todayWeek(dr.stream) : '') + '</span></div>' +
+        '<div class="drv-seg drv-runseg">' + shiftStreams().map(function(x){ return '<button type="button" data-sstream="' + x[0] + '" class="' + (dr.stream === x[0] ? 'on' : '') + '">' + esc(x[1]) + '</button>'; }).join('') + '</div>' +
+        (dr.stream ? (todaysRuns(dr.stream).length
+          ? '<div class="drv-seg drv-runseg">' + todaysRuns(dr.stream).map(function(r){ return '<button type="button" data-srun="' + esc(r) + '" class="' + (String(dr.run) === String(r) ? 'on' : '') + '">' + esc(r) + '</button>'; }).join('') + '</div>'
+          : '<div class="drv-hint">No ' + esc(dr.stream) + ' runs on today’s list.</div>') : '') +
         '<div class="drv-sect"><span>Truck at the start</span></div>' + readingsHtml(dr, 'uxsS') + checksHtml(dr.checks) +
         (faults.length ? '<div class="drv-warnbox">' + I.warn + '<span>' + faults.length + ' fault' + (faults.length > 1 ? 's' : '') + ': ' + esc(faults.map(function(k){ return CHK[k]; }).join(', ')) + '. Log each one as a defect (you’ll be asked after starting).</span></div>' : '') +
         '<div class="drv-foot"><button type="button" class="drv-btn" data-a="history">' + I.list + 'Past shifts</button><button type="button" class="drv-btn drv-go" data-a="start"' + (ready ? '' : ' disabled') + '>Start shift</button></div>' +
-        (ready ? '' : '<div class="drv-hint">' + esc(oosT && !isLead() ? 'This truck can’t be started.' : !dr.driver.trim() ? 'Put your name in.' : ((dr.km === '' || dr.hrs === '') && !dr.photo) ? 'Put in the km and hours, or take a photo of the dash.' : 'Tick every pre-start item.') + '</div>') + roleHtml();
+        (ready ? '' : '<div class="drv-hint">' + esc(oosT && !isLead() ? 'This truck can’t be started.' : !runOk ? 'Pick your stream and run.' : !dr.driver.trim() ? 'Put your name in.' : ((dr.km === '' || dr.hrs === '') && !dr.photo) ? 'Put in the km and hours, or take a photo of the dash.' : 'Tick every pre-start item.') + '</div>') + roleHtml();
     } else {
       var rr = rates(), br = onBreak(), dfs = defects().filter(function(x){ return x.shiftId === SH.id; }), iss = ((window.uxIssueLog && window.uxIssueLog()) || []).filter(function(i){ return i.ts >= SH.start; });
       title = br ? 'On a break' : 'On shift';
@@ -29914,6 +29945,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     }
     var chk = b.getAttribute('data-chk');
     if (chk) { var tgt = view === 'prestart' ? pre : draft; var v = b.getAttribute('data-val'); if (tgt.checks[chk] === v) delete tgt.checks[chk]; else tgt.checks[chk] = v; paint(); return; }
+    var sst = b.getAttribute('data-sstream'); if (sst && draft) { if (draft.stream !== sst) draft.run = ''; draft.stream = sst; paint(); return; }
+    var srn = b.getAttribute('data-srun'); if (srn && draft) { draft.run = srn; paint(); return; }
     var sev = b.getAttribute('data-sev'); if (sev && defDraft) { defDraft.sev = sev; paint(); return; }
     var dsev = b.getAttribute('data-dsev'); if (dsev && dashDraft) { dashDraft.sev = dsev; paint(); return; }
     var dsafe = b.getAttribute('data-dsafe'); if (dsafe !== null && dashDraft) { dashDraft.safe = dsafe === '1'; paint(); return; }
@@ -29933,10 +29966,11 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       // The rego is remembered per unit, so the next shift on the same truck (and the accident card) fill it in.
       if (dr.truck && dr.rego) { var rgS = lsGet('lbRegos', {}) || {}; rgS[String(dr.truck).trim().toLowerCase()] = String(dr.rego).trim().toUpperCase(); lsSet('lbRegos', rgS); }
       var faults = Object.keys(dr.checks).filter(function(k){ return dr.checks[k] === 'fault'; });
-      startShift({ driver: dr.driver.trim(), truck: dr.truck.trim(), rego: String(dr.rego || '').trim().toUpperCase(), km: num(dr.km), hrs: num(dr.hrs), photo: dr.photo, prestart: { ts: Date.now(), checks: dr.checks, faults: faults } });
+      startShift({ stream: dr.stream || '', run: dr.run || '', driver: dr.driver.trim(), truck: dr.truck.trim(), rego: String(dr.rego || '').trim().toUpperCase(), km: num(dr.km), hrs: num(dr.hrs), photo: dr.photo, prestart: { ts: Date.now(), checks: dr.checks, faults: faults } });
       draft = null; localStorage.removeItem('lbShiftNoAuto');
       if (faults.length) { view = 'defect'; newDefect(faults[0]); pendingFaults = faults.slice(1); }
       else { view = 'main'; toast('Shift started'); }
+      try { openShiftRun(); } catch (e) {}
       paint(); return;
     }
     if (a === 'prestart') { var d0 = me(); pre = { checks: {}, km: SH.startKm == null ? '' : SH.startKm, hrs: SH.startHrs == null ? '' : SH.startHrs, photo: SH.startPhoto, driver: SH.driver || d0.name || '', truck: SH.truck || d0.truck || '' }; view = 'prestart'; paintPre(); return; }
@@ -30049,6 +30083,54 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   document.addEventListener('keydown', function(e){ if (e.key === 'Escape') closeSheet(); });
   document.addEventListener('lb-outbox', function(){ if (sheet && sheet.classList.contains('open') && (view === 'main' || view === 'truck' || view === 'brakedone' || view === 'history')) paint(); });
   window.uxShiftState = function(){ return SH ? JSON.parse(JSON.stringify(SH)) : null; };
+
+  /* ---- the shift's run stays put while other runs are looked at ----
+     - The Drive screen's bin totals are always worked out for the shift's run, whatever the filter is on.
+     - On the same stream, picking other runs adds to the map; the shift's run is never dropped from it.
+     - On another stream, a chip on the map goes straight back to the shift's run. */
+  (function(){
+    var FG = {}, FS = {};
+    function gg(n){ try { return (FG[n] || (FG[n] = new Function('return ' + n)))(); } catch (e) { return undefined; } }
+    function ss(n, v){ try { (FS[n] || (FS[n] = new Function('v', n + ' = v')))(v); } catch (e) {} }
+    function mapStream(r){ return r.stream === 'SummerRecycling' ? 'SummerRecycling' : r.stream; }
+    function wrapTotals(){
+      var orig = window.lbHudTotals; if (typeof orig !== 'function' || orig.__shift) return;
+      var w = function(){
+        var r = shiftRun(); if (!r) return orig.apply(this, arguments);
+        var keep = { st: gg('activeFilterStream'), d: gg('activeFilterDay'), wk: gg('activeFilterWeek'), runs: Array.from(gg('selectedRunsSet') || []) };
+        var set = gg('selectedRunsSet');
+        try {
+          ss('activeFilterStream', mapStream(r)); ss('activeFilterDay', r.day); ss('activeFilterWeek', r.stream === 'Garbage' || r.stream === 'SummerRecycling' ? '' : r.week);
+          if (set) { set.clear(); set.add(String(r.run).toLowerCase()); }
+          return orig.apply(this, arguments);
+        } finally {
+          ss('activeFilterStream', keep.st); ss('activeFilterDay', keep.d); ss('activeFilterWeek', keep.wk);
+          if (set) { set.clear(); keep.runs.forEach(function(x){ set.add(x); }); }
+        }
+      };
+      w.__shift = true; window.lbHudTotals = w;
+    }
+    var chip = null;
+    function keepOnMap(){
+      wrapTotals();
+      var r = shiftRun(), onMap = document.body.getAttribute('data-ux-screen') === 'map';
+      var st = gg('activeFilterStream'), set = gg('selectedRunsSet'), key = String((r && r.run) || '').toLowerCase();
+      var sameStream = r && (st === mapStream(r) || !st);
+      if (r && sameStream && set && set.size && !set.has(key)) {
+        set.add(key);
+        try { if (typeof renderActiveFilterChips === 'function') renderActiveFilterChips(); if (typeof renderMapData === 'function') renderMapData(); } catch (e) {}
+      }
+      var show = !!(r && onMap && !sameStream);
+      if (show && !chip) {
+        chip = document.createElement('button'); chip.type = 'button'; chip.id = 'uxMyRunChip';
+        chip.addEventListener('click', function(){ openShiftRun(); });
+        document.body.appendChild(chip);
+      }
+      if (chip) { chip.style.display = show ? '' : 'none'; if (show) chip.textContent = 'Back to my run · ' + (STREAM_LBL[r.stream] || r.stream) + ' ' + r.run; }
+    }
+    var STREAM_LBL = { Garbage: 'Garbage', Recycling: 'Recycling', FOGO: 'FOGO', SummerRecycling: 'Summer' };
+    setInterval(function(){ if (!document.hidden) keepOnMap(); }, 1000);
+  })();
   window.uxShiftRates = rates;
   window.uxShowTrail = showTrail;
 })();
@@ -31906,6 +31988,9 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   function tickTimer(){
     if (!timerEl) return;
     var st = null; try { st = window.lbRunTimer && window.lbRunTimer.state; } catch (e) {}
+    // On shift, the timer is the time since the shift started (not a separate run stopwatch).
+    var sh = null; try { sh = window.uxShiftState && window.uxShiftState(); } catch (e) {}
+    if (sh && sh.start) st = { running: true, ms: Date.now() - sh.start };
     if (!st) { timerEl.setAttribute('data-s', 'none'); return; }
     var mode = st.running ? 'run' : (st.ms > 0 ? 'pause' : 'idle');
     var key = mode + '|' + fmt(st.ms);
@@ -31927,6 +32012,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     bar.parentNode.insertBefore(timerEl, bar);
     timerEl.addEventListener('click', function(ev){
       ev.stopPropagation();
+      if (window.uxShiftState && window.uxShiftState()) { if (window.uxShiftOpen) window.uxShiftOpen(); return; }
       var T = window.lbRunTimer; if (!T) return;
       var st = T.state;
       if (st.running) T.pause(); else if (st.ms > 0) T.resume(); else T.start('Run');
