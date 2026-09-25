@@ -32724,6 +32724,14 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
         kv('Finish', s.end ? hhmm(s.end) : 'still on shift') +
         kv('Breaks', br.length ? br.map(function(b){ return hhmm(b.s) + '–' + (b.e ? hhmm(b.e) : 'now'); }).join(', ') : 'none') +
         R.breakdowns.map(function(b){ return kv('Breakdown', hhmm(b.s) + '–' + (b.e ? hhmm(b.e) : 'now')); }).join('') +
+        (function(){
+          var ls = window.lbStops ? window.lbStops.list(s.id, 'long') : [];
+          if (!ls.length) return '';
+          return '<div class="rs-auto">Stopped over a minute away from any bin (not at units or a corner). Add a reason if it matters.</div>' + ls.map(function(x){
+            var m = Math.floor(x.dur / 60), sec = x.dur % 60;
+            return '<div class="rs-li"><div><b>Stopped ' + hhmm(x.t0) + ' · ' + m + ' min' + (sec ? ' ' + sec + ' s' : '') + '</b><span>' + esc(x.street || 'no house nearby') + '</span></div><button type="button" class="drv-btn" data-a="stopnote" data-t="' + x.t0 + '">Add to comments</button></div>';
+          }).join('');
+        })() +
         (SHc.live ? '<div class="drv-acts"><button type="button" class="drv-btn' + (bdOpen ? ' drv-go' : ' drv-warnb') + '" data-a="breakdown">' + (bdOpen ? 'Breakdown over' : 'Broken down') + '</button></div>' : '') +
         sect('Truck') +
         kv('Unit #1', [s.truck, s.rego].filter(Boolean).join(' · ')) +
@@ -32832,6 +32840,11 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     }
     if (a === 'delfuel') { R.fuel.splice(+b.getAttribute('data-i'), 1); save(R); paint(); return; }
     if (a === 'deladblue') { R.adblue.splice(+b.getAttribute('data-i'), 1); save(R); paint(); return; }
+    if (a === 'stopnote') {
+      var x0 = (window.lbStops ? window.lbStops.list(SHc.s.id, 'long') : []).filter(function(x){ return String(x.t0) === b.getAttribute('data-t'); })[0];
+      if (x0) { R.comments = (R.comments ? R.comments.replace(/\s+$/, '') + '\n' : '') + 'Stopped ' + hhmm(x0.t0) + ' for ' + Math.round(x0.dur / 60) + ' min' + (x0.street ? ' on ' + x0.street : '') + ': '; save(R); paint(); var ta = $('rsComments'); if (ta) { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); } }
+      return;
+    }
     if (a === 'breakdown') {
       var bo = R.breakdowns.filter(function(x){ return !x.e; })[0];
       if (bo) bo.e = Date.now(); else R.breakdowns.push({ s: Date.now(), e: null });
@@ -32955,6 +32968,118 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   }
 
   window.lbRunSheet = { open: open, missing: missing, text: function(id){ var sh = shiftFor(id); if (!sh) return ''; SHc = sh; R = getOrMake(sh.s.id); return sheetText(); }, _t: { tick: tick, get: get, all: all } };
+})();
+</script>
+
+
+<!-- =====================================================================
+     WHAT A STOP MEANS
+     Watches speed and position once a second while a shift is on. Each stop is sorted into:
+       flip          a bin was marked done during it. Its length teaches the app the usual
+                     time to flip one bin (median of the last 200).
+       inferred      nothing marked, about a flip's length, beside an unfinished bin on the run
+                     whose own house is the nearest house: almost certainly a flip where the
+                     bin's pin is in the wrong place. The bin is marked done and the spot the
+                     truck stopped at is kept as a pin fix (lbPinFixes), for the location check.
+       long          over a minute, not at units or an intersection, nothing flipped: something
+                     else going on. Listed on the run sheet so the driver can say what.
+       intersection  houses from two different streets close by: waiting to turn, ignored.
+       traffic       short, nothing near: ignored.
+     Stored in localStorage lbStops (last 400) and lbStopStats.
+     ================================================================== -->
+<script id="lb-stops-script">
+(function(){
+  'use strict';
+  var GF = {};
+  function g(n){ try { return (GF[n] || (GF[n] = new Function('return typeof ' + n + ' === "undefined" ? undefined : ' + n)))(); } catch (e) { return undefined; } }
+  function lsGet(k, d){ try { var v = JSON.parse(localStorage.getItem(k)); return v == null ? d : v; } catch (e) { return d; } }
+  function lsSet(k, v){ try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
+  function metres(a, b){ var kx = 111320 * Math.cos(a.lat * Math.PI / 180); return Math.hypot((b.lng - a.lng) * kx, (b.lat - a.lat) * 110540); }
+
+  var STOP_KMH = 3, GO_KMH = 6, DRIFT_M = 15;        // below 3 km/h is stopped; above 6 km/h, or 15 m away, is moving again
+  var LONG_S = 60, NEAR_BIN_M = 40, CORNER_M = 40, DEFAULT_FLIP_S = 12;
+
+  function stats(){ var s = lsGet('lbStopStats', null); return s && Array.isArray(s.flips) ? s : { flips: [] }; }
+  function flipTime(){
+    var f = stats().flips.slice().sort(function(a, b){ return a - b; });
+    return f.length >= 5 ? f[Math.floor(f.length / 2)] : DEFAULT_FLIP_S;
+  }
+  function learn(secPerBin){
+    if (!(secPerBin >= 3 && secPerBin <= 120)) return;
+    var s = stats(); s.flips.push(Math.round(secPerBin)); s.flips = s.flips.slice(-200); lsSet('lbStopStats', s);
+  }
+  function log(rec){ var a = lsGet('lbStops', []); if (!Array.isArray(a)) a = []; a.push(rec); lsSet('lbStops', a.slice(-400)); }
+
+  function siteKey(s){ return String(s.propId || s.siteId || ''); }
+  function street(s){ try { var f = g('siteStreetKey'); return f ? f(s) : ''; } catch (e) { return ''; } }
+  function isUnits(s){ return /^\s*(unit|u\s*\d|flat|apt|villa)|\//i.test(String(s.addressText || s.baseStreetLine || '')); }
+  function sitesNear(p, r){
+    var recs = g('siteRecords') || [], out = [], dLat = r / 110540, dLng = r / (111320 * Math.cos(p.lat * Math.PI / 180));
+    for (var i = 0; i < recs.length; i++) {
+      var s = recs[i], la = +s.lat, ln = +s.lng; if (!la) continue;
+      if (Math.abs(la - p.lat) > dLat || Math.abs(ln - p.lng) > dLng) continue;
+      var d = metres(p, { lat: la, lng: ln }); if (d <= r) out.push({ s: s, d: d });
+    }
+    return out.sort(function(a, b){ return a.d - b.d; });
+  }
+
+  var stop = null;
+  function speed(){ var v = +g('currentMapSpeedKmh'); return isFinite(v) ? v : null; }
+  function here(){ var l = g('userCurrentLocation'); return l && isFinite(l.lat) && (l.lat || l.lng) ? { lat: +l.lat, lng: +l.lng } : null; }
+  function doneCount(){ var s = g('servicedBinSerials'); return s ? s.size : 0; }
+
+  function tick(){
+    var sh = window.uxShiftState ? window.uxShiftState() : null;
+    if (!sh) { stop = null; return; }
+    var sp = speed(), p = here(); if (sp == null || !p) return;
+    if (!stop) { if (sp < STOP_KMH) stop = { t0: Date.now(), lat: p.lat, lng: p.lng, done0: doneCount(), shiftId: sh.id }; return; }
+    if (sp >= GO_KMH || metres(stop, p) > DRIFT_M) { var s0 = stop; stop = null; finish(s0); }
+  }
+
+  function finish(s0){
+    var dur = (Date.now() - s0.t0) / 1000; if (dur < 4) return;
+    var bins = doneCount() - s0.done0, p = { lat: s0.lat, lng: s0.lng };
+    var rec = { t0: s0.t0, dur: Math.round(dur), lat: +p.lat.toFixed(6), lng: +p.lng.toFixed(6), bins: Math.max(0, bins), shiftId: s0.shiftId, kind: '' };
+    if (bins > 0) { learn(dur / bins); rec.kind = 'flip'; log(rec); return; }
+
+    var near = sitesNear(p, CORNER_M);
+    var streets = {}; near.forEach(function(x){ var k = street(x.s); if (k) streets[k] = 1; });
+    if (Object.keys(streets).length >= 2 && near.length && near[0].d > 12) { rec.kind = 'intersection'; log(rec); return; }
+    var units = near.slice(0, 3).some(function(x){ return isUnits(x.s); });
+
+    // a flip where the bin's pin is off: the nearest unfinished bin on the run, whose own house is the nearest house
+    var ft = flipTime();
+    if (dur <= Math.max(3 * ft, 45)) {
+      var best = null, bd = NEAR_BIN_M, done = g('servicedBinSerials'), missed = g('missedBinSerials'), markers = g('activeMapCircleMarkers');
+      if (markers && markers.forEach) markers.forEach(function(m, key){
+        var id = m.serial || key; if (done && done.has(id)) return;
+        var d = metres(p, m); if (d < bd) { bd = d; best = { m: m, key: key, id: id, d: d }; }
+      });
+      if (best && near.length && siteKey(near[0].s) === String(best.m.siteId) && best.d > 12) {
+        try {
+          done.add(best.id); if (missed) missed.delete(best.id);
+          var layer = g('mapMarkersLayer'); if (layer && best.m.layer) layer.removeLayer(best.m.layer);
+          var u = g('updateFlippedBinCount'); if (u) u(); var sv = g('saveRunProgress'); if (sv) sv();
+        } catch (e) {}
+        rec.kind = 'inferred'; rec.serial = best.id; rec.siteId = String(best.m.siteId); rec.binDist = Math.round(best.d);
+        var fx = lsGet('lbPinFixes', []); if (!Array.isArray(fx)) fx = [];
+        fx = fx.filter(function(x){ return x.serial !== best.id; });
+        fx.push({ serial: best.id, siteId: rec.siteId, stream: best.m.stream || '', binLat: best.m.lat, binLng: best.m.lng, stopLat: rec.lat, stopLng: rec.lng, dist: rec.binDist, ts: Date.now() });
+        lsSet('lbPinFixes', fx.slice(-500));
+        log(rec); return;
+      }
+    }
+    if (dur >= LONG_S && !units) { rec.kind = 'long'; rec.street = near.length ? String(near[0].s.baseStreetLine || '').replace(/^[\d\s\/A-Za-z-]*?\d+[A-Za-z]?\s+/, '') : ''; log(rec); return; }
+    rec.kind = units ? 'units' : 'traffic'; if (dur >= LONG_S) log(rec);
+  }
+
+  setInterval(function(){ try { tick(); } catch (e) {} }, 1000);
+  window.lbStops = {
+    flipTime: flipTime,
+    list: function(shiftId, kind){ var a = lsGet('lbStops', []) || []; return a.filter(function(r){ return (!shiftId || r.shiftId === shiftId) && (!kind || r.kind === kind); }); },
+    pinFixes: function(){ return lsGet('lbPinFixes', []) || []; },
+    _t: { finish: finish, sitesNear: sitesNear, setStop: function(s){ stop = s; } }
+  };
 })();
 </script>
 
