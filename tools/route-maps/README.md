@@ -31,6 +31,7 @@ venv/bin/python identify_garbage.py           # Garbage (geometry-identified) ->
 venv/bin/python modes_export.py --write       # merge all three -> data/street-modes.json
 venv/bin/python extend_boundaries.py --write  # stretch every stream's boundaries to the streets driven, split shared road down the middle -> data/run-boundaries.json (new `generated`)
 venv/bin/python cover.py                      # Recycling only: how many of each run's houses sit inside its boundary
+venv/bin/python notes_export.py --write       # the Drivers Notes box on every page -> data/run-notes.json (shown in the app by street)
 ```
 
 Notes:
