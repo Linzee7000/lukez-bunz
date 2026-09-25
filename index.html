@@ -16973,10 +16973,29 @@ window.addEventListener('DOMContentLoaded', async () => {
 
     let nearestSiteOverall = null, nearestDistOverall = Infinity;
     let nearestSameSideSite = null, nearestSameSideDist = Infinity;
+    // Measure to each house's bins on the map (where they sit on the kerb) as well as to the house pin, and use
+    // whichever is closer. In a court the blocks are wedge-shaped: the pins fan out across the bulb while the bins
+    // bunch up at the narrow frontages, so the next-door pin was often nearer than your own - the box said 14 or 16
+    // while the bin being flipped (found by the bin's own position, like the highlight) was 15's.
+    const binDistBySite = new Map();
+    if (userCurrentLocation && typeof activeMapCircleMarkers !== 'undefined' && activeMapCircleMarkers && activeMapCircleMarkers.forEach) {
+      activeMapCircleMarkers.forEach(m => {
+        if (!m || m.siteId == null || !Number.isFinite(m.lat) || !Number.isFinite(m.lng)) return;
+        const d = getDistanceMeters(userCurrentLocation.lat, userCurrentLocation.lng, m.lat, m.lng);
+        const k = String(m.siteId), prev = binDistBySite.get(k);
+        if (prev === undefined || d < prev) binDistBySite.set(k, d);
+      });
+    }
+    // A bin this close is the one being worked: its house wins outright, whichever kerb it's on.
+    const BIN_AT_TRUCK_M = 10;
+    let nearestBinSite = null, nearestBinDist = Infinity;
     if (userCurrentLocation) {
       records.forEach(site => {
+        const bd = binDistBySite.get(String(site.propId || site.siteId || ''));
+        if (bd !== undefined && bd < nearestBinDist) { nearestBinDist = bd; nearestBinSite = site; }
         if (site.lat && site.lng && Number(site.lat) !== 0) {
-          const d = getDistanceMeters(userCurrentLocation.lat, userCurrentLocation.lng, Number(site.lat), Number(site.lng));
+          let d = getDistanceMeters(userCurrentLocation.lat, userCurrentLocation.lng, Number(site.lat), Number(site.lng));
+          if (bd !== undefined && bd < d) d = bd;
           if (d < nearestDistOverall) { nearestDistOverall = d; nearestSiteOverall = site; }
           if (lastSideOfTravel && d < nearestSameSideDist && !isBothSidesSite(site) && sideOfSite(site) === lastSideOfTravel) {
             nearestSameSideDist = d; nearestSameSideSite = site;
@@ -16988,7 +17007,8 @@ window.addEventListener('DOMContentLoaded', async () => {
     // back to the plain "nearest overall" pick (which can jump across the
     // road) once there's nothing left on that side within range, e.g. the
     // street's ended and it's time to move on.
-    const currentSite = (nearestSameSideSite && nearestSameSideDist <= 300)
+    const currentSite = (nearestBinSite && nearestBinDist <= BIN_AT_TRUCK_M) ? nearestBinSite
+      : (nearestSameSideSite && nearestSameSideDist <= 300)
       ? nearestSameSideSite
       : (nearestDistOverall <= 300 ? nearestSiteOverall : null);
 
