@@ -3990,6 +3990,12 @@ body:not(.dark-mode) .welcome-go-wrap {
 
 
 
+<script>
+  // Low-memory devices (e.g. Galaxy Tab Active 3): turn off the frosted-glass blur. Every blurred bar or menu
+  // over the live map has to be re-blurred each time the map moves, which is what makes menus lag there.
+  try { if (Number(navigator.deviceMemory) > 0 && Number(navigator.deviceMemory) <= 4) document.documentElement.classList.add('lb-lite'); } catch (e) {}
+</script>
+<style>html.lb-lite *, html.lb-lite *::before, html.lb-lite *::after { -webkit-backdrop-filter: none !important; backdrop-filter: none !important; }</style>
 </head>
 
 <body class="ux2 dark-mode">
@@ -15707,13 +15713,15 @@ window.addEventListener('DOMContentLoaded', async () => {
       // A uniform enlargement must cover the container's full diagonal at
       // any rotation angle, not just a fixed guess - otherwise tall/narrow
       // phone screens show grey corners near 45°/135° rotation angles.
-      let scale = 1.5;
-      let w = 0, h = 0;
+      let w = 0, h = 0, side = 0;
       if (container && container.clientWidth && container.clientHeight) {
         w = container.clientWidth;
         h = container.clientHeight;
-        const diagonal = Math.sqrt(w * w + h * h);
-        scale = Math.max(1.5, (diagonal / Math.min(w, h)) + 0.1);
+        // A square as wide as the screen's diagonal covers every rotation angle. Scaling both sides by
+        // diagonal/shortest-side (as this used to) made a phone's map ~2.4x more pixels than needed and a
+        // tablet's ~1.8x - every map canvas grows with it, which is what ran low-memory devices out of
+        // graphics memory (worst in fullscreen, where the screen is biggest).
+        side = Math.ceil(Math.sqrt(w * w + h * h)) + 8;
       }
 
       // Cover that extra ground by physically enlarging the map element
@@ -15725,8 +15733,8 @@ window.addEventListener('DOMContentLoaded', async () => {
       // at the SAME zoom level, so nothing gets stretched past its native
       // resolution and the apparent zoom level doesn't change at all.
       if (mapEl && w && h) {
-        const bigW = w * scale;
-        const bigH = h * scale;
+        const bigW = side;
+        const bigH = side;
         const offsetX = (bigW - w) / 2;
         const offsetY = (bigH - h) / 2;
 
@@ -15736,7 +15744,9 @@ window.addEventListener('DOMContentLoaded', async () => {
         mapEl.style.setProperty('--tu-map-w', bigW + 'px');
         mapEl.style.setProperty('--tu-map-h', bigH + 'px');
         mapEl.style.transform = `rotate(${-heading}deg)`;
-        if (leafletMap) leafletMap.invalidateSize({ pan: false, animate: false });
+        // Only tell Leaflet to re-measure when the size actually changed, not on every GPS fix.
+        const sizeSig = bigW + 'x' + bigH;
+        if (leafletMap && mapEl.dataset.tuSize !== sizeSig) { mapEl.dataset.tuSize = sizeSig; leafletMap.invalidateSize({ pan: false, animate: false }); }
 
         // Leaflet's own zoom/attribution controls live inside #mainLeafletMap
         // and normally hold a fixed spot via CSS `position:fixed`, which - once
@@ -15757,7 +15767,7 @@ window.addEventListener('DOMContentLoaded', async () => {
       if (mapEl) {
         mapEl.classList.remove('map-track-up-enlarged');
         mapEl.style.transform = 'none';
-        if (leafletMap) leafletMap.invalidateSize({ pan: false, animate: false });
+        if (leafletMap && mapEl.dataset.tuSize) { delete mapEl.dataset.tuSize; leafletMap.invalidateSize({ pan: false, animate: false }); }
       }
       if (arrowBtnSvg) {
         arrowBtnSvg.style.transform = 'none';
@@ -17331,6 +17341,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   window.onGpsPositionSuccess = function(pos) {
     const accuracy = Math.round(pos.coords.accuracy);
     const speedKmh = pos.coords.speed !== null && !isNaN(pos.coords.speed) ? Math.round(pos.coords.speed * 3.6) : 0;
+    window.lbSpeedKmh = speedKmh;   // read by the property-boundary layer, which holds off downloading while driving fast
     
     currentMapSpeedKmh = speedKmh;
     userCurrentLocation = {
@@ -23663,6 +23674,9 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     const inside = drawnBox && cur.w >= drawnBox.w && cur.e <= drawnBox.e && cur.s >= drawnBox.s && cur.n <= drawnBox.n;
     if (!(fromMove && inside && drawnSig === drawSigNow())) redraw();   // saved outlines show immediately, even offline
     if (batch.running || map.getZoom() < MIN_FETCH_ZOOM) return;
+    // Driving fast pulls in a new map area every few seconds, each several MB of lot shapes - more than
+    // older phones/tablets can keep up with. Saved boundaries still draw; new ones load once below 30 km/h.
+    if (fromMove && Number(window.lbSpeedKmh) > 30) return;
     if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
     const v = viewBox(0.5);
     const x0 = Math.floor(v.w / TILE_DEG), x1 = Math.floor(v.e / TILE_DEG);
@@ -23679,14 +23693,18 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     if (!jobs.length) return;
     pill('Loading property boundaries...');
     let failed = 0, matched = 0;
-    await Promise.all(jobs.map(async ([ix, iy, k]) => {
+    // a couple at a time, not all 12 at once
+    let nextJob = 0;
+    const one = async ([ix, iy, k]) => {
       try {
         const parcels = await loadTile(ix, iy);
         failedTiles.delete(k);
         const r = matchList(parcels, sitesInTile(ix, iy), false);
         matched += r.inside + r.near + r.none;
       } catch (e) { failed++; failedTiles.set(k, Date.now()); }
-    }));
+    };
+    const worker = async () => { while (nextJob < jobs.length) await one(jobs[nextJob++]); };
+    await Promise.all(Array.from({ length: Math.min(LOW_MEM ? 2 : CONCURRENCY, jobs.length) }, worker));
     redraw();
     // Saving copies the whole parcel store (several MB) into IndexedDB - only do it when a house was matched.
     if (matched) scheduleSave();
