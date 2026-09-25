@@ -33453,5 +33453,77 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
 })();
 </script>
 
+
+<!-- =====================================================================
+     SCHOOLS on the map, shaded yellow like the route maps' "Schools".
+     The route maps' own shading can't be used (most pages can't be placed on the ground),
+     so the school grounds come from OpenStreetMap: fetched once for the whole area the
+     houses cover, kept on the phone for 30 days (localStorage lbSchools), drawn from zoom 14.
+     ================================================================== -->
+<script id="lb-schools-script">
+(function(){
+  'use strict';
+  var GF = {};
+  function g(n){ try { return (GF[n] || (GF[n] = new Function('return typeof ' + n + ' === "undefined" ? undefined : ' + n)))(); } catch (e) { return undefined; } }
+  function lsGet(k, d){ try { var v = JSON.parse(localStorage.getItem(k)); return v == null ? d : v; } catch (e) { return d; } }
+  function lsSet(k, v){ try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch (e) { return false; } }
+  var KEY = 'lbSchools', TTL = 30 * 86400000, MIN_ZOOM = 14;
+  var MIRRORS = ['https://overpass-api.de/api/interpreter', 'https://overpass.kumi.systems/api/interpreter', 'https://overpass.private.coffee/api/interpreter'];
+  var map = null, layer = null, drawnZoomOk = null, loading = false;
+
+  function area(){
+    var recs = g('siteRecords') || []; if (recs.length < 100) return null;
+    var a = [90, 180, -90, -180];
+    for (var i = 0; i < recs.length; i += 7) { var la = +recs[i].lat, ln = +recs[i].lng; if (!la || !ln) continue; a[0] = Math.min(a[0], la); a[1] = Math.min(a[1], ln); a[2] = Math.max(a[2], la); a[3] = Math.max(a[3], ln); }
+    return a[0] < a[2] ? [a[0] - 0.01, a[1] - 0.01, a[2] + 0.01, a[3] + 0.01].map(function(v){ return +v.toFixed(3); }) : null;
+  }
+  function load(){
+    var c = lsGet(KEY, null);
+    if (c && c.ts && Date.now() - c.ts < TTL) return Promise.resolve(c.items);
+    if (loading || navigator.onLine === false) return Promise.resolve(c ? c.items : null);
+    var bb = area(); if (!bb) return Promise.resolve(null);
+    loading = true;
+    var q = '[out:json][timeout:60];(way["amenity"="school"](' + bb.join(',') + ');relation["amenity"="school"](' + bb.join(',') + '););out geom;';
+    var tries = 0;
+    function go(){
+      return fetch(MIRRORS[tries % MIRRORS.length], { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'data=' + encodeURIComponent(q) })
+        .then(function(r){ return r.text(); }).then(function(t){ if (t.charAt(0) !== '{') throw new Error('busy'); return JSON.parse(t).elements || []; })
+        .catch(function(e){ if (++tries < MIRRORS.length) return new Promise(function(r){ setTimeout(r, 1500); }).then(go); throw e; });
+    }
+    return go().then(function(els){
+      var items = [];
+      els.forEach(function(e){
+        var rings = [];
+        if (e.type === 'way' && e.geometry) rings.push(e.geometry.map(function(p){ return [+p.lat.toFixed(5), +p.lon.toFixed(5)]; }));
+        if (e.type === 'relation' && e.members) e.members.forEach(function(m){ if (m.role === 'outer' && m.geometry) rings.push(m.geometry.map(function(p){ return [+p.lat.toFixed(5), +p.lon.toFixed(5)]; })); });
+        rings = rings.filter(function(r){ return r.length >= 3; });
+        if (rings.length) items.push({ n: (e.tags && e.tags.name) || 'School', r: rings });
+      });
+      loading = false; lsSet(KEY, { ts: Date.now(), items: items }); return items;
+    }).catch(function(){ loading = false; return c ? c.items : null; });
+  }
+  function draw(){
+    var m = g('leafletMap'); if (!m || !window.L) return;
+    if (map !== m) {
+      map = m;
+      if (!m.getPane('lb-school-pane')) { var p = m.createPane('lb-school-pane'); p.style.zIndex = 390; }
+      layer = L.layerGroup().addTo(m); drawnZoomOk = null;
+      m.on('zoomend', function(){ var ok = m.getZoom() >= MIN_ZOOM; if (ok !== drawnZoomOk) draw(); });
+    }
+    var ok = m.getZoom() >= MIN_ZOOM; drawnZoomOk = ok;
+    layer.clearLayers(); if (!ok) return;
+    var c = lsGet(KEY, null); if (!c || !c.items) return;
+    c.items.forEach(function(s){
+      L.polygon(s.r, { pane: 'lb-school-pane', color: '#ca8a04', weight: 1, opacity: 0.7, fillColor: '#fde047', fillOpacity: 0.28, interactive: true })
+        .bindTooltip(s.n, { sticky: true }).addTo(layer);
+    });
+  }
+  // if OpenStreetMap was busy or there was no signal, try again in 5 minutes (until it's loaded)
+  function start(){ load().then(function(items){ if (items) draw(); else setTimeout(start, 5 * 60000); }); }
+  var tries = 0, t = setInterval(function(){ if (g('leafletMap') && (g('siteRecords') || []).length > 100) { clearInterval(t); start(); } else if (++tries > 120) clearInterval(t); }, 2000);
+  window.lbSchools = { refresh: function(){ localStorage.removeItem(KEY); start(); }, draw: draw };
+})();
+</script>
+
 </body>
 </html>
