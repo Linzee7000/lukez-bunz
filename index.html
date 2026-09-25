@@ -29703,6 +29703,63 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       return id;
     } catch (e) { return null; }
   }
+  /* ---- run check: what's left on the shift's run ----
+     Every bin on the run that is neither done nor marked missed, grouped by street, and the streets the
+     trail never came within 35 m of (so were probably never driven). Used by "Check my run" and at End shift. */
+  function runCheck(){
+    var r = shiftRun(); if (!r || typeof window.lbRunGroups !== 'function') return null;
+    var stream = r.stream === 'SummerRecycling' ? 'Recycling' : r.stream, day = String(r.day || '').toLowerCase(), wk = String(r.week || '').toUpperCase();
+    var grp = (window.lbRunGroups(stream) || []).filter(function(x){ return String(x.run).toLowerCase() === String(r.run).toLowerCase() && String(x.day).toLowerCase() === day && (!x.week || !wk || String(x.week).toUpperCase() === wk); })[0];
+    if (!grp) return null;
+    var done = g('servicedBinSerials') || new Set(), missed = g('missedBinSerials') || new Set(), skey = g('siteStreetKey'), dist = g('getDistanceMeters');
+    var P = g('gpsTrailPoints') || [], T = g('gpsTrailTimes') || [];
+    // trail points of this shift, in ~35 m grid cells for quick "was the truck near here" checks
+    var cell = function(lat, lng){ return Math.floor(lat / 0.0003) + ':' + Math.floor(lng / 0.0004); }, grid = {};
+    for (var i = 0; i < P.length; i++) { if ((T[i] || 0) < SH.start) continue; var p = P[i], la = Array.isArray(p) ? p[0] : p.lat, ln = Array.isArray(p) ? p[1] : p.lng; (grid[cell(la, ln)] = grid[cell(la, ln)] || []).push([la, ln]); }
+    var near = function(la, ln){
+      var cy = Math.floor(la / 0.0003), cx = Math.floor(ln / 0.0004);
+      for (var y = cy - 1; y <= cy + 1; y++) for (var x = cx - 1; x <= cx + 1; x++) { var a = grid[y + ':' + x]; if (a) for (var k = 0; k < a.length; k++) if (dist(la, ln, a[k][0], a[k][1]) <= 35) return true; }
+      return false;
+    };
+    var streets = {}, left = 0, pink = 0, total = 0, noLoc = 0, seen = {}, sc = g('sourceCoords'), ds = g('activeFilterDataSource');
+    grp.sites.forEach(function(site){
+      var sk = skey ? skey(site) : '', st = streets[sk] || (streets[sk] = { key: sk, name: '', left: 0, pink: 0, bins: 0, driven: false });
+      if (!st.name) st.name = String(site.baseStreetLine || '').replace(/^[^A-Za-z]*\d+[A-Za-z]?\s+/, '').trim() || sk;
+      // the same bins the map draws a dot for (same Solo / council choice); a bin with no location can't be ticked off by GPS
+      [ds === 'council' ? null : site.soloStreams, ds === 'solo' ? null : site.councilStreams].forEach(function(obj){ ((obj || {})[stream] || []).forEach(function(b){
+        var id = String(b.serial || '').trim().toUpperCase(); if (!id || seen[id]) return; seen[id] = 1;
+        if (sc && !sc(site, b)) { noLoc++; return; }
+        total++; st.bins++;
+        if (done.has(id)) return;
+        if (missed.has(id)) { pink++; st.pink++; return; }
+        left++; st.left++;
+      }); });
+      if (!st.driven && site.lat && +site.lat && near(+site.lat, +site.lng)) st.driven = true;
+    });
+    var list = Object.keys(streets).map(function(k){ return streets[k]; });
+    return { run: r, total: total, left: left, pink: pink, noLoc: noLoc,
+      streets: list.filter(function(x){ return x.left || x.pink; }).sort(function(a, b){ return (b.left + b.pink) - (a.left + a.pink); }),
+      notDriven: list.filter(function(x){ return !x.driven && x.bins; }), hasTrail: Object.keys(grid).length > 0 };
+  }
+  function runCheckLine(c){
+    if (!c) return '';
+    var bits = [];
+    if (c.left) bits.push(c.left + ' bin' + (c.left === 1 ? '' : 's') + ' not done');
+    if (c.pink) bits.push(c.pink + ' missed');
+    if (c.hasTrail && c.notDriven.length) bits.push(c.notDriven.length + ' street' + (c.notDriven.length === 1 ? '' : 's') + ' never driven');
+    return bits.join(' · ');
+  }
+  function runCheckHtml(c){
+    if (!c) return '<div class="drv-empty">This shift has no run picked, or the run’s houses aren’t loaded.</div>';
+    var h = '<div class="drv-stats">' + stat(c.total - c.left - c.pink, 'done') + stat(c.left, 'not done') + stat(c.pink, 'missed') + '</div>' +
+      (c.noLoc ? '<div class="drv-hint">' + c.noLoc + ' more bin' + (c.noLoc === 1 ? ' has' : 's have') + ' no location in the data, so ' + (c.noLoc === 1 ? 'it isn’t' : 'they aren’t') + ' counted here.</div>' : '');
+    if (!c.left && !c.pink && !(c.hasTrail && c.notDriven.length)) return h + '<div class="drv-okline">' + I.ok + 'Every bin on run ' + esc(c.run.run) + ' is done.</div>';
+    if (c.hasTrail && c.notDriven.length) h += '<div class="drv-sect"><span>Streets never driven</span><em>' + c.notDriven.length + '</em></div><div class="drv-list">' +
+      c.notDriven.map(function(x){ return '<div class="drv-li bad"><b>' + esc(x.name) + '</b><span>' + x.bins + ' bin' + (x.bins === 1 ? '' : 's') + ' · the truck never came within 35 m</span><button type="button" class="drv-link" data-a="rcstreet" data-k="' + esc(x.key) + '">Map</button></div>'; }).join('') + '</div>';
+    if (c.streets.length) h += '<div class="drv-sect"><span>Bins left</span><em>' + (c.left + c.pink) + '</em></div><div class="drv-list">' +
+      c.streets.map(function(x){ return '<div class="drv-li' + (x.left ? ' bad' : '') + '"><b>' + esc(x.name) + '</b><span>' + (x.left ? x.left + ' not done' : '') + (x.left && x.pink ? ' · ' : '') + (x.pink ? x.pink + ' missed' : '') + ' of ' + x.bins + '</span><button type="button" class="drv-link" data-a="rcstreet" data-k="' + esc(x.key) + '">Map</button></div>'; }).join('') + '</div>';
+    return h;
+  }
   // The saved trail of a finished shift as a KML file (one line per unbroken stretch), shared or downloaded.
   function trailKml(id, startTs){
     mGet(id).then(function(r){
@@ -29960,6 +30017,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       title = 'End shift';
       var e = endDraft || (endDraft = { km: '', hrs: '', photo: null, note: '' }), r = rates();
       h = summaryHtml({ worked: r.worked, gpsKm: r.km, bins: r.bins, perKm: r.perKm, perHr: r.perHr, start: SH.start }) +
+        (function(){ var c = runCheck(), l = c ? runCheckLine(c) : ''; return l ? '<div class="drv-stopbox">' + I.warn + '<span><b>Run ' + esc(c.run.run) + ':</b> ' + esc(l) + '.</span><button type="button" class="drv-link" data-a="runcheck">See</button></div>' : ''; })() +
         (function(){ var m = window.lbRunSheet ? window.lbRunSheet.missing(SH.id) : []; return m.length ? '<div class="drv-warnbox">' + I.warn + '<span>Run sheet still needs: ' + esc(m.join(' · ')) + '</span><button type="button" class="drv-link" data-a="rs:main">Fill in</button></div>' : ''; })() +
         '<div class="drv-sect"><span>Truck at the end</span></div>' + readingsHtml(e, 'uxsE') +
         field('uxsENote', 'Note (optional)', e.note, 'text', 'anything operations should know') +
@@ -29968,6 +30026,9 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       title = 'Shift finished';
       var L0 = lastRec;
       h = L0 ? summaryHtml(L0) + '<div class="drv-foot"><button type="button" class="drv-btn" data-a="share" data-id="' + L0.id + '">' + I.share + 'Share summary</button>' + (L0.trail ? '<button type="button" class="drv-btn" data-a="trail" data-id="' + L0.trail + '" data-lbl="' + esc(dateStr(L0.start)) + '">' + I.route + 'Trail</button><button type="button" class="drv-btn" data-a="kml" data-id="' + L0.trail + '" data-lbl="' + esc(L0.start) + '">' + I.share + 'Trail KML</button>' : '') + (window.lbRunSheet ? '<button type="button" class="drv-btn" data-a="rs:main" data-id="' + L0.id + '">Run sheet</button>' : '') + '<button type="button" class="drv-btn drv-go" data-a="close">Done</button></div>' : '';
+    } else if (view === 'runcheck') {
+      title = 'Run ' + ((SH && SH.run) || '') + ' check';
+      h = runCheckHtml(SH ? runCheck() : null) + '<div class="drv-foot"><button type="button" class="drv-btn" data-a="back">Back</button></div>';
     } else if (view === 'history') {
       title = 'Past shifts';
       var hs = history().slice().reverse();
@@ -30009,6 +30070,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
         (brakeDue() ? '<div class="drv-warnbox">' + I.warn + '<span>Friday: brake wear is due. Enter it when you’re back at the depot.</span><button type="button" class="drv-link" data-a="brakes">Enter now</button></div>' : '') +
         (oosFor(SH.truck) ? '<div class="drv-stopbox">' + I.warn + '<span><b>This truck is marked out of service.</b> Tell your leading hand.</span></div>' : '') +
         dashListHtml() +
+        (SH.run ? '<div class="drv-acts"><button type="button" class="drv-btn" data-a="runcheck">Check my run' + (function(){ var c = runCheck(); var l = c ? runCheckLine(c) : ''; return l ? ' · ' + esc(l) : ''; })() + '</button></div>' : '') +
         (window.lbRunSheet ? '<div class="drv-sect"><span>Run sheet</span></div><div class="drv-acts"><button type="button" class="drv-btn drv-go" data-a="rs:tip">At the tip</button><button type="button" class="drv-btn" data-a="rs:fuel">Fuel</button><button type="button" class="drv-btn" data-a="rs:adblue">AdBlue</button><button type="button" class="drv-btn" data-a="rs:main">Run sheet</button></div>' : '') +
         '<div class="drv-acts"><button type="button" class="drv-btn drv-warnb" data-a="dashrep">' + I.warn + 'Dash warning</button><button type="button" class="drv-btn" data-a="newdef">' + I.truck + 'Truck defect</button>' + (hasBrakeGauge(SH.truck) ? '<button type="button" class="drv-btn' + (brakeDue() ? ' drv-due' : '') + '" data-a="brakes">' + I.clock + 'Brake wear</button>' : '') + '<button type="button" class="drv-btn" data-a="issues">' + I.list + 'Issues (' + iss.length + ')</button></div>' +
         '<div class="drv-foot"><button type="button" class="drv-btn" data-a="history">Past shifts</button><button type="button" class="drv-btn drv-bad" data-a="end">End shift</button></div>' + roleHtml();
@@ -30217,6 +30279,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       doFinish(); return;
     }
     if (a === 'share') { var s = history().filter(function(x){ return x.id === b.getAttribute('data-id'); })[0]; if (s) shareText(summaryText(s), 'Shift ' + dateStr(s.start)); return; }
+    if (a === 'runcheck') { view = 'runcheck'; paint(); return; }
+    if (a === 'rcstreet') { closeSheet(); try { if (typeof switchMainTab === 'function') switchMainTab('map'); if (window.showStreetOnMap) window.showStreetOnMap(b.getAttribute('data-k')); } catch (e) {} return; }
     if (a === 'kml') { trailKml(b.getAttribute('data-id'), +b.getAttribute('data-lbl')); return; }
     if (a === 'trail') { closeSheet(); showTrail(b.getAttribute('data-id'), 'Trail ' + (b.getAttribute('data-lbl') || '')); return; }
     if (a === 'role') { (isLead() ? Promise.resolve(toDriver()) : toLead()).then(function(){ paint(); }); return; }
