@@ -5209,7 +5209,7 @@ const STREET_LITTER_SERVICE_LEVELS = {"seasons":[{"key":"tourist1","label":"Tour
     if(!site) return notes;
     const id=String(site.propId||site.siteId||'');
 
-    const mode = (typeof houseStreetModes!=='undefined') ? houseStreetModes[id] : null;
+    const mode = (typeof houseStreetModes!=='undefined') ? (houseStreetModes[id] || (typeof lbSharedHouseModesNow === 'function' ? lbSharedHouseModesNow()[id] : null)) : null;
     if(mode){
       notes.push({icon:'🚚', text:`${mode.label} — ${formatRunsBadge(mode.runs)}`});
     }
@@ -5364,6 +5364,7 @@ const STREET_LITTER_SERVICE_LEVELS = {"seasons":[{"key":"tourist1","label":"Tour
   // startBoundarySelectMode) — gates the live title update below.
   let boundarySelectModeActive = false;
   let collectionPoints = JSON.parse(localStorage.getItem('lukezBunzCollectionPoints')||'{}');
+  window.lbCollectionPointsObj = function(){ return collectionPoints; };   // for the shared house-access sync
   let collectionPointMode = false;
   let collectionPointDraftMarker = null;
   let collectionSelectionActive = false;
@@ -13399,6 +13400,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   window.endMapManualOverride = endMapManualOverride;
 
   let houseStreetModes = JSON.parse(localStorage.getItem('lukezBunzHouseStreetModes') || '{}');
+  window.lbHouseStreetModesObj = function(){ return houseStreetModes; };   // for the shared house-access sync
 
   const q = id => document.getElementById(id);
   const clean = v => (v === null || v === undefined) ? '' : String(v).trim();
@@ -17590,9 +17592,43 @@ window.addEventListener('DOMContentLoaded', async () => {
   };
 
   /* Interactive House Markers (street-number chips; function name kept as drawHouseTriangle for existing callers) */
+  // Houses along the shared street-mode lines (data/street-modes.json, read off the route maps) get the
+  // same mode as if a driver had set it on the house: same street name, pin within 45 m of the line.
+  // A mode set on the house itself (on this phone or shared from another) still wins.
+  let lbSharedHouseModes = {}, lbSharedHouseSig = '';
+  function lbSharedHouseModesNow(){
+    const recs = getRecordsArray();
+    const sig = (sharedStreetModes ? sharedStreetModes.length : 0) + '|' + recs.length;
+    if (sig === lbSharedHouseSig) return lbSharedHouseModes;
+    lbSharedHouseSig = sig; lbSharedHouseModes = {};
+    if (!sharedStreetModes || !sharedStreetModes.length || !recs.length) return lbSharedHouseModes;
+    const norm = t => String(t || '').toLowerCase().replace(/[^a-z ]/g, ' ').replace(/\s+/g, ' ').trim();
+    const byStreet = new Map();
+    recs.forEach(site => {
+      const raw = String(site.baseStreetLine || cleanStreetAddress(site.addressText) || '').replace(/^(unit|u|flat|apt|shop|lot)\s*/i, '').replace(/^[\d\s\/-]+[A-Za-z]?\s+(?=\D)/, '');
+      const k = norm(raw); if (!k) return;
+      let a = byStreet.get(k); if (!a) byStreet.set(k, a = []); a.push(site);
+    });
+    const segDist = (p, a, b) => {
+      const kx = 111320 * Math.cos(p.lat * Math.PI / 180), ky = 110540;
+      const ax = a[1] * kx, ay = a[0] * ky, dx = b[1] * kx - ax, dy = b[0] * ky - ay, px = p.lng * kx, py = p.lat * ky;
+      let t = ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy || 1); t = Math.max(0, Math.min(1, t));
+      return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+    };
+    sharedStreetModes.forEach(seg => {
+      const list = byStreet.get(norm(seg.street)); if (!list || !Array.isArray(seg.points) || seg.points.length < 2) return;
+      list.forEach(site => {
+        const p = gps(site.lat, site.lng); if (!p) return;
+        let d = Infinity; for (let i = 1; i < seg.points.length; i++) d = Math.min(d, segDist(p, seg.points[i - 1], seg.points[i]));
+        if (d <= 45) lbSharedHouseModes[String(site.propId || site.siteId || '')] = { type: seg.type, label: STREET_MODE_LABELS[seg.type] || seg.type, runs: ['ALL'], shared: true };
+      });
+    });
+    return lbSharedHouseModes;
+  }
+  window.lbSharedHouseModesNow = lbSharedHouseModesNow;
   function activeStreetModeForSite(site){
     const id = String(site.propId||site.siteId||'');
-    const mode = houseStreetModes[id];
+    const mode = houseStreetModes[id] || (showStreetModes ? lbSharedHouseModesNow()[id] : null);
     if(!mode) return null;
     return runsApplyToSelection(mode.runs) ? mode : null;
   }
@@ -30604,6 +30640,10 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       var mine = lsGet('lbPlaces', []), have = {}; mine.forEach(function(p){ have[p.id] = 1; });
       var fleet = Object.keys(r.places).map(function(k){ var p = r.places[k]; if (p && p.lat != null) { p.id = p.id || k; p.fleet = true; return p; } return null; }).filter(Boolean);
       lsSet('lbPlacesFleet', fleet); fire();
+      // collection points and house driving modes shared between phones travel as places too (no lat/lng, so not pins)
+      var ha = Object.keys(r.places).map(function(k){ return r.places[k]; }).filter(function(p){ return p && p.kind === 'houseAccess' && p.propId; });
+      lsSet('lbHouseAccessFleet', ha);
+      try { document.dispatchEvent(new CustomEvent('lb-house-access')); } catch (e) {}
     }).catch(function(){});
   }
 
@@ -33243,6 +33283,70 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     pinFixes: function(){ return lsGet('lbPinFixes', []) || []; },
     _t: { finish: finish, sitesNear: sitesNear, setStop: function(s){ stop = s; } }
   };
+})();
+</script>
+
+
+<!-- =====================================================================
+     SHARED HOUSE ACCESS: collection points and drive-in / reverse-in houses
+     Set on one phone, they used to live only in that phone's localStorage
+     (lukezBunzCollectionPoints, lukezBunzHouseStreetModes). Every change is now sent to
+     the Apps Script as a "place" (kind houseAccess, one per house, newest wins) and every
+     phone applies the others' changes, so the house is coloured for everyone.
+     ================================================================== -->
+<script id="lb-house-access-script">
+(function(){
+  'use strict';
+  var GF = {};
+  function g(n){ try { return (GF[n] || (GF[n] = new Function('return typeof ' + n + ' === "undefined" ? undefined : ' + n)))(); } catch (e) { return undefined; } }
+  function lsGet(k, d){ try { var v = JSON.parse(localStorage.getItem(k)); return v == null ? d : v; } catch (e) { return d; } }
+  function lsSet(k, v){ try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
+  function hashOf(cp, mode){ return JSON.stringify({ cp: cp || null, mode: mode || null }); }
+  function driver(){ try { return (lsGet('lbDriver', {}) || {}).name || ''; } catch (e) { return ''; } }
+
+  function objs(){ return { cps: window.lbCollectionPointsObj ? window.lbCollectionPointsObj() : null, hsm: window.lbHouseStreetModesObj ? window.lbHouseStreetModesObj() : null }; }
+  // what this phone has already sent (or taken from the fleet): id -> { h, ts }
+  function sent(){ return lsGet('lbHouseAccessSent', {}) || {}; }
+
+  function pushChanges(){
+    var cps = objs().cps, hsm = objs().hsm; if (!cps || !hsm || !window.lbOutbox || !window.lbOutbox.sendPlace) return;
+    var S = sent(), ids = {}, now = Date.now(), ch = false;
+    Object.keys(cps).forEach(function(k){ ids[k] = 1; }); Object.keys(hsm).forEach(function(k){ ids[k] = 1; });
+    Object.keys(ids).forEach(function(id){
+      var h = hashOf(cps[id], hsm[id]);
+      if (S[id] && S[id].h === h) return;
+      window.lbOutbox.sendPlace({ id: 'ha_' + id, kind: 'houseAccess', propId: id, cp: cps[id] || null, mode: hsm[id] || null, ts: now, by: driver() });
+      S[id] = { h: h, ts: now }; ch = true;
+    });
+    Object.keys(S).forEach(function(id){
+      if (ids[id] || S[id].h === hashOf(null, null)) return;          // removed on this phone: tell the others
+      window.lbOutbox.sendPlace({ id: 'ha_' + id, kind: 'houseAccess', propId: id, cp: null, mode: null, ts: now, by: driver() });
+      S[id] = { h: hashOf(null, null), ts: now }; ch = true;
+    });
+    if (ch) lsSet('lbHouseAccessSent', S);
+  }
+
+  function applyFleet(){
+    var cps = objs().cps, hsm = objs().hsm; if (!cps || !hsm) return;
+    var fleet = lsGet('lbHouseAccessFleet', []) || [], S = sent(), ch = false;
+    fleet.forEach(function(r){
+      var id = String(r.propId), mine = S[id];
+      if (mine && mine.ts >= (r.ts || 0)) return;                       // ours is as new or newer
+      if (r.cp) cps[id] = r.cp; else delete cps[id];
+      if (r.mode) hsm[id] = r.mode; else delete hsm[id];
+      S[id] = { h: hashOf(r.cp, r.mode), ts: r.ts || Date.now() }; ch = true;
+    });
+    if (!ch) return;
+    lsSet('lbHouseAccessSent', S);
+    try { localStorage.setItem('lukezBunzCollectionPoints', JSON.stringify(cps)); localStorage.setItem('lukezBunzHouseStreetModes', JSON.stringify(hsm)); } catch (e) {}
+    try { var r2 = g('renderMapData'); if (r2 && g('leafletMap')) r2(); } catch (e) {}
+  }
+
+  document.addEventListener('lb-house-access', function(){ try { applyFleet(); } catch (e) {} });
+  setTimeout(function(){ try { applyFleet(); pushChanges(); } catch (e) {} }, 5000);
+  setInterval(function(){ try { pushChanges(); } catch (e) {} }, 15000);
+  setInterval(function(){ try { if (window.lbOutbox && navigator.onLine !== false) window.lbOutbox.pullPlaces(); } catch (e) {} }, 10 * 60000);
+  window.lbHouseAccess = { push: pushChanges, apply: applyFleet };
 })();
 </script>
 
