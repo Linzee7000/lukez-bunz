@@ -13581,6 +13581,48 @@ window.addEventListener('DOMContentLoaded', async () => {
     });
     return out;
   }
+  // Bins pinned across the road: a bin's pin that is much nearer a house on the other side of the same
+  // street (odd vs even number) than its own house. In Australia odd and even numbers face each other, so
+  // that is almost always the bin's point being put on the wrong kerb in the data.
+  function lbHouseNo(site) { const m = /(\d+)[A-Za-z]?$/.exec(String(houseNumberLabel(site) || '')); return m ? +m[1] : null; }
+  function lbWrongSideBins(sites, stream) {
+    const out = [], byStreet = new Map();
+    sites.forEach(s => { const h = gps(s.lat, s.lng), n = lbHouseNo(s); if (!h || n == null) return; const k = siteStreetKey(s); if (!k) return; let a = byStreet.get(k); if (!a) byStreet.set(k, a = []); a.push({ s, h, n }); });
+    const bs = stream === 'SummerRecycling' ? 'Recycling' : stream;
+    byStreet.forEach(list => {
+      if (list.length < 3) return;
+      list.forEach(me => {
+        if (collectionPointForSite(me.s)) return;
+        [['solo', me.s.soloStreams], ['council', me.s.councilStreams]].forEach(([src, obj]) => ((obj || {})[bs] || []).forEach((bin, idx) => {
+          const bp = gps(bin.lat, bin.lng); if (!bp) return;
+          const dOwn = getDistanceMeters(me.h.lat, me.h.lng, bp.lat, bp.lng);
+          if (dOwn < 15 || dOwn > LB_BIN_FAR_M) return;
+          let other = null, dO = Infinity;
+          list.forEach(o => { if (o === me || o.n % 2 === me.n % 2) return; const d = getDistanceMeters(o.h.lat, o.h.lng, bp.lat, bp.lng); if (d < dO) { dO = d; other = o; } });
+          if (!(other && dO < dOwn * 0.6)) return;
+          // With both blocks' Vicmap boundaries to hand, trust them over the pins: the bin must be nearer the
+          // front of the block across the road than its own block (pins sit anywhere in a block; boundaries don't).
+          const own = lbLotOf(me.s), opp = lbLotOf(other.s);
+          if (own && opp && !(lbPolyDist(bp, opp) < lbPolyDist(bp, own) - 1)) return;
+          out.push({ site: me.s, src, idx, bin, stream: bs, dOwn, other: other.s, dOther: dO, byLot: !!(own && opp) });
+        }));
+      });
+    });
+    return out;
+  }
+  window.lbWrongSideBins = lbWrongSideBins;
+  function lbLotOf(site) { try { return window.lbParcels && window.lbParcels.boundaryFor ? window.lbParcels.boundaryFor(site) : null; } catch (e) { return null; } }
+  function lbPolyDist(p, poly) {   // metres from a point to the nearest edge of a [lat, lng] ring
+    const kx = 111320 * Math.cos(p.lat * Math.PI / 180), ky = 110540, px = p.lng * kx, py = p.lat * ky;
+    let m = Infinity;
+    for (let i = 0; i < poly.length; i++) {
+      const a = poly[i], b = poly[(i + 1) % poly.length];
+      const ax = a[1] * kx, ay = a[0] * ky, dx = b[1] * kx - ax, dy = b[0] * ky - ay;
+      let t = ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy || 1); t = Math.max(0, Math.min(1, t));
+      m = Math.min(m, Math.hypot(px - (ax + t * dx), py - (ay + t * dy)));
+    }
+    return m;
+  }
   function lbBinKey(site, src, stream, idx) { return String(site.propId || site.siteId || site.addressText || '') + '|' + src + '|' + stream + '|' + idx; }
 
   // Called by renderMapData with the run groups it is about to draw: remembers which houses / bins are
@@ -13594,6 +13636,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     groups.forEach(g => {
       view.groups++;
       const strays = lbStraySites(g.sites);
+      const wrongBySite = new Map(); lbWrongSideBins(g.sites, g.stream).forEach(w => { let a = wrongBySite.get(w.site); if (!a) wrongBySite.set(w.site, a = []); a.push(w); });
       g.sites.forEach(site => {
         const house = gps(site.lat, site.lng);
         const far = lbFarBins(site, g.stream, house);
@@ -13604,6 +13647,7 @@ window.addEventListener('DOMContentLoaded', async () => {
           [['solo', site.soloStreams], ['council', site.councilStreams]].forEach(([src, obj]) => ((obj || {})[bs] || []).forEach((b, idx) => bins.add(lbBinKey(site, src, bs, idx))));
         }
         far.forEach(f => { bins.add(lbBinKey(site, f.src, f.stream, f.idx)); if (!seenBin.has(f.bin)) { seenBin.add(f.bin); view.bins++; } });
+        (wrongBySite.get(site) || []).forEach(f => { far.push(f); bins.add(lbBinKey(site, f.src, f.stream, f.idx)); if (!seenBin.has(f.bin)) { seenBin.add(f.bin); view.bins++; } });
         if (isStray || far.length) {
           if (isStray && !seen.has(site)) view.houses++;
           if (!seen.has(site)) { seen.add(site); view.sites.push({ site, gap: strays.get(site) || 0, stream: g.stream, run: g.run }); }
@@ -13642,7 +13686,8 @@ window.addEventListener('DOMContentLoaded', async () => {
         g.sites.push(site);
       });
     });
-    const rows = [], out = { rows, groups: 0, houses: 0, far: 0, missing: 0, binFar: 0, cpFar: 0, scope };
+    const rows = [], out = { rows, groups: 0, houses: 0, far: 0, missing: 0, binFar: 0, cpFar: 0, wrongSide: 0, stopFix: 0, scope };
+    const fixes = new Map(); ((window.lbStops && window.lbStops.pinFixes()) || []).forEach(f => fixes.set(String(f.serial), f));
     const dayName = d => d ? d.charAt(0).toUpperCase() + d.slice(1) : '';
     groups.forEach(g => {
       out.groups++; out.houses += g.sites.length;
@@ -13662,13 +13707,24 @@ window.addEventListener('DOMContentLoaded', async () => {
           if (cd > 800) { rows.push(Object.assign({}, base, { problem: 'Collection point far from house', detail: 'Its collection point is ' + Math.round(cd) + ' m from the house', meters: Math.round(cd), site })); out.cpFar++; }
           return;
         }
+        const binRows = [];
         lbFarBins(site, g.stream, house).forEach(f => {
           rows.push(Object.assign({}, base, { problem: 'Bin pin far from house', detail: 'Bin pin is ' + (f.d >= 1000 ? (f.d / 1000).toFixed(1) + ' km' : Math.round(f.d) + ' m') + ' from its house' + (f.src === 'council' ? ' (council data)' : ''), meters: Math.round(f.d), site, bin: f.bin }));
-          out.binFar++;
+          out.binFar++; binRows.push(f.bin);
         });
+        [site.soloStreams, site.councilStreams].forEach(obj => ((obj || {})[g.stream === 'SummerRecycling' ? 'Recycling' : g.stream] || []).forEach(bin => {
+          const f = fixes.get(String(bin.serial || '').trim().toUpperCase()) || fixes.get(String(bin.serial || ''));
+          if (!f || binRows.indexOf(bin) >= 0) return;
+          rows.push(Object.assign({}, base, { problem: 'Truck emptied it somewhere else', detail: 'The truck stopped ' + f.dist + ' m from this bin\'s pin to empty it. Suggested spot: ' + f.stopLat + ', ' + f.stopLng, meters: f.dist, site, bin }));
+          out.stopFix++; binRows.push(bin);
+        }));
+      });
+      lbWrongSideBins(g.sites, g.stream).forEach(w => {
+        rows.push(Object.assign({}, base, { problem: 'Bin on the wrong side of the street', detail: 'Bin pin is ' + Math.round(w.dOwn) + ' m from its house but ' + Math.round(w.dOther) + ' m from ' + (cleanStreetAddress(w.other.addressText) || 'the house opposite'), meters: Math.round(w.dOwn), site: w.site, bin: w.bin }));
+        out.wrongSide++;
       });
     });
-    const prio = { 'Far from the run': 0, 'No location': 1, 'Collection point far from house': 2, 'Bin pin far from house': 3 };
+    const prio = { 'Far from the run': 0, 'No location': 1, 'Collection point far from house': 2, 'Bin pin far from house': 3, 'Bin on the wrong side of the street': 4, 'Truck emptied it somewhere else': 5 };
     rows.sort((a, b) => (prio[a.problem] - prio[b.problem]) || (a.stream + a.run).localeCompare(b.stream + b.run, undefined, { numeric: true }) || (b.meters || 0) - (a.meters || 0));
     return out;
   };
@@ -17487,7 +17543,12 @@ window.addEventListener('DOMContentLoaded', async () => {
       const d = getDistanceMeters(userCurrentLocation.lat, userCurrentLocation.lng, markerObj.lat, markerObj.lng);
       if (d > 12) return;
 
-      const binBearing = getBearing(userCurrentLocation.lat, userCurrentLocation.lng, markerObj.lat, markerObj.lng);
+      // Which side: judged by the bin's HOUSE, not its dot. A dot put in the middle of the road is always on
+      // the right of a truck working the left kerb - going up the street and coming back down - so judged by
+      // the dot it was never collected and never missed, and just sat there. The house is always on its own
+      // side. (Collection points, whose bins sit away from the house, still go by the dot.)
+      const sideRef = lbBinSideRef(markerObj);
+      const binBearing = getBearing(userCurrentLocation.lat, userCurrentLocation.lng, sideRef.lat, sideRef.lng);
       const relAngle = (binBearing - (lastValidHeading || 0) + 360) % 360;
 
       const isLeft = relAngle >= 200 && relAngle <= 340;
@@ -17639,6 +17700,17 @@ window.addEventListener('DOMContentLoaded', async () => {
     updateBinPropertyHighlight();
   }
 
+  // The point that says which side of the road a bin is on: its house, when the house is within 60 m of the
+  // bin's dot (so collection points and far-off pins still go by the dot).
+  let lbSideSites = null, lbSideSitesN = -1;
+  function lbBinSideRef(m) {
+    const recs = getRecordsArray();
+    if (!lbSideSites || lbSideSitesN !== recs.length) { lbSideSites = new Map(); recs.forEach(s => lbSideSites.set(String(s.propId || s.siteId || ''), s)); lbSideSitesN = recs.length; }
+    const s = m && m.siteId != null ? lbSideSites.get(String(m.siteId)) : null;
+    const h = s ? gps(s.lat, s.lng) : null;
+    return (h && getDistanceMeters(h.lat, h.lng, m.lat, m.lng) <= 60) ? h : m;
+  }
+
   // Called on every GPS fix (see onGpsPositionSuccess).
   function updateBinPropertyHighlight() {
     if (binPropertyHighlight.pinnedKey) return;   // a tapped bin's outline stays put while its popup is open
@@ -17654,8 +17726,9 @@ window.addEventListener('DOMContentLoaded', async () => {
       const d = getDistanceMeters(here.lat, here.lng, m.lat, m.lng);
       if (m.siteId === currentId && d < currentD) currentD = d;
       if (d > BIN_HIGHLIGHT_ENTER_M || d >= nextD) return;
-      // Same left / right cones and side setting as the pass / pull-up check.
-      const rel = (getBearing(here.lat, here.lng, m.lat, m.lng) - heading + 360) % 360;
+      // Same left / right cones and side setting as the pass / pull-up check (judged by the bin's house).
+      const ref = lbBinSideRef(m);
+      const rel = (getBearing(here.lat, here.lng, ref.lat, ref.lng) - heading + 360) % 360;
       const isLeft = rel >= 200 && rel <= 340;
       const isRight = rel >= 20 && rel <= 160;
       if (travelMode === 'left' && !isLeft) return;
@@ -31621,7 +31694,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var r = report;
     var far = r.far || 0, miss = r.missing || 0, bf = r.binFar || 0, cf = r.cpFar || 0;
     sub.textContent = r.rows.length
-      ? [far && far + ' house' + (far === 1 ? '' : 's') + ' far from the run', miss && miss + ' with no location', cf && cf + ' collection point' + (cf === 1 ? '' : 's') + ' far from the house', bf && bf + ' bin pin' + (bf === 1 ? '' : 's') + ' far from the house'].filter(Boolean).join(' · ')
+      ? [far && far + ' house' + (far === 1 ? '' : 's') + ' far from the run', miss && miss + ' with no location', cf && cf + ' collection point' + (cf === 1 ? '' : 's') + ' far from the house', bf && bf + ' bin pin' + (bf === 1 ? '' : 's') + ' far from the house', r.wrongSide && r.wrongSide + ' bin' + (r.wrongSide === 1 ? '' : 's') + ' on the wrong side', r.stopFix && r.stopFix + ' emptied somewhere else'].filter(Boolean).join(' · ')
       : 'Nothing found in this view';
     var html = '';
     if (!r.rows.length) html = '<p class="uxs-empty">No house in this view has a location that looks wrong. Use Export all runs to check every run.</p>';
