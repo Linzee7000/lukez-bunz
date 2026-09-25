@@ -23051,7 +23051,10 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
   const MIN_DRAW_ZOOM  = 16;
   const MIN_FETCH_ZOOM = 17;
   const MAX_DRAW    = 3000;
-  let cacheLimit = 40;
+  // Phones that report little memory (navigator.deviceMemory is 1-4 GB on budget Androids) keep fewer
+  // map areas' raw lot shapes in memory.
+  const LOW_MEM = (typeof navigator !== 'undefined') && Number(navigator.deviceMemory) > 0 && Number(navigator.deviceMemory) <= 4;
+  let cacheLimit = LOW_MEM ? 16 : 40;
   const CONCURRENCY = 3;
   const DB_KEY      = 'propertyParcels';
   const PANE        = 'lb-parcel-pane';
@@ -23515,7 +23518,10 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
       pane.style.zIndex = 405;              // above tiles, under run boundaries/markers
       pane.style.pointerEvents = 'none';
     }
-    rend = L.canvas({ pane: PANE, padding: 0.4 });
+    // padding 0.4 made this canvas 1.8x the screen each way (3.2x the pixels, times the screen's pixel ratio) on
+    // top of the map's own canvas - a big enough GPU surface to crash Chrome on some phones. The lines are
+    // redrawn on every moveend anyway, so a small margin is all a pan needs.
+    rend = L.canvas({ pane: PANE, padding: 0.1 });
     group = L.layerGroup().addTo(map);
     map.on('moveend', scheduleRefresh);
     return true;
@@ -23672,16 +23678,18 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     }
     if (!jobs.length) return;
     pill('Loading property boundaries...');
-    let failed = 0;
+    let failed = 0, matched = 0;
     await Promise.all(jobs.map(async ([ix, iy, k]) => {
       try {
         const parcels = await loadTile(ix, iy);
         failedTiles.delete(k);
-        matchList(parcels, sitesInTile(ix, iy), false);
+        const r = matchList(parcels, sitesInTile(ix, iy), false);
+        matched += r.inside + r.near + r.none;
       } catch (e) { failed++; failedTiles.set(k, Date.now()); }
     }));
     redraw();
-    scheduleSave();
+    // Saving copies the whole parcel store (several MB) into IndexedDB - only do it when a house was matched.
+    if (matched) scheduleSave();
     refreshSettingsUI();
     if (failed) pill('Property boundaries: no signal - showing saved ones', 4000); else pill(null);
   }
@@ -24452,7 +24460,7 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
   }
   // Faint Vicmap lot lines on the "Choose on Map" picker so a pin can be dropped in the right lot.
   function attachPicker(m) {
-    const grp = L.layerGroup().addTo(m), r = L.canvas({ padding: 0.3 });
+    const grp = L.layerGroup().addTo(m), r = L.canvas({ padding: 0.1 });
     let token = 0;
     async function upd() {
       const my = ++token;
