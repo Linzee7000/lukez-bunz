@@ -13696,7 +13696,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     groups.forEach(g => {
       out.groups++; out.houses += g.sites.length;
       const base = { stream: g.stream, run: g.run, day: dayName(g.day), week: g.week };
-      const strays = lbStraySites(g.sites);
+      const strays = lbStraySites(g.sites), binsReported = [];
       g.sites.forEach(site => {
         const house = gps(site.lat, site.lng);
         if (strays.has(site)) {
@@ -13711,16 +13711,21 @@ window.addEventListener('DOMContentLoaded', async () => {
           if (cd > 800) { rows.push(Object.assign({}, base, { problem: 'Collection point far from house', detail: 'Its collection point is ' + Math.round(cd) + ' m from the house', meters: Math.round(cd), site })); out.cpFar++; }
           return;
         }
-        const binRows = [];
+        const binRows = binsReported;
         lbFarBins(site, g.stream, house).forEach(f => {
           rows.push(Object.assign({}, base, { problem: 'Bin pin far from house', detail: 'Bin pin is ' + (f.d >= 1000 ? (f.d / 1000).toFixed(1) + ' km' : Math.round(f.d) + ' m') + ' from its house' + (f.src === 'council' ? ' (council data)' : ''), meters: Math.round(f.d), site, bin: f.bin }));
           out.binFar++; binRows.push(f.bin);
         });
+      });
+      // where trucks actually emptied a bin away from its pin (from the stop detection) - checked for every house,
+      // even one already flagged above, because it says where the bin really is
+      g.sites.forEach(site => {
+        const base2 = base;
         [site.soloStreams, site.councilStreams].forEach(obj => ((obj || {})[g.stream === 'SummerRecycling' ? 'Recycling' : g.stream] || []).forEach(bin => {
           const f = fixes.get(String(bin.serial || '').trim().toUpperCase()) || fixes.get(String(bin.serial || ''));
-          if (!f || binRows.indexOf(bin) >= 0) return;
-          rows.push(Object.assign({}, base, { problem: 'Truck emptied it somewhere else', detail: 'The truck stopped ' + f.dist + ' m from this bin\'s pin to empty it. Suggested spot: ' + f.stopLat + ', ' + f.stopLng, meters: f.dist, site, bin }));
-          out.stopFix++; binRows.push(bin);
+          if (!f || binsReported.indexOf(bin) >= 0) return;
+          rows.push(Object.assign({}, base2, { problem: 'Truck emptied it somewhere else', detail: 'Emptied ' + f.dist + ' m from its pin' + ((f.n || 1) > 1 ? ' (seen ' + f.n + ' times)' : '') + '. Suggested spot: ' + f.stopLat + ', ' + f.stopLng, meters: f.dist, site, bin, fix: f }));
+          out.stopFix++; binsReported.push(bin);
         }));
       });
       lbWrongSideBins(g.sites, g.stream).forEach(w => {
@@ -31785,6 +31790,24 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     note(ok ? 'Exported ' + rep.rows.length + ' row' + (rep.rows.length === 1 ? '' : 's') + '.' : 'Could not start the download on this device.');
   }
 
+  // ---- email the list (to the "data" role in the script's config; for now that's the default address) ----
+  function mailReport(){
+    var rep = window.lbStrayReport && window.lbStrayReport('view');
+    if (!rep || !rep.rows.length) { note('Nothing to send: no location problems in this view.'); return; }
+    if (!window.lbOutbox) { note('Sending isn\u2019t set up on this phone. Use Export instead.'); return; }
+    var lines = rep.rows.slice(0, 400).map(function(r){
+      var st = r.site || {}, b = r.bin || {};
+      return [r.problem, st.addressText || st.propId || '', r.stream + ' ' + r.run + (r.day ? ' ' + r.day.slice(0, 3) : '') + (r.week ? ' ' + r.week : ''), b.serial ? 'bin ' + b.serial : '', r.detail].filter(Boolean).join(' | ');
+    });
+    var counts = {}; rep.rows.forEach(function(r){ counts[r.problem] = (counts[r.problem] || 0) + 1; });
+    var text = 'Location problems · ' + viewName().replace(/-/g, ' ') + ' · ' + new Date().toLocaleString('en-AU') + '\n' +
+      Object.keys(counts).map(function(k){ return counts[k] + ' × ' + k; }).join('\n') + '\n\n' + lines.join('\n') +
+      (rep.rows.length > 400 ? '\n\n+ ' + (rep.rows.length - 400) + ' more: use Export in the app for the full list.' : '');
+    window.lbOutbox.send({ kind: 'locations', to: ['data'], subject: 'Location problems · ' + viewName().replace(/-/g, ' ') + ' · ' + rep.rows.length, text: text,
+      data: { rows: rep.rows.slice(0, 200).map(function(r){ var st = r.site || {}, b = r.bin || {}; return { p: r.problem, id: st.propId || st.siteId, a: st.addressText, s: r.stream, r: r.run, bin: b.serial || '', bl: b.lat, bg: b.lng, d: r.detail }; }) } });
+    note('Sent ' + rep.rows.length + ' problem' + (rep.rows.length === 1 ? '' : 's') + '. It goes when there\u2019s signal.');
+  }
+
   // ---- the sheet -------------------------------------------------------------------
   var sheet = null, report = null;
   function note(msg){ var n = sheet && sheet.querySelector('.uxs-note'); if (n) { n.textContent = msg; } }
@@ -31802,6 +31825,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
         '<div class="uxs-foot">' +
           '<button type="button" class="uxs-btn primary" data-uxs="exp-view">' + DL + '<span>Export this run</span></button>' +
           '<button type="button" class="uxs-btn" data-uxs="exp-all">' + DL + '<span>Export all runs</span></button>' +
+          '<button type="button" class="uxs-btn" data-uxs="mail">' + DL + '<span>Email list</span></button>' +
         '</div>' +
       '</div>';
     document.body.appendChild(sheet);
@@ -31811,6 +31835,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       if (a === 'close') closeSheet();
       else if (a === 'exp-view') exportCsv('view');
       else if (a === 'exp-all') exportCsv('all');
+      else if (a === 'mail') mailReport();
       else if (t.hasAttribute('data-uxs-go')) fly(+t.getAttribute('data-uxs-go'));
     });
     return sheet;
@@ -32913,7 +32938,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       var br = breaksOf(SHc), miss = missing(s.id);
       var bdOpen = R.breakdowns.filter(function(b){ return !b.e; })[0];
       h = (miss.length ? '<div class="drv-warnbox">' + (I.warn || '') + '<span>Still to fill in: ' + esc(miss.join(' · ')) + '</span></div>' : '') +
-        '<div class="drv-acts"><button type="button" class="drv-btn drv-go" data-a="print">View / print the sheet</button><button type="button" class="drv-btn" data-a="send">' + (R.sentAt ? 'Send again' : 'Send to the office') + '</button><button type="button" class="drv-btn" data-a="share">Share</button></div>' +
+        '<div class="drv-acts"><button type="button" class="drv-btn drv-go" data-a="print">View / print the sheet</button><button type="button" class="drv-btn" data-a="send">' + (R.sentAt ? 'Send again' : 'Send to leading hand') + '</button><button type="button" class="drv-btn" data-a="share">Share</button></div>' +
         (R.sentAt ? '<div class="rs-auto">Sent ' + esc(dateStr(R.sentAt) + ' ' + hhmm(R.sentAt)) + '</div>' : '') +
         sect('Loads and tips', R.loads.length) +
         R.loads.map(loadLine).join('') +
@@ -33166,9 +33191,9 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     if (!window.lbOutbox) { shareSheet(); return; }
     var miss = missing(SHc.s.id);
     if (miss.length && !confirm('Still to fill in: ' + miss.join(', ') + '.\n\nSend it anyway?')) return;
-    window.lbOutbox.send({ rid: 'rs_' + R.id, kind: 'runsheet', to: ['ops'], subject: 'Run sheet · ' + (SHc.s.driver || 'driver') + ' · run ' + (SHc.s.run || '?') + ' · ' + dateStr(SHc.s.start),
+    window.lbOutbox.send({ rid: 'rs_' + R.id, kind: 'runsheet', to: ['lead'], subject: 'Run sheet · ' + (SHc.s.driver || 'driver') + ' · run ' + (SHc.s.run || '?') + ' · ' + dateStr(SHc.s.start),
       text: sheetText(), data: { runSheet: Object.assign({}, R, { sig: R.sig ? 'signed ' + new Date(R.sigTs).toISOString() : null }), shift: { id: SHc.s.id, start: SHc.s.start, end: SHc.s.end || null, driver: SHc.s.driver, truck: SHc.s.truck, run: SHc.s.run } }, media: mediaIds() });
-    R.sentAt = Date.now(); save(R); toast('Run sheet sent to the office'); paint();
+    R.sentAt = Date.now(); save(R); toast('Run sheet sent to the leading hand'); paint();
   }
 
   window.lbRunSheet = { open: open, missing: missing, text: function(id){ var sh = shiftFor(id); if (!sh) return ''; SHc = sh; R = getOrMake(sh.s.id); return sheetText(); }, _t: { tick: tick, get: get, all: all } };
@@ -33266,9 +33291,16 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
           var u = g('updateFlippedBinCount'); if (u) u(); var sv = g('saveRunProgress'); if (sv) sv();
         } catch (e) {}
         rec.kind = 'inferred'; rec.serial = best.id; rec.siteId = String(best.m.siteId); rec.binDist = Math.round(best.d);
+        // Where the bin was really emptied. Every sighting is kept (last 5 per bin); the suggested spot is the middle
+        // of them, so one odd stop doesn't move it, and "seen 3 times" says how sure it is.
         var fx = lsGet('lbPinFixes', []); if (!Array.isArray(fx)) fx = [];
+        var old = fx.filter(function(x){ return x.serial === best.id; })[0];
         fx = fx.filter(function(x){ return x.serial !== best.id; });
-        fx.push({ serial: best.id, siteId: rec.siteId, stream: best.m.stream || '', binLat: best.m.lat, binLng: best.m.lng, stopLat: rec.lat, stopLng: rec.lng, dist: rec.binDist, ts: Date.now() });
+        var spots = ((old && old.spots) || (old ? [[old.stopLat, old.stopLng, old.ts]] : [])).concat([[rec.lat, rec.lng, Date.now()]]).slice(-5);
+        var med = function(i){ var v = spots.map(function(p){ return p[i]; }).sort(function(a, b){ return a - b; }); return v[Math.floor(v.length / 2)]; };
+        var sLat = +med(0).toFixed(6), sLng = +med(1).toFixed(6);
+        fx.push({ serial: best.id, siteId: rec.siteId, stream: best.m.stream || '', binLat: best.m.lat, binLng: best.m.lng, stopLat: sLat, stopLng: sLng,
+          dist: Math.round(metres({ lat: sLat, lng: sLng }, best.m)), n: spots.length, spots: spots, ts: Date.now() });
         lsSet('lbPinFixes', fx.slice(-500));
         log(rec); return;
       }
@@ -33278,10 +33310,29 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   }
 
   setInterval(function(){ try { tick(); } catch (e) {} }, 1000);
+
+  // On the map (zoom 16+): a dashed line from each such bin's dot to where it was really emptied.
+  var fxLayer = null, fxMap = null, fxSig = '';
+  function drawFixes(){
+    var m = g('leafletMap'); if (!m || !window.L) return;
+    if (fxMap !== m) { fxMap = m; fxLayer = L.layerGroup().addTo(m); fxSig = ''; m.on('zoomend moveend', function(){ fxSig = ''; drawFixes(); }); }
+    var fx = lsGet('lbPinFixes', []) || [], on = m.getZoom() >= 16;
+    var b = m.getBounds().pad(0.3), sig = on + '|' + fx.length + '|' + (fx.length ? fx[fx.length - 1].ts : 0) + '|' + b.toBBoxString();
+    if (sig === fxSig) return; fxSig = sig; fxLayer.clearLayers(); if (!on) return;
+    fx.forEach(function(f){
+      if (!b.contains([f.stopLat, f.stopLng]) && !b.contains([f.binLat, f.binLng])) return;
+      L.polyline([[f.binLat, f.binLng], [f.stopLat, f.stopLng]], { color: '#f59e0b', weight: 2, dashArray: '4,4', interactive: false }).addTo(fxLayer);
+      L.marker([f.stopLat, f.stopLng], { icon: L.divIcon({ className: '', html: '<div style="width:12px;height:12px;background:#f59e0b;border:2px solid #fff;box-shadow:0 1px 3px rgba(0,0,0,.5)"></div>', iconSize: [12, 12], iconAnchor: [6, 6] }), keyboard: false })
+        .bindTooltip('Bin ' + f.serial + ' emptied here' + ((f.n || 1) > 1 ? ' (' + f.n + ' times)' : '') + ', ' + f.dist + ' m from its pin').addTo(fxLayer);
+    });
+  }
+  setInterval(function(){ if (!document.hidden) try { drawFixes(); } catch (e) {} }, 5000);
+
   window.lbStops = {
     flipTime: flipTime,
     list: function(shiftId, kind){ var a = lsGet('lbStops', []) || []; return a.filter(function(r){ return (!shiftId || r.shiftId === shiftId) && (!kind || r.kind === kind); }); },
     pinFixes: function(){ return lsGet('lbPinFixes', []) || []; },
+    drawFixes: drawFixes,
     _t: { finish: finish, sitesNear: sitesNear, setStop: function(s){ stop = s; } }
   };
 })();
