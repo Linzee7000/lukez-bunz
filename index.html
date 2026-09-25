@@ -29862,13 +29862,14 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       title = 'End shift';
       var e = endDraft || (endDraft = { km: '', hrs: '', photo: null, note: '' }), r = rates();
       h = summaryHtml({ worked: r.worked, gpsKm: r.km, bins: r.bins, perKm: r.perKm, perHr: r.perHr, start: SH.start }) +
+        (function(){ var m = window.lbRunSheet ? window.lbRunSheet.missing(SH.id) : []; return m.length ? '<div class="drv-warnbox">' + I.warn + '<span>Run sheet still needs: ' + esc(m.join(' · ')) + '</span><button type="button" class="drv-link" data-a="rs:main">Fill in</button></div>' : ''; })() +
         '<div class="drv-sect"><span>Truck at the end</span></div>' + readingsHtml(e, 'uxsE') +
         field('uxsENote', 'Note (optional)', e.note, 'text', 'anything operations should know') +
         '<div class="drv-foot"><button type="button" class="drv-btn" data-a="back">Back</button><button type="button" class="drv-btn drv-go drv-bad" data-a="finish">Finish shift</button></div>';
     } else if (view === 'done') {
       title = 'Shift finished';
       var L0 = lastRec;
-      h = L0 ? summaryHtml(L0) + '<div class="drv-foot"><button type="button" class="drv-btn" data-a="share" data-id="' + L0.id + '">' + I.share + 'Share summary</button>' + (L0.trail ? '<button type="button" class="drv-btn" data-a="trail" data-id="' + L0.trail + '" data-lbl="' + esc(dateStr(L0.start)) + '">' + I.route + 'Trail</button>' : '') + '<button type="button" class="drv-btn drv-go" data-a="close">Done</button></div>' : '';
+      h = L0 ? summaryHtml(L0) + '<div class="drv-foot"><button type="button" class="drv-btn" data-a="share" data-id="' + L0.id + '">' + I.share + 'Share summary</button>' + (L0.trail ? '<button type="button" class="drv-btn" data-a="trail" data-id="' + L0.trail + '" data-lbl="' + esc(dateStr(L0.start)) + '">' + I.route + 'Trail</button>' : '') + (window.lbRunSheet ? '<button type="button" class="drv-btn" data-a="rs:main" data-id="' + L0.id + '">Run sheet</button>' : '') + '<button type="button" class="drv-btn drv-go" data-a="close">Done</button></div>' : '';
     } else if (view === 'history') {
       title = 'Past shifts';
       var hs = history().slice().reverse();
@@ -29910,6 +29911,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
         (brakeDue() ? '<div class="drv-warnbox">' + I.warn + '<span>Friday: brake wear is due. Enter it when you’re back at the depot.</span><button type="button" class="drv-link" data-a="brakes">Enter now</button></div>' : '') +
         (oosFor(SH.truck) ? '<div class="drv-stopbox">' + I.warn + '<span><b>This truck is marked out of service.</b> Tell your leading hand.</span></div>' : '') +
         dashListHtml() +
+        (window.lbRunSheet ? '<div class="drv-sect"><span>Run sheet</span></div><div class="drv-acts"><button type="button" class="drv-btn drv-go" data-a="rs:tip">At the tip</button><button type="button" class="drv-btn" data-a="rs:fuel">Fuel</button><button type="button" class="drv-btn" data-a="rs:adblue">AdBlue</button><button type="button" class="drv-btn" data-a="rs:main">Run sheet</button></div>' : '') +
         '<div class="drv-acts"><button type="button" class="drv-btn drv-warnb" data-a="dashrep">' + I.warn + 'Dash warning</button><button type="button" class="drv-btn" data-a="newdef">' + I.truck + 'Truck defect</button>' + (hasBrakeGauge(SH.truck) ? '<button type="button" class="drv-btn' + (brakeDue() ? ' drv-due' : '') + '" data-a="brakes">' + I.clock + 'Brake wear</button>' : '') + '<button type="button" class="drv-btn" data-a="issues">' + I.list + 'Issues (' + iss.length + ')</button></div>' +
         '<div class="drv-foot"><button type="button" class="drv-btn" data-a="history">Past shifts</button><button type="button" class="drv-btn drv-bad" data-a="end">End shift</button></div>' + roleHtml();
     }
@@ -30016,6 +30018,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var dsafe = b.getAttribute('data-dsafe'); if (dsafe !== null && dashDraft) { dashDraft.safe = dsafe === '1'; paint(); return; }
     if (!a) return;
     if (a === 'close') { closeSheet(); return; }
+    if (a.indexOf('rs:') === 0) { closeSheet(); if (window.lbRunSheet) window.lbRunSheet.open(a.slice(3), b.getAttribute('data-id') || (SH && SH.id)); return; }
     if (a === 'back') { view = 'main'; defDraft = null; paint(); return; }
     if (a === 'history') { view = 'history'; paint(); return; }
     if (a === 'csv') { shiftsCsv(); return; }
@@ -32446,5 +32449,514 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
 
 
 </script>
+
+<!-- =====================================================================
+     DAILY RUN SHEET (Domestic)
+     The paper run sheet drivers fill in every shift, done by the app instead.
+     Most of it is already known: start/finish, breaks, hours and speedo, run, truck.
+     What the app works out as the shift goes (from GPS and the bins done):
+       - leaving and getting back to the depot
+       - first and last pick-up of each load, with the speedo at each (start km + GPS km)
+       - bins collected per load
+     What the driver adds: each tip (site, arrival/departure time and weight, docket
+     number and photo), fuel, AdBlue, employee no, contract, a second truck, breakdowns,
+     comments and a signature. The sheet is laid out like the printed form and can be
+     printed / saved as PDF, shared, or sent to the office.
+     Stored per shift in localStorage lbRunSheets (keyed by the shift id).
+     ================================================================== -->
+<style id="lb-runsheet-style">
+  #uxRs .rs-li { display: flex; align-items: center; gap: 10px; padding: 10px; margin: 6px 0; border: 1px solid color-mix(in srgb, currentColor 18%, transparent); border-radius: var(--ux-rad, 6px); }
+  #uxRs .rs-li > div { flex: 1 1 auto; min-width: 0; }
+  #uxRs .rs-li b { display: block; }
+  #uxRs .rs-li span { display: block; opacity: .75; font-size: 13px; }
+  #uxRs .rs-li.warn { border-color: #f59e0b; }
+  #uxRs .rs-auto { font-size: 12px; opacity: .7; margin: 2px 0 8px; }
+  #uxRs .rs-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  #uxRs textarea { width: 100%; box-sizing: border-box; min-height: 80px; font: inherit; font-size: 16px; padding: 8px; }
+  #uxRs .rs-sig { width: 100%; height: 150px; background: #fff; border-radius: var(--ux-rad, 6px); touch-action: none; display: block; }
+  #uxRs .rs-sig-row { display: flex; gap: 8px; margin-top: 6px; }
+  #uxRs .rs-kv { display: flex; justify-content: space-between; gap: 10px; padding: 6px 0; border-bottom: 1px solid color-mix(in srgb, currentColor 12%, transparent); }
+  #uxRs .rs-kv span { opacity: .75; }
+  #uxRs input[type=time] { min-height: 44px; font-size: 16px; }
+  /* the printable sheet */
+  #rsPrint { position: fixed; inset: 0; z-index: 30000; background: #fff; color: #000; overflow: auto; -webkit-overflow-scrolling: touch; }
+  #rsPrint .rsp-bar { position: sticky; top: 0; display: flex; gap: 8px; justify-content: flex-end; padding: 8px; background: #f1f5f9; border-bottom: 1px solid #cbd5e1; }
+  #rsPrint .rsp-bar button { min-height: 44px; padding: 0 16px; font: 700 15px system-ui, sans-serif; border: 1px solid #334155; background: #fff; color: #000; border-radius: 6px; }
+  #rsPrint .rsp-page { width: 1080px; margin: 12px auto; padding: 20px 26px; font: 12px/1.25 Arial, Helvetica, sans-serif; color: #000; background: #fff; }
+  #rsPrint h1 { font: 400 20px Arial, sans-serif; margin: 0; letter-spacing: .5px; }
+  #rsPrint .rsp-code { font-size: 13px; margin: 2px 0 12px; }
+  #rsPrint .rsp-line { display: grid; grid-template-columns: 1.2fr 1.7fr 1.2fr 1.3fr; border-bottom: 1px solid #000; padding: 10px 0 3px; }
+  #rsPrint .rsp-line > div b { margin-right: 6px; }
+  #rsPrint table { border-collapse: collapse; }
+  #rsPrint td, #rsPrint th { border: 1px solid #000; padding: 4px 5px; height: 26px; vertical-align: middle; }
+  #rsPrint th { background: #c9c9c9; font-weight: 700; text-align: center; font-size: 11px; }
+  #rsPrint .rsp-top { display: grid; grid-template-columns: 210px 250px 1fr 270px; gap: 14px; margin-top: 14px; align-items: start; }
+  #rsPrint .rsp-top table { width: 100%; }
+  #rsPrint .rsp-top td.l { border: 0; text-align: right; font-weight: 700; padding-right: 6px; white-space: nowrap; }
+  #rsPrint .rsp-top td.v { text-align: center; min-width: 70px; }
+  #rsPrint .rsp-cmt { border: 1px solid #000; min-height: 150px; padding: 5px; margin-top: 6px; white-space: pre-wrap; }
+  #rsPrint .rsp-loads { width: 100%; margin-top: 14px; }
+  #rsPrint .rsp-loads td { text-align: center; }
+  #rsPrint .rsp-cert { font-size: 9.5px; font-style: italic; margin: 3px 0 10px; }
+  #rsPrint .rsp-sig { display: flex; align-items: flex-end; gap: 10px; border-bottom: 1px solid #000; min-height: 44px; padding-bottom: 2px; margin-top: 8px; }
+  #rsPrint .rsp-sig img { height: 44px; }
+  #rsPrint .rsp-chk { display: grid; grid-template-columns: 2fr 1.3fr 1fr; border-bottom: 1px solid #000; padding: 16px 0 3px; margin-top: 6px; }
+  #rsPrint .rsp-note { font-size: 10px; color: #444; margin-top: 10px; }
+  @media print {
+    @page { size: A4 landscape; margin: 8mm; }
+    body.rs-printing > *:not(#rsPrint) { display: none !important; }
+    body.rs-printing #rsPrint { position: static; overflow: visible; }
+    body.rs-printing #rsPrint .rsp-bar { display: none; }
+    body.rs-printing #rsPrint .rsp-page { width: auto; margin: 0; padding: 0; zoom: 1 !important; }
+  }
+</style>
+<script id="lb-runsheet-script">
+(function(){
+  'use strict';
+  function $(id){ return document.getElementById(id); }
+  function esc(v){ return String(v == null ? '' : v).replace(/[&<>"']/g, function(c){ return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+  var GF = {};
+  function g(n){ try { return (GF[n] || (GF[n] = new Function('return typeof ' + n + ' === "undefined" ? undefined : ' + n)))(); } catch (e) { return undefined; } }
+  function lsGet(k, d){ try { var v = JSON.parse(localStorage.getItem(k)); return v == null ? d : v; } catch (e) { return d; } }
+  function lsSet(k, v){ try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
+  function uid(){ return Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
+  function toast(m){ try { if (window.uxToast) window.uxToast(m); } catch (e) {} }
+  function num(v){ if (v === '' || v == null) return null; var n = parseFloat(String(v).replace(/,/g, '')); return isFinite(n) ? n : null; }
+  function hhmm(ts){ if (!ts) return ''; var d = new Date(ts); return (d.getHours() < 10 ? '0' : '') + d.getHours() + ':' + (d.getMinutes() < 10 ? '0' : '') + d.getMinutes(); }
+  function dateStr(ts){ try { return new Date(ts).toLocaleDateString('en-AU', { day: '2-digit', month: '2-digit', year: 'numeric' }); } catch (e) { return ''; } }
+  function dayName(ts){ return ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][new Date(ts).getDay()]; }
+  // a "HH:MM" typed into a time box, on the same day as the shift
+  function fromHHMM(s, dayTs){ var m = /^(\d{1,2}):(\d{2})$/.exec(String(s || '')); if (!m) return null; var d = new Date(dayTs || Date.now()); d.setHours(+m[1], +m[2], 0, 0); return d.getTime(); }
+  function metres(a, b){ var kx = 111320 * Math.cos(a.lat * Math.PI / 180); return Math.hypot((b.lng - a.lng) * kx, (b.lat - a.lat) * 110540); }
+  function here(){ var l = g('userCurrentLocation'); return l && isFinite(l.lat) && (l.lat || l.lng) ? { lat: +l.lat, lng: +l.lng } : null; }
+  var I = window.UX_DRIVER_ICONS || {};
+  var SV = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true">';
+  var X = SV + '<path d="M6 6l12 12M18 6 6 18"/></svg>';
+
+  var DEPOT_R = 250;                  // same radius the shift uses for "at the depot"
+  var STREAM_TYPE = { Garbage: 'Garbage', Recycling: 'Recycling', FOGO: 'FOGO', SummerRecycling: 'Summer recycling' };
+
+  /* ---- records ---- */
+  function all(){ var o = lsGet('lbRunSheets', {}); return o && typeof o === 'object' ? o : {}; }
+  function profile(){ return lsGet('lbRunSheetProfile', {}) || {}; }
+  function save(R){
+    var o = all(); o[R.id] = R;
+    var ids = Object.keys(o).sort(function(a, b){ return (o[a].ts || 0) - (o[b].ts || 0); });
+    while (ids.length > 30) delete o[ids.shift()];          // keep the last 30 shifts' sheets on the phone
+    lsSet('lbRunSheets', o);
+  }
+  function fresh(id){
+    var p = profile();
+    return { id: id, ts: Date.now(), empNo: p.empNo || '', contract: p.contract || '', collType: '', depart: null, ret: null,
+      loads: [], cur: { n: 0, first: null, last: null }, seenBins: null, fuel: [], adblue: [], breakdowns: [],
+      unit2: { truck: '', hrsS: '', hrsE: '', kmS: '', kmE: '' }, comments: '', sig: null, sigTs: null, sentAt: null };
+  }
+  function get(id){ var o = all(); return o[id] || null; }
+  function getOrMake(id){ return get(id) || fresh(id); }
+
+  /* the shift this sheet belongs to: the running one, or a finished one from history */
+  function shiftFor(id){
+    var live = window.uxShiftState ? window.uxShiftState() : null;
+    if (live && (!id || live.id === id)) return { live: true, s: live };
+    var h = lsGet('lbShiftHistory', []) || [];
+    for (var i = h.length - 1; i >= 0; i--) if (!id || h[i].id === id) return { live: false, s: h[i] };
+    return null;
+  }
+  function breaksOf(sh){
+    if (!sh.live) return (sh.s.breaks || []).slice();
+    var st = null; try { st = window.lbBreakClock && window.lbBreakClock.state; } catch (e) {}
+    return ((st && st.breaks) || []).filter(function(b){ return b.s >= sh.s.start - 60000; }).map(function(b){ return { s: b.s, e: b.e }; });
+  }
+  // the odometer right now, as best we know it: the start reading plus the GPS distance since
+  function odoNow(s){ return s.startKm != null ? Math.round(s.startKm + (s.dist || 0) / 1000) : null; }
+
+  /* ---- live: fill in what the app can see as the shift goes ---- */
+  function tick(){
+    var live = window.uxShiftState ? window.uxShiftState() : null; if (!live) return;
+    var R = getOrMake(live.id), ch = !get(live.id);
+    // bins done since the last look belong to the load being worked (the one not yet tipped)
+    var n = live.bins || 0;
+    if (R.seenBins == null) { R.seenBins = n; ch = true; }
+    if (n > R.seenBins) {
+      var ts = live.binTs || [], k = odoNow(live);
+      var t0 = ts.length ? ts[Math.max(0, ts.length - (n - R.seenBins))] : Date.now(), t1 = ts.length ? ts[ts.length - 1] : Date.now();
+      if (!R.cur.first) R.cur.first = { t: t0, km: k };
+      R.cur.last = { t: t1, km: k }; R.cur.n += n - R.seenBins; R.seenBins = n; ch = true;
+    }
+    // leaving and getting back to the depot
+    var dp = lsGet('lbDepot', null); if (!(dp && isFinite(dp.lat))) dp = live.home || null;
+    var loc = here();
+    if (dp && loc) {
+      var d = metres(dp, loc);
+      if (d > DEPOT_R && !R.depart) { R.depart = Date.now(); ch = true; }
+      if (d > DEPOT_R && R.ret && R.depart && Date.now() - R.ret > 5 * 60000) { R.ret = null; ch = true; }   // went out again
+      if (d <= DEPOT_R && R.depart && !R.ret && Date.now() - R.depart > 15 * 60000) { R.ret = Date.now(); ch = true; }
+    }
+    if (!R.collType && live.stream) { R.collType = STREAM_TYPE[live.stream] || live.stream; ch = true; }
+    if (ch) save(R);
+  }
+  setInterval(function(){ try { tick(); } catch (e) {} }, 5000);
+
+  /* ---- tips ---- */
+  function tipSites(){ var a = lsGet('lbTipSites', []); return Array.isArray(a) ? a : []; }
+  function nearestTip(loc){
+    if (!loc) return null; var best = null, bd = 1500;
+    tipSites().forEach(function(t){ var d = metres(loc, t); if (d < bd) { bd = d; best = t; } });
+    return best;
+  }
+  function rememberTip(name, loc){
+    name = String(name || '').trim(); if (!name) return;
+    var a = tipSites().filter(function(t){ return t.name.toLowerCase() !== name.toLowerCase(); });
+    var old = tipSites().filter(function(t){ return t.name.toLowerCase() === name.toLowerCase(); })[0];
+    a.push({ name: name, lat: loc ? loc.lat : (old && old.lat), lng: loc ? loc.lng : (old && old.lng) });
+    lsSet('lbTipSites', a.slice(-20));
+  }
+  // "At the tip": the bins since the last tip become a load
+  function arriveTip(R, sh){
+    var loc = here(), nt = nearestTip(loc);
+    var L = { id: 'l_' + uid(), runNo: '', n: R.cur.n, first: R.cur.first, last: R.cur.last, site: nt ? nt.name : '', lat: loc && loc.lat, lng: loc && loc.lng,
+      arrT: Date.now(), arrW: '', depW: '', depT: null, docket: '', photos: [] };
+    R.loads.push(L); R.cur = { n: 0, first: null, last: null }; save(R);
+    return L;
+  }
+
+  /* ---- what's still missing (shown before ending the shift, and on the sheet) ---- */
+  function missing(id){
+    var sh = shiftFor(id); if (!sh) return [];
+    var R = getOrMake(sh.s.id), out = [];
+    if (!R.empNo) out.push('employee number');
+    R.loads.forEach(function(L, i){
+      var m = [];
+      if (!L.docket) m.push('docket no.'); if (!L.depT) m.push('departure time'); if (L.arrW === '' || L.depW === '') m.push('weights'); if (!L.site) m.push('site');
+      if (m.length) out.push('load ' + (i + 1) + ': ' + m.join(', '));
+    });
+    if (R.cur.n > 0) out.push(R.cur.n + ' bin' + (R.cur.n === 1 ? '' : 's') + ' not tipped yet');
+    return out;
+  }
+
+  /* =====================================================================
+     the sheet (editor)
+     ===================================================================== */
+  var sheet = null, R = null, SHc = null, view = 'main', loadId = null, fuelKind = 'fuel', fuelDraft = null;
+  function build(){
+    if (sheet) return;
+    sheet = document.createElement('div'); sheet.id = 'uxRs'; sheet.className = 'modal-overlay';
+    sheet.innerHTML = '<div class="modal-box drv-box" role="dialog" aria-label="Run sheet"><div class="drv-head"><b id="uxRsTitle">Run sheet</b><button type="button" class="drv-x" data-a="close" aria-label="Close">' + X + '</button></div><div class="drv-body" id="uxRsBody"></div></div>';
+    document.body.appendChild(sheet);
+    sheet.addEventListener('click', onClick);
+    sheet.addEventListener('input', onInput);
+    sheet.addEventListener('change', onInput);
+  }
+  function open(what, id){
+    build();
+    try { tick(); } catch (e) {}
+    SHc = shiftFor(id);
+    if (!SHc) { toast('Start a shift first'); return; }
+    R = getOrMake(SHc.s.id); save(R);
+    view = 'main'; loadId = null;
+    if (what === 'tip') {
+      // already at the tip with a load open and not left yet? carry on with that one
+      var open0 = R.loads.filter(function(L){ return !L.depT; }).slice(-1)[0];
+      var L = open0 || arriveTip(R, SHc);
+      view = 'load'; loadId = L.id;
+      if (!open0) toast('At the tip ' + hhmm(L.arrT) + ' · ' + L.n + ' bin' + (L.n === 1 ? '' : 's') + ' in this load');
+    } else if (what === 'fuel' || what === 'adblue') { view = 'fuel'; fuelKind = what; fuelDraft = { litres: '', km: odoNow(SHc.s) == null ? '' : String(Math.round(odoNow(SHc.s))), photo: null }; }
+    sheet.classList.add('open'); paint();
+  }
+  function close(){ if (sheet) sheet.classList.remove('open'); }
+
+  function f(id, label, val, type, ph, extra){
+    return '<label class="drv-f"><span>' + esc(label) + '</span><input id="' + id + '" type="' + (type || 'text') + '" ' + (type === 'number' ? 'inputmode="decimal" step="any"' : 'autocomplete="off"') + ' value="' + esc(val == null ? '' : val) + '" placeholder="' + esc(ph || '') + '"' + (extra || '') + '></label>';
+  }
+  function sect(t, em){ return '<div class="drv-sect"><span>' + esc(t) + '</span>' + (em != null ? '<em>' + esc(em) + '</em>' : '') + '</div>'; }
+  function kv(k, v){ return '<div class="rs-kv"><span>' + esc(k) + '</span><b>' + esc(v || '—') + '</b></div>'; }
+  function loadLine(L, i){
+    var m = [];
+    if (!L.docket) m.push('docket'); if (!L.depT) m.push('leaving time'); if (L.arrW === '' || L.depW === '') m.push('weights');
+    return '<div class="rs-li' + (m.length ? ' warn' : '') + '"><div><b>Load ' + (i + 1) + (L.site ? ' · ' + esc(L.site) : '') + '</b><span>' + L.n + ' bins · tip ' + esc(hhmm(L.arrT)) + (L.depT ? '–' + esc(hhmm(L.depT)) : '') + (L.docket ? ' · docket ' + esc(L.docket) : '') + (m.length ? ' · needs ' + esc(m.join(', ')) : '') + '</span></div>' +
+      '<button type="button" class="drv-btn" data-a="editload" data-id="' + L.id + '">Edit</button></div>';
+  }
+
+  function paint(){
+    if (!sheet || !R || !SHc) return;
+    var s = SHc.s, body = $('uxRsBody'), h = '', title = 'Run sheet';
+    if (view === 'load') {
+      var L = R.loads.filter(function(x){ return x.id === loadId; })[0];
+      if (!L) { view = 'main'; return paint(); }
+      var i = R.loads.indexOf(L);
+      title = 'Load ' + (i + 1) + ' · tip';
+      var sites = tipSites();
+      h = '<div class="rs-auto">' + L.n + ' bins in this load' + (L.first ? ' · first pick-up ' + hhmm(L.first.t) + ', last ' + hhmm(L.last.t) : '') + '</div>' +
+        f('rsLSite', 'Tip site', L.site, 'text', 'e.g. Rye transfer station', ' list="rsTipList"') + '<datalist id="rsTipList">' + sites.map(function(t){ return '<option value="' + esc(t.name) + '">'; }).join('') + '</datalist>' +
+        '<div class="rs-grid">' + f('rsLArrT', 'Arrived', hhmm(L.arrT), 'time') + f('rsLArrW', 'Arrival weight (t)', L.arrW, 'number', 'weighbridge in') + '</div>' +
+        '<div class="rs-grid">' + f('rsLDepW', 'Departure weight (t)', L.depW, 'number', 'weighbridge out') + f('rsLDepT', 'Left', hhmm(L.depT), 'time') + '</div>' +
+        (L.depT ? '' : '<div class="drv-big"><button type="button" class="drv-btn drv-go" data-a="leavetip">Leaving the tip now</button></div>') +
+        f('rsLDocket', 'Docket no.', L.docket, 'text', 'from the docket') +
+        '<div class="drv-media">' + (L.photos || []).map(function(id){ return window.lbMedia ? window.lbMedia.thumb(id, true) : ''; }).join('') + '<button type="button" class="drv-btn" data-a="docketphoto">' + (I.cam || '') + 'Photo of the docket</button></div>' +
+        '<details><summary>More</summary>' + f('rsLRun', 'Run no. (if different to the shift’s)', L.runNo, 'text', s.run || '') +
+        '<div class="rs-grid">' + f('rsLFirstT', 'First pick-up', L.first ? hhmm(L.first.t) : '', 'time') + f('rsLFirstK', 'Speedo', L.first && L.first.km != null ? L.first.km : '', 'number') + '</div>' +
+        '<div class="rs-grid">' + f('rsLLastT', 'Last pick-up', L.last ? hhmm(L.last.t) : '', 'time') + f('rsLLastK', 'Speedo', L.last && L.last.km != null ? L.last.km : '', 'number') + '</div>' +
+        f('rsLN', 'Bins collected', L.n, 'number') +
+        '<div class="rs-auto">Pick-up times, speedo and bins are worked out from the GPS and the bins done. Fix them here if they’re out.</div>' +
+        '<button type="button" class="drv-btn drv-bad" data-a="delload" data-id="' + L.id + '">Delete this load</button></details>' +
+        '<div class="drv-foot"><button type="button" class="drv-btn" data-a="back">Done</button></div>';
+    } else if (view === 'fuel') {
+      title = fuelKind === 'fuel' ? 'Fuel' : 'AdBlue';
+      h = '<div class="rs-grid">' + f('rsFLitres', 'Litres', fuelDraft.litres, 'number', 'e.g. 180') + f('rsFKm', 'Odometer (km)', fuelDraft.km, 'number', '') + '</div>' +
+        '<div class="drv-media">' + (fuelDraft.photo && window.lbMedia ? window.lbMedia.thumb(fuelDraft.photo, true) : '') + '<button type="button" class="drv-btn" data-a="fuelphoto">' + (I.cam || '') + 'Photo of the pump / receipt</button></div>' +
+        '<div class="drv-foot"><button type="button" class="drv-btn" data-a="back">Cancel</button><button type="button" class="drv-btn drv-go" data-a="fuelsave">Save</button></div>';
+    } else {
+      var br = breaksOf(SHc), miss = missing(s.id);
+      var bdOpen = R.breakdowns.filter(function(b){ return !b.e; })[0];
+      h = (miss.length ? '<div class="drv-warnbox">' + (I.warn || '') + '<span>Still to fill in: ' + esc(miss.join(' · ')) + '</span></div>' : '') +
+        '<div class="drv-acts"><button type="button" class="drv-btn drv-go" data-a="print">View / print the sheet</button><button type="button" class="drv-btn" data-a="send">' + (R.sentAt ? 'Send again' : 'Send to the office') + '</button><button type="button" class="drv-btn" data-a="share">Share</button></div>' +
+        (R.sentAt ? '<div class="rs-auto">Sent ' + esc(dateStr(R.sentAt) + ' ' + hhmm(R.sentAt)) + '</div>' : '') +
+        sect('Loads and tips', R.loads.length) +
+        R.loads.map(loadLine).join('') +
+        (SHc.live ? '<div class="rs-li"><div><b>Load now</b><span>' + R.cur.n + ' bins so far' + (R.cur.first ? ' · since ' + hhmm(R.cur.first.t) : '') + '</span></div><button type="button" class="drv-btn drv-go" data-a="tip">At the tip</button></div>' : '') +
+        sect('Fuel and AdBlue') +
+        R.fuel.map(function(x, i){ return '<div class="rs-li"><div><b>Fuel ' + esc(x.litres) + ' L</b><span>' + esc(hhmm(x.t)) + (x.km ? ' · ' + esc(x.km) + ' km' : '') + '</span></div><button type="button" class="drv-btn" data-a="delfuel" data-i="' + i + '">Remove</button></div>'; }).join('') +
+        R.adblue.map(function(x, i){ return '<div class="rs-li"><div><b>AdBlue ' + esc(x.litres) + ' L</b><span>' + esc(hhmm(x.t)) + (x.km ? ' · ' + esc(x.km) + ' km' : '') + '</span></div><button type="button" class="drv-btn" data-a="deladblue" data-i="' + i + '">Remove</button></div>'; }).join('') +
+        '<div class="drv-acts"><button type="button" class="drv-btn" data-a="addfuel">+ Fuel</button><button type="button" class="drv-btn" data-a="addadblue">+ AdBlue</button></div>' +
+        sect('Times') +
+        kv('Start', hhmm(s.start)) +
+        '<div class="rs-grid">' + f('rsDepart', 'Left the depot', hhmm(R.depart), 'time') + f('rsRet', 'Back at the depot', hhmm(R.ret), 'time') + '</div>' +
+        kv('Finish', s.end ? hhmm(s.end) : 'still on shift') +
+        kv('Breaks', br.length ? br.map(function(b){ return hhmm(b.s) + '–' + (b.e ? hhmm(b.e) : 'now'); }).join(', ') : 'none') +
+        R.breakdowns.map(function(b){ return kv('Breakdown', hhmm(b.s) + '–' + (b.e ? hhmm(b.e) : 'now')); }).join('') +
+        (SHc.live ? '<div class="drv-acts"><button type="button" class="drv-btn' + (bdOpen ? ' drv-go' : ' drv-warnb') + '" data-a="breakdown">' + (bdOpen ? 'Breakdown over' : 'Broken down') + '</button></div>' : '') +
+        sect('Truck') +
+        kv('Unit #1', [s.truck, s.rego].filter(Boolean).join(' · ')) +
+        kv('Hours', (s.startHrs != null ? s.startHrs : '?') + ' → ' + (s.endHrs != null ? s.endHrs : (SHc.live ? 'at the end' : '?'))) +
+        kv('Speedo', (s.startKm != null ? s.startKm : '?') + ' → ' + (s.endKm != null ? s.endKm : (SHc.live ? 'at the end' : '?'))) +
+        '<details' + (R.unit2.truck ? ' open' : '') + '><summary>Changed trucks during the shift (unit #2)</summary>' +
+          f('rsU2', 'Unit #2', R.unit2.truck, 'text', 'Fleet no.') +
+          '<div class="rs-grid">' + f('rsU2HS', 'Hours start', R.unit2.hrsS, 'number') + f('rsU2HE', 'Hours finish', R.unit2.hrsE, 'number') + '</div>' +
+          '<div class="rs-grid">' + f('rsU2KS', 'Speedo start', R.unit2.kmS, 'number') + f('rsU2KE', 'Speedo finish', R.unit2.kmE, 'number') + '</div></details>' +
+        sect('You and the run') +
+        '<div class="rs-grid">' + f('rsEmp', 'Employee no.', R.empNo, 'text') + f('rsContract', 'Contract', R.contract, 'text', 'e.g. Mornington Peninsula') + '</div>' +
+        '<div class="rs-grid">' + f('rsColl', 'Collection type', R.collType, 'text', 'Garbage / Recycling / FOGO') + '<div>' + kv('Run', s.run ? s.run + (s.day ? ' · ' + s.day : '') : 'not picked') + '</div></div>' +
+        sect('Other work / comments') +
+        '<textarea id="rsComments" placeholder="Tidies collected, deliveries, bin repairs etc.">' + esc(R.comments) + '</textarea>' +
+        sect('Signature') +
+        '<div class="rs-auto">I certify that I have completed my run as per Company procedures and that the information provided in this report is true and correct. I also certify that I have completed a Defect Notice book reporting all faults found with this vehicle including all lights.</div>' +
+        (R.sig ? '<img src="' + R.sig + '" alt="Signature" style="background:#fff;max-width:100%;height:110px;border-radius:6px"><div class="rs-sig-row"><span class="rs-auto">Signed ' + esc(hhmm(R.sigTs)) + '</span><button type="button" class="drv-btn" data-a="resign">Sign again</button></div>'
+          : '<canvas class="rs-sig" id="rsSig" width="700" height="170"></canvas><div class="rs-sig-row"><button type="button" class="drv-btn" data-a="sigclear">Clear</button><button type="button" class="drv-btn drv-go" data-a="sigsave">Save signature</button></div>') +
+        '<div class="drv-foot"><button type="button" class="drv-btn" data-a="close">Close</button></div>';
+    }
+    $('uxRsTitle').textContent = title;
+    body.innerHTML = h;
+    try { if (window.lbMedia) window.lbMedia.hydrate(body); } catch (e) {}
+    var cv = $('rsSig'); if (cv) sigPad(cv);
+  }
+
+  /* ---- signature pad ---- */
+  var sigDirty = false;
+  function sigPad(cv){
+    var ctx = cv.getContext('2d'), drawing = false, last = null; sigDirty = false;
+    ctx.lineWidth = 3; ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.strokeStyle = '#000';
+    function pos(e){ var r = cv.getBoundingClientRect(); return { x: (e.clientX - r.left) * cv.width / r.width, y: (e.clientY - r.top) * cv.height / r.height }; }
+    cv.addEventListener('pointerdown', function(e){ drawing = true; last = pos(e); try { cv.setPointerCapture(e.pointerId); } catch (x) {} e.preventDefault(); });
+    cv.addEventListener('pointermove', function(e){ if (!drawing) return; var p = pos(e); ctx.beginPath(); ctx.moveTo(last.x, last.y); ctx.lineTo(p.x, p.y); ctx.stroke(); last = p; sigDirty = true; e.preventDefault(); });
+    cv.addEventListener('pointerup', function(){ drawing = false; });
+    cv.addEventListener('pointercancel', function(){ drawing = false; });
+  }
+
+  /* ---- typing ---- */
+  function onInput(ev){
+    var t = ev.target, id = t.id; if (!R || !id || id.indexOf('rs') !== 0) return;
+    var v = t.value, day = SHc.s.start;
+    if (view === 'load') {
+      var L = R.loads.filter(function(x){ return x.id === loadId; })[0]; if (!L) return;
+      if (id === 'rsLSite') L.site = v;
+      else if (id === 'rsLArrT') L.arrT = fromHHMM(v, day) || L.arrT;
+      else if (id === 'rsLArrW') L.arrW = v;
+      else if (id === 'rsLDepW') L.depW = v;
+      else if (id === 'rsLDepT') L.depT = fromHHMM(v, day);
+      else if (id === 'rsLDocket') L.docket = v;
+      else if (id === 'rsLRun') L.runNo = v;
+      else if (id === 'rsLN') L.n = num(v) || 0;
+      else if (id === 'rsLFirstT') { L.first = L.first || {}; L.first.t = fromHHMM(v, day); }
+      else if (id === 'rsLFirstK') { L.first = L.first || {}; L.first.km = num(v); }
+      else if (id === 'rsLLastT') { L.last = L.last || {}; L.last.t = fromHHMM(v, day); }
+      else if (id === 'rsLLastK') { L.last = L.last || {}; L.last.km = num(v); }
+      save(R); return;
+    }
+    if (view === 'fuel') { if (id === 'rsFLitres') fuelDraft.litres = v; else if (id === 'rsFKm') fuelDraft.km = v; return; }
+    if (id === 'rsEmp' || id === 'rsContract') {
+      if (id === 'rsEmp') R.empNo = v; else R.contract = v;
+      var p = profile(); p.empNo = R.empNo; p.contract = R.contract; lsSet('lbRunSheetProfile', p);   // remembered for the next shift
+    }
+    else if (id === 'rsColl') R.collType = v;
+    else if (id === 'rsComments') R.comments = v;
+    else if (id === 'rsDepart') R.depart = fromHHMM(v, day);
+    else if (id === 'rsRet') R.ret = fromHHMM(v, day);
+    else if (id === 'rsU2') R.unit2.truck = v; else if (id === 'rsU2HS') R.unit2.hrsS = v; else if (id === 'rsU2HE') R.unit2.hrsE = v;
+    else if (id === 'rsU2KS') R.unit2.kmS = v; else if (id === 'rsU2KE') R.unit2.kmE = v;
+    else return;
+    save(R);
+  }
+
+  function onClick(ev){
+    if (ev.target === sheet) { close(); return; }
+    var b = ev.target.closest ? ev.target.closest('button') : null; if (!b || !sheet.contains(b)) return;
+    var rm = b.getAttribute('data-rm');
+    if (rm) {
+      ev.stopPropagation();
+      if (view === 'fuel' && fuelDraft && fuelDraft.photo === rm) fuelDraft.photo = null;
+      R.loads.forEach(function(L){ L.photos = (L.photos || []).filter(function(x){ return x !== rm; }); });
+      save(R); try { window.lbMedia.del(rm); } catch (e) {} paint(); return;
+    }
+    var a = b.getAttribute('data-a'); if (!a) return;
+    if (a === 'close') { close(); return; }
+    if (a === 'back') { view = 'main'; paint(); return; }
+    if (a === 'tip') { var L0 = arriveTip(R, SHc); view = 'load'; loadId = L0.id; paint(); return; }
+    if (a === 'editload') { view = 'load'; loadId = b.getAttribute('data-id'); paint(); return; }
+    if (a === 'leavetip') {
+      var L1 = R.loads.filter(function(x){ return x.id === loadId; })[0];
+      if (L1) { L1.depT = Date.now(); rememberTip(L1.site, L1.lat != null ? { lat: L1.lat, lng: L1.lng } : null); save(R); }
+      paint(); return;
+    }
+    if (a === 'delload') { R.loads = R.loads.filter(function(x){ return x.id !== b.getAttribute('data-id'); }); save(R); view = 'main'; paint(); return; }
+    if (a === 'docketphoto' && window.lbMedia) {
+      var id0 = loadId;
+      window.lbMedia.takePhoto('docket').then(function(pid){ if (!pid) return; var L2 = R.loads.filter(function(x){ return x.id === id0; })[0]; if (L2) { (L2.photos = L2.photos || []).push(pid); save(R); } paint(); });
+      return;
+    }
+    if (a === 'addfuel' || a === 'addadblue') { view = 'fuel'; fuelKind = a === 'addfuel' ? 'fuel' : 'adblue'; fuelDraft = { litres: '', km: odoNow(SHc.s) == null ? '' : String(Math.round(odoNow(SHc.s))), photo: null }; paint(); return; }
+    if (a === 'fuelphoto' && window.lbMedia) { window.lbMedia.takePhoto(fuelKind).then(function(pid){ if (pid) { fuelDraft.photo = pid; paint(); } }); return; }
+    if (a === 'fuelsave') {
+      if (num(fuelDraft.litres) == null) { toast('Put in the litres'); return; }
+      (fuelKind === 'fuel' ? R.fuel : R.adblue).push({ t: Date.now(), litres: num(fuelDraft.litres), km: num(fuelDraft.km), photo: fuelDraft.photo });
+      save(R); toast((fuelKind === 'fuel' ? 'Fuel' : 'AdBlue') + ' saved'); view = 'main'; paint(); return;
+    }
+    if (a === 'delfuel') { R.fuel.splice(+b.getAttribute('data-i'), 1); save(R); paint(); return; }
+    if (a === 'deladblue') { R.adblue.splice(+b.getAttribute('data-i'), 1); save(R); paint(); return; }
+    if (a === 'breakdown') {
+      var bo = R.breakdowns.filter(function(x){ return !x.e; })[0];
+      if (bo) bo.e = Date.now(); else R.breakdowns.push({ s: Date.now(), e: null });
+      save(R); paint(); return;
+    }
+    if (a === 'sigclear') { var cv = $('rsSig'); if (cv) { cv.getContext('2d').clearRect(0, 0, cv.width, cv.height); sigDirty = false; } return; }
+    if (a === 'sigsave') { var cv2 = $('rsSig'); if (!cv2 || !sigDirty) { toast('Sign in the white box first'); return; } R.sig = cv2.toDataURL('image/png'); R.sigTs = Date.now(); save(R); paint(); return; }
+    if (a === 'resign') { R.sig = null; R.sigTs = null; save(R); paint(); return; }
+    if (a === 'print') { showPrint(); return; }
+    if (a === 'share') { shareSheet(); return; }
+    if (a === 'send') { sendSheet(); return; }
+  }
+
+  /* =====================================================================
+     the printable sheet, laid out like IMS-OPER-F-8007
+     ===================================================================== */
+  function sheetData(){
+    var s = SHc.s, br = breaksOf(SHc);
+    var loads = R.loads.slice();
+    if (R.cur.n > 0) loads.push({ runNo: '', n: R.cur.n, first: R.cur.first, last: R.cur.last, site: '', arrT: null, arrW: '', depW: '', depT: null, docket: '', notTipped: true });
+    var extra = [];
+    R.fuel.forEach(function(x){ extra.push('Fuel: ' + x.litres + ' L at ' + hhmm(x.t) + (x.km ? ' (' + x.km + ' km)' : '')); });
+    R.adblue.forEach(function(x){ extra.push('AdBlue: ' + x.litres + ' L at ' + hhmm(x.t) + (x.km ? ' (' + x.km + ' km)' : '')); });
+    if (br.length > 3) extra.push('More breaks: ' + br.slice(3).map(function(b){ return hhmm(b.s) + '–' + hhmm(b.e); }).join(', '));
+    if (R.breakdowns.length > 1) extra.push('More breakdowns: ' + R.breakdowns.slice(1).map(function(b){ return hhmm(b.s) + '–' + hhmm(b.e); }).join(', '));
+    if (loads.length > 4) extra.push('More loads: see the list sent with this sheet');
+    return { s: s, br: br, loads: loads, comments: [R.comments].concat(extra).filter(Boolean).join('\n') };
+  }
+  function printHtml(){
+    var d = sheetData(), s = d.s, br = d.br, bd = R.breakdowns[0] || {};
+    function td(v){ return '<td class="v">' + esc(v == null ? '' : v) + '</td>'; }
+    var rows = [];
+    for (var i = 0; i < Math.max(4, d.loads.length); i++) {
+      var L = d.loads[i] || {};
+      rows.push('<tr><td><b>' + (i + 1) + '</b></td><td>' + esc(L.runNo || '') + '</td><td>' + esc(L.first ? hhmm(L.first.t) : '') + '</td><td>' + esc(L.first && L.first.km != null ? L.first.km : '') + '</td><td>' + esc(L.last ? hhmm(L.last.t) : '') + '</td><td>' + esc(L.last && L.last.km != null ? L.last.km : '') + '</td><td>' + esc(L.n != null && (L.n || L.first) ? L.n : '') + '</td><td>' + esc(L.notTipped ? '(not tipped)' : L.site || '') + '</td><td>' + esc(hhmm(L.arrT)) + '</td><td>' + esc(L.arrW) + '</td><td>' + esc(L.depW) + '</td><td>' + esc(hhmm(L.depT)) + '</td><td>' + esc(L.docket) + '</td></tr>');
+    }
+    return '<div class="rsp-page">' +
+      '<h1>DAILY RUN SHEET - DOMESTIC</h1><div class="rsp-code">IMS-OPER-F-8007</div>' +
+      '<div class="rsp-line"><div><b>Run No:</b>' + esc(s.run || '') + '</div><div><b>Day:</b>' + esc(s.day || dayName(s.start)) + '</div><div><b>Contract:</b>' + esc(R.contract) + '</div><div><b>Collection Type:</b>' + esc(R.collType) + '</div></div>' +
+      '<div class="rsp-line"><div><b>Date:</b>' + esc(dateStr(s.start)) + '</div><div><b>Drivers Name:</b>' + esc(s.driver || '') + '</div><div><b>Employee No:</b>' + esc(R.empNo) + '</div><div><b>Pre-start Inspection:</b>' + esc(s.prestart ? 'Done ' + hhmm(s.prestart.ts) + (s.prestart.faults && s.prestart.faults.length ? ' (' + s.prestart.faults.length + ' fault' + (s.prestart.faults.length > 1 ? 's' : '') + ')' : '') : '') + '</div></div>' +
+      '<div class="rsp-top">' +
+        '<table><tr><td class="l"></td><th>Man Hours<br>Driver</th></tr><tr><td class="l">Emp. Start</td>' + td(hhmm(s.start)) + '</tr><tr><td class="l">Depart Depot</td>' + td(hhmm(R.depart)) + '</tr><tr><td class="l">Return Depot</td>' + td(hhmm(R.ret)) + '</tr><tr><td class="l">Emp. Finish</td>' + td(hhmm(s.end)) + '</tr></table>' +
+        '<table><tr><td class="l"></td><th>Downtime</th></tr>' +
+          [0, 1, 2].map(function(k){ var b = br[k] || {}; return '<tr><td class="l">Break ' + (k + 1) + ' Start Time:</td>' + td(hhmm(b.s)) + '</tr><tr><td class="l">Break ' + (k + 1) + ' Finish Time:</td>' + td(hhmm(b.e)) + '</tr>'; }).join('') +
+          '<tr><td class="l"><u>Break Down Start:</u></td>' + td(hhmm(bd.s)) + '</tr><tr><td class="l"><u>Break Down Finish:</u></td>' + td(hhmm(bd.e)) + '</tr></table>' +
+        '<div><table style="width:100%"><tr><td class="l"></td><th colspan="2">Hours (RHS Dash)</th></tr><tr><td class="l"></td><th>Unit # 1<br>' + esc(s.truck || '') + '</th><th>Unit # 2<br>' + esc(R.unit2.truck) + '</th></tr>' +
+          '<tr><td class="l">Hour Start:</td>' + td(s.startHrs) + td(R.unit2.hrsS) + '</tr><tr><td class="l">Hour Finish:</td>' + td(s.endHrs) + td(R.unit2.hrsE) + '</tr></table>' +
+          '<div class="rsp-cmt"><b><u>OTHER WORK/COMMENTS</u>:</b>\n' + esc(d.comments) + '</div></div>' +
+        '<table><tr><td class="l"></td><th colspan="2">Speedo (RHS Dash)</th></tr><tr><td class="l"></td><th>Unit # 1</th><th>Unit # 2</th></tr>' +
+          '<tr><td class="l">Speedo: Start</td>' + td(s.startKm) + td(R.unit2.kmS) + '</tr><tr><td class="l">Speedo: Finish</td>' + td(s.endKm) + td(R.unit2.kmE) + '</tr></table>' +
+      '</div>' +
+      '<table class="rsp-loads"><tr><th>Load No.</th><th>Run No if different to above</th><th>First pick up time</th><th>RHS Speedo Reading</th><th>Last pick up time</th><th>RHS Speedo Reading</th><th>No. of bins collected</th><th>Site</th><th>Arrival Time</th><th>Arrival Weight</th><th>Departure Weight</th><th>Departure Time</th><th>Docket No.</th></tr>' + rows.join('') + '</table>' +
+      '<div class="rsp-cert">I certify that I have completed my run as per Company procedures &amp; that the information provided in this report is true &amp; correct. I also certify that I have completed a Defect Notice book reporting all faults found with this vehicle including all lights.</div>' +
+      '<div class="rsp-sig"><b>Driver’s Signature:</b>' + (R.sig ? '<img src="' + R.sig + '" alt="">' : '') + '</div>' +
+      '<div class="rsp-chk"><div><b>Run Sheet Checked by Name:</b></div><div><b>Signature:</b></div><div><b>Date:</b></div></div>' +
+      '<div class="rsp-note">Filled in by the Lukez Bunz app. Pick-up times and speedo readings are worked out from GPS and the bins marked done.</div>' +
+      '</div>';
+  }
+  function showPrint(){
+    var ov = $('rsPrint'); if (ov) ov.remove();
+    ov = document.createElement('div'); ov.id = 'rsPrint';
+    ov.innerHTML = '<div class="rsp-bar"><button type="button" data-p="print">Print / save as PDF</button><button type="button" data-p="close">Close</button></div>' + printHtml();
+    document.body.appendChild(ov);
+    // fit the A4-wide page to the phone's screen (printing puts it back to full size)
+    var pg = ov.querySelector('.rsp-page'), fit = Math.min(1, (window.innerWidth - 12) / 1080); if (pg && fit < 1) pg.style.zoom = fit;
+    var wasOpen = sheet && sheet.classList.contains('open'); if (wasOpen) sheet.classList.remove('open');   // the sheet sits on top of it otherwise
+    ov.addEventListener('click', function(e){
+      var b = e.target.closest ? e.target.closest('[data-p]') : null; if (!b) return;
+      if (b.getAttribute('data-p') === 'close') { ov.remove(); if (wasOpen) sheet.classList.add('open'); return; }
+      document.body.classList.add('rs-printing');
+      setTimeout(function(){ try { window.print(); } catch (x) {} setTimeout(function(){ document.body.classList.remove('rs-printing'); }, 500); }, 50);
+    });
+  }
+
+  /* ---- text version, for sharing and for the office email ---- */
+  function sheetText(){
+    var d = sheetData(), s = d.s;
+    var L = [
+      'DAILY RUN SHEET - DOMESTIC (IMS-OPER-F-8007)',
+      'Run ' + (s.run || '—') + ' · ' + (s.day || dayName(s.start)) + ' · ' + dateStr(s.start) + ' · ' + (R.collType || '') + (R.contract ? ' · ' + R.contract : ''),
+      'Driver: ' + (s.driver || '—') + (R.empNo ? ' (emp. ' + R.empNo + ')' : ''),
+      'Unit #1: ' + [s.truck, s.rego].filter(Boolean).join(' ') + ' · hours ' + (s.startHrs != null ? s.startHrs : '?') + '→' + (s.endHrs != null ? s.endHrs : '?') + ' · speedo ' + (s.startKm != null ? s.startKm : '?') + '→' + (s.endKm != null ? s.endKm : '?'),
+      R.unit2.truck ? 'Unit #2: ' + R.unit2.truck + ' · hours ' + R.unit2.hrsS + '→' + R.unit2.hrsE + ' · speedo ' + R.unit2.kmS + '→' + R.unit2.kmE : '',
+      'Start ' + hhmm(s.start) + ' · left depot ' + (hhmm(R.depart) || '—') + ' · back at depot ' + (hhmm(R.ret) || '—') + ' · finish ' + (hhmm(s.end) || '—'),
+      'Breaks: ' + (d.br.length ? d.br.map(function(b){ return hhmm(b.s) + '–' + hhmm(b.e); }).join(', ') : 'none'),
+      R.breakdowns.length ? 'Breakdowns: ' + R.breakdowns.map(function(b){ return hhmm(b.s) + '–' + hhmm(b.e); }).join(', ') : '',
+      'Pre-start: ' + (s.prestart ? 'done ' + hhmm(s.prestart.ts) : 'not done'),
+      ''
+    ];
+    d.loads.forEach(function(x, i){
+      L.push('Load ' + (i + 1) + (x.runNo ? ' (run ' + x.runNo + ')' : '') + ': ' + (x.n || 0) + ' bin' + (x.n === 1 ? '' : 's') + ', first ' + (x.first ? hhmm(x.first.t) + (x.first.km != null ? ' @ ' + x.first.km + ' km' : '') : '—') + ', last ' + (x.last ? hhmm(x.last.t) + (x.last.km != null ? ' @ ' + x.last.km + ' km' : '') : '—') +
+        (x.notTipped ? ' · not tipped' : ' · ' + (x.site || 'site?') + ' in ' + (hhmm(x.arrT) || '—') + ' ' + (x.arrW || '?') + ' t, out ' + (hhmm(x.depT) || '—') + ' ' + (x.depW || '?') + ' t, docket ' + (x.docket || '—')));
+    });
+    if (d.comments) L.push('', 'Other work / comments:', d.comments);
+    L.push('', R.sig ? 'Signed by the driver ' + hhmm(R.sigTs) : 'Not signed yet');
+    return L.filter(function(x, i, a){ return x !== '' || (a[i - 1] !== ''); }).join('\n');
+  }
+  function mediaIds(){
+    var ids = [];
+    R.loads.forEach(function(L){ (L.photos || []).forEach(function(p){ ids.push(p); }); });
+    R.fuel.concat(R.adblue).forEach(function(x){ if (x.photo) ids.push(x.photo); });
+    return ids;
+  }
+  function shareSheet(){
+    var text = sheetText(), data = { title: 'Run sheet ' + dateStr(SHc.s.start), text: text };
+    var gets = window.lbMedia ? mediaIds().map(function(id){ return window.lbMedia.get(id); }) : [];
+    Promise.all(gets).then(function(ms){
+      var files = ms.filter(function(m){ return m && m.blob; }).map(function(m, i){ return new File([m.blob], 'docket-' + (i + 1) + '.jpg', { type: m.type || 'image/jpeg' }); });
+      try { if (files.length && navigator.canShare && navigator.canShare({ files: files })) data.files = files; } catch (e) {}
+      if (navigator.share) return navigator.share(data);
+      return navigator.clipboard && navigator.clipboard.writeText(text).then(function(){ toast('Run sheet copied. Paste it into a message.'); });
+    }).catch(function(){});
+  }
+  function sendSheet(){
+    if (!window.lbOutbox) { shareSheet(); return; }
+    var miss = missing(SHc.s.id);
+    if (miss.length && !confirm('Still to fill in: ' + miss.join(', ') + '.\n\nSend it anyway?')) return;
+    window.lbOutbox.send({ rid: 'rs_' + R.id, kind: 'runsheet', to: ['ops'], subject: 'Run sheet · ' + (SHc.s.driver || 'driver') + ' · run ' + (SHc.s.run || '?') + ' · ' + dateStr(SHc.s.start),
+      text: sheetText(), data: { runSheet: Object.assign({}, R, { sig: R.sig ? 'signed ' + new Date(R.sigTs).toISOString() : null }), shift: { id: SHc.s.id, start: SHc.s.start, end: SHc.s.end || null, driver: SHc.s.driver, truck: SHc.s.truck, run: SHc.s.run } }, media: mediaIds() });
+    R.sentAt = Date.now(); save(R); toast('Run sheet sent to the office'); paint();
+  }
+
+  window.lbRunSheet = { open: open, missing: missing, text: function(id){ var sh = shiftFor(id); if (!sh) return ''; SHc = sh; R = getOrMake(sh.s.id); return sheetText(); }, _t: { tick: tick, get: get, all: all } };
+})();
+</script>
+
 </body>
 </html>
