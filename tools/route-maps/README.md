@@ -57,3 +57,11 @@ Notes:
   day **and** week - A and B weeks are different fortnights and may legitimately sit on top of each other.
 - `lib.py` holds the shared geometry helpers (PDF parsing, the coarse+precise fit, the boundary/house loaders) that
   `compare.py`, `identify_garbage.py`, `modes_export.py` and `extend_boundaries.py` all import.
+
+**Tried and dropped (2026-09-26): placing the part-run Garbage pages automatically.** 56 of the 60 skipped Garbage
+pages have their run number read fine but fail the fit (40-60 m), because they show only part of the run, and `fit()`
+scores a placement by how close *all* the run's houses are to the drawn route. A scorer for part-pages (route -> real
+OSM roads from `work/roads.json` + footprint houses -> route, zoom limited to 1/8-1.3x of the run's overview) was tested
+by cutting pieces out of pages that *do* place well and re-placing them: only 1 of 12 came back within 25 m (median
+error ~1.4 km). Suburban streets look too alike for a piece of route to be placed on shape alone. Getting these pages in
+needs either the maps' source files (if they carry coordinates) or placing each page by hand once.
