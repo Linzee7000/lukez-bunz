@@ -6562,6 +6562,8 @@ const STREET_LITTER_SERVICE_LEVELS = {"seasons":[{"key":"tourist1","label":"Tour
 
   function recordSnailTrailPoint(lat, lng) {
     if (snailTrailPaused) return;
+    // The trail is the shift's: nothing is recorded before Start shift (or GO) or after End shift.
+    if (typeof window.lbShiftOn === 'function' && !window.lbShiftOn()) return;
     // Rolled over to a new day with the app still open (left running overnight, or a very early
     // start): yesterday's line would otherwise keep drawing and make streets look already done.
     // The same clear happens on load for the ordinary case of reopening the app next morning.
@@ -29652,8 +29654,11 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   window.lbShiftRun = shiftRun;
   window.lbOpenShiftRun = openShiftRun;
 
+  window.lbShiftOn = function(){ return !!SH; };
   function startShift(o){
     var s = clockState(), now = Date.now();
+    // a fresh trail for the shift: whatever was driven before it started isn't part of it
+    try { var clr = g('clearSnailTrail'); if (typeof clr === 'function') clr(); } catch (e) {}
     SH = { id: 's_' + uid(), start: now, stream: o.stream || '', run: o.run || '', day: o.run ? todayDay() : '', week: o.run ? todayWeek(o.stream) : '', driver: o.driver || '', truck: o.truck || '', rego: o.rego || '', startKm: o.km, startHrs: o.hrs, startPhoto: o.photo || null,
       prestart: o.prestart || null, defects: [], dist: 0, bins: 0, binTs: [], auto: !!o.auto, synced: false };
     if (o.auto && s && s.start) SH.start = s.start;
@@ -29697,6 +29702,26 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       var id = 't_' + rec.id; mPut({ id: id, kind: 'trail', pts: pts, brk: brk, ts: rec.end, ref: rec.id }).catch(function(){});
       return id;
     } catch (e) { return null; }
+  }
+  // The saved trail of a finished shift as a KML file (one line per unbroken stretch), shared or downloaded.
+  function trailKml(id, startTs){
+    mGet(id).then(function(r){
+      if (!r || !r.pts || r.pts.length < 2) { toast('That trail wasn’t saved'); return; }
+      var segs = [], cur = [];
+      r.pts.forEach(function(p, i){ if (r.brk[i] && cur.length) { segs.push(cur); cur = []; } cur.push(p); });
+      if (cur.length) segs.push(cur);
+      var rec = history().filter(function(h){ return h.trail === id; })[0] || {};
+      var name = 'Shift ' + dateStr(startTs || r.ts) + (rec.run ? ' run ' + rec.run : '') + (rec.truck ? ' unit ' + rec.truck : '');
+      var kml = '<?xml version="1.0" encoding="UTF-8"?>\n<kml xmlns="http://www.opengis.net/kml/2.2"><Document><name>' + esc(name) + '</name>' +
+        '<Style id="t"><LineStyle><color>ffc084fc</color><width>4</width></LineStyle></Style>' +
+        segs.filter(function(sg){ return sg.length > 1; }).map(function(sg, i){
+          return '<Placemark><name>' + esc(name) + ' (' + (i + 1) + ')</name><TimeSpan><begin>' + new Date(sg[0][2]).toISOString() + '</begin><end>' + new Date(sg[sg.length - 1][2]).toISOString() + '</end></TimeSpan><styleUrl>#t</styleUrl><LineString><tessellate>1</tessellate><coordinates>' +
+            sg.map(function(p){ return p[1] + ',' + p[0] + ',0'; }).join(' ') + '</coordinates></LineString></Placemark>';
+        }).join('') + '</Document></kml>';
+      var d = new Date(startTs || r.ts), fn = 'trail-' + d.getFullYear() + ('0' + (d.getMonth() + 1)).slice(-2) + ('0' + d.getDate()).slice(-2) + (rec.run ? '-run' + rec.run : '') + '.kml';
+      try { var f = new File([kml], fn, { type: 'application/vnd.google-earth.kml+xml' }); if (navigator.canShare && navigator.canShare({ files: [f] })) { navigator.share({ files: [f], title: name }).catch(function(){}); return; } } catch (e) {}
+      try { var a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([kml], { type: 'application/vnd.google-earth.kml+xml' })); a.download = fn; document.body.appendChild(a); a.click(); setTimeout(function(){ a.remove(); }, 500); } catch (e) {}
+    });
   }
   var shownTrail = null;
   function showTrail(id, label){
@@ -29942,13 +29967,13 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     } else if (view === 'done') {
       title = 'Shift finished';
       var L0 = lastRec;
-      h = L0 ? summaryHtml(L0) + '<div class="drv-foot"><button type="button" class="drv-btn" data-a="share" data-id="' + L0.id + '">' + I.share + 'Share summary</button>' + (L0.trail ? '<button type="button" class="drv-btn" data-a="trail" data-id="' + L0.trail + '" data-lbl="' + esc(dateStr(L0.start)) + '">' + I.route + 'Trail</button>' : '') + (window.lbRunSheet ? '<button type="button" class="drv-btn" data-a="rs:main" data-id="' + L0.id + '">Run sheet</button>' : '') + '<button type="button" class="drv-btn drv-go" data-a="close">Done</button></div>' : '';
+      h = L0 ? summaryHtml(L0) + '<div class="drv-foot"><button type="button" class="drv-btn" data-a="share" data-id="' + L0.id + '">' + I.share + 'Share summary</button>' + (L0.trail ? '<button type="button" class="drv-btn" data-a="trail" data-id="' + L0.trail + '" data-lbl="' + esc(dateStr(L0.start)) + '">' + I.route + 'Trail</button><button type="button" class="drv-btn" data-a="kml" data-id="' + L0.trail + '" data-lbl="' + esc(L0.start) + '">' + I.share + 'Trail KML</button>' : '') + (window.lbRunSheet ? '<button type="button" class="drv-btn" data-a="rs:main" data-id="' + L0.id + '">Run sheet</button>' : '') + '<button type="button" class="drv-btn drv-go" data-a="close">Done</button></div>' : '';
     } else if (view === 'history') {
       title = 'Past shifts';
       var hs = history().slice().reverse();
       h = (hs.length ? '<div class="drv-hist">' + hs.map(function(s){
         return '<div class="drv-hrow"><div><b>' + esc(dateStr(s.start)) + ' · ' + esc(clock(s.start)) + '–' + esc(clock(s.end)) + '</b><span>' + esc([s.driver, s.truck].filter(Boolean).join(' · ')) + ' · worked ' + hm(s.worked) + ' · ' + (s.bins || 0) + ' bins' + (s.perHr != null ? ' · ' + s.perHr + '/h' : '') + (s.defects && s.defects.length ? ' · ' + s.defects.length + ' defect' + (s.defects.length > 1 ? 's' : '') : '') + '</span></div>' +
-          (s.trail ? '<button type="button" data-a="trail" data-id="' + s.trail + '" data-lbl="' + esc(dateStr(s.start)) + '" aria-label="Show trail">' + I.route + '</button>' : '<i></i>') +
+          (s.trail ? '<button type="button" data-a="trail" data-id="' + s.trail + '" data-lbl="' + esc(dateStr(s.start)) + '" aria-label="Show trail">' + I.route + '</button><button type="button" data-a="kml" data-id="' + s.trail + '" data-lbl="' + esc(s.start) + '" aria-label="Trail as KML">KML</button>' : '<i></i>') +
           '<button type="button" data-a="share" data-id="' + s.id + '" aria-label="Share">' + I.share + '</button></div>';
       }).join('') + '</div>' : '<div class="drv-empty">No finished shifts on this phone yet.</div>') +
         '<div class="drv-foot"><button type="button" class="drv-btn" data-a="back">Back</button><button type="button" class="drv-btn" data-a="csv">' + I.share + 'All shifts (CSV)</button></div>';
@@ -30192,6 +30217,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       doFinish(); return;
     }
     if (a === 'share') { var s = history().filter(function(x){ return x.id === b.getAttribute('data-id'); })[0]; if (s) shareText(summaryText(s), 'Shift ' + dateStr(s.start)); return; }
+    if (a === 'kml') { trailKml(b.getAttribute('data-id'), +b.getAttribute('data-lbl')); return; }
     if (a === 'trail') { closeSheet(); showTrail(b.getAttribute('data-id'), 'Trail ' + (b.getAttribute('data-lbl') || '')); return; }
     if (a === 'role') { (isLead() ? Promise.resolve(toDriver()) : toLead()).then(function(){ paint(); }); return; }
   }
