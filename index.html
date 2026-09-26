@@ -25397,6 +25397,24 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     S.breaks.push({ s: now, e: null });
     lastWarn = null; save();
   }
+  // Breaks put in after the fact (the "Having a rest?" pop-up after a long stop): never before the
+  // shift began or overlapping the last logged break, and never into the future.
+  function earliest(t) {
+    const last = S.breaks[S.breaks.length - 1];
+    return Math.max(t, S.start, last && last.e != null ? last.e : -Infinity);
+  }
+  function addBreak(s, e) {
+    if (S.start == null || onBreak()) return false;
+    s = earliest(s); e = Math.min(e, Date.now());
+    if (!(e > s)) return false;
+    S.breaks.push({ s, e });
+    lastWarn = null; save(); return true;
+  }
+  function startBreakAt(t) {
+    if (S.start == null || onBreak()) return false;
+    S.breaks.push({ s: Math.min(earliest(t), Date.now()), e: null });
+    lastWarn = null; save(); return true;
+  }
   function endBreak() {
     const now = Date.now();
     if (!onBreak()) return;
@@ -25660,6 +25678,8 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     endShift() { S = { start: null, lastSeen: 0, breaks: [] }; lastWarn = null; save(); paint(); },
     sectionHtml, paint,
     startBreak, endBreak, newShift, onGo,
+    addBreak(s, e) { const ok = addBreak(s, e); paint(); return ok; },
+    startBreakAt(t) { const ok = startBreakAt(t); paint(); return ok; },
     get state() { return JSON.parse(JSON.stringify(S)); },
     _t: { analyze, view, blocksOf, ruleOk, allOk, workAt, RULES, setState: s => { S = s; }, MIN, HR }
   };
@@ -26514,6 +26534,10 @@ body.ux2.ux-gta-game #uxGtaHealth{display:flex;flex-direction:column;align-items
 #lbStickerPop .lbsp-w{font-size:12.5px;color:var(--ux-text-3, #75849a);margin-top:6px}
 #lbStickerPop .lbsp-b{display:flex;justify-content:flex-end;gap:8px;margin-top:12px}
 #lbStickerPop .lbsp-b button{min-height:44px;padding:0 16px;border-radius:var(--ux-rad, 4px);border:1px solid var(--ux-line-2, rgba(255,255,255,.15));background:transparent;color:var(--ux-text, #f1f5f9);font-size:15px;font-weight:700;cursor:pointer}
+#lbStickerPop .lbsp-b3{flex-wrap:wrap}
+#lbStickerPop .lbsp-b3 button{flex:1 1 40%}
+#lbStickerPop .lbsp-b3 button.go{flex-basis:100%}
+#lbStickerPop[data-stage="3"], #lbStickerPop[data-stage="4"]{border-left-color:var(--ux-info, #60a5fa)}
 #lbStickerPop .lbsp-b button.go{background:var(--ui-accent, #b5451b);border-color:transparent;color:var(--ui-accent-ink, #fff)}
 html[data-ux-skin="gta"] #lbStickerPop{background:rgba(0,0,0,.86);color:#fff;border-left-color:#f0c850}
 html[data-ux-skin="gta"] #lbStickerPop .lbsp-t{font-family:"Pricedown", "Pricedown Bl", "Anton", Impact, "Arial Black", sans-serif;font-weight:400;font-size:24px;letter-spacing:.02em;color:#f0c850;text-shadow:1.5px 0 0 #000, -1.5px 0 0 #000, 0 1.5px 0 #000, 0 -1.5px 0 #000}
@@ -34138,14 +34162,21 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
 })();
 
 /* =====================================================================
-   Long stop at a bin: "Stickering a bin?" / "Did you make a mess?"
+   Long stops: "Stickering a bin?" / "Did you make a mess?" / "Having a rest?"
 
    On a shift, when the truck has been stopped beside a bin on the run (one emptied during this stop,
    or one still to do within 40 m) for over a minute, the driver is probably out stickering it: a
    pop-up offers to log it. Past three minutes it's more likely something went wrong (a spill, a
    broken bin), so the pop-up changes to ask about that. Either button opens the usual bin report on
-   that bin with a starter note; nothing is sent unless the driver sends it. It goes away when the
-   truck moves, and each stage can be waved off once per stop. Not at the depot or a tip.
+   that bin with a starter note; nothing is sent unless the driver sends it. Not at the depot or a tip.
+
+   Stopped 15 minutes anywhere but a tip (waiting at a tip is work under the fatigue rules), and not
+   already on a break: "Having a rest?" - add a 15 min break (from when the truck stopped), or start
+   the break from when it stopped and carry on resting. Both go into the break clock, same as the
+   shift screen's Rest button, so the health bar / break countdown follow. If the truck then drives
+   off with that break still running, it asks once whether to end it.
+
+   It goes away when the truck moves, and each question can be waved off once per stop.
    ===================================================================== */
 (function(){
   'use strict';
@@ -34154,21 +34185,22 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   function lsGet(k, d){ try { var v = JSON.parse(localStorage.getItem(k)); return v == null ? d : v; } catch (e) { return d; } }
   function metres(a, b){ var kx = 111320 * Math.cos(a.lat * Math.PI / 180); return Math.hypot((b.lng - a.lng) * kx, (b.lat - a.lat) * 110540); }
   function esc(v){ return String(v == null ? '' : v).replace(/[&<>"']/g, function(c){ return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
-  var STAGE1_S = 60, STAGE2_S = 180, NEAR_BIN_M = 40, PLACE_R = 300;
+  function hhmm(t){ try { return new Date(t).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }); } catch (e) { return ''; } }
+  var MIN = 60000, STAGE1_S = 60, STAGE2_S = 180, REST_MS = 15 * MIN, NEAR_BIN_M = 40, PLACE_R = 300, GO_KMH = 6;
 
   function firstName(){
     var sh = window.uxShiftState ? window.uxShiftState() : null, d = lsGet('lbDriver', {}) || {};
     var n = String((sh && sh.driver) || d.name || '').trim().split(/\s+/)[0];
     return n || 'mate';
   }
-  // at the depot or a tip the truck stands still for good reasons
-  function atBase(p){
-    var K = window.lbKnownPlaces, spots = [];
-    var dp = lsGet('lbDepot', null); if (dp && isFinite(dp.lat)) spots.push(dp);
-    if (K) { var d = K.depot(); if (d) spots.push(d); K.tips().forEach(function(t){ if (t.lat != null) spots.push(t); }); }
-    (lsGet('lbTipSites', []) || []).forEach(function(t){ if (t && isFinite(t.lat)) spots.push(t); });
-    return spots.some(function(s){ return metres(p, s) < PLACE_R; });
+  // 'depot' | 'tip' | '' - the truck stands still at both for good reasons
+  function placeAt(p){
+    var K = window.lbKnownPlaces, near = function(x){ return x && isFinite(x.lat) && x.lat != null && metres(p, x) < PLACE_R; };
+    if (near(lsGet('lbDepot', null)) || (K && near(K.depot()))) return 'depot';
+    if ((K && K.tips().some(near)) || (lsGet('lbTipSites', []) || []).some(near)) return 'tip';
+    return '';
   }
+  function clockBreak(){ var BC = window.lbBreakClock, st = BC && BC.state, b = st && st.breaks && st.breaks[st.breaks.length - 1]; return (b && b.e == null) ? b : null; }
   // The bin the truck is at: one emptied during this stop (latest first), else the nearest still to do.
   function binAt(st){
     var markers = g('activeMapCircleMarkers'), done = g('servicedBinSerials'); if (!markers || !markers.forEach) return null;
@@ -34190,58 +34222,97 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     return '';
   }
 
-  var el = null, key = '', waved = {}, shown = 0, doneSeen = null, stopT0 = 0;
+  // stages: 1 stickering, 2 mess, 3 having a rest, 4 back on the road with a break running, 9 a note
+  var el = null, key = '', waved = {}, shown = 0, doneSeen = null, stopT0 = 0, restBreak = 0, noteTimer = 0;
   function build(){
     if (el) return el;
     el = document.createElement('div'); el.id = 'lbStickerPop'; el.setAttribute('role', 'status'); el.setAttribute('aria-live', 'polite');
     el.addEventListener('click', function(ev){
       var b = ev.target.closest ? ev.target.closest('button') : null; if (!b) return;
-      var a = b.getAttribute('data-a'), st = el._st, stage = shown;
-      waved[key + '|' + stage] = 1; hide();
-      if (a !== 'go' || !st || typeof window.uxOpenIssue !== 'function') return;
-      window.uxOpenIssue('bin', { serial: st.bin ? st.bin.id : '', stream: st.bin ? (st.bin.m.stream || '') : '', site: st.bin ? String(st.bin.m.siteId || '') : '' });
-      var n = document.getElementById('uxiNote');
-      if (n && !n.value) n.value = stage === 2 ? 'Spilt / mess at the bin while emptying' : 'Stickered bin';
+      var a = b.getAttribute('data-a'), st = el._st || {}, stage = shown, BC = window.lbBreakClock;
+      waved[(stage === 4 ? 'brk' + restBreak : key) + '|' + stage] = 1; hide();
+      if (a === 'go' && typeof window.uxOpenIssue === 'function') {
+        window.uxOpenIssue('bin', { serial: st.bin ? st.bin.id : '', stream: st.bin ? (st.bin.m.stream || '') : '', site: st.bin ? String(st.bin.m.siteId || '') : '' });
+        var n = document.getElementById('uxiNote');
+        if (n && !n.value) n.value = stage === 2 ? 'Spilt / mess at the bin while emptying' : 'Stickered bin';
+      } else if (a === 'add15' && BC && BC.addBreak) {
+        if (BC.addBreak(st.t0, st.t0 + REST_MS)) note('15 min break added', hhmm(st.t0) + ' to ' + hhmm(st.t0 + REST_MS) + '.');
+        else note('Couldn’t add the break', 'Is a shift running? Check the break clock in Layers.');
+      } else if (a === 'rest' && BC && BC.startBreakAt) {
+        if (BC.startBreakAt(st.t0)) { var cb = clockBreak(); restBreak = cb ? cb.s : st.t0; note('On a break since ' + hhmm(restBreak), 'Enjoy it. End it from the shift screen when you’re back to work.'); }
+        else note('Couldn’t start the break', 'Is a shift running? Check the break clock in Layers.');
+      } else if (a === 'endbrk' && BC && BC.endBreak) {
+        BC.endBreak(); try { BC.paint(); } catch (e) {} restBreak = 0; note('Break ended', 'Back to work.');
+      }
     });
     document.body.appendChild(el);
     return el;
   }
-  function hide(){ if (el) el.classList.remove('on'); shown = 0; }
+  function hide(){ if (el) el.classList.remove('on'); shown = 0; clearTimeout(noteTimer); }
+  function note(t, s){
+    var e = build(); shown = 9; e._st = null;
+    e.innerHTML = '<div class="lbsp-t">' + esc(t) + '</div><div class="lbsp-s">' + esc(s) + '</div>';
+    e.setAttribute('data-stage', 'note'); e.classList.add('on');
+    clearTimeout(noteTimer); noteTimer = setTimeout(function(){ if (shown === 9) hide(); }, 4500);
+  }
   function show(stage, st){
     var e = build(); e._st = st;
     if (shown === stage && e.classList.contains('on')) return;
-    shown = stage;
-    var name = esc(firstName()), where = st.bin ? address(st.bin.m.siteId) : '';
-    var sub = where ? '<div class="lbsp-w">' + esc(where) + (st.bin && st.bin.id ? ' · bin ' + esc(st.bin.id) : '') + '</div>' : '';
-    e.innerHTML = stage === 1
-      ? '<div class="lbsp-t">Stickering a bin, ' + name + '?</div><div class="lbsp-s">Mario would be proud.</div>' + sub +
-        '<div class="lbsp-b"><button type="button" data-a="x">Not now</button><button type="button" class="go" data-a="go">Enter details</button></div>'
-      : '<div class="lbsp-t">Did you make a mess, ' + name + '?</div><div class="lbsp-s">That sucks. Anything to report?</div>' + sub +
-        '<div class="lbsp-b"><button type="button" data-a="x">All good</button><button type="button" class="go" data-a="go">Report it</button></div>';
+    shown = stage; clearTimeout(noteTimer);
+    var name = esc(firstName()), html;
+    if (stage === 1 || stage === 2) {
+      var where = st.bin ? address(st.bin.m.siteId) : '';
+      var sub = where ? '<div class="lbsp-w">' + esc(where) + (st.bin && st.bin.id ? ' · bin ' + esc(st.bin.id) : '') + '</div>' : '';
+      html = stage === 1
+        ? '<div class="lbsp-t">Stickering a bin, ' + name + '?</div><div class="lbsp-s">Mario would be proud.</div>' + sub +
+          '<div class="lbsp-b"><button type="button" data-a="x">Not now</button><button type="button" class="go" data-a="go">Enter details</button></div>'
+        : '<div class="lbsp-t">Did you make a mess, ' + name + '?</div><div class="lbsp-s">That sucks. Anything to report?</div>' + sub +
+          '<div class="lbsp-b"><button type="button" data-a="x">All good</button><button type="button" class="go" data-a="go">Report it</button></div>';
+    } else if (stage === 3) {
+      html = '<div class="lbsp-t">Having a rest, ' + name + '?</div><div class="lbsp-s">Stopped since ' + esc(hhmm(st.t0)) + ' (' + Math.floor((Date.now() - st.t0) / MIN) + ' min).</div>' +
+        '<div class="lbsp-b lbsp-b3"><button type="button" data-a="x">No, working</button><button type="button" data-a="add15">Add a 15 min break</button>' +
+        '<button type="button" class="go" data-a="rest">I’m resting: break from ' + esc(hhmm(st.t0)) + '</button></div>';
+    } else {
+      html = '<div class="lbsp-t">Back on the road, ' + name + '?</div><div class="lbsp-s">Your break’s still running (since ' + esc(hhmm(st.s)) + ', ' + Math.floor((Date.now() - st.s) / MIN) + ' min).</div>' +
+        '<div class="lbsp-b"><button type="button" data-a="x">Still on break</button><button type="button" class="go" data-a="endbrk">End break</button></div>';
+    }
+    e.innerHTML = html;
     e.setAttribute('data-stage', String(stage));
     e.classList.add('on');
-    try { if (window.uxGta && window.uxGta.play) window.uxGta.play(stage === 1 ? 'pickup' : 'armour'); } catch (x) {}
-    try { if (navigator.vibrate) navigator.vibrate(stage === 1 ? 120 : [120, 80, 120]); } catch (x) {}
+    try { if (window.uxGta && window.uxGta.play) window.uxGta.play(stage === 1 ? 'pickup' : stage === 2 ? 'armour' : 'heal'); } catch (x) {}
+    try { if (navigator.vibrate) navigator.vibrate(stage === 2 || stage === 4 ? [120, 80, 120] : 120); } catch (x) {}
   }
 
   function tick(){
+    if (shown === 9) return;                                   // let a note finish
+    var sh = window.uxShiftState ? window.uxShiftState() : null;
     var cur = window.lbStops && window.lbStops.current ? window.lbStops.current() : null;
-    if (!cur) { if (shown) hide(); key = ''; doneSeen = null; return; }
+    var brk = clockBreak();
+    if (!cur) {
+      if (shown && shown !== 4) hide();
+      key = ''; doneSeen = null;
+      // driving off with the break this pop-up started still running
+      var sp = +g('currentMapSpeedKmh');
+      if (sh && brk && restBreak && brk.s === restBreak && sp >= GO_KMH && !waved['brk' + restBreak + '|4']) { if (shown !== 4) show(4, { s: brk.s }); }
+      else if (shown === 4 && !(brk && brk.s === restBreak)) hide();
+      return;
+    }
+    if (shown === 4) hide();
     if (cur.t0 !== stopT0) {            // a new stop: remember which bins were already done when it began
       stopT0 = cur.t0; key = String(cur.t0); waved = {};
       var done = g('servicedBinSerials'); doneSeen = new Set(done && done.forEach ? Array.from(done) : []);
       if (shown) hide();
     }
-    var secs = (Date.now() - cur.t0) / 1000;
-    var stage = secs >= STAGE2_S ? 2 : secs >= STAGE1_S ? 1 : 0;
-    if (!stage) return;
-    var issue = document.getElementById('uxIssue');
-    if (waved[key + '|' + stage] || (issue && issue.classList.contains('open'))) { if (shown === stage) hide(); return; }
+    if (brk) { if (shown) hide(); return; }                   // already on a break: nothing to ask
+    var ms = Date.now() - cur.t0, p = { lat: cur.lat, lng: cur.lng }, place = placeAt(p);
+    var issue = document.getElementById('uxIssue'), busy = issue && issue.classList.contains('open');
+    if (ms >= REST_MS && place !== 'tip' && !waved[key + '|3'] && !busy) { if (shown !== 3) show(3, { t0: cur.t0 }); return; }
+    var stage = ms >= STAGE2_S * 1000 ? 2 : ms >= STAGE1_S * 1000 ? 1 : 0;
+    if (!stage || place) { if (shown) hide(); return; }
+    if (waved[key + '|' + stage] || busy) { if (shown === stage) hide(); return; }
     if (shown === stage) return;
-    var p = { lat: cur.lat, lng: cur.lng };
-    if (atBase(p)) return;
     var bin = binAt({ lat: cur.lat, lng: cur.lng, doneSeen: doneSeen });
-    if (!bin) return;
+    if (!bin) { if (shown) hide(); return; }
     show(stage, { bin: bin });
   }
   setInterval(function(){ try { tick(); } catch (e) {} }, 1000);
