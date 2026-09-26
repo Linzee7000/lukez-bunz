@@ -26505,6 +26505,20 @@ body.ux2.ux-gta-game #uxGtaHealth{display:flex;flex-direction:column;align-items
 #uxGtaSplash.k-red b{color:#c8202a}
 #uxGtaSplash.k-white b{color:#fff}
 @media (prefers-reduced-motion: reduce){.uxgp{animation:none}#uxGtaFeed .uxgf{animation:uxgfOut .4s linear 4.1s forwards}}
+/* Long stop at a bin pop-up (see "Long stop at a bin" in lb-stops-script) */
+#lbStickerPop{position:fixed;left:10px;right:10px;top:calc(env(safe-area-inset-top, 0px) + 96px);z-index:11500;max-width:420px;margin:0 auto;padding:14px 14px 12px 16px;background:var(--ux-s1, #11171e);color:var(--ux-text, #f1f5f9);border-left:4px solid var(--ui-accent, #b5451b);border-radius:var(--ux-rad, 4px);box-shadow:0 10px 30px rgba(0,0,0,.5);transform:translateY(-12px);opacity:0;pointer-events:none;transition:opacity .2s, transform .2s}
+#lbStickerPop.on{opacity:1;transform:none;pointer-events:auto}
+#lbStickerPop[data-stage="2"]{border-left-color:var(--ux-warn, #fbbf24)}
+#lbStickerPop .lbsp-t{font-size:18px;font-weight:800;line-height:1.2}
+#lbStickerPop .lbsp-s{font-size:15px;color:var(--ux-text-2, #adb9c8);margin-top:3px}
+#lbStickerPop .lbsp-w{font-size:12.5px;color:var(--ux-text-3, #75849a);margin-top:6px}
+#lbStickerPop .lbsp-b{display:flex;justify-content:flex-end;gap:8px;margin-top:12px}
+#lbStickerPop .lbsp-b button{min-height:44px;padding:0 16px;border-radius:var(--ux-rad, 4px);border:1px solid var(--ux-line-2, rgba(255,255,255,.15));background:transparent;color:var(--ux-text, #f1f5f9);font-size:15px;font-weight:700;cursor:pointer}
+#lbStickerPop .lbsp-b button.go{background:var(--ui-accent, #b5451b);border-color:transparent;color:var(--ui-accent-ink, #fff)}
+html[data-ux-skin="gta"] #lbStickerPop{background:rgba(0,0,0,.86);color:#fff;border-left-color:#f0c850}
+html[data-ux-skin="gta"] #lbStickerPop .lbsp-t{font-family:"Pricedown", "Pricedown Bl", "Anton", Impact, "Arial Black", sans-serif;font-weight:400;font-size:24px;letter-spacing:.02em;color:#f0c850;text-shadow:1.5px 0 0 #000, -1.5px 0 0 #000, 0 1.5px 0 #000, 0 -1.5px 0 #000}
+html[data-ux-skin="gta"] #lbStickerPop[data-stage="2"] .lbsp-t{color:#e05252}
+html[data-ux-skin="gta"] #lbStickerPop .lbsp-b button.go{background:#fff;color:#000}
 /* The map title bar is deliberately solid (not glass) in both themes - see "Map title bar: solid
    black" further down - so it takes the skin's dark background instead of the fixed #0a0e13. */
 html[data-ux-skin] body.ux2 .map-header-panel .map-top-bar,
@@ -29589,6 +29603,102 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
 })();
 
 /* =====================================================================
+   Known places: the depot and the tip sites, built in so a fresh phone knows them.
+
+   The addresses are fixed here; where they are on the map is looked up once per phone from
+   OpenStreetMap (Nominatim, the same service the app already uses for addresses) and kept in
+   localStorage 'lbPlaceGeo'. A lookup that fails is tried again on a later day. What a phone
+   learns for itself still wins: a leading hand's "Set depot to here" (lbDepot), and a tip named
+   on the run sheet while standing at it (lbTipSites, exact GPS).
+
+   Which tip each stream goes to (current as of Sep 2026 - change it here when the contracts do):
+     Recycling  Cleanaway Hallam
+     Garbage    Rye Landfill                 backup Cleanaway Dandenong (SEMTS)
+     FOGO       Mon: Bio Gro Dandenong       Tue-Fri: Cleanaway Dandenong (SEMTS)   backup Valoriza Dandenong
+   ===================================================================== */
+(function(){
+  'use strict';
+  var GEO_KEY = 'lbPlaceGeo';
+  var DEPOT = { id: 'depot', name: 'Depot (4 David Court, Rosebud)', addr: '4 David Court, Rosebud West VIC 3940',
+    q: ['4 David Court, Rosebud West, Victoria, Australia', 'David Court, Rosebud West, Victoria, Australia', 'David Court, Capel Sound, Victoria, Australia', 'David Court, Rosebud, Victoria, Australia'] };
+  // use: [stream, days (0 = Sunday ... 6 = Saturday; empty = every day), 'main' | 'backup']
+  var TIPS = [
+    { id: 'hallam', name: 'Cleanaway Hallam', addr: '39 Wedgewood Road, Hallam VIC 3803',
+      q: ['39 Wedgewood Road, Hallam, Victoria, Australia', 'Wedgewood Road, Hallam, Victoria, Australia'],
+      use: [['Recycling', [], 'main'], ['SummerRecycling', [], 'main']] },
+    { id: 'rye', name: 'Rye Landfill', addr: '280 Truemans Road, Fingal VIC 3939',
+      q: ['Rye Landfill, Truemans Road, Victoria, Australia', '280 Truemans Road, Fingal, Victoria, Australia', 'Truemans Road, Fingal, Victoria, Australia'],
+      use: [['Garbage', [], 'main']] },
+    { id: 'semts', name: 'Cleanaway Dandenong (SEMTS)', addr: '72 Thomas Murrell Crescent, Dandenong South VIC 3175',
+      q: ['72 Thomas Murrell Crescent, Dandenong South, Victoria, Australia', 'Thomas Murrell Crescent, Dandenong South, Victoria, Australia'],
+      use: [['Garbage', [], 'backup'], ['FOGO', [2, 3, 4, 5], 'main']] },
+    { id: 'biogro', name: 'Bio Gro Dandenong', addr: '80-82 Ordish Road, Dandenong South VIC 3175',
+      q: ['80 Ordish Road, Dandenong South, Victoria, Australia', 'Ordish Road, Dandenong South, Victoria, Australia'],
+      use: [['FOGO', [1], 'main']] },
+    { id: 'valoriza', name: 'Valoriza Dandenong', addr: '42-46 Villas Road, Dandenong South VIC 3175',
+      q: ['42 Villas Road, Dandenong South, Victoria, Australia', 'Villas Road, Dandenong South, Victoria, Australia'],
+      use: [['FOGO', [], 'backup']] }
+  ];
+  function lsGet(k, d){ try { var v = JSON.parse(localStorage.getItem(k)); return v == null ? d : v; } catch (e) { return d; } }
+  function lsSet(k, v){ try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
+  function geo(){ var o = lsGet(GEO_KEY, {}); return (o && typeof o === 'object') ? o : {}; }
+  function withPos(p){ var c = geo()[p.id]; return { id: p.id, name: p.name, addr: p.addr, use: p.use, lat: c && isFinite(c.lat) ? c.lat : null, lng: c && isFinite(c.lng) ? c.lng : null }; }
+
+  // Anything the lookup returns outside the Peninsula / south-east Melbourne is a wrong match.
+  function inArea(lat, lng){ return lat > -38.62 && lat < -37.85 && lng > 144.6 && lng < 145.45; }
+  var busy = false;
+  function locate(){
+    if (busy || !navigator.onLine) return;
+    var all = [DEPOT].concat(TIPS), g0 = geo(), today = new Date().toDateString();
+    var todo = all.filter(function(p){ var c = g0[p.id]; return !(c && isFinite(c.lat)) && !(c && c.tried === today); });
+    if (!todo.length) return;
+    busy = true;
+    (function next(i){
+      if (i >= todo.length) { busy = false; return; }
+      var p = todo[i];
+      (function tryQ(j){
+        if (j >= p.q.length) { var g1 = geo(); g1[p.id] = { tried: today }; lsSet(GEO_KEY, g1); setTimeout(function(){ next(i + 1); }, 1200); return; }
+        fetch('https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&countrycodes=au&q=' + encodeURIComponent(p.q[j]))
+          .then(function(r){ return r.ok ? r.json() : []; })
+          .then(function(a){
+            var hit = a && a[0], lat = hit && +hit.lat, lng = hit && +hit.lon;
+            if (hit && inArea(lat, lng)) {
+              var g1 = geo(); g1[p.id] = { lat: lat, lng: lng, q: p.q[j], exact: j === 0, ts: Date.now() }; lsSet(GEO_KEY, g1);
+              setTimeout(function(){ next(i + 1); }, 1200);
+            } else setTimeout(function(){ tryQ(j + 1); }, 1200);     // Nominatim asks for no more than one request a second
+          })
+          .catch(function(){ busy = false; });                      // offline: try again next time the app opens
+      })(0);
+    })(0);
+  }
+  setTimeout(locate, 8000);
+
+  // The tips for a stream on a given day: { main: [...], backup: [...] }.
+  function tipsFor(stream, when){
+    var st = String(stream || ''), day = (when ? new Date(when) : new Date()).getDay(), out = { main: [], backup: [] };
+    TIPS.forEach(function(t){
+      t.use.forEach(function(u){
+        if (u[0] !== st || (u[1].length && u[1].indexOf(day) < 0)) return;
+        var arr = out[u[2]]; if (!arr.some(function(x){ return x.id === t.id; })) arr.push(withPos(t));
+      });
+    });
+    return out;
+  }
+  window.lbKnownPlaces = {
+    depot: function(){ var d = withPos(DEPOT); return isFinite(d.lat) && d.lat != null ? d : null; },
+    depotInfo: function(){ return withPos(DEPOT); },
+    tips: function(){ return TIPS.map(withPos); },
+    tipsFor: tipsFor,
+    // "Garbage: Rye Landfill (backup Cleanaway Dandenong (SEMTS))"
+    tipLine: function(stream, when){
+      var t = tipsFor(stream, when); if (!t.main.length && !t.backup.length) return '';
+      return t.main.map(function(x){ return x.name; }).join(' / ') + (t.backup.length ? ' · backup ' + t.backup.map(function(x){ return x.name; }).join(' / ') : '');
+    },
+    locate: locate
+  };
+})();
+
+/* =====================================================================
    Driver tools: the shift (start, rest, end), the pre-start check, truck defects,
    photos / voice notes / QR scanning for reports, live bins per km and per hour,
    each shift's trail kept to look at later, and leading-hand mode (PIN).
@@ -29884,7 +29994,13 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   // Only the Iveco S-Way Accos (units 3436-3469, 3525, 3540) show brake wear % on the dash, so only they are asked for it.
   function hasBrakeGauge(t){ var n = parseInt(String(t || '').replace(/\D/g, ''), 10); return (n >= 3436 && n <= 3469) || n === 3525 || n === 3540; }
   function brakeDue(){ return !!(SH && hasBrakeGauge(SH.truck) && isBrakeDay() && !brakeDoneToday() && !SH.brakeSkipped); }
-  function depotPos(){ var d = lsGet('lbDepot', null); return d && isFinite(d.lat) ? d : (SH && SH.home) || null; }
+  // The depot a leading hand set on this phone, else the built-in one (4 David Court - see Known places),
+  // else wherever this shift started.
+  function depotPos(){
+    var d = lsGet('lbDepot', null); if (d && isFinite(d.lat)) return d;
+    var k = window.lbKnownPlaces && window.lbKnownPlaces.depot(); if (k) return k;
+    return (SH && SH.home) || null;
+  }
 
   var SH = lsGet('lbShift', null);                 // the running shift, or null
   function saveSh(){ lsSet('lbShift', SH); }
@@ -30371,7 +30487,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
         (isLead() && r.status === 'waiting' ? '<button type="button" class="drv-link" data-a="ack" data-id="' + esc(r.id) + '">I’ve got it</button>' : '') + '</div>';
     }).join('') + '</div>';
   }
-  function roleHtml(){ return (isLead() ? '<div class="drv-role">' + I.truck + '<span>Depot: ' + (lsGet('lbDepot', null) ? 'set' : 'not set (using where each shift starts)') + '</span><button type="button" class="drv-link" data-a="setdepot">Set depot to here</button></div>' : '') + '<div class="drv-role">' + I.key + '<span>' + (isLead() ? 'Leading hand mode' : 'Driver mode') + '</span><button type="button" class="drv-link" data-a="role">' + (isLead() ? 'Switch to driver' : 'Leading hand…') + '</button></div>'; }
+  function roleHtml(){ return (isLead() ? '<div class="drv-role">' + I.truck + '<span>Depot: ' + (lsGet('lbDepot', null) ? 'set on this phone' : (window.lbKnownPlaces && window.lbKnownPlaces.depot() ? '4 David Court, Rosebud' : '4 David Court, Rosebud (not found on the map yet, using where each shift starts)')) + '</span><button type="button" class="drv-link" data-a="setdepot">Set depot to here</button></div>' : '') + '<div class="drv-role">' + I.key + '<span>' + (isLead() ? 'Leading hand mode' : 'Driver mode') + '</span><button type="button" class="drv-link" data-a="role">' + (isLead() ? 'Switch to driver' : 'Leading hand…') + '</button></div>'; }
   function summaryHtml(s){
     return '<div class="drv-stats">' + stat(hm(s.worked), 'worked') + stat((s.odoKm != null ? s.odoKm : (+s.gpsKm || 0).toFixed(1)), s.odoKm != null ? 'km (odometer)' : 'km (GPS)') + stat(s.bins || 0, 'bins') +
       stat(s.perKm == null ? '–' : (+s.perKm).toFixed(1), 'bins / km') + stat(s.perHr == null ? '–' : Math.round(s.perHr), 'bins / h') + stat(s.engHrs != null ? s.engHrs : '–', 'engine h') + '</div>';
@@ -33478,7 +33594,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       R.cur.last = { t: t1, km: k }; R.cur.n += n - R.seenBins; R.seenBins = n; ch = true;
     }
     // leaving and getting back to the depot
-    var dp = lsGet('lbDepot', null); if (!(dp && isFinite(dp.lat))) dp = live.home || null;
+    var dp = lsGet('lbDepot', null); if (!(dp && isFinite(dp.lat))) dp = (window.lbKnownPlaces && window.lbKnownPlaces.depot()) || live.home || null;
     var loc = here();
     if (dp && loc) {
       var d = metres(dp, loc);
@@ -33492,10 +33608,22 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   setInterval(function(){ try { tick(); } catch (e) {} }, 5000);
 
   /* ---- tips ---- */
-  function tipSites(){ var a = lsGet('lbTipSites', []); return Array.isArray(a) ? a : []; }
+  // Tips this phone has learned (named on the run sheet while there - exact GPS), then the built-in ones
+  // (Known places) it hasn't: today's tips for the shift's stream first, so they head the suggestions.
+  function tipSites(){
+    var learned = lsGet('lbTipSites', []); learned = Array.isArray(learned) ? learned : [];
+    var K = window.lbKnownPlaces; if (!K) return learned;
+    var byName = {}; learned.forEach(function(x){ byName[String(x.name).toLowerCase()] = x; });
+    var sh = window.uxShiftState ? window.uxShiftState() : null, t = sh && sh.stream ? K.tipsFor(sh.stream) : { main: [], backup: [] };
+    var out = [], used = {};
+    // a learned spot beats the looked-up one for the same name (it's where the truck actually stood)
+    function add(x){ var k = String(x.name).toLowerCase(); if (used[k]) return; used[k] = 1; out.push(byName[k] || x); }
+    t.main.concat(t.backup).forEach(add); learned.forEach(add); K.tips().forEach(add);
+    return out;
+  }
   function nearestTip(loc){
     if (!loc) return null; var best = null, bd = 1500;
-    tipSites().forEach(function(t){ var d = metres(loc, t); if (d < bd) { bd = d; best = t; } });
+    tipSites().forEach(function(t){ if (t.lat == null || !isFinite(t.lat)) return; var d = metres(loc, t); if (d < bd) { bd = d; best = t; } });
     return best;
   }
   function rememberTip(name, loc){
@@ -33508,6 +33636,9 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   // "At the tip": the bins since the last tip become a load
   function arriveTip(R, sh){
     var loc = here(), nt = nearestTip(loc);
+    // not at a tip the phone knows the spot of: suggest today's usual one for the stream
+    var stm = sh && (sh.s || sh).stream;
+    if (!nt && window.lbKnownPlaces && stm) { var tt = window.lbKnownPlaces.tipsFor(stm); if (tt.main.length) nt = tt.main[0]; }
     var L = { id: 'l_' + uid(), runNo: '', n: R.cur.n, first: R.cur.first, last: R.cur.last, site: nt ? nt.name : '', lat: loc && loc.lat, lng: loc && loc.lng,
       arrT: Date.now(), arrW: '', depW: '', depT: null, docket: '', photos: [] };
     R.loads.push(L); R.cur = { n: 0, first: null, last: null }; save(R);
@@ -33580,7 +33711,9 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       var i = R.loads.indexOf(L);
       title = 'Load ' + (i + 1) + ' · tip';
       var sites = tipSites();
+      var tipLine = window.lbKnownPlaces && s.stream ? window.lbKnownPlaces.tipLine(s.stream, L.arrT) : '';
       h = '<div class="rs-auto">' + L.n + ' bins in this load' + (L.first ? ' · first pick-up ' + hhmm(L.first.t) + ', last ' + hhmm(L.last.t) : '') + '</div>' +
+        (tipLine ? '<div class="rs-auto">Tip for ' + esc(STREAM_TYPE[s.stream] || s.stream) + ' that day: ' + esc(tipLine) + '</div>' : '') +
         f('rsLSite', 'Tip site', L.site, 'text', 'e.g. Rye transfer station', ' list="rsTipList"') + '<datalist id="rsTipList">' + sites.map(function(t){ return '<option value="' + esc(t.name) + '">'; }).join('') + '</datalist>' +
         '<div class="rs-grid">' + f('rsLArrT', 'Arrived', hhmm(L.arrT), 'time') + f('rsLArrW', 'Arrival weight (t)', L.arrW, 'number', 'weighbridge in') + '</div>' +
         '<div class="rs-grid">' + f('rsLDepW', 'Departure weight (t)', L.depW, 'number', 'weighbridge out') + f('rsLDepT', 'Left', hhmm(L.depT), 'time') + '</div>' +
@@ -33998,8 +34131,121 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     list: function(shiftId, kind){ var a = lsGet('lbStops', []) || []; return a.filter(function(r){ return (!shiftId || r.shiftId === shiftId) && (!kind || r.kind === kind); }); },
     pinFixes: function(){ return lsGet('lbPinFixes', []) || []; },
     drawFixes: drawFixes,
+    // the stop happening now, if the truck is stopped (read-only copy)
+    current: function(){ return stop ? { t0: stop.t0, lat: stop.lat, lng: stop.lng, done0: stop.done0, shiftId: stop.shiftId } : null; },
     _t: { finish: finish, sitesNear: sitesNear, setStop: function(s){ stop = s; } }
   };
+})();
+
+/* =====================================================================
+   Long stop at a bin: "Stickering a bin?" / "Did you make a mess?"
+
+   On a shift, when the truck has been stopped beside a bin on the run (one emptied during this stop,
+   or one still to do within 40 m) for over a minute, the driver is probably out stickering it: a
+   pop-up offers to log it. Past three minutes it's more likely something went wrong (a spill, a
+   broken bin), so the pop-up changes to ask about that. Either button opens the usual bin report on
+   that bin with a starter note; nothing is sent unless the driver sends it. It goes away when the
+   truck moves, and each stage can be waved off once per stop. Not at the depot or a tip.
+   ===================================================================== */
+(function(){
+  'use strict';
+  var GF = {};
+  function g(n){ try { return (GF[n] || (GF[n] = new Function('return typeof ' + n + ' === "undefined" ? undefined : ' + n)))(); } catch (e) { return undefined; } }
+  function lsGet(k, d){ try { var v = JSON.parse(localStorage.getItem(k)); return v == null ? d : v; } catch (e) { return d; } }
+  function metres(a, b){ var kx = 111320 * Math.cos(a.lat * Math.PI / 180); return Math.hypot((b.lng - a.lng) * kx, (b.lat - a.lat) * 110540); }
+  function esc(v){ return String(v == null ? '' : v).replace(/[&<>"']/g, function(c){ return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+  var STAGE1_S = 60, STAGE2_S = 180, NEAR_BIN_M = 40, PLACE_R = 300;
+
+  function firstName(){
+    var sh = window.uxShiftState ? window.uxShiftState() : null, d = lsGet('lbDriver', {}) || {};
+    var n = String((sh && sh.driver) || d.name || '').trim().split(/\s+/)[0];
+    return n || 'mate';
+  }
+  // at the depot or a tip the truck stands still for good reasons
+  function atBase(p){
+    var K = window.lbKnownPlaces, spots = [];
+    var dp = lsGet('lbDepot', null); if (dp && isFinite(dp.lat)) spots.push(dp);
+    if (K) { var d = K.depot(); if (d) spots.push(d); K.tips().forEach(function(t){ if (t.lat != null) spots.push(t); }); }
+    (lsGet('lbTipSites', []) || []).forEach(function(t){ if (t && isFinite(t.lat)) spots.push(t); });
+    return spots.some(function(s){ return metres(p, s) < PLACE_R; });
+  }
+  // The bin the truck is at: one emptied during this stop (latest first), else the nearest still to do.
+  function binAt(st){
+    var markers = g('activeMapCircleMarkers'), done = g('servicedBinSerials'); if (!markers || !markers.forEach) return null;
+    var p = { lat: st.lat, lng: st.lng }, fresh = {}, i = 0;
+    if (done && done.forEach && st.doneSeen) done.forEach(function(id){ if (!st.doneSeen.has(id)) fresh[id] = ++i; });
+    var best = null;
+    markers.forEach(function(m, key){
+      var id = m.serial || key, d = metres(p, m); if (d > NEAR_BIN_M) return;
+      var f = fresh[id] || 0, todo = !(done && done.has(id));
+      if (!f && !todo) return;
+      var score = f ? 1000 + f : -d;          // emptied this stop beats anything still to do; then the nearest
+      if (!best || score > best.score) best = { id: id, m: m, d: d, score: score };
+    });
+    return best;
+  }
+  function address(siteId){
+    var recs = g('siteRecords') || [];
+    for (var i = 0; i < recs.length; i++) if (String(recs[i].propId || recs[i].siteId) === String(siteId)) return String(recs[i].addressText || recs[i].baseStreetLine || '');
+    return '';
+  }
+
+  var el = null, key = '', waved = {}, shown = 0, doneSeen = null, stopT0 = 0;
+  function build(){
+    if (el) return el;
+    el = document.createElement('div'); el.id = 'lbStickerPop'; el.setAttribute('role', 'status'); el.setAttribute('aria-live', 'polite');
+    el.addEventListener('click', function(ev){
+      var b = ev.target.closest ? ev.target.closest('button') : null; if (!b) return;
+      var a = b.getAttribute('data-a'), st = el._st, stage = shown;
+      waved[key + '|' + stage] = 1; hide();
+      if (a !== 'go' || !st || typeof window.uxOpenIssue !== 'function') return;
+      window.uxOpenIssue('bin', { serial: st.bin ? st.bin.id : '', stream: st.bin ? (st.bin.m.stream || '') : '', site: st.bin ? String(st.bin.m.siteId || '') : '' });
+      var n = document.getElementById('uxiNote');
+      if (n && !n.value) n.value = stage === 2 ? 'Spilt / mess at the bin while emptying' : 'Stickered bin';
+    });
+    document.body.appendChild(el);
+    return el;
+  }
+  function hide(){ if (el) el.classList.remove('on'); shown = 0; }
+  function show(stage, st){
+    var e = build(); e._st = st;
+    if (shown === stage && e.classList.contains('on')) return;
+    shown = stage;
+    var name = esc(firstName()), where = st.bin ? address(st.bin.m.siteId) : '';
+    var sub = where ? '<div class="lbsp-w">' + esc(where) + (st.bin && st.bin.id ? ' · bin ' + esc(st.bin.id) : '') + '</div>' : '';
+    e.innerHTML = stage === 1
+      ? '<div class="lbsp-t">Stickering a bin, ' + name + '?</div><div class="lbsp-s">Mario would be proud.</div>' + sub +
+        '<div class="lbsp-b"><button type="button" data-a="x">Not now</button><button type="button" class="go" data-a="go">Enter details</button></div>'
+      : '<div class="lbsp-t">Did you make a mess, ' + name + '?</div><div class="lbsp-s">That sucks. Anything to report?</div>' + sub +
+        '<div class="lbsp-b"><button type="button" data-a="x">All good</button><button type="button" class="go" data-a="go">Report it</button></div>';
+    e.setAttribute('data-stage', String(stage));
+    e.classList.add('on');
+    try { if (window.uxGta && window.uxGta.play) window.uxGta.play(stage === 1 ? 'pickup' : 'armour'); } catch (x) {}
+    try { if (navigator.vibrate) navigator.vibrate(stage === 1 ? 120 : [120, 80, 120]); } catch (x) {}
+  }
+
+  function tick(){
+    var cur = window.lbStops && window.lbStops.current ? window.lbStops.current() : null;
+    if (!cur) { if (shown) hide(); key = ''; doneSeen = null; return; }
+    if (cur.t0 !== stopT0) {            // a new stop: remember which bins were already done when it began
+      stopT0 = cur.t0; key = String(cur.t0); waved = {};
+      var done = g('servicedBinSerials'); doneSeen = new Set(done && done.forEach ? Array.from(done) : []);
+      if (shown) hide();
+    }
+    var secs = (Date.now() - cur.t0) / 1000;
+    var stage = secs >= STAGE2_S ? 2 : secs >= STAGE1_S ? 1 : 0;
+    if (!stage) return;
+    var issue = document.getElementById('uxIssue');
+    if (waved[key + '|' + stage] || (issue && issue.classList.contains('open'))) { if (shown === stage) hide(); return; }
+    if (shown === stage) return;
+    var p = { lat: cur.lat, lng: cur.lng };
+    if (atBase(p)) return;
+    var bin = binAt({ lat: cur.lat, lng: cur.lng, doneSeen: doneSeen });
+    if (!bin) return;
+    show(stage, { bin: bin });
+  }
+  setInterval(function(){ try { tick(); } catch (e) {} }, 1000);
+  window.lbStickerPop = { _t: { tick: tick, show: show, hide: hide } };
 })();
 </script>
 
