@@ -26562,6 +26562,22 @@ body.ux2 .ux-skin-pv i:nth-child(2){top:20px;right:22px}
 body.ux2 .ux-skin-pv b{position:absolute;left:10px;bottom:5px;width:40%;height:3px;border-radius:2px;background:var(--p-t)}
 body.ux2 .ux-skin-pv em{position:absolute;right:6px;top:20px;width:10px;height:10px;border-radius:calc(var(--ux-rad) / 2);background:var(--ui-accent)}
 @media (max-width: 360px){body.ux2 .ux-skins{grid-template-columns:repeat(2, minmax(0, 1fr))}}
+/* Truck picker (Customize > Look > Truck on the map). The truck pictures are stored cab-up for the map;
+   here they're turned on their side so they fit a card. */
+body.ux2 .ux-trucks{display:grid;grid-template-columns:repeat(3, minmax(0, 1fr));gap:8px}
+body.ux2 .ux-truck-sw{display:flex;flex-direction:column;align-items:stretch;gap:6px;min-height:0 !important;padding:6px !important;border-radius:var(--ux-rad) !important;background:transparent !important;border:2px solid var(--ux-line) !important;box-shadow:none !important;color:var(--ux-text-2) !important;font-size:13px !important;font-weight:700 !important;cursor:pointer}
+body.ux2 .ux-truck-sw.on{border-color:var(--ui-accent) !important;color:var(--ux-text) !important}
+html[data-ux-skin="gta"] body.ux2 .ux-truck-sw.on{border-color:var(--ux-text) !important}
+body.ux2 .ux-truck-pv{position:relative;display:flex;align-items:center;justify-content:center;height:52px;border-radius:var(--ux-rad);background:var(--ux-s2);overflow:hidden;color:var(--ux-text-2)}
+body.ux2 .ux-truck-pv img{position:absolute;left:50%;top:50%;height:92px;width:auto;transform:translate(-50%, -50%) rotate(-90deg)}
+body.ux2 .ux-truck-ico{position:relative;display:inline-flex}
+body.ux2 .ux-truck-auto b{position:absolute;right:-8px;top:-4px;font-size:11px;font-weight:900;line-height:16px;width:16px;text-align:center;border-radius:50%;background:var(--ui-accent);color:var(--ui-accent-ink)}
+/* The amber beacon on the chosen truck's cab roof, flashing. The marker is rebuilt on every GPS fix,
+   so the flash's phase is set from the clock (animation-delay, see the truck block) to keep an even
+   rhythm instead of restarting each fix. */
+.lb-beacon{position:absolute;width:8px;height:8px;margin:-4px 0 0 -4px;border-radius:50%;background:#ffc02e;box-shadow:0 0 6px 3px rgba(255,150,0,.95), 0 0 16px 6px rgba(255,140,0,.55);pointer-events:none;animation:lbBeacon 1s ease-in-out infinite}
+@keyframes lbBeacon{0%, 100%{opacity:1;transform:scale(1.15)}50%{opacity:.08;transform:scale(.6)}}
+@media (prefers-reduced-motion: reduce){.lb-beacon{animation-duration:2.4s}}
 /* Map colours (Customize > Look > Map colours): a filter on the base map tiles only - pins, runs,
    boundaries and the trail sit in other panes and keep their true colours. "Night" turns the street
    map dark (inverted, hues turned back so water stays blue) and just dims satellite, which can't be
@@ -28660,6 +28676,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       cr: (o.cr === 'sharp' || o.cr === 'round') ? o.cr : 'soft',
       skin: skinOf(o.skin).id,
       maptint: MAPTINTS.indexOf(o.maptint) >= 0 ? o.maptint : 'normal',
+      truck: /^(standard|auto|recycle|fogo|garbage|glass)$/.test(o.truck) ? o.truck : 'standard',
       gtafx: o.gtafx !== false,
       gtasnd: o.gtasnd !== false,
       ov: (o.ov && typeof o.ov === 'object') ? o.ov : {}
@@ -28687,6 +28704,18 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     window[name] = function(){ var r = prev.apply(this, arguments); syncThemeColor(); return r; };
   });
 
+  // Read by the truck block further down ("Your truck on the map").
+  window.uxTruckChoice = function(){ return st.truck; };
+  var TRUCK_ICO = '<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><path d="M2 7h11v9H2zM13 10h4l3 3v3h-7z"/><circle cx="6" cy="17.5" r="1.8"/><circle cx="16.5" cy="17.5" r="1.8"/></svg>';
+  function truckPicker(){
+    var list = (window.lbTrucks && window.lbTrucks.list) || [];
+    var cards = [['standard', 'Standard', '<span class="ux-truck-ico">' + TRUCK_ICO + '</span>'], ['auto', 'Match my shift', '<span class="ux-truck-ico ux-truck-auto">' + TRUCK_ICO + '<b>A</b></span>']]
+      .concat(list.map(function(t){ return [t.id, t.l, '<img src="' + t.src + '" alt="" loading="lazy">']; }));
+    return '<div class="ux-trucks" role="group" aria-label="Truck on the map">' + cards.map(function(c){
+      return '<button type="button" class="ux-truck-sw" data-truck="' + c[0] + '"><span class="ux-truck-pv" aria-hidden="true">' + c[2] + '</span><span>' + c[1] + '</span></button>';
+    }).join('') + '</div>';
+  }
+
   // Read by the GTA game mode block further down.
   window.uxGtaOpts = function(){ var on = st.skin === 'gta'; return { skin: on, game: on && st.gtafx, sound: on && st.gtafx && st.gtasnd }; };
 
@@ -28710,7 +28739,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   }
 
   // ---- apply ---------------------------------------------------------
-  var styleEl = null;
+  var styleEl = null, lastTruck = null;
   function apply(){
     var b = document.body;
     b.classList.toggle('ux-nerd', st.nerd);
@@ -28731,6 +28760,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     if (st.maptint === 'normal') h.removeAttribute('data-ux-maptint'); else h.setAttribute('data-ux-maptint', st.maptint);
     syncThemeColor();
     b.classList.toggle('ux-gta-game', st.skin === 'gta' && st.gtafx);
+    if (window.lbTrucks && st.truck !== lastTruck) { lastTruck = st.truck; window.lbTrucks.refresh(); }
     if (st.skin === 'gta' && !document.getElementById('uxGtaFont')) {
       var fl = document.createElement('link');
       fl.id = 'uxGtaFont'; fl.rel = 'stylesheet';
@@ -28783,6 +28813,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
             '<label class="ux-gta-fuel"><span class="ux-sw-l">Diesel price</span><span class="ux-gta-price">$<input id="uxGtaPrice" type="number" inputmode="decimal" step="0.01" min="0.5" max="6" aria-label="Diesel price in dollars per litre">/L</span></label>' +
             '<div class="ux-sw-s" id="uxGtaFuelInfo">Diesel for the km you drive on a shift comes off your cash.</div>' +
           '</div>' +
+          '<div class="ux-cz-field ux-cz-col"><div class="ux-cz-fl">Truck on the map</div>' + truckPicker() + '<div class="ux-cz-hint">Match my shift: the recycling truck on a Recycling shift, FOGO on FOGO, garbage on Garbage.</div></div>' +
           '<div class="ux-cz-field ux-cz-col"><div class="ux-cz-fl">Map colours</div>' + seg('maptint', [['normal', 'Normal'], ['dim', 'Dim'], ['night', 'Night'], ['grey', 'Grey'], ['gta', 'GTA']]) + '</div>' +
           '<div class="ux-cz-field ux-cz-stack"><div class="ux-cz-fl">Drive screen style</div>' + seg('hud', [['bands', 'Bands'], ['panel', 'Panel'], ['focus', 'Focus']]) + '</div>' +
           '<div class="ux-cz-field ux-cz-stack"><div class="ux-cz-fl">Navigation</div>' + seg('nav', [['menu', 'Menu only'], ['compact', 'Slim icons'], ['bar', 'Bottom bar']]) + '</div>' +
@@ -28805,10 +28836,12 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       var t = ev.target.closest ? ev.target.closest('button') : null;
       if (!t || !root.contains(t)) return;
       if (t.getAttribute('data-cz') === 'reset') {
-        st = { nerd: false, density: 'normal', text: 'normal', hand: 'right', hud: 'bands', nav: 'menu', cr: 'soft', skin: 'slate', maptint: 'normal', gtafx: true, gtasnd: true, ov: {} };
+        st = { nerd: false, density: 'normal', text: 'normal', hand: 'right', hud: 'bands', nav: 'menu', cr: 'soft', skin: 'slate', maptint: 'normal', truck: 'standard', gtafx: true, gtasnd: true, ov: {} };
         if (typeof window.uxSetTheme === 'function') window.uxSetTheme('dark', true);
         save(); apply(); sync(); return;
       }
+      var truckId = t.getAttribute('data-truck');
+      if (truckId) { st.truck = truckId; save(); apply(); sync(); return; }
       var skinId = t.getAttribute('data-skin');
       if (skinId) {
         var was = st.skin;
@@ -28849,6 +28882,10 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     if (!root) return;
     var theme = document.body.classList.contains('dark-mode') ? 'dark' : 'light';
     var cur = { theme: theme, text: st.text, density: st.density, hand: st.hand, hud: st.hud, nav: st.nav, cr: st.cr, maptint: st.maptint };
+    Array.prototype.forEach.call(root.querySelectorAll('.ux-truck-sw'), function(b){
+      var on = b.getAttribute('data-truck') === st.truck;
+      b.classList.toggle('on', on); b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
     Array.prototype.forEach.call(root.querySelectorAll('.ux-skin-sw'), function(b){
       var sk = skinOf(b.getAttribute('data-skin')), c = theme === 'dark' ? sk.d : sk.lt;
       var pv = b.firstChild;
@@ -33482,43 +33519,65 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
 })();
 
 /* =====================================================================
-   Recycling shift: the truck on the map is a Solo recycling truck.
+   Your truck on the map (Customize > Look > Truck).
 
-   recycle-truck.png is the top-down picture turned cab-up (the same way the usual truck image
-   points) with the lifter arm and bin on the left, the kerb side. The arm makes the picture wider
-   on that side, so the marker turns about the middle of the truck body (31 px across the 52 px
-   image), not the middle of the picture - otherwise it would swing sideways as the heading changes.
-   Only on a Recycling / Summer recycling shift; the image is loaded first and, if it can't be, the
-   usual truck stays (a missing icon would otherwise just be a blank marker).
+   Pictures of the Solo trucks, top down, turned cab-up the same way the usual truck image points,
+   with the lifter arm (and bin) on the left - the kerb side. Each is 106 px long on the map.
+   pivotX: the arm makes each picture wider on the kerb side, so the marker turns about the middle of
+   the truck body, not the middle of the picture - otherwise it would swing sideways as the heading
+   changes. lightX/lightY: where the amber beacon on the cab roof is, for the flashing light laid on
+   top. Both were measured off the pictures when they were made (body = columns the truck fills top
+   to bottom; beacon = the orange pixels on the cab roof), so redo them if a picture is replaced.
+   'standard' is the app's own truck; 'auto' picks by the running shift's stream.
+   A picture that can't be loaded falls back to the usual truck (a missing icon would just be blank).
    ===================================================================== */
 (function(){
   'use strict';
   var GF = {};
   function g(n){ try { return (GF[n] || (GF[n] = new Function('return typeof ' + n + ' === "undefined" ? undefined : ' + n)))(); } catch (e) { return undefined; } }
-  var SRC = 'recycle-truck.png', ok = false;
-  var pre = new Image(); pre.onload = function(){ ok = true; try { swap(); } catch (e) {} }; pre.src = SRC;
-  function recycling(){
-    var sh = null; try { sh = window.uxShiftState ? window.uxShiftState() : null; } catch (e) {}
-    return !!(sh && (sh.stream === 'Recycling' || sh.stream === 'SummerRecycling'));
+  var TRUCKS = [
+    { id: 'recycle', l: 'Recycling', src: 'truck-recycle.png', w: 52, pivotX: 31.3, lightX: 35.5, lightY: 8.9 },
+    { id: 'fogo',    l: 'FOGO',      src: 'truck-fogo.png',    w: 53, pivotX: 31.8, lightX: 41,   lightY: 8.9 },
+    { id: 'garbage', l: 'Garbage',   src: 'truck-garbage.png', w: 52, pivotX: 31,   lightX: 35.5, lightY: 8.9 },
+    { id: 'glass',   l: 'Glass',     src: 'truck-glass.png',   w: 53, pivotX: 31.5, lightX: 39,   lightY: 8.7 }
+  ];
+  var BY_STREAM = { Recycling: 'recycle', SummerRecycling: 'recycle', FOGO: 'fogo', Garbage: 'garbage', Glass: 'glass' };
+  var H = 106, loaded = {};
+  TRUCKS.forEach(function(t){ var im = new Image(); im.onload = function(){ loaded[t.id] = true; try { refresh(); } catch (e) {} }; im.src = t.src; });
+
+  function choice(){ try { return (window.uxTruckChoice && window.uxTruckChoice()) || 'standard'; } catch (e) { return 'standard'; } }
+  function current(){
+    var c = choice();
+    if (c === 'auto') {
+      var sh = null; try { sh = window.uxShiftState ? window.uxShiftState() : null; } catch (e) {}
+      c = (sh && BY_STREAM[sh.stream]) || 'standard';
+    }
+    return TRUCKS.filter(function(t){ return t.id === c && loaded[t.id]; })[0] || null;
   }
-  function icon(deg){
+  function icon(t, deg){
+    // a box centred on the body's middle, wide enough for the picture either side of it
+    var half = Math.ceil(Math.max(t.pivotX, t.w - t.pivotX)), W = half * 2, left = half - t.pivotX;
     return L.divIcon({
-      className: 'custom-gps-icon lb-rec-truck',
-      html: '<div style="position:relative;width:62px;height:106px"><div style="position:absolute;left:0;top:0;width:62px;height:106px;transform:rotate(' + deg + 'deg);transform-origin:31px 53px">' +
-        '<img src="' + SRC + '" width="52" height="106" style="display:block;filter:drop-shadow(0 0 4px rgba(0,0,0,.6))" alt=""></div></div>',
-      iconSize: [62, 106], iconAnchor: [31, 53]
+      className: 'custom-gps-icon lb-truck lb-truck-' + t.id,
+      html: '<div style="position:relative;width:' + W + 'px;height:' + H + 'px"><div style="position:absolute;left:0;top:0;width:' + W + 'px;height:' + H + 'px;transform:rotate(' + deg + 'deg);transform-origin:' + half + 'px ' + (H / 2) + 'px">' +
+        '<img src="' + t.src + '" width="' + t.w + '" height="' + H + '" style="position:absolute;left:' + left + 'px;top:0;display:block;filter:drop-shadow(0 0 4px rgba(0,0,0,.6))" alt="">' +
+        '<i class="lb-beacon" style="left:' + (left + t.lightX) + 'px;top:' + t.lightY + 'px;animation-delay:-' + (Date.now() % 1000) + 'ms"></i></div></div>',
+      iconSize: [W, H], iconAnchor: [half, H / 2]
     });
   }
   function swap(){
-    if (!ok || !window.L || !recycling()) return;
+    var t = current(); if (!t || !window.L) return;
     var m = g('mapTruckMarker'); if (!m || !m.setIcon) return;
-    m.setIcon(icon(+g('lastValidHeading') || 0));
+    m.setIcon(icon(t, +g('lastValidHeading') || 0));
   }
+  // Redraw now (after a choice changes), not on the next GPS fix: the app's own function puts the usual
+  // truck back, then swap() above lays the chosen one over it.
+  function refresh(){ try { if (typeof window.updateMapTruckPosition === 'function' && g('mapTruckMarker')) window.updateMapTruckPosition(); } catch (e) {} }
   var prev = window.updateMapTruckPosition;
   if (typeof prev === 'function') {
     window.updateMapTruckPosition = function(){ var r = prev.apply(this, arguments); try { swap(); } catch (e) {} return r; };
   }
-  window.lbRecTruck = { swap: swap, recycling: recycling };
+  window.lbTrucks = { list: TRUCKS, current: current, refresh: refresh };
 })();
 
 
