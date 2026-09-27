@@ -79,3 +79,14 @@ Garbage runs with map lines: 36 -> 40 of 65. The rest are in areas no well-place
 match against. `pub_pages.py` reads the original Publisher files (`brew install libmspub`): plain-text titles and the
 pictures used, but each page crops its picture differently and libmspub doesn't give the crop, so the .pub files alone
 can't place a page. Order after this: `picture_place.py`, `modes_export.py --write`, `snap_modes.py --write`.
+
+**Pages placed from their street names (2026-09-27, `label_place.py` + `ocr/ocr.swift`).** Apple's Vision text
+recognition (built into macOS, run with `swift`) reads the names printed on each page's street-map picture, three
+times (upright and turned both ways, since labels run along the streets). Each capitalised name that matches an OSM
+road near the run votes, for every rotation and zoom, for the shifts that would put it on its own street; the winner is
+then refined by pulling each agreeing name onto its street, and finally nudged onto the roads. Checked on pages whose
+placement is known: 16-19 m from the truth from names alone. It needs no other page to overlap, so it reached most
+pages nothing else could. Pages are kept only when the route ends up on the roads and the names agree (see run_all).
+Garbage runs with map lines: 40 -> 60 of 65. Left: Wed 209, 212, 213 and Thu 210, 215 - rural/regional overview pages
+with suburb names but few street names. Order: `picture_place.py`, `label_place.py --all`, `modes_export.py --write`,
+`snap_modes.py --write`.

@@ -104,7 +104,7 @@ def load_placed():
     """every page already placed (by its route's shape): {(pdf, page): (day, run, page->m)}"""
     placed = {}
     for f in sorted(glob.glob(f'{S}/compare-results-GAR-*.json')):
-        if re.search(r'GAR-(P|zpic)', f): continue
+        if re.search(r'GAR-(P|zpic|zlab)', f): continue
         routes = json.load(open(f.replace('compare-results', 'routes-m')))
         for r in json.load(open(f)):
             if 'fit_m' not in r: continue
