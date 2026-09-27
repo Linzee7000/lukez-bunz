@@ -12296,12 +12296,15 @@ window.addEventListener('DOMContentLoaded', async () => {
         // Resume whichever run was filtered (started) last time, before the
         // first filter-chip render, so the person comes back to the same
         // run instead of "Select run".
-        await restoreRunFilterFromDB();
+        // A new day with no shift running starts fresh on Start shift (see newDayCheck in the shift block):
+        // yesterday's run and screen aren't brought back.
+        const newDay = typeof window.lbNewDayPending === 'function' && window.lbNewDayPending();
+        if (!newDay) await restoreRunFilterFromDB();
         renderActiveFilterChips();
         updateDriverHud();
         // Land back on whichever screen (Search / Drive HUD / Map) was
         // open last time, instead of always resetting to Search.
-        switchMainTab(activeTab);
+        if (!newDay) switchMainTab(activeTab);
       }
 
       if (!cached || cached.length === 0) {
@@ -30126,7 +30129,10 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   }
 
   /* ---- the shift's own run: stream picked at the start; day and week are today's, so only the run number is asked ---- */
-  var SHIFT_STREAMS = [['Garbage', 'Garbage'], ['Recycling', 'Recycling'], ['FOGO', 'FOGO'], ['SummerRecycling', 'Summer recycling']];
+  var SHIFT_STREAMS = [['Garbage', 'Garbage'], ['Recycling', 'Recycling'], ['FOGO', 'FOGO'], ['SummerRecycling', 'Summer recycling'], ['StreetGarbage', 'Street litter'], ['StreetRecycling', 'Street recycling']];
+  function isStreet(st){ return st === 'StreetGarbage' || st === 'StreetRecycling'; }
+  // the stream a truck is picked for on Start shift, from what the fleet list says it does
+  function streamForTruck(t){ var u = window.lbFleetUse ? window.lbFleetUse(t) : ''; return /^(Garbage|Recycling|FOGO)$/.test(u) ? u : u === 'Street litter' ? 'StreetGarbage' : u === 'Street recycling' ? 'StreetRecycling' : ''; }
   function shiftStreams(){ var su = window.uxSummerSeason ? window.uxSummerSeason() : false; return SHIFT_STREAMS.filter(function(x){ return x[0] !== 'SummerRecycling' || su; }); }
   function todayDay(){ return ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][new Date().getDay()]; }
   function todayWeek(stream){
@@ -30136,17 +30142,39 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   }
   function todaysRuns(stream){
     if (!stream || typeof window.lbRunsFor !== 'function') return [];
-    try { return window.lbRunsFor(stream === 'SummerRecycling' ? 'Recycling' : stream, todayDay(), todayWeek(stream)) || []; } catch (e) { return []; }
+    try { return window.lbRunsFor(stream === 'SummerRecycling' ? 'Recycling' : stream, todayDay(), isStreet(stream) ? '' : todayWeek(stream)) || []; } catch (e) { return []; }
   }
   function shiftRun(){ return (SH && SH.run) ? { run: SH.run, stream: SH.stream, day: SH.day, week: SH.week } : null; }
   function openShiftRun(){
-    var r = shiftRun(); if (!r || typeof window.openRunDirectlyOnMap !== 'function') return;
+    var r = shiftRun(); if (!r) return;
+    if (isStreet(r.stream)) { if (window.openStreetLitterRunOnMap) window.openStreetLitterRunOnMap(r.run, r.stream === 'StreetRecycling' ? 'rr' : 'rl'); return; }
+    if (typeof window.openRunDirectlyOnMap !== 'function') return;
     window.openRunDirectlyOnMap(r.run, r.stream === 'SummerRecycling' ? 'Recycling' : r.stream, r.day, r.week, r.stream === 'SummerRecycling');
   }
   window.lbShiftRun = shiftRun;
   window.lbOpenShiftRun = openShiftRun;
 
   window.lbShiftOn = function(){ return !!SH; };
+  /* A new day: the first thing on screen is Start shift, not yesterday's run on the map. Runs once a day, as
+     soon as no shift is running (a street litter shift from last night can run on until 3 am). */
+  var SETF = {};
+  function setG(n, v){ try { (SETF[n] || (SETF[n] = new Function('v', n + ' = v')))(v); } catch (e) {} }
+  window.lbNewDayPending = function(){ return !SH && lsGet('lbLastDay', null) !== new Date().toDateString(); };
+  function newDayCheck(){
+    var today = new Date().toDateString();
+    if (!(g('siteRecords') || []).length) return;          // wait for the houses to load, so nothing restores over this
+    if (lsGet('lbLastDay', null) === today || SH) { if (SH) lsSet('lbLastDay', today); return; }
+    lsSet('lbLastDay', today);
+    try { var set = g('selectedRunsSet'); if (set) set.clear(); } catch (e) {}
+    setG('activeFilterStream', ''); setG('activeFilterDay', ''); setG('activeFilterWeek', ''); setG('streetLitterRunFilter', null);
+    try { if (typeof renderActiveFilterChips === 'function') renderActiveFilterChips(); } catch (e) {}
+    try { if (typeof switchMainTab === 'function') switchMainTab('welcome'); } catch (e) {}
+    draft = null; openSheet('main');
+  }
+  function shiftOverNight(sh){
+    var st = new Date(sh.start), cut = new Date(st.getFullYear(), st.getMonth(), st.getDate() + 1, isStreet(sh.stream) ? 3 : 0, 0, 0);
+    return Date.now() >= cut.getTime();
+  }
   function startShift(o){
     var s = clockState(), now = Date.now();
     // a fresh trail for the shift: whatever was driven before it started isn't part of it
@@ -30304,6 +30332,9 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       toast('Shift started. Do the pre-start check and put in the truck’s km and hours.', 'Open', function(){ openSheet(); });
     }
     if (SH && Date.now() - SH.start > 18 * 3600000) { finishShift({ note: 'Not ended in the app: closed after 18 h' }); toast('Yesterday’s shift was closed. It’s in Past shifts.'); }
+    // Kerbside never runs past midnight; street litter can go on until 3 am (summer nights). A shift still open
+    // after that was just never ended in the app: close it, so the new day starts clean.
+    if (SH && shiftOverNight(SH)) { finishShift({ note: 'Not ended in the app: closed ' + (isStreet(SH.stream) ? 'at 3 am' : 'at midnight') }); toast('Yesterday’s shift was closed. It’s in Past shifts.'); }
     try { escalate(); } catch (e) {}
     if (!SH) return;
     var ch = false, brk = onBreak();
@@ -30386,7 +30417,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   };
   /* The fleet list (unit number -> rego) from operations, Sep 2026. A rego a driver types in themselves (lbRegos) still wins over this list. */
   var FLEET = {};
-  '1701 XW14HD|1906 XSL261|1912 XUQ272|2120 YOW447|2130 ZIF496|2203 ZLO162|2206 ZOJ512|2207 ZQK538|2426 XV97FO|2442 1DL1OD|2443 1DL1NO|2445 1DL1NP|2535 1IY4JH|2536 1IY4JJ|2537 1IY4JG|2659 1IZ1YC|2708 1KN2QB|2711 1YI1IS|2712 XV41DS|2834 XN59DD|2835 XN19FK|2836 XN50GH|2838 XN58GH|2839 XN59GH|2850 1BQ6LF|2853 XN92JA|2902 XN17JB|2907 XN95JA|3430 XP28CW|3436 XP28DO|3437 XP78GM|3438 XP69DN|3439 XP66DN|3440 XP70DN|3441 XP75LT|3442 XP04LT|3443 XP68MP|3444 XP76MP|3446 XP14KJ|3447 XP60LM|3448 XP73LM|3449 XP67MP|3450 XP72LM|3451 XP79LM|3452 XP11LT|3453 XP66LM|3454 XP42OL|3455 XP12LT|3456 XP05LT|3457 XP43OL|3458 XP46OL|3459 XP13LT|3460 XP22DN|3461 XP00HR|3462 XP01HR|3464 XP02HR|3465 XP13KJ|3466 XP00KJ|3467 XP15KJ|3468 XP09KJ|3469 XP93QP|3470 XP58KI|3476 XP90KI|3525 XP44OL|3540 XP96KI'.split('|').forEach(function(x){ var p = x.split(' '); FLEET[p[0]] = p[1]; });
+  '1701 XW14HD|1906 XSL261|1912 XUQ272|2120 YOW447|2130 ZIF496|2203 ZLO162|2206 ZOJ512|2207 ZQK538|2426 XV97FO|2442 1DL1OD|2443 1DL1NO|2445 1DL1NP|2535 1IY4JH|2536 1IY4JJ|2537 1IY4JG|2659 1IZ1YC|2708 1KN2QB|2710 1KN2QB|2711 1YI1IS|2712 XV41DS|2834 XN59DD|2835 XN19FK|2836 XN50GH|2838 XN58GH|2839 XN59GH|2850 1BQ6LF|2853 XN92JA|2902 XN17JB|2907 XN95JA|3430 XP28CW|3436 XP28DO|3437 XP78GM|3438 XP69DN|3439 XP66DN|3440 XP70DN|3441 XP75LT|3442 XP04LT|3443 XP68MP|3444 XP76MP|3446 XP14KJ|3447 XP60LM|3448 XP73LM|3449 XP67MP|3450 XP72LM|3451 XP79LM|3452 XP11LT|3453 XP66LM|3454 XP42OL|3455 XP12LT|3456 XP05LT|3457 XP43OL|3458 XP46OL|3459 XP13LT|3460 XP22DN|3461 XP00HR|3462 XP01HR|3464 XP02HR|3465 XP13KJ|3466 XP00KJ|3467 XP15KJ|3468 XP09KJ|3469 XP93QP|3470 XP58KI|3476 XP90KI|3525 XP44OL|3540 XP96KI'.split('|').forEach(function(x){ var p = x.split(' '); FLEET[p[0]] = p[1]; });
   (function(){ var rg = lsGet('lbRegos', {}) || {}, ch = false; Object.keys(FLEET).forEach(function(k){ if (!rg[k]) { rg[k] = FLEET[k]; ch = true; } }); if (ch) lsSet('lbRegos', rg); })();
   // What each truck normally does (operations, Sep 2026). Garbage/Recycling/FOGO pre-select the stream on Start shift;
   // spare and kerbside trucks don't pick one. 3452 was named as both Garbage and FOGO; the fleet sheet colours it FOGO.
@@ -30419,7 +30450,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   window.lbFleetInfo = function(unit){ return FLEET_INFO[String(unit || '').trim()] || ''; };
   window.lbFleetUse = function(unit){ return FLEET_USE[String(unit || '').trim()] || ''; };
   window.lbFleetRego = function(unit){ var k = String(unit || '').trim().toLowerCase(), rg = lsGet('lbRegos', {}) || {}; return rg[k] || FLEET[k] || ''; };
-  function newDraft(){ var d = me(), rg = lsGet('lbRegos', {}) || {}; draft = draft || { driver: d.name || '', truck: d.truck || '', rego: rg[String(d.truck || '').toLowerCase()] || '', km: '', hrs: '', photo: null, checks: {}, stream: (function(u){ return /^(Garbage|Recycling|FOGO)$/.test(u) ? u : ''; })(window.lbFleetUse(d.truck)) }; }
+  function newDraft(){ var d = me(), rg = lsGet('lbRegos', {}) || {}; draft = draft || { driver: d.name || '', truck: d.truck || '', rego: rg[String(d.truck || '').toLowerCase()] || '', km: '', hrs: '', photo: null, checks: {}, stream: streamForTruck(d.truck) }; }
   var brakeDraft = null, dashDraft = null, brakeRes = null, pendingEnd = false;
   function newBrake(why){
     var lb = lastBrake(SH && SH.truck || me().truck), p = lb ? lb.vals.map(String) : null;   /* keep last week's three numbers; change them if the dash reads different */
@@ -30566,7 +30597,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
         (brakeDue() ? '<div class="drv-warnbox">' + I.warn + '<span>Friday: brake wear is due. Enter it when you’re back at the depot.</span><button type="button" class="drv-link" data-a="brakes">Enter now</button></div>' : '') +
         (oosFor(SH.truck) ? '<div class="drv-stopbox">' + I.warn + '<span><b>This truck is marked out of service.</b> Tell your leading hand.</span></div>' : '') +
         dashListHtml() +
-        (SH.run ? '<div class="drv-acts"><button type="button" class="drv-btn" data-a="runcheck">Check my run' + (function(){ var c = runCheck(); var l = c ? runCheckLine(c) : ''; return l ? ' · ' + esc(l) : ''; })() + '</button></div>' : '') +
+        (SH.run && !isStreet(SH.stream) ? '<div class="drv-acts"><button type="button" class="drv-btn" data-a="runcheck">Check my run' + (function(){ var c = runCheck(); var l = c ? runCheckLine(c) : ''; return l ? ' · ' + esc(l) : ''; })() + '</button></div>' : '') +
         (window.lbRunSheet ? '<div class="drv-sect"><span>Run sheet</span></div><div class="drv-acts"><button type="button" class="drv-btn drv-go" data-a="rs:tip">At the tip</button><button type="button" class="drv-btn" data-a="rs:fuel">Fuel</button><button type="button" class="drv-btn" data-a="rs:adblue">AdBlue</button><button type="button" class="drv-btn" data-a="rs:main">Run sheet</button></div>' : '') +
         '<div class="drv-acts"><button type="button" class="drv-btn drv-warnb" data-a="dashrep">' + I.warn + 'Dash warning</button><button type="button" class="drv-btn" data-a="newdef">' + I.truck + 'Truck defect</button>' + (hasBrakeGauge(SH.truck) ? '<button type="button" class="drv-btn' + (brakeDue() ? ' drv-due' : '') + '" data-a="brakes">' + I.clock + 'Brake wear</button>' : '') + '<button type="button" class="drv-btn" data-a="issues">' + I.list + 'Issues (' + iss.length + ')</button></div>' +
         '<div class="drv-foot"><button type="button" class="drv-btn" data-a="history">Past shifts</button><button type="button" class="drv-btn drv-bad" data-a="end">End shift</button></div>' + roleHtml();
@@ -30629,8 +30660,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
         var auto = window.lbFleetRego(draft.truck); draft.truck = t.value;
         if (!draft.rego || draft.rego === auto) { draft.rego = window.lbFleetRego(t.value); var rgEl = $('uxsRego'); if (rgEl) rgEl.value = draft.rego; }
         // the truck's usual stream is picked for them (still changeable), unless they've already chosen one
-        var use = window.lbFleetUse(t.value);
-        if (/^(Garbage|Recycling|FOGO)$/.test(use) && !draft.run && draft.stream !== use) { draft.stream = use; clearTimeout(draft._pt); draft._pt = setTimeout(function(){ var f = document.activeElement, id0 = f && f.id, pos = f && f.selectionStart; paint(); var f2 = id0 && $(id0); if (f2) { f2.focus(); try { f2.setSelectionRange(pos, pos); } catch (e) {} } }, 600); }
+        var use = streamForTruck(t.value);
+        if (use && !draft.run && draft.stream !== use) { draft.stream = use; clearTimeout(draft._pt); draft._pt = setTimeout(function(){ var f = document.activeElement, id0 = f && f.id, pos = f && f.selectionStart; paint(); var f2 = id0 && $(id0); if (f2) { f2.focus(); try { f2.setSelectionRange(pos, pos); } catch (e) {} } }, 600); }
       } else if (id === 'uxsRego') draft.rego = t.value;
       else if (id === 'uxsSKm') draft.km = t.value; else if (id === 'uxsSHrs') draft.hrs = t.value; else return;
       paintSoon();
@@ -30803,6 +30834,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   /* ---- ticking ---- */
   setInterval(function(){
     try { count(); } catch (e) {}
+    try { newDayCheck(); } catch (e) {}
     try { paintRate(); } catch (e) {}
     try { if (sheet && sheet.classList.contains('open') && SH && view === 'main' && !(document.activeElement && sheet.contains(document.activeElement) && document.activeElement.tagName === 'INPUT')) paint(); } catch (e) {}
   }, 2000);
@@ -30822,7 +30854,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     function wrapTotals(){
       var orig = window.lbHudTotals; if (typeof orig !== 'function' || orig.__shift) return;
       var w = function(){
-        var r = shiftRun(); if (!r) return orig.apply(this, arguments);
+        var r = shiftRun(); if (!r || isStreet(r.stream)) return orig.apply(this, arguments);
         var keep = { st: gg('activeFilterStream'), d: gg('activeFilterDay'), wk: gg('activeFilterWeek'), runs: Array.from(gg('selectedRunsSet') || []) };
         var set = gg('selectedRunsSet');
         try {
@@ -30841,8 +30873,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       wrapTotals();
       var r = shiftRun(), onMap = document.body.getAttribute('data-ux-screen') === 'map';
       var st = gg('activeFilterStream'), set = gg('selectedRunsSet'), key = String((r && r.run) || '').toLowerCase();
-      var sameStream = r && (st === mapStream(r) || !st);
-      if (r && sameStream && set && set.size && !set.has(key)) {
+      var sameStream = r && (isStreet(r.stream) ? (st === r.stream && String(g('streetLitterRunFilter') || '') === String(r.run)) : (st === mapStream(r) || !st));
+      if (r && !isStreet(r.stream) && sameStream && set && set.size && !set.has(key)) {
         set.add(key);
         try { if (typeof renderActiveFilterChips === 'function') renderActiveFilterChips(); if (typeof renderMapData === 'function') renderMapData(); } catch (e) {}
       }
@@ -30854,7 +30886,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       }
       if (chip) { chip.style.display = show ? '' : 'none'; if (show) chip.textContent = 'Back to my run · ' + (STREAM_LBL[r.stream] || r.stream) + ' ' + r.run; }
     }
-    var STREAM_LBL = { Garbage: 'Garbage', Recycling: 'Recycling', FOGO: 'FOGO', SummerRecycling: 'Summer' };
+    var STREAM_LBL = { Garbage: 'Garbage', Recycling: 'Recycling', FOGO: 'FOGO', SummerRecycling: 'Summer', StreetGarbage: 'Street litter', StreetRecycling: 'Street recycling' };
     setInterval(function(){ if (!document.hidden) keepOnMap(); }, 1000);
   })();
   window.uxShiftRates = rates;
