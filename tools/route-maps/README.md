@@ -90,3 +90,11 @@ pages nothing else could. Pages are kept only when the route ends up on the road
 Garbage runs with map lines: 40 -> 60 of 65. Left: Wed 209, 212, 213 and Thu 210, 215 - rural/regional overview pages
 with suburb names but few street names. Order: `picture_place.py`, `label_place.py --all`, `modes_export.py --write`,
 `snap_modes.py --write`.
+
+**Recycling and FOGO re-placed (2026-09-27, `replace_rec_org.py`).** Every page is re-placed from its street names
+(`label_place.place_by_labels`) and from its old fit nudged onto the roads; the one closer to the roads wins, written to
+`work/*-{REC,ORG}zlab.json` (sorts after the originals). Recycling: 74 by street names, 12 nudged fits, 19 not placed well
+either way; FOGO: 64, 11, 8. **Run maps** (`routes_export.py --write` -> `data/run-routes.json`): each run's route as the
+OSM streets it drives - from the placed pages, plus the streets its houses are on (by address, first house to last) so
+a street a map missed, or a run with no usable page, is still drawn. Full order: `picture_place.py`,
+`label_place.py --all`, `replace_rec_org.py`, `modes_export.py --write`, `snap_modes.py --write`, `routes_export.py --write`.
