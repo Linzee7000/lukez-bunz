@@ -21082,6 +21082,7 @@ body.lb-on-welcome #lbDrawerTab { display: none; }
       <div class="lb-drawer-sect">Find</div>
       ${item('nearby',  img('navigation.png'), "What's nearby", 'Runs, bins and addresses around you')}
       ${item('days', img('calendar.png'), 'Service days', 'Where the runs go, Monday to Friday')}
+      ${item('runmaps', img('route.png'), 'Run maps', 'A clean printable map of any run')}
       ${item('places', '<svg class="lb-svg-ico" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" aria-hidden="true"><path d="M12 21s-7-6-7-11a7 7 0 0 1 14 0c0 5-7 11-7 11z"/><circle cx="12" cy="10" r="2.5"/></svg>', 'Toilets & emergency spots', 'Closest toilet \u00b7 safe tip area \u00b7 hydrants')}
       <div class="lb-drawer-sect">Set up</div>
       ${item('layers', img('layers.png'), 'Layers', 'What shows on the map \u00b7 boundaries, bins, trail, run timer')}
@@ -21232,6 +21233,7 @@ body.lb-on-welcome #lbDrawerTab { display: none; }
     if (act === 'go-search')  { switchMainTab('search'); return; }
     if (act === 'go-home')    { switchMainTab('welcome'); return; }
     if (act === 'issues')     { if (typeof window.uxOpenIssueLog === 'function') window.uxOpenIssueLog(); return; }
+    if (act === 'runmaps')    { if (typeof window.lbRunMapOpen === 'function') window.lbRunMapOpen(); return; }
     if (act === 'customize')  { if (typeof window.uxOpenCustomize === 'function') window.uxOpenCustomize(); return; }
   });
 
@@ -30610,7 +30612,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
         (brakeDue() ? '<div class="drv-warnbox">' + I.warn + '<span>Friday: brake wear is due. Enter it when you’re back at the depot.</span><button type="button" class="drv-link" data-a="brakes">Enter now</button></div>' : '') +
         (oosFor(SH.truck) ? '<div class="drv-stopbox">' + I.warn + '<span><b>This truck is marked out of service.</b> Tell your leading hand.</span></div>' : '') +
         dashListHtml() +
-        (SH.run && !isStreet(SH.stream) ? '<div class="drv-acts"><button type="button" class="drv-btn" data-a="runcheck">Check my run' + (function(){ var c = runCheck(); var l = c ? runCheckLine(c) : ''; return l ? ' · ' + esc(l) : ''; })() + '</button></div>' : '') +
+        (SH.run && !isStreet(SH.stream) ? '<div class="drv-acts"><button type="button" class="drv-btn" data-a="runmap">Run map</button><button type="button" class="drv-btn" data-a="runcheck">Check my run' + (function(){ var c = runCheck(); var l = c ? runCheckLine(c) : ''; return l ? ' · ' + esc(l) : ''; })() + '</button></div>' : '') +
         (window.lbRunSheet ? '<div class="drv-sect"><span>Run sheet</span></div><div class="drv-acts"><button type="button" class="drv-btn drv-go" data-a="rs:tip">At the tip</button><button type="button" class="drv-btn" data-a="rs:fuel">Fuel</button><button type="button" class="drv-btn" data-a="rs:adblue">AdBlue</button><button type="button" class="drv-btn" data-a="rs:main">Run sheet</button></div>' : '') +
         '<div class="drv-acts"><button type="button" class="drv-btn drv-warnb" data-a="dashrep">' + I.warn + 'Dash warning</button><button type="button" class="drv-btn" data-a="newdef">' + I.truck + 'Truck defect</button>' + (hasBrakeGauge(SH.truck) ? '<button type="button" class="drv-btn' + (brakeDue() ? ' drv-due' : '') + '" data-a="brakes">' + I.clock + 'Brake wear</button>' : '') + '<button type="button" class="drv-btn" data-a="issues">' + I.list + 'Issues (' + iss.length + ')</button></div>' +
         '<div class="drv-foot"><button type="button" class="drv-btn" data-a="history">Past shifts</button><button type="button" class="drv-btn drv-bad" data-a="end">End shift</button></div>' + roleHtml();
@@ -30820,6 +30822,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     }
     if (a === 'share') { var s = history().filter(function(x){ return x.id === b.getAttribute('data-id'); })[0]; if (s) shareText(summaryText(s), 'Shift ' + dateStr(s.start)); return; }
     if (a === 'runcheck') { view = 'runcheck'; paint(); return; }
+    if (a === 'runmap') { closeSheet(); if (window.lbRunMapOpen) window.lbRunMapOpen(); return; }
     if (a === 'rcstreet') { closeSheet(); try { if (typeof switchMainTab === 'function') switchMainTab('map'); if (window.showStreetOnMap) window.showStreetOnMap(b.getAttribute('data-k')); } catch (e) {} return; }
     if (a === 'kml') { trailKml(b.getAttribute('data-id'), +b.getAttribute('data-lbl')); return; }
     if (a === 'trail') { closeSheet(); showTrail(b.getAttribute('data-id'), 'Trail ' + (b.getAttribute('data-lbl') || '')); return; }
@@ -34742,6 +34745,201 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   function start(){ load().then(function(items){ if (items) draw(); else setTimeout(start, 5 * 60000); }); }
   var tries = 0, t = setInterval(function(){ if (g('leafletMap') && (g('siteRecords') || []).length > 100) { clearInterval(t); start(); } else if (++tries > 120) clearInterval(t); }, 2000);
   window.lbSchools = { refresh: function(){ localStorage.removeItem(KEY); start(); }, draw: draw };
+})();
+</script>
+
+
+<!-- =====================================================================
+     RUN MAPS - our own tidy version of the run route maps.
+     Drawn from data: the run's route on the real streets (data/run-routes.json, made by
+     tools/route-maps/routes_export.py from the placed Publisher/PDF route maps), the reverse-in /
+     drive-in streets (data/street-modes.json), schools, the run's houses, and the Drivers Notes
+     (data/run-notes.json) pinned to the streets they mention. One A4 landscape page per run,
+     printable / save as PDF, for any run.
+     ================================================================== -->
+<style id="lb-runmap-style">
+  #lbRunMap { position: fixed; inset: 0; z-index: 30000; background: #eef1f4; color: #111; overflow: auto; -webkit-overflow-scrolling: touch; font: 14px/1.35 system-ui, -apple-system, 'Segoe UI', sans-serif; }
+  #lbRunMap .rm-bar { position: sticky; top: 0; z-index: 2; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 8px; background: #1f2937; color: #fff; }
+  #lbRunMap .rm-bar select { min-height: 40px; font: 600 15px system-ui, sans-serif; border-radius: 6px; border: 0; padding: 0 6px; max-width: 42vw; }
+  #lbRunMap .rm-bar button { min-height: 40px; padding: 0 14px; font: 700 15px system-ui, sans-serif; border: 0; border-radius: 6px; background: #fff; color: #111; }
+  #lbRunMap .rm-bar .rm-sp { flex: 1 1 auto; }
+  #lbRunMap .rm-page { display: flex; gap: 0; max-width: 1180px; margin: 10px auto; background: #fff; box-shadow: 0 2px 10px rgba(0,0,0,.15); }
+  #lbRunMap .rm-map { flex: 1 1 auto; min-height: 640px; position: relative; }
+  #lbRunMap .rm-map .leaflet-tile-pane { filter: grayscale(1) contrast(.9) brightness(1.08); opacity: .75; }
+  #lbRunMap .rm-side { flex: 0 0 300px; padding: 18px 18px 14px; border-left: 1px solid #e5e7eb; display: flex; flex-direction: column; gap: 12px; }
+  #lbRunMap .rm-title { font: 800 28px/1.05 system-ui, sans-serif; letter-spacing: -.5px; }
+  #lbRunMap .rm-sub { font-weight: 600; color: #475569; margin-top: 2px; }
+  #lbRunMap .rm-band { height: 6px; border-radius: 3px; }
+  #lbRunMap .rm-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+  #lbRunMap .rm-stats div { background: #f1f5f9; border-radius: 6px; padding: 6px 8px; }
+  #lbRunMap .rm-stats b { display: block; font-size: 18px; }
+  #lbRunMap .rm-stats span { font-size: 11px; color: #475569; text-transform: uppercase; letter-spacing: .04em; }
+  #lbRunMap h4 { margin: 0 0 4px; font: 800 11px system-ui, sans-serif; letter-spacing: .08em; text-transform: uppercase; color: #334155; }
+  #lbRunMap .rm-leg { display: grid; grid-template-columns: 1fr; gap: 4px; font-size: 12.5px; }
+  #lbRunMap .rm-leg i { display: inline-block; width: 22px; height: 0; vertical-align: middle; margin-right: 6px; border-top: 4px solid; }
+  #lbRunMap .rm-leg i.dot { width: 8px; height: 8px; border: 0; border-radius: 50%; background: #475569; margin: 0 13px 0 7px; }
+  #lbRunMap .rm-leg i.box { width: 18px; height: 10px; border: 1px solid #ca8a04; background: #fde68a; }
+  #lbRunMap .rm-leg i.num { width: 16px; height: 16px; border: 0; border-radius: 50%; background: #111; color: #fff; font: 700 10px/16px system-ui; text-align: center; font-style: normal; margin-right: 4px; }
+  #lbRunMap ol { margin: 0; padding: 0 0 0 0; list-style: none; font-size: 12.5px; }
+  #lbRunMap ol li { display: flex; gap: 6px; margin: 3px 0; }
+  #lbRunMap ol li b { flex: 0 0 18px; height: 18px; border-radius: 50%; background: #111; color: #fff; font: 700 10.5px/18px system-ui; text-align: center; }
+  #lbRunMap .rm-streets { font-size: 11.5px; color: #334155; column-count: 2; column-gap: 12px; }
+  #lbRunMap .rm-streets div { break-inside: avoid; }
+  #lbRunMap .rm-foot { margin-top: auto; font-size: 10px; color: #64748b; }
+  #lbRunMap .rm-empty { padding: 40px; text-align: center; color: #475569; }
+  .rm-note-pin { width: 22px; height: 22px; border-radius: 50%; background: #111; color: #fff; font: 700 12px/22px system-ui; text-align: center; border: 2px solid #fff; box-shadow: 0 1px 4px rgba(0,0,0,.5); }
+  @media (max-width: 760px) {
+    #lbRunMap .rm-page { flex-direction: column; margin: 0; }
+    #lbRunMap .rm-map { min-height: 62vh; }
+    #lbRunMap .rm-side { flex: none; border-left: 0; border-top: 1px solid #e5e7eb; }
+  }
+  @media print {
+    @page { size: A4 landscape; margin: 7mm; }
+    body.rm-printing > *:not(#lbRunMap) { display: none !important; }
+    body.rm-printing #lbRunMap { position: static; overflow: visible; background: #fff; }
+    body.rm-printing #lbRunMap .rm-bar { display: none; }
+    body.rm-printing #lbRunMap .rm-page { margin: 0; box-shadow: none; width: 283mm; height: 194mm; max-width: none; }
+    body.rm-printing #lbRunMap .rm-map { min-height: 0; height: 194mm; }
+    body.rm-printing #lbRunMap .rm-side { flex-basis: 72mm; padding: 4mm; }
+  }
+</style>
+<script id="lb-runmap-script">
+(function(){
+  'use strict';
+  function esc(v){ return String(v == null ? '' : v).replace(/[&<>"']/g, function(c){ return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+  var GF = {};
+  function g(n){ try { return (GF[n] || (GF[n] = new Function('return typeof ' + n + ' === "undefined" ? undefined : ' + n)))(); } catch (e) { return undefined; } }
+  var DATA = null, loading = null;
+  function load(){
+    if (DATA) return Promise.resolve(DATA);
+    if (!loading) loading = fetch('data/run-routes.json', { cache: 'no-cache' }).then(function(r){ return r.ok ? r.json() : null; }).then(function(d){ DATA = (d && d.runs) || {}; return DATA; }).catch(function(){ DATA = {}; return DATA; });
+    return loading;
+  }
+  var COL = { Garbage: '#dc2626', Recycling: '#eab308', FOGO: '#16a34a' };
+  var DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
+  function parse(key){ var p = String(key || '').split('#'); return p.length === 3 ? { stream: p[0], day: p[1], week: '', run: p[2] } : { stream: p[0], day: p[1], week: p[2], run: p[3] }; }
+  function keyOf(o){ return o.stream === 'Garbage' ? 'Garbage#' + o.day + '#' + o.run : o.stream + '#' + o.day + '#' + (o.week || '') + '#' + o.run; }
+  function currentKey(){
+    var r = window.lbShiftRun ? window.lbShiftRun() : null;
+    if (r && /^(Garbage|Recycling|FOGO)$/.test(r.stream)) return keyOf({ stream: r.stream, day: r.day, week: r.week, run: r.run });
+    var sel = g('selectedRunsSet'), st = g('activeFilterStream'), day = g('activeFilterDay'), wk = g('activeFilterWeek');
+    if (sel && sel.size === 1 && /^(Garbage|Recycling|FOGO)$/.test(st || '') && day) { day = String(day); return keyOf({ stream: st, day: day.charAt(0).toUpperCase() + day.slice(1).toLowerCase(), week: String(wk || '').toUpperCase(), run: Array.from(sel)[0] }); }
+    return null;
+  }
+  function groupFor(o){
+    try { return (window.lbRunGroups(o.stream) || []).filter(function(x){ return String(x.run).toLowerCase() === String(o.run).toLowerCase() && String(x.day).toLowerCase() === o.day.toLowerCase() && (!o.week || !x.week || String(x.week).toUpperCase() === o.week); })[0] || null; } catch (e) { return null; }
+  }
+
+  var el = null, map = null, cur = null;
+  function build(){
+    if (el) return;
+    el = document.createElement('div'); el.id = 'lbRunMap';
+    el.innerHTML = '<div class="rm-bar"><select id="rmStream"></select><select id="rmDay"></select><select id="rmRun"></select><span class="rm-sp"></span><button type="button" data-rm="print">Print / PDF</button><button type="button" data-rm="close">Close</button></div>' +
+      '<div class="rm-page"><div class="rm-map" id="rmMap"></div><div class="rm-side" id="rmSide"></div></div>';
+    document.body.appendChild(el);
+    el.addEventListener('click', function(e){
+      var b = e.target.closest && e.target.closest('[data-rm]'); if (!b) return;
+      var a = b.getAttribute('data-rm');
+      if (a === 'close') { el.style.display = 'none'; return; }
+      if (a === 'print') { document.body.classList.add('rm-printing'); map.invalidateSize(); fit(); setTimeout(function(){ try { window.print(); } catch (x) {} setTimeout(function(){ document.body.classList.remove('rm-printing'); map.invalidateSize(); }, 600); }, 900); }
+    });
+    ['rmStream', 'rmDay', 'rmRun'].forEach(function(id){ document.getElementById(id).addEventListener('change', function(){ pickerChanged(id); }); });
+  }
+  function keys(){ return Object.keys(DATA || {}); }
+  function fillPickers(o){
+    var ks = keys().map(parse);
+    var streams = ['Garbage', 'Recycling', 'FOGO'].filter(function(s){ return ks.some(function(k){ return k.stream === s; }); });
+    var S = document.getElementById('rmStream'), D = document.getElementById('rmDay'), R = document.getElementById('rmRun');
+    S.innerHTML = streams.map(function(s){ return '<option' + (s === o.stream ? ' selected' : '') + '>' + s + '</option>'; }).join('');
+    var dayOpts = [];
+    DAYS.forEach(function(d){
+      if (o.stream === 'Garbage') { if (ks.some(function(k){ return k.stream === 'Garbage' && k.day === d; })) dayOpts.push([d, d]); }
+      else ['A', 'B'].forEach(function(w){ if (ks.some(function(k){ return k.stream === o.stream && k.day === d && k.week === w; })) dayOpts.push([d + '|' + w, d + ' · Week ' + w]); });
+    });
+    var dv = o.stream === 'Garbage' ? o.day : o.day + '|' + o.week;
+    D.innerHTML = dayOpts.map(function(x){ return '<option value="' + x[0] + '"' + (x[0] === dv ? ' selected' : '') + '>' + x[1] + '</option>'; }).join('');
+    var runs = ks.filter(function(k){ return k.stream === o.stream && k.day === o.day && (o.stream === 'Garbage' || k.week === o.week); }).map(function(k){ return k.run; }).sort(function(a, b){ return a.localeCompare(b, undefined, { numeric: true }); });
+    R.innerHTML = runs.map(function(r){ return '<option' + (r === o.run ? ' selected' : '') + '>' + esc(r) + '</option>'; }).join('');
+  }
+  function pickerChanged(id){
+    var S = document.getElementById('rmStream').value, Dv = document.getElementById('rmDay').value, R = document.getElementById('rmRun').value;
+    var ks = keys().map(parse), o;
+    if (id === 'rmStream') o = ks.filter(function(k){ return k.stream === S; })[0];
+    else {
+      var p = Dv.split('|'); o = { stream: S, day: p[0], week: p[1] || '', run: R };
+      if (id === 'rmDay' || !DATA[keyOf(o)]) o = ks.filter(function(k){ return k.stream === S && k.day === p[0] && (S === 'Garbage' || k.week === (p[1] || '')); })[0] || o;
+    }
+    if (o) show(keyOf(o));
+  }
+
+  var layers = null, bounds = null;
+  function fit(){ if (map && bounds) map.fitBounds(bounds, { padding: [24, 24] }); }
+  function show(key){
+    var o = parse(key), R = DATA[key]; cur = key;
+    fillPickers(o);
+    var side = document.getElementById('rmSide');
+    if (!map) {
+      map = L.map('rmMap', { zoomControl: true, attributionControl: true, zoomSnap: 0.25 });
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap contributors' }).addTo(map);
+      layers = L.layerGroup().addTo(map);
+    }
+    layers.clearLayers(); bounds = null;
+    if (!R) { side.innerHTML = '<div class="rm-empty">No route map for this run yet.</div>'; return; }
+    var colour = COL[o.stream] || '#16a34a';
+    // houses on the run
+    var grp = groupFor(o), houses = 0, bins = 0;
+    if (grp) grp.sites.forEach(function(s){
+      var la = +s.lat, ln = +s.lng; if (!la || !ln) return; houses++;
+      var bs = ((s.soloStreams || {})[o.stream] || []).length || ((s.councilStreams || {})[o.stream] || []).length; bins += bs;
+      L.circleMarker([la, ln], { radius: 2.2, weight: 0, fillColor: '#475569', fillOpacity: .75, interactive: false }).addTo(layers);
+    });
+    // schools
+    try { var sc = JSON.parse(localStorage.getItem('lbSchools') || 'null'); (sc && sc.items || []).forEach(function(s){ L.polygon(s.r, { color: '#ca8a04', weight: 1, fillColor: '#fde68a', fillOpacity: .55, interactive: false }).addTo(layers); }); } catch (e) {}
+    // the route: white casing under the run's colour
+    var all = [];
+    R.lines.forEach(function(l){ all = all.concat(l.c); L.polyline(l.c, { color: '#fff', weight: 8, opacity: 1, interactive: false }).addTo(layers); });
+    R.lines.forEach(function(l){ L.polyline(l.c, { color: '#16a34a', weight: 4.5, opacity: 1, interactive: false, lineCap: 'round' }).bindTooltip(l.n || '', { sticky: true }).addTo(layers); });
+    bounds = L.latLngBounds(all);
+    // reverse-in / drive-in streets that lie on this route
+    var grid = {}; all.forEach(function(p){ grid[Math.round(p[0] / 0.0003) + ':' + Math.round(p[1] / 0.0004)] = 1; });
+    var near = function(p){ var a = Math.round(p[0] / 0.0003), b = Math.round(p[1] / 0.0004); for (var i = -1; i <= 1; i++) for (var j = -1; j <= 1; j++) if (grid[(a + i) + ':' + (b + j)]) return true; return false; };
+    var modes = g('sharedStreetModes') || [];
+    modes.forEach(function(m){
+      if (!m.points || !m.points.every(near)) return;
+      L.polyline(m.points, { color: m.type === 'drive-reverse-out' ? '#f59e0b' : '#7c3aed', weight: 6, opacity: 1, interactive: false, lineCap: 'round' }).addTo(layers);
+    });
+    // Drivers Notes, numbered, pinned to the first street on this route each one names
+    var notes = window.lbRunNotes ? window.lbRunNotes.forRun(key) : [], T = window.lbRunNotes && window.lbRunNotes._t, pinned = [];
+    notes.forEach(function(n){
+      if (!/^[A-Z0-9*“"]/.test(n.text) || n.text.split(/\s+/).length < 2) return;
+      var at = null;
+      if (T) R.lines.some(function(l){ if (l.n && T.mentions(T.norm(n.text), l.n)) { at = l.c[Math.floor(l.c.length / 2)]; return true; } return false; });
+      pinned.push({ text: n.text, at: at });
+    });
+    pinned.forEach(function(p, i){ if (p.at) L.marker(p.at, { icon: L.divIcon({ className: '', html: '<div class="rm-note-pin">' + (i + 1) + '</div>', iconSize: [22, 22], iconAnchor: [11, 11] }), keyboard: false }).addTo(layers); });
+    fit();
+    var sub = o.stream + ' · ' + o.day + (o.week ? ' · Week ' + o.week : '');
+    var streets = (R.streets || []).slice().sort(function(a, b){ return a.localeCompare(b); });
+    side.innerHTML =
+      '<div><div class="rm-band" style="background:' + colour + '"></div></div>' +
+      '<div><div class="rm-title">Run ' + esc(o.run) + '</div><div class="rm-sub">' + esc(sub) + '</div></div>' +
+      '<div class="rm-stats"><div><b>' + houses.toLocaleString() + '</b><span>houses</span></div><div><b>' + bins.toLocaleString() + '</b><span>bins</span></div><div><b>' + esc(R.km) + '</b><span>km route</span></div></div>' +
+      '<div><h4>Legend</h4><div class="rm-leg"><div><i style="border-color:#16a34a"></i>Route</div><div><i style="border-color:#7c3aed"></i>Reverse in, drive out</div><div><i style="border-color:#f59e0b"></i>Drive in, reverse out</div><div><i class="box"></i>School</div><div><i class="dot"></i>House on the run</div><div><i class="num">1</i>Driver note</div></div></div>' +
+      (pinned.length ? '<div><h4>Driver notes</h4><ol>' + pinned.map(function(p, i){ return '<li><b>' + (i + 1) + '</b><span>' + esc(p.text) + '</span></li>'; }).join('') + '</ol></div>' : '') +
+      '<div><h4>Streets (' + streets.length + ')</h4><div class="rm-streets">' + streets.map(function(n){ return '<div>' + esc(n) + '</div>'; }).join('') + '</div></div>' +
+      '<div class="rm-foot">Lukez Bunz run map · redrawn ' + new Date().toLocaleDateString('en-AU') + ' from the Solo route maps on OpenStreetMap streets. Check the street before reversing.</div>';
+  }
+  function open(key){
+    if (!window.L) return;
+    build(); el.style.display = '';
+    load().then(function(){
+      var k = key || currentKey();
+      if (!k || !DATA[k]) k = k && DATA[k] ? k : (Object.keys(DATA).sort()[0] || null);
+      if (!k) { document.getElementById('rmSide').innerHTML = '<div class="rm-empty">No run maps yet.</div>'; return; }
+      setTimeout(function(){ show(k); map.invalidateSize(); fit(); }, 30);
+    });
+  }
+  window.lbRunMapOpen = open;
 })();
 </script>
 
