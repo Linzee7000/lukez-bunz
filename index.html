@@ -5305,6 +5305,9 @@ const STREET_LITTER_SERVICE_LEVELS = {"seasons":[{"key":"tourist1","label":"Tour
   // drawn in green alongside the normal boundary when on. See
   // sitesForBoundaryHull and renderMapData for where the two differ.
   let showPropertyBoundaries = true;
+  // Rings round houses whose pin sits outside its lot (orange) or has no lot near it (red): possible address /
+  // pin problems. Handy when checking data, noise when driving, so off unless switched on (Layers).
+  let showPinRings = (function(){ try { return localStorage.getItem('lbShowPinRings') === '1'; } catch (e) { return false; } })();
 
   let isTruckFollowEnabled = true;
   let isNextBinBoxVisible = localStorage.getItem('lukezBunzNextBinBoxVisible') !== 'false';
@@ -6332,6 +6335,13 @@ const STREET_LITTER_SERVICE_LEVELS = {"seasons":[{"key":"tourist1","label":"Tour
     updateMapSideLayersUI();
   }
 
+  function togglePinRings() {
+    showPinRings = !showPinRings;
+    try { localStorage.setItem('lbShowPinRings', showPinRings ? '1' : '0'); } catch (e) {}
+    if (window.lbParcels) window.lbParcels.refresh();
+    if (typeof updateMapSideLayersUI === 'function') updateMapSideLayersUI();
+  }
+  window.togglePinRings = togglePinRings;
   function togglePropertyBoundaries() {
     showPropertyBoundaries = !showPropertyBoundaries;
     renderMapData();
@@ -22203,6 +22213,7 @@ body.stream-slr .lb-layers-head .icon-img { filter: brightness(0); }
       case 'houses':    return typeof showHouseGpsDots !== 'undefined' && showHouseGpsDots;
       case 'bounds':    return typeof showRunBoundaries !== 'undefined' && showRunBoundaries;
       case 'propBounds':return typeof showPropertyBoundaries !== 'undefined' && showPropertyBoundaries;
+      case 'pinRings':  return typeof showPinRings !== 'undefined' && showPinRings;
       case 'streetModes':return typeof showStreetModes !== 'undefined' && showStreetModes;
       case 'garSq':     return typeof showGarbageRunSquares !== 'undefined' && showGarbageRunSquares;
       case 'recSq':     return typeof showRecyclingRunSquares !== 'undefined' && showRecyclingRunSquares;
@@ -22264,6 +22275,7 @@ body.stream-slr .lb-layers-head .icon-img { filter: brightness(0); }
     ['houses',   'toggleHouseGpsDots',            'img:houses.png',   'Houses'],
     ['bounds',   'toggleRunBoundaries',           'img:boundary.png', 'Run boundaries'],
     ['propBounds','togglePropertyBoundaries',     'img:boundary.png', 'Property boundaries'],
+    ['pinRings', 'togglePinRings',                '⭕',               'Address check rings'],
     ['streetModes','toggleStreetModes',           'img:route.png',    'Reverse in / drive in streets'],
     ['garSq',    'toggleGarbageRunSquares',       'img:garbage.png',  'Garbage squares'],
     ['recSq',    'toggleRecyclingRunSquares',     'img:recycle.png',  'Recycling squares'],
@@ -23735,7 +23747,7 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
   // area already drawn is skipped - see refresh().
   let drawnBox = null, drawnSig = '';
   const MAX_VERTS = 40000;       // faint context lines only; matched lots are always drawn
-  const drawSigNow = () => map.getZoom() + '|' + dataVer + '|' + tiles.size + '|' + (isOn() ? 1 : 0) + '|' + (((typeof isSatelliteView !== 'undefined') && isSatelliteView) ? 1 : 0) + '|' + runVer;
+  const drawSigNow = () => map.getZoom() + '|' + dataVer + '|' + tiles.size + '|' + (isOn() ? 1 : 0) + '|' + (((typeof isSatelliteView !== 'undefined') && isSatelliteView) ? 1 : 0) + '|' + runVer + '|' + (((typeof showPinRings !== 'undefined') && showPinRings) ? 1 : 0);
   function redraw() {
     if (!ensureMap()) return 0;
     group.clearLayers();
@@ -23782,8 +23794,9 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     // 2b. Houses whose pin isn't in any lot: red ring = no lot within 25 m, orange = pin outside its lot
     //     (nearest lot used). Those pins are probably in the wrong place - select the house and drag it.
     const inV = pt => pt.lng >= v.w && pt.lng <= v.e && pt.lat >= v.s && pt.lat <= v.n;
+    const ringsOn = (typeof showPinRings !== 'undefined') && showPinRings;   // Layers > Address check rings (off by default)
     nearby.forEach(s => {
-      if (n >= MAX_DRAW) return;
+      if (!ringsOn || n >= MAX_DRAW) return;
       if (only && !only.has(siteKey(s))) return;
       const e = store.sites[siteKey(s)];
       if (!e || !(e.x || e.m === 1) || !e.q || !isFresh(s, e)) return;
@@ -24014,7 +24027,7 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
       + row('lbParcelMatchViewBtn', 'window.lbParcels.matchViewUI()', 'fit.png', 'Match houses on screen')
       + row('', 'window.lbParcels.goToNextUnmatched()', 'search.png', 'Find next house with no lot')
       + row('', 'window.lbParcels.clearAllUI()', 'minus.png', 'Clear matched boundaries', 'danger')
-      + '<div class="lb-bnd-help">On the map, a <b>red ring</b> is a house with no lot near its pin and an <b>orange ring</b> is a pin sitting outside its lot. Those pins are usually in the wrong place: select the house (it turns blue), then drag it into its lot.</div>'
+      + '<div class="lb-bnd-help">With <b>Layers &gt; Address check rings</b> switched on, a <b>red ring</b> on the map is a house with no lot near its pin and an <b>orange ring</b> is a pin sitting outside its lot. Those pins are usually in the wrong place: select the house (it turns blue), then drag it into its lot.</div>'
       + '<div class="lb-layers-sect">Run boundaries from property lines</div>'
       + row('lbBuildRunsBtn', 'window.lbParcels.buildRunsUI(\'selected\')', 'boundary.png', 'Build selected run')
       + row('lbBuildAllBtn', 'window.lbParcels.buildRunsUI(\'all\')', 'layers.png', 'Build every run')
