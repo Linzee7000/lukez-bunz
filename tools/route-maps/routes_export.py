@@ -15,7 +15,8 @@ from shapely.geometry import LineString, MultiLineString, MultiPoint, Point
 from shapely.ops import unary_union, linemerge, substring
 from shapely.strtree import STRtree
 from lib import S, REPO, KX, KY, LAT0, LNG0, to_m, load_results
-from picture_place import road_dist, apply
+from picture_place import road_dist, apply, page_to_m_from_saved
+from lib import page_routes
 
 NAME = {'REC': 'Recycling', 'ORG': 'FOGO', 'GAR': 'Garbage'}
 NEAR_M, MIN_PIECE_M, MAX_PAGE_ROAD_M = 16.0, 20.0, 12.0
@@ -65,7 +66,7 @@ def _flat(g): return [x for x in getattr(g, 'geoms', [g]) if x.geom_type == 'Lin
 def run(write):
     roads = [(r.get('name') or '', LineString([to_m(a, b) for a, b in r['pts']])) for r in json.load(open(f'{S}/roads.json')) if len(r['pts']) > 1]
     tree = STRtree([g for _, g in roads])
-    lines_by_run, skipped = {}, 0
+    lines_by_run, skipped = {}, 0            # key -> {'main': [...], '#rrggbb' (a section's colour): [...]}
     for code in ('REC', 'ORG', 'GAR'):
         routes, results = load_results(code)
         for tag, r in results.items():
@@ -74,21 +75,41 @@ def run(write):
             if not pls: continue
             pts = np.vstack([np.array(pl) for pl in pls])
             if road_dist(np.eye(3), pts) > MAX_PAGE_ROAD_M: skipped += 1; continue
-            lines_by_run.setdefault(key_of(tag), []).extend(pls)
+            by = lines_by_run.setdefault(key_of(tag), {})
+            by.setdefault('main', []).extend(pls)
+            # the page's other colours (sections: loads, or a chopped run's drivers), put where the page was placed
+            pdf, pg = tag.split('|')[4].rsplit(' p', 1)
+            try:
+                T = page_to_m_from_saved(pdf, int(pg), routes[tag])
+                if T is None: continue
+                for col, plist in page_routes(pdf, int(pg), sections=True).items():
+                    if not col.startswith('#'): continue
+                    for pl in plist:
+                        if len(pl) > 1: by.setdefault(col, []).append(apply(T, np.array(pl)).tolist())
+            except Exception as e:
+                print('  sections not read for', tag, e)
     houses = houses_by_run()
     out = {}
     for key in sorted(set(lines_by_run) | set(houses)):
-        pls = lines_by_run.get(key, [])
-        pieces, names, short = [], {}, []
-        if pls:
-            area = unary_union([LineString(pl) for pl in pls]).buffer(NEAR_M)
-            for i in tree.query(area):
+        by = lines_by_run.get(key, {})
+        areas = {c: unary_union([LineString(pl) for pl in pls if len(pl) > 1]).buffer(NEAR_M) for c, pls in by.items() if pls}
+        sec_cols = [c for c in areas if c != 'main']
+        sec_area = unary_union([areas[c] for c in sec_cols]) if sec_cols else None
+        pieces, names, short = [], {}, []          # (name, geometry, section colour or '')
+        def add(name, geom, col):
+            for part in getattr(geom, 'geoms', [geom]):
+                if part.is_empty or part.geom_type != 'LineString': continue
+                if part.length < MIN_PIECE_M: short.append((name, part, col)); continue
+                pieces.append((name, part.simplify(2.0), col)); names[name] = names.get(name, 0) + part.length
+        def add_split(name, geom):
+            # a stretch goes to a section where that section's lines run along it, the rest to the main route
+            for c in sec_cols: add(name, geom.intersection(areas[c]), c)
+            add(name, geom.difference(sec_area) if sec_area is not None else geom, '')
+        if areas:
+            everything = unary_union(list(areas.values()))
+            for i in tree.query(everything):
                 name, g = roads[i]
-                inter = g.intersection(area)
-                for part in getattr(inter, 'geoms', [inter]):
-                    if part.is_empty or part.geom_type != 'LineString': continue
-                    if part.length < MIN_PIECE_M: short.append((name, part)); continue
-                    pieces.append((name, part.simplify(2.0))); names[name] = names.get(name, 0) + part.length
+                add_split(name, g.intersection(everything))
         # the streets the run's houses are on (from their addresses), first house to last, so a street the
         # route map missed - or a run with no usable map page - still has its streets drawn
         for st_name, pts in houses.get(key, {}).items():
@@ -103,24 +124,25 @@ def run(write):
                 if a1 - a0 < 10: continue
                 seg = substring(g, a0, a1)
                 if seg.geom_type != 'LineString' or seg.length < 10: continue
-                pieces.append((name, seg.simplify(2.0))); names[name] = names.get(name, 0) + seg.length
+                add_split(name, seg)
         if not pieces: continue
         # short bits at corners are kept when both ends meet the route
-        kept = unary_union([g for _, g in pieces])
-        for name, part in short:
+        kept = unary_union([g for _, g, _ in pieces])
+        for name, part, col in short:
             a, z = Point(part.coords[0]), Point(part.coords[-1])
-            if kept.distance(a) < 6 and kept.distance(z) < 6: pieces.append((name, part))
-        # one clean line per street (overlapping pieces from the map and from the addresses joined)
-        pieces = [(nm, g) for nm, gs in _group(pieces).items() for g in _flat(_merge(unary_union(gs)))]
-        # pieces joined up per street, each line carrying its street's name (n) for notes and the street list
-        by_name = {}
-        for nm, g in pieces: by_name.setdefault(nm, []).append(g)
-        lines, km = [], 0.0
-        for nm, gs in by_name.items():
-            merged = _merge(MultiLineString(gs)) if len(gs) > 1 else gs[0]
-            for g in getattr(merged, 'geoms', [merged]):
-                km += g.length; lines.append(dict(n=nm, c=[ll(x, y) for x, y in g.coords]))
-        out[key] = dict(km=round(km / 1000, 1), streets=[n for n, _ in sorted(names.items(), key=lambda kv: -kv[1]) if n], lines=lines)
+            if kept.distance(a) < 6 and kept.distance(z) < 6: pieces.append((name, part, col))
+        # one clean line per street and section (overlapping pieces from the map and from the addresses joined)
+        groups = {}
+        for nm, g, col in pieces: groups.setdefault((nm, col), []).append(g)
+        lines, km, seclen = [], 0.0, {}
+        for (nm, col), gs in groups.items():
+            for g in _flat(_merge(unary_union(gs))):
+                km += g.length; d = dict(n=nm, c=[ll(x, y) for x, y in g.coords])
+                if col: d['s'] = col; seclen[col] = seclen.get(col, 0) + g.length
+                lines.append(d)
+        rec = dict(km=round(km / 1000, 1), streets=[n for n, _ in sorted(names.items(), key=lambda kv: -kv[1]) if n], lines=lines)
+        if seclen: rec['sections'] = [c for c, _ in sorted(seclen.items(), key=lambda kv: -kv[1]) if seclen[c] > 150]
+        out[key] = rec
     size = len(json.dumps(out, separators=(',', ':')))
     print(f'{len(out)} runs, {sum(len(v['lines']) for v in out.values())} street pieces, {sum(v["km"] for v in out.values()):.0f} km; '
           f'{skipped} pages left out (> {MAX_PAGE_ROAD_M:.0f} m from the roads); {size // 1024} KB')

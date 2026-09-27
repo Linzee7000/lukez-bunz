@@ -13,6 +13,11 @@ S = os.path.join(HERE, 'work'); os.makedirs(S + '/pdf/svg', exist_ok=True)   # m
 DL = os.environ.get('ROUTEMAP_PDF_DIR', os.path.abspath(os.path.join(HERE, '..', '..')))   # folder with the route-map PDFs (default: the repo root)
 REPO = os.path.abspath(os.path.join(HERE, '..', '..'))
 ROUTE_COL = {'green': (0.0, 68.99, 31.4), 'orange': (100.0, 75.3, 0.0), 'purple': (50.2, 0.0, 50.2)}
+# Other route colours on the maps mark SECTIONS of a run - separate loads ("Start L2 / Finish L2"), or the parts of a
+# chopped run each driver is given. Read only when asked for (page_routes(..., sections=True)); the name is the
+# colour the app draws it in.
+SECTION_COL = {'#0000ff': (0.0, 0.0, 100.0), '#00b0f0': (0.0, 69.0, 94.1), '#ff0000': (100.0, 0.0, 0.0), '#ff006b': (100.0, 0.0, 42.0),
+               '#ff0073': (100.0, 0.0, 45.0), '#ff9900': (100.0, 60.0, 0.0), '#e3702b': (89.0, 44.0, 17.0), '#0070c0': (0.0, 44.0, 75.0)}
 LAT0, LNG0 = -38.30, 144.95
 KX = 111320 * math.cos(math.radians(LAT0)); KY = 110540.0
 def to_m(lat, lng): return ((lng - LNG0) * KX, (lat - LAT0) * KY)
@@ -78,6 +83,14 @@ def mul(m1, m2):  # apply m2 first, then m1
     a1, b1, c1, d1, e1, f1 = m1; a2, b2, c2, d2, e2, f2 = m2
     return (a1*a2 + c1*b2, b1*a2 + d1*b2, a1*c2 + c1*d2, b1*c2 + d1*d2, a1*e2 + c1*f2 + e1, b1*e2 + d1*f2 + f1)
 def apply(m, x, y): return (m[0]*x + m[2]*y + m[4], m[1]*x + m[3]*y + m[5])
+def section_name(s):
+    mm = re.match(r'rgb\(([\d.]+)%,\s*([\d.]+)%,\s*([\d.]+)%\)', s or '')
+    if not mm: return None
+    v = tuple(float(x) for x in mm.groups())
+    for n, c in SECTION_COL.items():
+        if all(abs(v[i] - c[i]) < 2.5 for i in range(3)): return n
+    return None
+
 def color_name(s):
     mm = re.match(r'rgb\(([\d.]+)%,\s*([\d.]+)%,\s*([\d.]+)%\)', s or '')
     if not mm: return None
@@ -114,7 +127,7 @@ def parse_d(d):
             i += 1
     flush()
     return out
-def page_routes(pdf, page):
+def page_routes(pdf, page, sections=False):
     svg = f"{S}/pdf/svg/{re.sub(r'[^A-Za-z0-9]+', '_', pdf)}_{page}.svg"
     if not os.path.exists(svg):
         subprocess.run(['pdftocairo', '-svg', '-f', str(page), '-l', str(page), os.path.join(DL, pdf), svg], check=True)
@@ -123,7 +136,8 @@ def page_routes(pdf, page):
     def walk(el, m):
         m2 = mul(m, parse_matrix(el.get('transform')))
         if el.tag.split('}')[-1] == 'path':
-            cn = color_name(el.get('stroke'))
+            cn = color_name(el.get('stroke')) or (section_name(el.get('stroke')) if sections else None)
+            if cn and cn not in lines: lines[cn] = []
             if cn and el.get('d'):
                 for sub in parse_d(el.get('d')):
                     lines[cn].append([apply(m2, x, y) for x, y in sub])

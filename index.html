@@ -31151,6 +31151,10 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       // collection points and house driving modes shared between phones travel as places too (no lat/lng, so not pins)
       var ha = Object.keys(r.places).map(function(k){ return r.places[k]; }).filter(function(p){ return p && p.kind === 'houseAccess' && p.propId; });
       lsSet('lbHouseAccessFleet', ha);
+      // run map edits (section colours, drawn lines, notes) made on other phones: newest per run
+      var rme = {};
+      Object.keys(r.places).forEach(function(k){ var p = r.places[k]; if (p && p.kind === 'runMapEdit' && p.key && p.edits && (!rme[p.key] || (p.ts || 0) > (rme[p.key].ts || 0))) rme[p.key] = Object.assign({}, p.edits, { ts: p.ts || p.edits.ts || 0 }); });
+      lsSet('lbRunMapEditsFleet', rme);
       try { document.dispatchEvent(new CustomEvent('lb-house-access')); } catch (e) {}
     }).catch(function(){});
   }
@@ -34790,6 +34794,13 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   #lbRunMap .rm-pg { font: 700 12px system-ui, sans-serif; color: #475569; letter-spacing: 0; vertical-align: middle; }
   .rm-page-tag { width: 20px; height: 20px; background: #0f172a; color: #fff; font: 800 12px/20px system-ui; text-align: center; }
   #rmPrint { display: none; }
+  #lbRunMap .rm-tools { position: relative; z-index: 999; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 8px; background: #f8fafc; border-bottom: 1px solid #cbd5e1; }
+  #lbRunMap .rm-tools button { min-height: 40px; padding: 0 12px; font: 700 13px system-ui, sans-serif; border: 1px solid #94a3b8; border-radius: 6px; background: #fff; color: #111; }
+  #lbRunMap .rm-tools button.on { background: #111827; color: #fff; border-color: #111827; }
+  #lbRunMap .rm-tools .rm-sw { width: 40px; padding: 0; border: 3px solid #fff; box-shadow: 0 0 0 1px #94a3b8; }
+  #lbRunMap .rm-tools .rm-sw.on { box-shadow: 0 0 0 3px #111827; background-clip: padding-box; }
+  #lbRunMap .rm-tools .rm-tl { font-size: 12px; color: #475569; }
+  #lbRunMap .rm-bar button.on { background: #fbbf24; }
   body.rm-printing #rmPrint { display: block; }
   body.rm-printing #rmView { display: none; }
   #lbRunMap .rm-page { break-after: page; page-break-after: always; }
@@ -34871,8 +34882,31 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     return pages;
   }
 
+  /* ---- edits: section colours, removed streets, drawn lines, notes, section names - per run, shared ----
+     Kept on the phone (lbRunMapEdits) and sent to the Apps Script as a "place" (kind runMapEdit), so every phone
+     gets them (pulled with the other places, lbRunMapEditsFleet); the newest version of a run's edits wins. */
+  var SECTION_NAMES = { '#16a34a': 'Green', '#0000ff': 'Blue', '#00b0f0': 'Light blue', '#ff0000': 'Red', '#ff006b': 'Pink', '#ff0073': 'Pink',
+    '#ff9900': 'Orange', '#e3702b': 'Brown', '#0070c0': 'Dark blue', '#111827': 'Black' };
+  var PALETTE = ['#16a34a', '#ff0000', '#0000ff', '#00b0f0', '#ff006b', '#ff9900', '#e3702b', '#111827'];
+  function lsGet(k, d){ try { var v = JSON.parse(localStorage.getItem(k)); return v == null ? d : v; } catch (e) { return d; } }
+  function lsSet(k, v){ try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
+  function edits(key){
+    var mine = (lsGet('lbRunMapEdits', {}) || {})[key], fleet = (lsGet('lbRunMapEditsFleet', {}) || {})[key];
+    var e = (fleet && (!mine || (fleet.ts || 0) > (mine.ts || 0))) ? fleet : mine;
+    e = e || {};
+    return { pieces: e.pieces || {}, drawn: e.drawn || [], notes: e.notes || [], hide: e.hide || [], names: e.names || {}, ts: e.ts || 0 };
+  }
+  function saveEdits(key, E){
+    E.ts = Date.now();
+    var all = lsGet('lbRunMapEdits', {}) || {}; all[key] = E; lsSet('lbRunMapEdits', all);
+    try { if (window.lbOutbox && window.lbOutbox.sendPlace) window.lbOutbox.sendPlace({ id: 'rme_' + key.replace(/[^A-Za-z0-9]+/g, '_'), kind: 'runMapEdit', key: key, edits: E, ts: E.ts }); } catch (e) {}
+  }
+  function pid(l){ var a = l.c[0], z = l.c[l.c.length - 1]; return (l.n || '') + '|' + a[0].toFixed(4) + ',' + a[1].toFixed(4) + '|' + z[0].toFixed(4) + ',' + z[1].toFixed(4); }
+
   /* ---- drawing one page into a container (the screen view, or each printed page) ---- */
-  function draw(container, key, R, page, idx, total){
+  function draw(container, key, R, page, idx, total, opts){
+    opts = opts || {};
+    var E = edits(key);
     var o = parse(key), map = L.map(container, { zoomControl: false, attributionControl: false, zoomSnap: 0.1, zoomDelta: 0.5, fadeAnimation: false, zoomAnimation: false });
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
     map.createPane('rmLabels').style.zIndex = 650; map.createPane('rmPins').style.zIndex = 660;
@@ -34885,8 +34919,23 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     });
     try { var sc = JSON.parse(localStorage.getItem('lbSchools') || 'null'); (sc && sc.items || []).forEach(function(s){ L.polygon(s.r, { color: '#ca8a04', weight: 1, fillColor: '#fde68a', fillOpacity: .55, interactive: false }).addTo(layers); }); } catch (e) {}
     var all = []; R.lines.forEach(function(l){ all = all.concat(l.c); });
-    R.lines.forEach(function(l){ L.polyline(l.c, { color: '#fff', weight: 9, opacity: 1, interactive: false }).addTo(layers); });
-    R.lines.forEach(function(l){ L.polyline(l.c, { color: '#16a34a', weight: 5, opacity: 1, interactive: false, lineCap: 'round', lineJoin: 'round' }).addTo(layers); });
+    // the route, each street piece in its section's colour (from the map, or as edited); removed pieces only in edit mode
+    var used = {};
+    var shown = R.lines.map(function(l){ var ov = E.pieces[pid(l)]; return { l: l, col: ov && ov !== 'x' ? ov : (l.s || '#16a34a'), gone: ov === 'x' }; });
+    shown.forEach(function(x){ if (!x.gone) L.polyline(x.l.c, { color: '#fff', weight: 9, opacity: 1, interactive: false }).addTo(layers); });
+    E.drawn.forEach(function(d){ L.polyline(d.c, { color: '#fff', weight: 9, opacity: 1, interactive: false }).addTo(layers); });
+    shown.forEach(function(x){
+      if (x.gone && !opts.edit) return;
+      if (!x.gone) used[x.col] = (used[x.col] || 0) + 1;
+      var line = L.polyline(x.l.c, { color: x.gone ? '#94a3b8' : x.col, weight: opts.edit ? 7 : 5, opacity: 1, dashArray: x.gone ? '4,6' : null, interactive: !!opts.edit, lineCap: 'round', lineJoin: 'round' }).addTo(layers);
+      if (opts.edit) line.on('click', function(ev){ L.DomEvent.stopPropagation(ev); opts.onPiece && opts.onPiece(pid(x.l), x); });
+    });
+    E.drawn.forEach(function(d, i){
+      used[d.s] = (used[d.s] || 0) + 1;
+      var line = L.polyline(d.c, { color: d.s, weight: opts.edit ? 7 : 5, opacity: 1, interactive: !!opts.edit, lineCap: 'round', lineJoin: 'round' }).addTo(layers);
+      if (opts.edit) line.on('click', function(ev){ L.DomEvent.stopPropagation(ev); opts.onDrawn && opts.onDrawn(i); });
+    });
+    if (opts.edit && opts.drawing && opts.drawing.length) L.polyline(opts.drawing, { color: opts.tool, weight: 5, dashArray: '6,5', interactive: false }).addTo(layers);
     var grid = {}; all.forEach(function(p){ grid[Math.round(p[0] / 0.0003) + ':' + Math.round(p[1] / 0.0004)] = 1; });
     var near = function(p){ var a = Math.round(p[0] / 0.0003), b = Math.round(p[1] / 0.0004); for (var i = -1; i <= 1; i++) for (var j = -1; j <= 1; j++) if (grid[(a + i) + ':' + (b + j)]) return true; return false; };
     (g('sharedStreetModes') || []).forEach(function(m){
@@ -34896,17 +34945,27 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var notes = window.lbRunNotes ? window.lbRunNotes.forRun(key) : [], T = window.lbRunNotes && window.lbRunNotes._t, pinned = [];
     notes.forEach(function(n){
       if (!/^[A-Z0-9*“"]/.test(n.text) || n.text.split(/\s+/).length < 2) return;
+      if (E.hide.indexOf(n.text) >= 0) return;          // a route-map note deleted in edit mode
       var at = null;
       if (T) R.lines.some(function(l){ if (l.n && T.mentions(T.norm(n.text), l.n)) { at = l.c[Math.floor(l.c.length / 2)]; return true; } return false; });
       pinned.push({ text: n.text, at: at });
     });
-    pinned.forEach(function(p, i){ if (p.at) L.marker(p.at, { icon: L.divIcon({ className: '', html: '<div class="rm-note-pin">' + (i + 1) + '</div>', iconSize: [22, 22], iconAnchor: [11, 11] }), keyboard: false, pane: 'rmPins', interactive: false }).addTo(layers); });
+    E.notes.forEach(function(n, i){ pinned.push({ text: n.text, at: n.at, mine: i }); });
+    pinned.forEach(function(p, i){
+      if (!p.at) return;
+      var mk = L.marker(p.at, { icon: L.divIcon({ className: '', html: '<div class="rm-note-pin">' + (i + 1) + '</div>', iconSize: [22, 22], iconAnchor: [11, 11] }), keyboard: false, pane: 'rmPins', interactive: !!opts.edit, draggable: !!opts.edit && p.mine != null }).addTo(layers);
+      if (opts.edit) {
+        mk.on('click', function(ev){ L.DomEvent.stopPropagation(ev); opts.onNote && opts.onNote(p); });
+        mk.on('dragend', function(){ if (p.mine != null) opts.onNoteMove && opts.onNoteMove(p.mine, mk.getLatLng()); });
+      }
+    });
+    if (opts.edit) map.on('click', function(ev){ opts.onMap && opts.onMap(ev.latlng); });
     // cards: title + legend on every page; the notes on the whole-run page (or the only page)
     var sub = o.stream + ' · ' + o.day + (o.week ? ' · Week ' + o.week : '');
     var card = document.createElement('div'); card.className = 'rm-card';
     card.innerHTML = '<div class="rm-band" style="background:' + (COL[o.stream] || '#16a34a') + '"></div><div class="rm-title">Run ' + esc(o.run) + (total > 1 ? ' <span class="rm-pg">' + (page.kind === 'all' ? 'whole run' : 'close-up ' + idx + ' of ' + (total - 1)) + '</span>' : '') + '</div><div class="rm-sub">' + esc(sub) + '</div>' +
       (page.kind === 'all' ? '<div class="rm-stats"><span><b>' + houses.toLocaleString() + '</b>houses</span><span><b>' + bins.toLocaleString() + '</b>bins</span><span><b>' + esc(R.km) + '</b>km</span></div>' +
-      '<div class="rm-leg"><div><i style="border-color:#16a34a"></i>Route</div><div><i style="border-color:#7c3aed"></i>Reverse in</div><div><i style="border-color:#f59e0b"></i>Drive in, back out</div><div><i class="box"></i>School</div><div><i class="dot"></i>House</div><div><i class="num">1</i>Note</div></div>' : '');
+      '<div class="rm-leg">' + legendSections(used, E) + '<div><i style="border-color:#7c3aed"></i>Reverse in</div><div><i style="border-color:#f59e0b"></i>Drive in, back out</div><div><i class="box"></i>School</div><div><i class="dot"></i>House</div><div><i class="num">1</i>Note</div></div>' : '');
     container.appendChild(card);
     if (pinned.length && page.kind === 'all') {
       var nc = document.createElement('div'); nc.className = 'rm-card rm-notes';
@@ -34923,10 +34982,18 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var ft = document.createElement('div'); ft.className = 'rm-foot'; ft.textContent = 'Lukez Bunz run map · ' + new Date().toLocaleDateString('en-AU') + ' · streets © OpenStreetMap contributors';
     container.appendChild(ft);
     var st = { map: map, R: R, container: container };
-    map.fitBounds([[page.b[0], page.b[1]], [page.b[2], page.b[3]]], { padding: [14, 14] });
+    if (opts.view) map.setView(opts.view.c, opts.view.z, { animate: false });
+    else map.fitBounds([[page.b[0], page.b[1]], [page.b[2], page.b[3]]], { padding: [14, 14] });
     placeCards(st);
     map.on('zoomend moveend', function(){ placeCards(st); });
     return st;
+  }
+
+  // the legend's route colours: just "Route" for a one-colour run; each section, with its name, when the run has several
+  function legendSections(used, E){
+    var cols = Object.keys(used).sort(function(a, b){ return used[b] - used[a]; });
+    if (cols.length <= 1) return '<div><i style="border-color:' + (cols[0] || '#16a34a') + '"></i>' + esc(E.names[cols[0]] || 'Route') + '</div>';
+    return cols.map(function(c){ return '<div><i style="border-color:' + c + '"></i>' + esc(E.names[c] || SECTION_NAMES[c] || 'Section') + '</div>'; }).join('');
   }
 
   /* ---- our own street names: along the street, never upside down, never on top of each other ---- */
@@ -34980,18 +35047,77 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
 
   /* ---- the viewer ---- */
   var el = null, view = null, curKey = null, pagesCache = [], curPage = 0;
+  var editing = false, tool = '#ff0000', drawing = null, orientOverride = null;
+  /* edit tools: a colour (tap a street to put it in that section), Remove / Restore, Draw a line, Add a note */
+  function paintTools(){
+    var t = document.getElementById('rmTools'); if (!t) return;
+    t.style.display = editing ? '' : 'none'; if (!editing) { t.innerHTML = ''; return; }
+    t.innerHTML = '<span class="rm-tl">Tap a street to:</span>' + PALETTE.map(function(c){ return '<button type="button" data-rm="tool" data-v="' + c + '" class="rm-sw' + (tool === c ? ' on' : '') + '" style="background:' + c + '" title="' + esc(SECTION_NAMES[c]) + '"></button>'; }).join('') +
+      '<button type="button" data-rm="tool" data-v="x" class="' + (tool === 'x' ? 'on' : '') + '">Remove / put back</button>' +
+      '<button type="button" data-rm="tool" data-v="draw" class="' + (tool === 'draw' ? 'on' : '') + '"><span style="display:inline-block;width:14px;height:4px;vertical-align:middle;margin-right:6px;background:' + drawColour + '"></span>Draw a line</button>' +
+      '<button type="button" data-rm="tool" data-v="note" class="' + (tool === 'note' ? 'on' : '') + '">Add a note</button>' +
+      '<button type="button" data-rm="names">Name the sections</button>' +
+      (drawing ? '<button type="button" data-rm="drawdone" class="on">Finish line (' + drawing.length + ' points)</button>' : '') +
+      '<span class="rm-tl">' + (tool === 'draw' ? 'Draw: pick a colour first, then tap along the street; Finish line when done. Tap a drawn line to delete it.' : tool === 'note' ? 'Tap the map where the note goes. Tap a note to change or delete it; drag your own notes to move them.' : '') + '</span>';
+  }
+  var drawColour = '#ff0000';
+  function editHandlers(){
+    return {
+      edit: true, tool: tool === 'draw' ? drawColour : tool, drawing: drawing,
+      onPiece: function(id, x){
+        if (tool === 'draw' || tool === 'note') return;
+        var E = edits(curKey);
+        if (tool === 'x') { if (E.pieces[id] === 'x') delete E.pieces[id]; else E.pieces[id] = 'x'; }
+        else if (x.l.s === tool || (!x.l.s && tool === '#16a34a')) delete E.pieces[id]; else E.pieces[id] = tool;
+        saveEdits(curKey, E); renderView(true);
+      },
+      onDrawn: function(i){ if (!confirm('Delete this drawn line?')) return; var E = edits(curKey); E.drawn.splice(i, 1); saveEdits(curKey, E); renderView(true); },
+      onNote: function(p){
+        var E = edits(curKey);
+        var t = prompt('Note (leave empty to delete it):', p.text); if (t === null) return;
+        if (p.mine != null) { if (t.trim()) E.notes[p.mine].text = t.trim(); else E.notes.splice(p.mine, 1); }
+        else { E.hide.push(p.text); if (t.trim()) E.notes.push({ text: t.trim(), at: p.at }); }
+        saveEdits(curKey, E); renderView(true);
+      },
+      onNoteMove: function(i, ll){ var E = edits(curKey); if (E.notes[i]) { E.notes[i].at = [+ll.lat.toFixed(6), +ll.lng.toFixed(6)]; saveEdits(curKey, E); renderView(true); } },
+      onMap: function(ll){
+        if (tool === 'note') { var t = prompt('Note:'); if (!t || !t.trim()) return; var E = edits(curKey); E.notes.push({ text: t.trim(), at: [+ll.lat.toFixed(6), +ll.lng.toFixed(6)] }); saveEdits(curKey, E); renderView(true); return; }
+        if (tool === 'draw') { drawing = (drawing || []).concat([[+ll.lat.toFixed(6), +ll.lng.toFixed(6)]]); renderView(true); }
+      }
+    };
+  }
+  function finishDrawing(){
+    if (drawing && drawing.length > 1) { var E = edits(curKey); E.drawn.push({ c: drawing, s: drawColour }); saveEdits(curKey, E); }
+    drawing = null; renderView(true);
+  }
+  function editNames(){
+    var E = edits(curKey), R = DATA[curKey]; if (!R) return;
+    var cols = {}; R.lines.forEach(function(l){ var ov = E.pieces[pid(l)]; cols[ov && ov !== 'x' ? ov : (l.s || '#16a34a')] = 1; }); E.drawn.forEach(function(d){ cols[d.s] = 1; });
+    Object.keys(cols).forEach(function(c){
+      var t = prompt('Name for the ' + (SECTION_NAMES[c] || c) + ' part of the run (e.g. "Load 1", "Driver 2"):', E.names[c] || '');
+      if (t === null) return; if (t.trim()) E.names[c] = t.trim(); else delete E.names[c];
+    });
+    saveEdits(curKey, E); renderView(true);
+  }
   function build(){
     if (el) return;
     el = document.createElement('div'); el.id = 'lbRunMap';
-    el.innerHTML = '<div class="rm-bar"><select id="rmStream"></select><select id="rmDay"></select><select id="rmRun"></select><span id="rmPages" class="rm-pages"></span><span class="rm-sp"></span><button type="button" data-rm="print">Print / PDF</button><button type="button" data-rm="close">Close</button></div>' +
-      '<div id="rmView"></div><div id="rmPrint"></div>';
+    el.innerHTML = '<div class="rm-bar"><select id="rmStream"></select><select id="rmDay"></select><select id="rmRun"></select><span id="rmPages" class="rm-pages"></span><span class="rm-sp"></span>' +
+      '<button type="button" data-rm="turn" title="Portrait / landscape">Turn page</button><button type="button" data-rm="edit">Edit</button><button type="button" data-rm="printview">Print this view</button><button type="button" data-rm="print">Print all pages</button><button type="button" data-rm="close">Close</button></div>' +
+      '<div id="rmTools" class="rm-tools"></div><div id="rmView"></div><div id="rmPrint"></div>';
     document.body.appendChild(el);
     el.addEventListener('click', function(e){
       var b = e.target.closest && e.target.closest('[data-rm]'); if (!b) return;
       var a = b.getAttribute('data-rm');
-      if (a === 'close') { el.style.display = 'none'; return; }
+      if (a === 'close') { editing = false; drawing = null; el.style.display = 'none'; return; }
       if (a === 'print') printAll();
-      if (a === 'page') { curPage = +b.getAttribute('data-i'); renderView(); }
+      if (a === 'printview') printView();
+      if (a === 'page') { curPage = +b.getAttribute('data-i'); orientOverride = null; renderView(); }
+      if (a === 'turn') { var pg = pagesCache[curPage] || pagesCache[0]; orientOverride = ((orientOverride || pg.o) === 'land') ? 'port' : 'land'; renderView(true); }
+      if (a === 'edit') { editing = !editing; drawing = null; renderView(true); }
+      if (a === 'tool') { tool = b.getAttribute('data-v'); if (/^#/.test(tool)) drawColour = tool; drawing = null; paintTools(); }
+      if (a === 'drawdone') finishDrawing();
+      if (a === 'names') editNames();
     });
     ['rmStream', 'rmDay', 'rmRun'].forEach(function(id){ document.getElementById(id).addEventListener('change', function(){ pickerChanged(id); }); });
     window.addEventListener('resize', function(){ if (el.style.display !== 'none' && curKey) renderView(); });
@@ -35007,21 +35133,46 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var m = document.createElement('div'); m.className = 'rm-map'; d.appendChild(m);
     return { page: d, map: m };
   }
-  function renderView(){
+  function renderView(keep){
     var host = document.getElementById('rmView');
+    var kept = keep && view ? { c: view.map.getCenter(), z: view.map.getZoom() } : null;
     if (view) { try { view.map.remove(); } catch (e) {} view = null; }
     host.innerHTML = '';
+    if (tool !== 'draw' && tool !== 'note' && tool !== 'x') drawColour = tool;
+    paintTools();
     var R = DATA[curKey]; if (!R) { host.innerHTML = '<div class="rm-empty">No route map for this run yet.</div>'; return; }
-    var pg = pagesCache[curPage] || pagesCache[0], d = pageDiv(pg.o, true);
+    var pg = pagesCache[curPage] || pagesCache[0], d = pageDiv(orientOverride || pg.o, true);
     host.appendChild(d.page);
-    view = draw(d.map, curKey, R, pg, curPage, pagesCache.length);
+    var o = editing ? editHandlers() : {};
+    if (kept) o.view = kept;
+    view = draw(d.map, curKey, R, pg, curPage, pagesCache.length, o);
+    Array.prototype.forEach.call(el.querySelectorAll('[data-rm="edit"]'), function(b){ b.classList.toggle('on', editing); b.textContent = editing ? 'Done editing' : 'Edit'; });
     document.getElementById('rmPages').innerHTML = pagesCache.length > 1 ? pagesCache.map(function(p, i){ return '<button type="button" data-rm="page" data-i="' + i + '" class="' + (i === curPage ? 'on' : '') + '">' + (i ? i : 'Whole run') + '</button>'; }).join('') : '';
   }
   function show(key){
-    curKey = key; curPage = 0;
+    curKey = key; curPage = 0; orientOverride = null; drawing = null;
     fillPickers(parse(key));
     pagesCache = DATA[key] ? pagesFor(DATA[key]) : [];
     renderView();
+  }
+  // Print exactly what is on screen: same page shape, same centre, and the zoom scaled up by how much bigger the paper is
+  function printView(){
+    var R = DATA[curKey]; if (!R || !view) return;
+    var o = orientOverride || (pagesCache[curPage] || pagesCache[0]).o;
+    var screenW = view.container.clientWidth, c = view.map.getCenter(), z = view.map.getZoom();   // before the screen view is hidden for printing
+    var host = document.getElementById('rmPrint'); printing.forEach(function(s){ try { s.map.remove(); } catch (e) {} }); printing = []; host.innerHTML = '';
+    document.body.classList.add('rm-printing');
+    var css = document.getElementById('rmPageStyle');
+    if (!css) { css = document.createElement('style'); css.id = 'rmPageStyle'; document.head.appendChild(css); }
+    css.textContent = '@media print { @page { size: A4 ' + (o === 'port' ? 'portrait' : 'landscape') + '; margin: 6mm; } }';
+    var d = pageDiv(o, false); host.appendChild(d.page);
+    var paperW = d.map.clientWidth || PAGE[o][0] * MM;
+    var pg = pagesCache[curPage] || pagesCache[0];
+    printing.push(draw(d.map, curKey, R, pg, curPage, pagesCache.length, { view: { c: c, z: z + Math.log2(paperW / screenW) } }));
+    setTimeout(function(){
+      try { window.print(); } catch (x) {}
+      setTimeout(function(){ document.body.classList.remove('rm-printing'); printing.forEach(function(s){ try { s.map.remove(); } catch (e) {} }); printing = []; host.innerHTML = ''; }, 800);
+    }, 1800);
   }
   var printing = [];
   function printAll(){
@@ -35076,6 +35227,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     });
   }
   window.lbRunMapOpen = open;
+  window.lbRunMapDebug = function(){ return { view: view, printing: printing }; };
   window.lbRunMapPages = function(key){ return DATA && DATA[key] ? pagesFor(DATA[key]) : null; };
 })();
 </script>

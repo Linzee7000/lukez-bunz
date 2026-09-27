@@ -86,5 +86,43 @@ def run(code):
 
 def moved_ok(mv): return mv < 150
 
+def run_orphans(code):
+    """Pages whose run has no houses of its own in the master list (a chopped run like Thursday 228 Week B: its houses
+    are listed under the runs it was chopped from). Placed by street names alone, searching round all of that day's
+    houses, and kept only when the names agree strongly and the route sits on the roads. -> *-{code}zorph.json"""
+    st = STREAMS[code]; houses = load_houses(st.csv_field, st.has_week); NEW, OLD = current_and_prior_boundaries()
+    pdfs = sorted(f for f in os.listdir(DL) if f.lower().endswith('.pdf') and WORD[code].upper() in f.upper())
+    results, routes_out = [], {}
+    for pdf in pdfs:
+        for page in range(1, page_count(pdf) + 1):
+            txt = subprocess.run(['pdftotext', '-f', str(page), '-l', str(page), os.path.join(DL, pdf), '-'], capture_output=True, text=True).stdout
+            m = TITLE_RE.search(txt)
+            if not m or m.group(3) != WORD[code]: continue
+            day, run_no, week = m.group(1), m.group(2), m.group(4)
+            if len(houses.get((day, week, run_no), [])) >= 20: continue
+            L = page_routes(pdf, page)
+            if not any(L.values()): continue
+            dayH = np.array([p for (d, w, r), v in houses.items() if d == day for p in v])
+            tag = f'{code}|{day}|{week}|{run_no}|{pdf} p{page}'
+            res = place_by_labels(pdf, page, dayH)
+            if not res: print(f'  {tag}: no house list for this run, and too few street names'); continue
+            T, inl, n, med = res
+            p = densify(L['green'] + L['orange'] + L['purple'])
+            T2 = refine_to_roads(T, p); d = road_dist(T2, p)
+            ok = d <= 10 and inl >= 15 and inl >= 0.7 * n
+            print(f'  {tag}: {inl}/{n} names agree, {d:.1f} m from roads -> {"PLACED" if ok else "rejected"}', flush=True)
+            if not ok: continue
+            rm = {k: [apply(T2, pl).tolist() for pl in v] for k, v in L.items()}
+            rm, _, _ = drop_stray_pieces(rm)
+            key = st.key(day, week, run_no)
+            results.append(dict(tag=tag, houses=0, fit_m=round(med, 1), road_m=round(d, 1), run_from=f'street names {inl}/{n}, no house list',
+                                new=measure(rm, geom_for(NEW, key)), old=measure(rm, geom_for(OLD, key))))
+            routes_out[tag] = routes_to_ll(rm)
+    json.dump(results, open(f'{S}/compare-results-{code}zorph.json', 'w'), indent=1)
+    json.dump(routes_out, open(f'{S}/routes-m-{code}zorph.json', 'w'))
+
 if __name__ == '__main__':
-    for c in (sys.argv[1:] or ['REC', 'ORG']): run(c)
+    if '--orphans' in sys.argv:
+        for c in [a for a in sys.argv[1:] if a in ('REC', 'ORG')] or ['REC', 'ORG']: run_orphans(c)
+    else:
+        for c in (sys.argv[1:] or ['REC', 'ORG']): run(c)
