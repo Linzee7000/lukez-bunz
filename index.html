@@ -11789,7 +11789,40 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
     if (el) el.textContent = servicedBinSerials.size;
   }
 
+  /* Bin dots that came from a DIFFERENT bin with the same serial number (lift positions were matched to bins by
+     number alone upstream: FOGO bin 13510 at a Rosebud unit got the lift of garbage bin 13510 in Mount Eliza,
+     24 km away) or from a GPS default spot. data/bin-fixes.json (tools/bin-fixes/bin_fixes.py) lists each one;
+     the dot goes back to the bin's own house, only while it is still more than 150 m from it - once Solo fixes it at
+     the source the fix simply stops applying. Nothing is moved between houses. */
+  let lbBinFixes = null;
+  const lbBinFixesReady = fetch('data/bin-fixes.json', { cache: 'no-cache' }).then(r => r.ok ? r.json() : null)
+    .then(d => { lbBinFixes = (d && d.fixes) || []; return lbBinFixes; }).catch(() => { lbBinFixes = []; return lbBinFixes; });
+  const LB_FIX_STREAM = { G: 'Garbage', R: 'Recycling', F: 'FOGO' };
+  function lbApplyBinFixes(records) {
+    if (!lbBinFixes || !lbBinFixes.length || !records || !records.length) return 0;
+    const byKey = new Map();
+    records.forEach(s => byKey.set(String(s.siteId || ''), s));          // site IDs are unique; property IDs aren't
+    let n = 0;
+    lbBinFixes.forEach(f => {
+      const site = byKey.get(String(f[0])); if (!site || !site.lat || !site.lng) return;
+      ((site.soloStreams || {})[LB_FIX_STREAM[f[1]]] || []).forEach(b => {
+        if (String(b.serial || '').toUpperCase() !== String(f[2]).toUpperCase()) return;
+        // only while the dot is still far from the house - once it's corrected at the source this stops applying
+        if (!Number(b.lat) || !Number(b.lng) || getDistanceMeters(Number(site.lat), Number(site.lng), Number(b.lat), Number(b.lng)) <= 150) return;
+        b.lat = String(site.lat); b.lng = String(site.lng); b.dotFixed = 'moved to its house (the old dot was another bin\'s)'; n++;
+      });
+    });
+    return n;
+  }
+  lbBinFixesReady.then(() => {
+    // the house list may already be loaded by the time the fixes arrive
+    if (typeof siteRecords !== 'undefined' && siteRecords && siteRecords.length && lbApplyBinFixes(siteRecords)) {
+      try { if (typeof renderMapData === 'function' && typeof leafletMap !== 'undefined' && leafletMap) renderMapData(); } catch (e) {}
+    }
+  });
+
   function mergeEditsIntoRecords(records, edits) {
+    lbApplyBinFixes(records);
     if (!edits || edits.length === 0) return records;
 
     edits.forEach(ed => {
