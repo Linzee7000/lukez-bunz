@@ -66,3 +66,16 @@ OSM roads from `work/roads.json` + footprint houses -> route, zoom limited to 1/
 by cutting pieces out of pages that *do* place well and re-placing them: only 1 of 12 came back within 25 m (median
 error ~1.4 km). Suburban streets look too alike for a piece of route to be placed on shape alone. Getting these pages in
 needs either the maps' source files (if they carry coordinates) or placing each page by hand once.
+
+**Garbage pages placed from their street-map picture (2026-09-27, `picture_place.py`).** Needs `opencv-python-headless`
+in the venv. The PDF keeps exactly where each page's street-map picture sits on the page, and pages cut from the same
+original street map share pixels, so OpenCV (SIFT + RANSAC) matches an unplaced page's picture to a placed page's and
+carries that page's placement across. Checking both methods against the OSM roads showed the picture transfer is
+accurate and passes on the *source's* quality, and that about half of the shape-fitted pages were 100+ m off (their
+lines were only saved by `snap_modes.py`). So: shape fits are first nudged onto the roads (ICP), only pages within 9 m
+of the roads are used as sources, and a picture-placed page is kept only if it lands within 10 m of the roads and its
+route runs past the run's houses. Writes `work/*-GAR-zpic-<Day>.json` (sorted last, so they replace weaker fits).
+Garbage runs with map lines: 36 -> 40 of 65. The rest are in areas no well-placed page covers, so there's nothing to
+match against. `pub_pages.py` reads the original Publisher files (`brew install libmspub`): plain-text titles and the
+pictures used, but each page crops its picture differently and libmspub doesn't give the crop, so the .pub files alone
+can't place a page. Order after this: `picture_place.py`, `modes_export.py --write`, `snap_modes.py --write`.
