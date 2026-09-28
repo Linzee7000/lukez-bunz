@@ -5305,6 +5305,9 @@ const STREET_LITTER_SERVICE_LEVELS = {"seasons":[{"key":"tourist1","label":"Tour
   // drawn in green alongside the normal boundary when on. See
   // sitesForBoundaryHull and renderMapData for where the two differ.
   let showPropertyBoundaries = true;
+  // Rings round houses whose pin sits outside its lot (orange) or has no lot near it (red): possible address /
+  // pin problems. Handy when checking data, noise when driving, so off unless switched on (Layers).
+  let showPinRings = (function(){ try { return localStorage.getItem('lbShowPinRings') === '1'; } catch (e) { return false; } })();
 
   let isTruckFollowEnabled = true;
   let isNextBinBoxVisible = localStorage.getItem('lukezBunzNextBinBoxVisible') !== 'false';
@@ -6332,6 +6335,13 @@ const STREET_LITTER_SERVICE_LEVELS = {"seasons":[{"key":"tourist1","label":"Tour
     updateMapSideLayersUI();
   }
 
+  function togglePinRings() {
+    showPinRings = !showPinRings;
+    try { localStorage.setItem('lbShowPinRings', showPinRings ? '1' : '0'); } catch (e) {}
+    if (window.lbParcels) window.lbParcels.refresh();
+    if (typeof updateMapSideLayersUI === 'function') updateMapSideLayersUI();
+  }
+  window.togglePinRings = togglePinRings;
   function togglePropertyBoundaries() {
     showPropertyBoundaries = !showPropertyBoundaries;
     renderMapData();
@@ -11779,7 +11789,40 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
     if (el) el.textContent = servicedBinSerials.size;
   }
 
+  /* Bin dots that came from a DIFFERENT bin with the same serial number (lift positions were matched to bins by
+     number alone upstream: FOGO bin 13510 at a Rosebud unit got the lift of garbage bin 13510 in Mount Eliza,
+     24 km away) or from a GPS default spot. data/bin-fixes.json (tools/bin-fixes/bin_fixes.py) lists each one;
+     the dot goes back to the bin's own house, only while it is still more than 150 m from it - once Solo fixes it at
+     the source the fix simply stops applying. Nothing is moved between houses. */
+  let lbBinFixes = null;
+  const lbBinFixesReady = fetch('data/bin-fixes.json', { cache: 'no-cache' }).then(r => r.ok ? r.json() : null)
+    .then(d => { lbBinFixes = (d && d.fixes) || []; return lbBinFixes; }).catch(() => { lbBinFixes = []; return lbBinFixes; });
+  const LB_FIX_STREAM = { G: 'Garbage', R: 'Recycling', F: 'FOGO' };
+  function lbApplyBinFixes(records) {
+    if (!lbBinFixes || !lbBinFixes.length || !records || !records.length) return 0;
+    const byKey = new Map();
+    records.forEach(s => byKey.set(String(s.siteId || ''), s));          // site IDs are unique; property IDs aren't
+    let n = 0;
+    lbBinFixes.forEach(f => {
+      const site = byKey.get(String(f[0])); if (!site || !site.lat || !site.lng) return;
+      ((site.soloStreams || {})[LB_FIX_STREAM[f[1]]] || []).forEach(b => {
+        if (String(b.serial || '').toUpperCase() !== String(f[2]).toUpperCase()) return;
+        // only while the dot is still far from the house - once it's corrected at the source this stops applying
+        if (!Number(b.lat) || !Number(b.lng) || getDistanceMeters(Number(site.lat), Number(site.lng), Number(b.lat), Number(b.lng)) <= 150) return;
+        b.lat = String(site.lat); b.lng = String(site.lng); b.dotFixed = 'moved to its house (the old dot was another bin\'s)'; n++;
+      });
+    });
+    return n;
+  }
+  lbBinFixesReady.then(() => {
+    // the house list may already be loaded by the time the fixes arrive
+    if (typeof siteRecords !== 'undefined' && siteRecords && siteRecords.length && lbApplyBinFixes(siteRecords)) {
+      try { if (typeof renderMapData === 'function' && typeof leafletMap !== 'undefined' && leafletMap) renderMapData(); } catch (e) {}
+    }
+  });
+
   function mergeEditsIntoRecords(records, edits) {
+    lbApplyBinFixes(records);
     if (!edits || edits.length === 0) return records;
 
     edits.forEach(ed => {
@@ -12296,12 +12339,15 @@ window.addEventListener('DOMContentLoaded', async () => {
         // Resume whichever run was filtered (started) last time, before the
         // first filter-chip render, so the person comes back to the same
         // run instead of "Select run".
-        await restoreRunFilterFromDB();
+        // A new day with no shift running starts fresh on Start shift (see newDayCheck in the shift block):
+        // yesterday's run and screen aren't brought back.
+        const newDay = typeof window.lbNewDayPending === 'function' && window.lbNewDayPending();
+        if (!newDay) await restoreRunFilterFromDB();
         renderActiveFilterChips();
         updateDriverHud();
         // Land back on whichever screen (Search / Drive HUD / Map) was
         // open last time, instead of always resetting to Search.
-        switchMainTab(activeTab);
+        if (!newDay) switchMainTab(activeTab);
       }
 
       if (!cached || cached.length === 0) {
@@ -21069,6 +21115,7 @@ body.lb-on-welcome #lbDrawerTab { display: none; }
       <div class="lb-drawer-sect">Find</div>
       ${item('nearby',  img('navigation.png'), "What's nearby", 'Runs, bins and addresses around you')}
       ${item('days', img('calendar.png'), 'Service days', 'Where the runs go, Monday to Friday')}
+      ${item('runmaps', img('route.png'), 'Run maps', 'A clean printable map of any run')}
       ${item('places', '<svg class="lb-svg-ico" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" aria-hidden="true"><path d="M12 21s-7-6-7-11a7 7 0 0 1 14 0c0 5-7 11-7 11z"/><circle cx="12" cy="10" r="2.5"/></svg>', 'Toilets & emergency spots', 'Closest toilet \u00b7 safe tip area \u00b7 hydrants')}
       <div class="lb-drawer-sect">Set up</div>
       ${item('layers', img('layers.png'), 'Layers', 'What shows on the map \u00b7 boundaries, bins, trail, run timer')}
@@ -21219,6 +21266,7 @@ body.lb-on-welcome #lbDrawerTab { display: none; }
     if (act === 'go-search')  { switchMainTab('search'); return; }
     if (act === 'go-home')    { switchMainTab('welcome'); return; }
     if (act === 'issues')     { if (typeof window.uxOpenIssueLog === 'function') window.uxOpenIssueLog(); return; }
+    if (act === 'runmaps')    { if (typeof window.lbRunMapOpen === 'function') window.lbRunMapOpen(); return; }
     if (act === 'customize')  { if (typeof window.uxOpenCustomize === 'function') window.uxOpenCustomize(); return; }
   });
 
@@ -22200,6 +22248,7 @@ body.stream-slr .lb-layers-head .icon-img { filter: brightness(0); }
       case 'houses':    return typeof showHouseGpsDots !== 'undefined' && showHouseGpsDots;
       case 'bounds':    return typeof showRunBoundaries !== 'undefined' && showRunBoundaries;
       case 'propBounds':return typeof showPropertyBoundaries !== 'undefined' && showPropertyBoundaries;
+      case 'pinRings':  return typeof showPinRings !== 'undefined' && showPinRings;
       case 'streetModes':return typeof showStreetModes !== 'undefined' && showStreetModes;
       case 'garSq':     return typeof showGarbageRunSquares !== 'undefined' && showGarbageRunSquares;
       case 'recSq':     return typeof showRecyclingRunSquares !== 'undefined' && showRecyclingRunSquares;
@@ -22261,6 +22310,7 @@ body.stream-slr .lb-layers-head .icon-img { filter: brightness(0); }
     ['houses',   'toggleHouseGpsDots',            'img:houses.png',   'Houses'],
     ['bounds',   'toggleRunBoundaries',           'img:boundary.png', 'Run boundaries'],
     ['propBounds','togglePropertyBoundaries',     'img:boundary.png', 'Property boundaries'],
+    ['pinRings', 'togglePinRings',                '⭕',               'Address check rings'],
     ['streetModes','toggleStreetModes',           'img:route.png',    'Reverse in / drive in streets'],
     ['garSq',    'toggleGarbageRunSquares',       'img:garbage.png',  'Garbage squares'],
     ['recSq',    'toggleRecyclingRunSquares',     'img:recycle.png',  'Recycling squares'],
@@ -23732,7 +23782,7 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
   // area already drawn is skipped - see refresh().
   let drawnBox = null, drawnSig = '';
   const MAX_VERTS = 40000;       // faint context lines only; matched lots are always drawn
-  const drawSigNow = () => map.getZoom() + '|' + dataVer + '|' + tiles.size + '|' + (isOn() ? 1 : 0) + '|' + (((typeof isSatelliteView !== 'undefined') && isSatelliteView) ? 1 : 0) + '|' + runVer;
+  const drawSigNow = () => map.getZoom() + '|' + dataVer + '|' + tiles.size + '|' + (isOn() ? 1 : 0) + '|' + (((typeof isSatelliteView !== 'undefined') && isSatelliteView) ? 1 : 0) + '|' + runVer + '|' + (((typeof showPinRings !== 'undefined') && showPinRings) ? 1 : 0);
   function redraw() {
     if (!ensureMap()) return 0;
     group.clearLayers();
@@ -23779,8 +23829,9 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     // 2b. Houses whose pin isn't in any lot: red ring = no lot within 25 m, orange = pin outside its lot
     //     (nearest lot used). Those pins are probably in the wrong place - select the house and drag it.
     const inV = pt => pt.lng >= v.w && pt.lng <= v.e && pt.lat >= v.s && pt.lat <= v.n;
+    const ringsOn = (typeof showPinRings !== 'undefined') && showPinRings;   // Layers > Address check rings (off by default)
     nearby.forEach(s => {
-      if (n >= MAX_DRAW) return;
+      if (!ringsOn || n >= MAX_DRAW) return;
       if (only && !only.has(siteKey(s))) return;
       const e = store.sites[siteKey(s)];
       if (!e || !(e.x || e.m === 1) || !e.q || !isFresh(s, e)) return;
@@ -24011,7 +24062,7 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
       + row('lbParcelMatchViewBtn', 'window.lbParcels.matchViewUI()', 'fit.png', 'Match houses on screen')
       + row('', 'window.lbParcels.goToNextUnmatched()', 'search.png', 'Find next house with no lot')
       + row('', 'window.lbParcels.clearAllUI()', 'minus.png', 'Clear matched boundaries', 'danger')
-      + '<div class="lb-bnd-help">On the map, a <b>red ring</b> is a house with no lot near its pin and an <b>orange ring</b> is a pin sitting outside its lot. Those pins are usually in the wrong place: select the house (it turns blue), then drag it into its lot.</div>'
+      + '<div class="lb-bnd-help">With <b>Layers &gt; Address check rings</b> switched on, a <b>red ring</b> on the map is a house with no lot near its pin and an <b>orange ring</b> is a pin sitting outside its lot. Those pins are usually in the wrong place: select the house (it turns blue), then drag it into its lot.</div>'
       + '<div class="lb-layers-sect">Run boundaries from property lines</div>'
       + row('lbBuildRunsBtn', 'window.lbParcels.buildRunsUI(\'selected\')', 'boundary.png', 'Build selected run')
       + row('lbBuildAllBtn', 'window.lbParcels.buildRunsUI(\'all\')', 'layers.png', 'Build every run')
@@ -24680,7 +24731,8 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     stats: stats,
     ready: ensureLoaded,
     // exposed for the test harness only
-    _t: { setRunSites, getRunKeys: () => runKeys, ingest, matchPoint, ringContains, distRingM, queryURL, fetchEnvelope, fetchTile, loadTile, applyMatch, needsMatch,
+    _t: { buildRunOutlines, ensureLoaded, runBatch, groupByTile,   // (tools: rebuild selected run boundaries from property lines)
+          setRunSites, getRunKeys: () => runKeys, ingest, matchPoint, ringContains, distRingM, queryURL, fetchEnvelope, fetchTile, loadTile, applyMatch, needsMatch,
           matchList, groupByTile, runBatch, redraw, computeOutline, computeOutlineWindowed, WIN, ringsFromEdges, openMask, closeMask, boxMorph, buildRunOutlines, applyOutlines, traceMask, ringSignedArea, simplifyClosed, fillRings, makeGrid, OUT, outBuild, getExtras: () => extras, cfg, tiles, failedTiles, batch, getStore: () => store, setStore: s => { store = s; },
           saveNow, tileOf, tkey, toLatLngs, lastDraw: () => lastDrawCount, resetMap: () => { map = null; },
           parcelIdsInView, sitesInView, sitesInTile, buildParcelIndex, buildSiteIndex,
@@ -30139,7 +30191,10 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   }
 
   /* ---- the shift's own run: stream picked at the start; day and week are today's, so only the run number is asked ---- */
-  var SHIFT_STREAMS = [['Garbage', 'Garbage'], ['Recycling', 'Recycling'], ['FOGO', 'FOGO'], ['SummerRecycling', 'Summer recycling']];
+  var SHIFT_STREAMS = [['Garbage', 'Garbage'], ['Recycling', 'Recycling'], ['FOGO', 'FOGO'], ['SummerRecycling', 'Summer recycling'], ['StreetGarbage', 'Street litter'], ['StreetRecycling', 'Street recycling']];
+  function isStreet(st){ return st === 'StreetGarbage' || st === 'StreetRecycling'; }
+  // the stream a truck is picked for on Start shift, from what the fleet list says it does
+  function streamForTruck(t){ var u = window.lbFleetUse ? window.lbFleetUse(t) : ''; return /^(Garbage|Recycling|FOGO)$/.test(u) ? u : u === 'Street litter' ? 'StreetGarbage' : u === 'Street recycling' ? 'StreetRecycling' : ''; }
   function shiftStreams(){ var su = window.uxSummerSeason ? window.uxSummerSeason() : false; return SHIFT_STREAMS.filter(function(x){ return x[0] !== 'SummerRecycling' || su; }); }
   function todayDay(){ return ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][new Date().getDay()]; }
   function todayWeek(stream){
@@ -30149,17 +30204,39 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   }
   function todaysRuns(stream){
     if (!stream || typeof window.lbRunsFor !== 'function') return [];
-    try { return window.lbRunsFor(stream === 'SummerRecycling' ? 'Recycling' : stream, todayDay(), todayWeek(stream)) || []; } catch (e) { return []; }
+    try { return window.lbRunsFor(stream === 'SummerRecycling' ? 'Recycling' : stream, todayDay(), isStreet(stream) ? '' : todayWeek(stream)) || []; } catch (e) { return []; }
   }
   function shiftRun(){ return (SH && SH.run) ? { run: SH.run, stream: SH.stream, day: SH.day, week: SH.week } : null; }
   function openShiftRun(){
-    var r = shiftRun(); if (!r || typeof window.openRunDirectlyOnMap !== 'function') return;
+    var r = shiftRun(); if (!r) return;
+    if (isStreet(r.stream)) { if (window.openStreetLitterRunOnMap) window.openStreetLitterRunOnMap(r.run, r.stream === 'StreetRecycling' ? 'rr' : 'rl'); return; }
+    if (typeof window.openRunDirectlyOnMap !== 'function') return;
     window.openRunDirectlyOnMap(r.run, r.stream === 'SummerRecycling' ? 'Recycling' : r.stream, r.day, r.week, r.stream === 'SummerRecycling');
   }
   window.lbShiftRun = shiftRun;
   window.lbOpenShiftRun = openShiftRun;
 
   window.lbShiftOn = function(){ return !!SH; };
+  /* A new day: the first thing on screen is Start shift, not yesterday's run on the map. Runs once a day, as
+     soon as no shift is running (a street litter shift from last night can run on until 3 am). */
+  var SETF = {};
+  function setG(n, v){ try { (SETF[n] || (SETF[n] = new Function('v', n + ' = v')))(v); } catch (e) {} }
+  window.lbNewDayPending = function(){ return !SH && lsGet('lbLastDay', null) !== new Date().toDateString(); };
+  function newDayCheck(){
+    var today = new Date().toDateString();
+    if (!(g('siteRecords') || []).length) return;          // wait for the houses to load, so nothing restores over this
+    if (lsGet('lbLastDay', null) === today || SH) { if (SH) lsSet('lbLastDay', today); return; }
+    lsSet('lbLastDay', today);
+    try { var set = g('selectedRunsSet'); if (set) set.clear(); } catch (e) {}
+    setG('activeFilterStream', ''); setG('activeFilterDay', ''); setG('activeFilterWeek', ''); setG('streetLitterRunFilter', null);
+    try { if (typeof renderActiveFilterChips === 'function') renderActiveFilterChips(); } catch (e) {}
+    try { if (typeof switchMainTab === 'function') switchMainTab('welcome'); } catch (e) {}
+    draft = null; openSheet('main');
+  }
+  function shiftOverNight(sh){
+    var st = new Date(sh.start), cut = new Date(st.getFullYear(), st.getMonth(), st.getDate() + 1, isStreet(sh.stream) ? 3 : 0, 0, 0);
+    return Date.now() >= cut.getTime();
+  }
   function startShift(o){
     var s = clockState(), now = Date.now();
     // a fresh trail for the shift: whatever was driven before it started isn't part of it
@@ -30317,6 +30394,9 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       toast('Shift started. Do the pre-start check and put in the truck’s km and hours.', 'Open', function(){ openSheet(); });
     }
     if (SH && Date.now() - SH.start > 18 * 3600000) { finishShift({ note: 'Not ended in the app: closed after 18 h' }); toast('Yesterday’s shift was closed. It’s in Past shifts.'); }
+    // Kerbside never runs past midnight; street litter can go on until 3 am (summer nights). A shift still open
+    // after that was just never ended in the app: close it, so the new day starts clean.
+    if (SH && shiftOverNight(SH)) { finishShift({ note: 'Not ended in the app: closed ' + (isStreet(SH.stream) ? 'at 3 am' : 'at midnight') }); toast('Yesterday’s shift was closed. It’s in Past shifts.'); }
     try { escalate(); } catch (e) {}
     if (!SH) return;
     var ch = false, brk = onBreak();
@@ -30399,7 +30479,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   };
   /* The fleet list (unit number -> rego) from operations, Sep 2026. A rego a driver types in themselves (lbRegos) still wins over this list. */
   var FLEET = {};
-  '1701 XW14HD|1906 XSL261|1912 XUQ272|2120 YOW447|2130 ZIF496|2203 ZLO162|2206 ZOJ512|2207 ZQK538|2426 XV97FO|2442 1DL1OD|2443 1DL1NO|2445 1DL1NP|2535 1IY4JH|2536 1IY4JJ|2537 1IY4JG|2659 1IZ1YC|2708 1KN2QB|2711 1YI1IS|2712 XV41DS|2834 XN59DD|2835 XN19FK|2836 XN50GH|2838 XN58GH|2839 XN59GH|2850 1BQ6LF|2853 XN92JA|2902 XN17JB|2907 XN95JA|3430 XP28CW|3436 XP28DO|3437 XP78GM|3438 XP69DN|3439 XP66DN|3440 XP70DN|3441 XP75LT|3442 XP04LT|3443 XP68MP|3444 XP76MP|3446 XP14KJ|3447 XP60LM|3448 XP73LM|3449 XP67MP|3450 XP72LM|3451 XP79LM|3452 XP11LT|3453 XP66LM|3454 XP42OL|3455 XP12LT|3456 XP05LT|3457 XP43OL|3458 XP46OL|3459 XP13LT|3460 XP22DN|3461 XP00HR|3462 XP01HR|3464 XP02HR|3465 XP13KJ|3466 XP00KJ|3467 XP15KJ|3468 XP09KJ|3469 XP93QP|3470 XP58KI|3476 XP90KI|3525 XP44OL|3540 XP96KI'.split('|').forEach(function(x){ var p = x.split(' '); FLEET[p[0]] = p[1]; });
+  '1701 XW14HD|1906 XSL261|1912 XUQ272|2120 YOW447|2130 ZIF496|2203 ZLO162|2206 ZOJ512|2207 ZQK538|2426 XV97FO|2442 1DL1OD|2443 1DL1NO|2445 1DL1NP|2535 1IY4JH|2536 1IY4JJ|2537 1IY4JG|2659 1IZ1YC|2708 1KN2QB|2710 1KN2QB|2711 1YI1IS|2712 XV41DS|2834 XN59DD|2835 XN19FK|2836 XN50GH|2838 XN58GH|2839 XN59GH|2850 1BQ6LF|2853 XN92JA|2902 XN17JB|2907 XN95JA|3430 XP28CW|3436 XP28DO|3437 XP78GM|3438 XP69DN|3439 XP66DN|3440 XP70DN|3441 XP75LT|3442 XP04LT|3443 XP68MP|3444 XP76MP|3446 XP14KJ|3447 XP60LM|3448 XP73LM|3449 XP67MP|3450 XP72LM|3451 XP79LM|3452 XP11LT|3453 XP66LM|3454 XP42OL|3455 XP12LT|3456 XP05LT|3457 XP43OL|3458 XP46OL|3459 XP13LT|3460 XP22DN|3461 XP00HR|3462 XP01HR|3464 XP02HR|3465 XP13KJ|3466 XP00KJ|3467 XP15KJ|3468 XP09KJ|3469 XP93QP|3470 XP58KI|3476 XP90KI|3525 XP44OL|3540 XP96KI'.split('|').forEach(function(x){ var p = x.split(' '); FLEET[p[0]] = p[1]; });
   (function(){ var rg = lsGet('lbRegos', {}) || {}, ch = false; Object.keys(FLEET).forEach(function(k){ if (!rg[k]) { rg[k] = FLEET[k]; ch = true; } }); if (ch) lsSet('lbRegos', rg); })();
   // What each truck normally does (operations, Sep 2026). Garbage/Recycling/FOGO pre-select the stream on Start shift;
   // spare and kerbside trucks don't pick one. 3452 was named as both Garbage and FOGO; the fleet sheet colours it FOGO.
@@ -30432,7 +30512,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   window.lbFleetInfo = function(unit){ return FLEET_INFO[String(unit || '').trim()] || ''; };
   window.lbFleetUse = function(unit){ return FLEET_USE[String(unit || '').trim()] || ''; };
   window.lbFleetRego = function(unit){ var k = String(unit || '').trim().toLowerCase(), rg = lsGet('lbRegos', {}) || {}; return rg[k] || FLEET[k] || ''; };
-  function newDraft(){ var d = me(), rg = lsGet('lbRegos', {}) || {}; draft = draft || { driver: d.name || '', truck: d.truck || '', rego: rg[String(d.truck || '').toLowerCase()] || '', km: '', hrs: '', photo: null, checks: {}, stream: (function(u){ return /^(Garbage|Recycling|FOGO)$/.test(u) ? u : ''; })(window.lbFleetUse(d.truck)) }; }
+  function newDraft(){ var d = me(), rg = lsGet('lbRegos', {}) || {}; draft = draft || { driver: d.name || '', truck: d.truck || '', rego: rg[String(d.truck || '').toLowerCase()] || '', km: '', hrs: '', photo: null, checks: {}, stream: streamForTruck(d.truck) }; }
   var brakeDraft = null, dashDraft = null, brakeRes = null, pendingEnd = false;
   function newBrake(why){
     var lb = lastBrake(SH && SH.truck || me().truck), p = lb ? lb.vals.map(String) : null;   /* keep last week's three numbers; change them if the dash reads different */
@@ -30579,7 +30659,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
         (brakeDue() ? '<div class="drv-warnbox">' + I.warn + '<span>Friday: brake wear is due. Enter it when you’re back at the depot.</span><button type="button" class="drv-link" data-a="brakes">Enter now</button></div>' : '') +
         (oosFor(SH.truck) ? '<div class="drv-stopbox">' + I.warn + '<span><b>This truck is marked out of service.</b> Tell your leading hand.</span></div>' : '') +
         dashListHtml() +
-        (SH.run ? '<div class="drv-acts"><button type="button" class="drv-btn" data-a="runcheck">Check my run' + (function(){ var c = runCheck(); var l = c ? runCheckLine(c) : ''; return l ? ' · ' + esc(l) : ''; })() + '</button></div>' : '') +
+        (SH.run && !isStreet(SH.stream) ? '<div class="drv-acts"><button type="button" class="drv-btn" data-a="runmap">Run map</button><button type="button" class="drv-btn" data-a="runcheck">Check my run' + (function(){ var c = runCheck(); var l = c ? runCheckLine(c) : ''; return l ? ' · ' + esc(l) : ''; })() + '</button></div>' : '') +
         (window.lbRunSheet ? '<div class="drv-sect"><span>Run sheet</span></div><div class="drv-acts"><button type="button" class="drv-btn drv-go" data-a="rs:tip">At the tip</button><button type="button" class="drv-btn" data-a="rs:fuel">Fuel</button><button type="button" class="drv-btn" data-a="rs:adblue">AdBlue</button><button type="button" class="drv-btn" data-a="rs:main">Run sheet</button></div>' : '') +
         '<div class="drv-acts"><button type="button" class="drv-btn drv-warnb" data-a="dashrep">' + I.warn + 'Dash warning</button><button type="button" class="drv-btn" data-a="newdef">' + I.truck + 'Truck defect</button>' + (hasBrakeGauge(SH.truck) ? '<button type="button" class="drv-btn' + (brakeDue() ? ' drv-due' : '') + '" data-a="brakes">' + I.clock + 'Brake wear</button>' : '') + '<button type="button" class="drv-btn" data-a="issues">' + I.list + 'Issues (' + iss.length + ')</button></div>' +
         '<div class="drv-foot"><button type="button" class="drv-btn" data-a="history">Past shifts</button><button type="button" class="drv-btn drv-bad" data-a="end">End shift</button></div>' + roleHtml();
@@ -30642,8 +30722,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
         var auto = window.lbFleetRego(draft.truck); draft.truck = t.value;
         if (!draft.rego || draft.rego === auto) { draft.rego = window.lbFleetRego(t.value); var rgEl = $('uxsRego'); if (rgEl) rgEl.value = draft.rego; }
         // the truck's usual stream is picked for them (still changeable), unless they've already chosen one
-        var use = window.lbFleetUse(t.value);
-        if (/^(Garbage|Recycling|FOGO)$/.test(use) && !draft.run && draft.stream !== use) { draft.stream = use; clearTimeout(draft._pt); draft._pt = setTimeout(function(){ var f = document.activeElement, id0 = f && f.id, pos = f && f.selectionStart; paint(); var f2 = id0 && $(id0); if (f2) { f2.focus(); try { f2.setSelectionRange(pos, pos); } catch (e) {} } }, 600); }
+        var use = streamForTruck(t.value);
+        if (use && !draft.run && draft.stream !== use) { draft.stream = use; clearTimeout(draft._pt); draft._pt = setTimeout(function(){ var f = document.activeElement, id0 = f && f.id, pos = f && f.selectionStart; paint(); var f2 = id0 && $(id0); if (f2) { f2.focus(); try { f2.setSelectionRange(pos, pos); } catch (e) {} } }, 600); }
       } else if (id === 'uxsRego') draft.rego = t.value;
       else if (id === 'uxsSKm') draft.km = t.value; else if (id === 'uxsSHrs') draft.hrs = t.value; else return;
       paintSoon();
@@ -30789,6 +30869,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     }
     if (a === 'share') { var s = history().filter(function(x){ return x.id === b.getAttribute('data-id'); })[0]; if (s) shareText(summaryText(s), 'Shift ' + dateStr(s.start)); return; }
     if (a === 'runcheck') { view = 'runcheck'; paint(); return; }
+    if (a === 'runmap') { closeSheet(); if (window.lbRunMapOpen) window.lbRunMapOpen(); return; }
     if (a === 'rcstreet') { closeSheet(); try { if (typeof switchMainTab === 'function') switchMainTab('map'); if (window.showStreetOnMap) window.showStreetOnMap(b.getAttribute('data-k')); } catch (e) {} return; }
     if (a === 'kml') { trailKml(b.getAttribute('data-id'), +b.getAttribute('data-lbl')); return; }
     if (a === 'trail') { closeSheet(); showTrail(b.getAttribute('data-id'), 'Trail ' + (b.getAttribute('data-lbl') || '')); return; }
@@ -30816,6 +30897,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   /* ---- ticking ---- */
   setInterval(function(){
     try { count(); } catch (e) {}
+    try { newDayCheck(); } catch (e) {}
     try { paintRate(); } catch (e) {}
     try { if (sheet && sheet.classList.contains('open') && SH && view === 'main' && !(document.activeElement && sheet.contains(document.activeElement) && document.activeElement.tagName === 'INPUT')) paint(); } catch (e) {}
   }, 2000);
@@ -30835,7 +30917,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     function wrapTotals(){
       var orig = window.lbHudTotals; if (typeof orig !== 'function' || orig.__shift) return;
       var w = function(){
-        var r = shiftRun(); if (!r) return orig.apply(this, arguments);
+        var r = shiftRun(); if (!r || isStreet(r.stream)) return orig.apply(this, arguments);
         var keep = { st: gg('activeFilterStream'), d: gg('activeFilterDay'), wk: gg('activeFilterWeek'), runs: Array.from(gg('selectedRunsSet') || []) };
         var set = gg('selectedRunsSet');
         try {
@@ -30854,8 +30936,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       wrapTotals();
       var r = shiftRun(), onMap = document.body.getAttribute('data-ux-screen') === 'map';
       var st = gg('activeFilterStream'), set = gg('selectedRunsSet'), key = String((r && r.run) || '').toLowerCase();
-      var sameStream = r && (st === mapStream(r) || !st);
-      if (r && sameStream && set && set.size && !set.has(key)) {
+      var sameStream = r && (isStreet(r.stream) ? (st === r.stream && String(g('streetLitterRunFilter') || '') === String(r.run)) : (st === mapStream(r) || !st));
+      if (r && !isStreet(r.stream) && sameStream && set && set.size && !set.has(key)) {
         set.add(key);
         try { if (typeof renderActiveFilterChips === 'function') renderActiveFilterChips(); if (typeof renderMapData === 'function') renderMapData(); } catch (e) {}
       }
@@ -30867,7 +30949,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       }
       if (chip) { chip.style.display = show ? '' : 'none'; if (show) chip.textContent = 'Back to my run · ' + (STREAM_LBL[r.stream] || r.stream) + ' ' + r.run; }
     }
-    var STREAM_LBL = { Garbage: 'Garbage', Recycling: 'Recycling', FOGO: 'FOGO', SummerRecycling: 'Summer' };
+    var STREAM_LBL = { Garbage: 'Garbage', Recycling: 'Recycling', FOGO: 'FOGO', SummerRecycling: 'Summer', StreetGarbage: 'Street litter', StreetRecycling: 'Street recycling' };
     setInterval(function(){ if (!document.hidden) keepOnMap(); }, 1000);
   })();
   window.uxShiftRates = rates;
@@ -31116,6 +31198,10 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       // collection points and house driving modes shared between phones travel as places too (no lat/lng, so not pins)
       var ha = Object.keys(r.places).map(function(k){ return r.places[k]; }).filter(function(p){ return p && p.kind === 'houseAccess' && p.propId; });
       lsSet('lbHouseAccessFleet', ha);
+      // run map edits (section colours, drawn lines, notes) made on other phones: newest per run
+      var rme = {};
+      Object.keys(r.places).forEach(function(k){ var p = r.places[k]; if (p && p.kind === 'runMapEdit' && p.key && p.edits && (!rme[p.key] || (p.ts || 0) > (rme[p.key].ts || 0))) rme[p.key] = Object.assign({}, p.edits, { ts: p.ts || p.edits.ts || 0 }); });
+      lsSet('lbRunMapEditsFleet', rme);
       try { document.dispatchEvent(new CustomEvent('lb-house-access')); } catch (e) {}
     }).catch(function(){});
   }
@@ -34824,6 +34910,1678 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   function start(){ load().then(function(items){ if (items) draw(); else setTimeout(start, 5 * 60000); }); }
   var tries = 0, t = setInterval(function(){ if (g('leafletMap') && (g('siteRecords') || []).length > 100) { clearInterval(t); start(); } else if (++tries > 120) clearInterval(t); }, 2000);
   window.lbSchools = { refresh: function(){ localStorage.removeItem(KEY); start(); }, draw: draw };
+})();
+</script>
+
+
+<!-- =====================================================================
+     RUN MAPS - our own tidy version of the run route maps.
+     Drawn from data: the run's route on the real streets (data/run-routes.json, made by
+     tools/route-maps/routes_export.py from the placed Publisher/PDF route maps), the reverse-in /
+     drive-in streets (data/street-modes.json), schools, the run's houses, and the Drivers Notes
+     (data/run-notes.json) pinned to the streets they mention.
+     The map fills a whole A4 page - portrait or landscape, whichever fits the run's shape - and the
+     street names on the route are our own large labels (the background map's own names are far too
+     small once a whole run is on one page). Title/legend and notes sit in cards in the emptiest corners.
+     ================================================================== -->
+<style id="lb-runmap-style">
+  #lbRunMap { position: fixed; inset: 0; z-index: 30000; background: #e5e7eb; color: #111; overflow: auto; -webkit-overflow-scrolling: touch; font: 14px/1.35 system-ui, -apple-system, 'Segoe UI', sans-serif; }
+  #lbRunMap .rm-head { position: sticky; top: 0; z-index: 1000; }
+  #lbRunMap .rm-bar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 8px; background: #1f2937; color: #fff; }
+  #lbRunMap .rm-bar select { min-height: 40px; font: 600 15px system-ui, sans-serif; border-radius: 6px; border: 0; padding: 0 6px; max-width: 42vw; }
+  #lbRunMap .rm-bar button { min-height: 40px; padding: 0 14px; font: 700 15px system-ui, sans-serif; border: 0; border-radius: 6px; background: #fff; color: #111; }
+  #lbRunMap .rm-bar .rm-sp { flex: 1 1 auto; }
+  #lbRunMap .rm-bar .rm-rot { display: inline-flex; gap: 2px; }
+  #lbRunMap .rm-bar .rm-rot button { padding: 0 10px; min-width: 44px; touch-action: manipulation; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+  #lbRunMap .rm-bar .rm-rot button[data-rm="rot0"] { min-width: 58px; font-variant-numeric: tabular-nums; }
+  #lbRunMap .rm-bar .rm-rot button.rm-fine { padding: 0 8px; min-width: 40px; background: #e5e7eb; }
+  #lbRunMap .rm-bar #rmKey { max-width: 36vw; }
+  #lbRunMap .rm-card.rm-key { padding-right: 44px; cursor: grab; touch-action: none; }
+  #lbRunMap .rm-card.rm-key.rm-dragging { cursor: grabbing; box-shadow: 0 4px 18px rgba(0,0,0,.3); outline: 2px dashed #64748b; }
+  #lbRunMap .rm-north { position: absolute; top: 8px; right: 8px; width: 28px; height: 40px; pointer-events: none; }
+  #lbRunMap .rm-north svg { display: block; width: 28px; height: 40px; transform-origin: 50% 50%; }
+  #lbRunMap .rm-bar .rm-rot button[data-rm="rot0"].on { background: #fbbf24; }
+  #lbRunMap .rm-map { transform-origin: 50% 50%; }
+  #lbRunMap .rm-page { position: relative; margin: 10px auto; background: #fff; box-shadow: 0 2px 12px rgba(0,0,0,.2); overflow: hidden; }   /* a turned map is bigger than the page: clip it to the paper */
+  #lbRunMap .rm-map { position: absolute; inset: 0; }
+  #lbRunMap .rm-map .leaflet-tile-pane { filter: grayscale(1) contrast(.85) brightness(1.1); opacity: .6; }
+  #lbRunMap .rm-card { position: absolute; z-index: 800; background: rgba(255,255,255,.94); border: 1px solid #cbd5e1; border-radius: 8px; padding: 10px 12px; box-shadow: 0 1px 6px rgba(0,0,0,.15); max-width: 44%; }
+  #lbRunMap .rm-band { height: 5px; border-radius: 3px; margin-bottom: 6px; }
+  #lbRunMap .rm-title { font: 800 26px/1.05 system-ui, sans-serif; letter-spacing: -.5px; }
+  #lbRunMap .rm-sub { font-weight: 600; color: #475569; font-size: 13px; }
+  #lbRunMap .rm-stats { display: flex; gap: 10px; margin: 6px 0; font-size: 12px; color: #334155; }
+  #lbRunMap .rm-stats b { font-size: 15px; color: #111; margin-right: 2px; }
+  #lbRunMap .rm-leg { display: grid; grid-template-columns: auto auto; gap: 2px 12px; font-size: 11.5px; }
+  #lbRunMap .rm-leg i { display: inline-block; width: 18px; height: 0; vertical-align: middle; margin-right: 5px; border-top: 4px solid; }
+  #lbRunMap .rm-leg i.dot { width: 7px; height: 7px; border: 0; border-radius: 50%; background: #475569; margin: 0 11px 0 6px; }
+  #lbRunMap .rm-leg i.box { width: 14px; height: 9px; border: 1px solid #ca8a04; background: #fde68a; }
+  #lbRunMap .rm-leg i.num { width: 14px; height: 14px; border: 0; border-radius: 50%; background: #111; color: #fff; font: 700 9px/14px system-ui; text-align: center; font-style: normal; margin-right: 4px; }
+  #lbRunMap .rm-notes ol { margin: 0; padding: 0; list-style: none; font-size: 11.5px; }
+  #lbRunMap .rm-notes li { display: flex; gap: 6px; margin: 2px 0; }
+  #lbRunMap .rm-notes li b { flex: 0 0 16px; height: 16px; border-radius: 50%; background: #111; color: #fff; font: 700 9.5px/16px system-ui; text-align: center; }
+  #lbRunMap .rm-foot { position: absolute; z-index: 800; right: 6px; bottom: 16px; font-size: 9px; color: #64748b; background: rgba(255,255,255,.8); padding: 1px 4px; }
+  #lbRunMap .rm-empty { padding: 40px; text-align: center; color: #475569; }
+  #rmPrint { display: none; }
+  #lbRunMap .rm-tools { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 8px; background: #f8fafc; border-bottom: 1px solid #cbd5e1; }
+  #lbRunMap .rm-tools button { min-height: 40px; padding: 0 12px; font: 700 13px system-ui, sans-serif; border: 1px solid #94a3b8; border-radius: 6px; background: #fff; color: #111; }
+  #lbRunMap .rm-tools button.on { background: #111827; color: #fff; border-color: #111827; }
+  #lbRunMap .rm-tools .rm-sw { width: 40px; padding: 0; border: 3px solid #fff; box-shadow: 0 0 0 1px #94a3b8; }
+  #lbRunMap .rm-tools .rm-sw.on { box-shadow: 0 0 0 3px #111827; background-clip: padding-box; }
+  #lbRunMap .rm-tools .rm-tl { font-size: 12px; color: #475569; }
+  #lbRunMap .rm-tools button:disabled { opacity: .4; }
+  #lbRunMap .rm-tools .rm-trow { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  #lbRunMap .rm-tools .rm-hint { margin-top: 6px; font-size: 12px; color: #475569; }
+  @media (max-width: 700px) {
+    #lbRunMap .rm-bar { gap: 4px; padding: 6px; }
+    #lbRunMap .rm-bar button, #lbRunMap .rm-bar select { min-height: 34px; font-size: 13px; padding: 0 9px; }
+    #lbRunMap .rm-tools { padding: 6px; }
+    #lbRunMap .rm-tools .rm-trow { flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch; padding-bottom: 2px; }
+    #lbRunMap .rm-tools .rm-trow > * { flex: 0 0 auto; }
+    #lbRunMap .rm-tools button { min-height: 36px; padding: 0 10px; }
+    #lbRunMap .rm-tools .rm-sw { width: 34px; }
+    #lbRunMap .rm-tools .rm-hint { margin-top: 4px; font-size: 11.5px; }
+  }
+  #lbRunMap .rm-drawing, #lbRunMap .rm-drawing .leaflet-interactive { cursor: crosshair; touch-action: none; }
+  #lbRunMap .rm-bar button.on { background: #fbbf24; }
+  body.rm-printing #rmPrint { display: block; }
+  body.rm-printing #rmView { display: none; }
+  #lbRunMap .rm-page { break-after: page; page-break-after: always; }
+
+  .rm-note-pin { width: 22px; height: 22px; border-radius: 50%; background: #111; color: #fff; font: 700 12px/22px system-ui; text-align: center; border: 2px solid #fff; box-shadow: 0 1px 4px rgba(0,0,0,.5); }
+  .rm-lbl { position: absolute; white-space: nowrap; font: 800 12px/1 system-ui, -apple-system, 'Segoe UI', sans-serif; color: #0f172a; letter-spacing: .1px; pointer-events: none;
+    text-shadow: -2px 0 #fff, 2px 0 #fff, 0 -2px #fff, 0 2px #fff, -1.5px -1.5px #fff, 1.5px 1.5px #fff, -1.5px 1.5px #fff, 1.5px -1.5px #fff; transform-origin: 0 0; }
+  /* Print page size. The run sheet's print styles (lb-runsheet) set a global "@page { size: A4 landscape }"
+     further down the file, and a later @page rule wins - so every run map printed landscape, and a portrait
+     map was squeezed onto a landscape sheet and ran onto a second page. Named pages can't be overridden by
+     an unnamed @page rule, so the run map's paper follows its own page shape whatever else is in the file. */
+  @page rmport { size: A4 portrait; margin: 6mm; }
+  @page rmland { size: A4 landscape; margin: 6mm; }
+  #rmPrint .rm-page.rm-port { page: rmport; }
+  #rmPrint .rm-page.rm-land { page: rmland; }
+  #rmPrint .rm-page:last-child { break-after: auto; page-break-after: auto; }
+  /* Pages: each printed page is a frame on the map (layout view and the printed layout page); on each printed
+     page the neighbouring pages show as dashed boxes (where they overlap it) and edge tabs (which way they carry on) */
+  #lbRunMap .rm-frame { position: absolute; z-index: 700; box-sizing: border-box; border: 2.5px dashed #1d4ed8; background: rgba(29,78,216,.05); pointer-events: none; }
+  #lbRunMap .rm-frame.live { pointer-events: auto; cursor: move; touch-action: none; }
+  #lbRunMap .rm-frame.sel { border-style: solid; border-color: #dc2626; background: rgba(220,38,38,.06); }
+  #lbRunMap .rm-frame > b { position: absolute; left: -2px; top: -2px; min-width: 26px; height: 26px; padding: 0 6px; box-sizing: border-box; background: #1d4ed8; color: #fff; font: 800 15px/26px system-ui, sans-serif; text-align: center; border-radius: 0 0 6px 0; }
+  #lbRunMap .rm-frame.sel > b { background: #dc2626; }
+  #lbRunMap .rm-frame > i { position: absolute; left: 30px; top: 3px; font: 700 11px/1.2 system-ui, sans-serif; font-style: normal; color: #1d4ed8; background: rgba(255,255,255,.85); padding: 1px 4px; border-radius: 3px; white-space: nowrap; }
+  #lbRunMap .rm-link { position: absolute; z-index: 690; box-sizing: border-box; border: 2px dashed #334155; pointer-events: none; }
+  #lbRunMap .rm-link > span { position: absolute; background: #334155; color: #fff; font: 800 11px/1 system-ui, sans-serif; padding: 3px 6px; border-radius: 3px; white-space: nowrap; }
+  #lbRunMap .rm-tab { position: absolute; z-index: 820; background: #111827; color: #fff; font: 800 12px/1 system-ui, sans-serif; padding: 5px 8px; border-radius: 4px; white-space: nowrap; pointer-events: none; box-shadow: 0 1px 4px rgba(0,0,0,.3); }
+  #lbRunMap .rm-tools .rm-pchip { min-width: 40px; }
+  /* no tint on paper: with "background graphics" off (the default on phones) a see-through fill prints as solid
+     white and hides the route under every page frame */
+  @media print { #lbRunMap .rm-frame, #lbRunMap .rm-link { background: none !important; } }
+  /* print this map's own colours even with "background graphics" off: otherwise the edge tabs, page labels, frame
+     numbers and note pins (white text on a dark fill) come out as white on white, and the key loses its white card */
+  #lbRunMap .rm-page, #lbRunMap .rm-page * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  @media print {
+    /* everything but the run map is hidden on paper. The extra :not(#rm-none) only raises the specificity, so
+       app overlays with strong "html body.ux2 #id { display: ... !important }" rules (e.g. the #uxToast notice)
+       can't print on top of the map */
+    html body.rm-printing > *:not(#lbRunMap):not(#rm-none) { display: none !important; }
+    body.rm-printing #lbRunMap { position: static; overflow: visible; background: #fff; }
+    body.rm-printing #lbRunMap .rm-head { display: none; }
+    body.rm-printing #lbRunMap .rm-page { margin: 0; box-shadow: none; }
+  }
+</style>
+<script id="lb-runmap-script">
+(function(){
+  'use strict';
+  function esc(v){ return String(v == null ? '' : v).replace(/[&<>"']/g, function(c){ return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+  var GF = {};
+  function g(n){ try { return (GF[n] || (GF[n] = new Function('return typeof ' + n + ' === "undefined" ? undefined : ' + n)))(); } catch (e) { return undefined; } }
+  var DATA = null, loading = null;
+  function load(){
+    if (DATA) return Promise.resolve(DATA);
+    if (!loading) loading = fetch('data/run-routes.json', { cache: 'no-cache' }).then(function(r){ return r.ok ? r.json() : null; }).then(function(d){ DATA = (d && d.runs) || {}; return DATA; }).catch(function(){ DATA = {}; return DATA; });
+    return loading;
+  }
+  var COL = { Garbage: '#dc2626', Recycling: '#eab308', FOGO: '#16a34a' };
+  var DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
+  var MM = 3.7795;                                     // CSS px per mm
+  var PAGE = { land: [285, 198], port: [198, 285] };   // printable A4 (mm), 6 mm margins
+  function parse(key){ var p = String(key || '').split('#'); return p.length === 3 ? { stream: p[0], day: p[1], week: '', run: p[2] } : { stream: p[0], day: p[1], week: p[2], run: p[3] }; }
+  function keyOf(o){ return o.stream === 'Garbage' ? 'Garbage#' + o.day + '#' + o.run : o.stream + '#' + o.day + '#' + (o.week || '') + '#' + o.run; }
+  function currentKey(){
+    var r = window.lbShiftRun ? window.lbShiftRun() : null;
+    if (r && /^(Garbage|Recycling|FOGO)$/.test(r.stream)) return keyOf({ stream: r.stream, day: r.day, week: r.week, run: r.run });
+    var sel = g('selectedRunsSet'), st = g('activeFilterStream'), day = g('activeFilterDay'), wk = g('activeFilterWeek');
+    if (sel && sel.size === 1 && /^(Garbage|Recycling|FOGO)$/.test(st || '') && day) { day = String(day); return keyOf({ stream: st, day: day.charAt(0).toUpperCase() + day.slice(1).toLowerCase(), week: String(wk || '').toUpperCase(), run: Array.from(sel)[0] }); }
+    return null;
+  }
+  function groupFor(o){
+    try { return (window.lbRunGroups(o.stream) || []).filter(function(x){ return String(x.run).toLowerCase() === String(o.run).toLowerCase() && String(x.day).toLowerCase() === o.day.toLowerCase() && (!o.week || !x.week || String(x.week).toUpperCase() === o.week); })[0] || null; } catch (e) { return null; }
+  }
+  function mPerDegLng(lat){ return 111320 * Math.cos(lat * Math.PI / 180); }
+  // metres per CSS pixel at a web-map zoom level
+  function mpp(zoom, lat){ return 156543.03 * Math.cos(lat * Math.PI / 180) / Math.pow(2, zoom); }
+
+  /* ---- the page: the whole run, landscape or portrait to suit its shape. Zoom / move the map to any part and Print prints what's on screen ---- */
+  function orient(b){
+    var wm = (b[3] - b[1]) * mPerDegLng(b[0]), hm = (b[2] - b[0]) * 110540;
+    return hm > wm * 1.05 ? 'port' : 'land';
+  }
+  function bboxOf(pts){ var b = [90, 180, -90, -180]; pts.forEach(function(p){ b[0] = Math.min(b[0], p[0]); b[1] = Math.min(b[1], p[1]); b[2] = Math.max(b[2], p[0]); b[3] = Math.max(b[3], p[1]); }); return b; }
+  function pagesFor(R){
+    var all = []; R.lines.forEach(function(l){ all = all.concat(l.c); });
+    var b = bboxOf(all);
+    return [{ kind: 'all', b: b, o: orient(b) }];
+  }
+
+  /* ---- edits: section colours, removed streets, drawn lines, notes, section names - per run, shared ----
+     Kept on the phone (lbRunMapEdits) and sent to the Apps Script as a "place" (kind runMapEdit), so every phone
+     gets them (pulled with the other places, lbRunMapEditsFleet); the newest version of a run's edits wins. */
+  var SECTION_NAMES = { '#16a34a': 'Green', '#0000ff': 'Blue', '#00b0f0': 'Light blue', '#ff0000': 'Red', '#ff006b': 'Pink', '#ff0073': 'Pink',
+    '#ff9900': 'Orange', '#e3702b': 'Brown', '#0070c0': 'Dark blue', '#111827': 'Black' };
+  var PALETTE = ['#16a34a', '#ff0000', '#0000ff', '#00b0f0', '#ff006b', '#ff9900', '#e3702b', '#111827'];
+  function lsGet(k, d){ try { var v = JSON.parse(localStorage.getItem(k)); return v == null ? d : v; } catch (e) { return d; } }
+  function lsSet(k, v){ try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
+  function edits(key){
+    var mine = (lsGet('lbRunMapEdits', {}) || {})[key], fleet = (lsGet('lbRunMapEditsFleet', {}) || {})[key];
+    var e = (fleet && (!mine || (fleet.ts || 0) > (mine.ts || 0))) ? fleet : mine;
+    e = e || {};
+    return { pieces: e.pieces || {}, drawn: e.drawn || [], notes: e.notes || [], hide: e.hide || [], names: e.names || {}, ts: e.ts || 0 };
+  }
+  function saveEdits(key, E){
+    E.ts = Date.now();
+    var all = lsGet('lbRunMapEdits', {}) || {}; all[key] = E; lsSet('lbRunMapEdits', all);
+    try { if (window.lbOutbox && window.lbOutbox.sendPlace) window.lbOutbox.sendPlace({ id: 'rme_' + key.replace(/[^A-Za-z0-9]+/g, '_'), kind: 'runMapEdit', key: key, edits: E, ts: E.ts }); } catch (e) {}
+  }
+  function pid(l){ var a = l.c[0], z = l.c[l.c.length - 1]; return (l.n || '') + '|' + a[0].toFixed(4) + ',' + a[1].toFixed(4) + '|' + z[0].toFixed(4) + ',' + z[1].toFixed(4); }
+
+  /* ---- drawing the page into a container (the screen view, or the printed page) ----
+     Edit modes (opts.mode): 'paint' tap a street to colour it, 'x' tap a street to remove / put back, 'draw' drag to draw a
+     line (the map holds still), 'note' tap to add a note. Taps pick the street nearest the finger (within ~24 px), not
+     whatever thin line happens to be under it. */
+  function distToLine(map, pt, c){
+    var best = Infinity, prev = null;
+    for (var i = 0; i < c.length; i++) {
+      var q = map.latLngToContainerPoint(c[i]);
+      if (prev) best = Math.min(best, L.LineUtil.pointToSegmentDistance(pt, prev, q)); else best = pt.distanceTo(q);
+      prev = q;
+    }
+    return best;
+  }
+  function draw(container, key, R, page, opts){
+    opts = opts || {};
+    var E = edits(key), mode = opts.edit ? opts.mode : '';
+    // the map can be turned (rot, degrees clockwise) inside the page; the page and its cards stay upright
+    var st = { R: R, container: container, page: container.parentNode, fixed: opts.order || null, rot: 0, sig: 0 };
+    setGeom(st, opts.rot || 0);
+    var o = parse(key), map = L.map(container, { zoomControl: false, attributionControl: false, zoomSnap: 0.1, zoomDelta: 0.5, fadeAnimation: false, zoomAnimation: false });
+    st.map = map;
+    turnAware(st);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
+    map.createPane('rmLabels').style.zIndex = 650; map.createPane('rmPins').style.zIndex = 660;
+    var layers = L.layerGroup().addTo(map);
+    var grp = groupFor(o), houses = 0, bins = 0;
+    if (grp) grp.sites.forEach(function(s){
+      var la = +s.lat, ln = +s.lng; if (!la || !ln) return; houses++;
+      bins += ((s.soloStreams || {})[o.stream] || []).length || ((s.councilStreams || {})[o.stream] || []).length;
+      L.circleMarker([la, ln], { radius: 2, weight: 0, fillColor: '#475569', fillOpacity: .7, interactive: false }).addTo(layers);
+    });
+    try { var sc = JSON.parse(localStorage.getItem('lbSchools') || 'null'); (sc && sc.items || []).forEach(function(s){ L.polygon(s.r, { color: '#ca8a04', weight: 1, fillColor: '#fde68a', fillOpacity: .55, interactive: false }).addTo(layers); }); } catch (e) {}
+    var all = []; R.lines.forEach(function(l){ all = all.concat(l.c); });
+    // the route, each street piece in its section's colour (from the map, or as edited); removed pieces only in edit mode
+    var used = {};
+    var shown = R.lines.map(function(l){ var ov = E.pieces[pid(l)]; return { l: l, col: ov && ov !== 'x' ? ov : (l.s || '#16a34a'), gone: ov === 'x' }; });
+    shown.forEach(function(x){ if (!x.gone) L.polyline(x.l.c, { color: '#fff', weight: 9, opacity: 1, interactive: false }).addTo(layers); });
+    E.drawn.forEach(function(d){ L.polyline(d.c, { color: '#fff', weight: 9, opacity: 1, interactive: false }).addTo(layers); });
+    shown.forEach(function(x){
+      if (x.gone && !opts.edit) return;
+      if (!x.gone) used[x.col] = (used[x.col] || 0) + 1;
+      L.polyline(x.l.c, { color: x.gone ? '#94a3b8' : x.col, weight: opts.edit ? 7 : 5, opacity: 1, dashArray: x.gone ? '4,6' : null, interactive: false, lineCap: 'round', lineJoin: 'round' }).addTo(layers);
+    });
+    E.drawn.forEach(function(d){
+      used[d.s] = (used[d.s] || 0) + 1;
+      L.polyline(d.c, { color: d.s, weight: opts.edit ? 7 : 5, opacity: 1, interactive: false, lineCap: 'round', lineJoin: 'round' }).addTo(layers);
+    });
+    var grid = {}; all.forEach(function(p){ grid[Math.round(p[0] / 0.0003) + ':' + Math.round(p[1] / 0.0004)] = 1; });
+    var near = function(p){ var a = Math.round(p[0] / 0.0003), b = Math.round(p[1] / 0.0004); for (var i = -1; i <= 1; i++) for (var j = -1; j <= 1; j++) if (grid[(a + i) + ':' + (b + j)]) return true; return false; };
+    (g('sharedStreetModes') || []).forEach(function(m){
+      if (!m.points || !m.points.every(near)) return;
+      L.polyline(m.points, { color: m.type === 'drive-reverse-out' ? '#f59e0b' : '#7c3aed', weight: 7, opacity: 1, interactive: false, lineCap: 'round' }).addTo(layers);
+    });
+    var notes = window.lbRunNotes ? window.lbRunNotes.forRun(key) : [], T = window.lbRunNotes && window.lbRunNotes._t, pinned = [];
+    notes.forEach(function(n){
+      if (!/^[A-Z0-9*“"]/.test(n.text) || n.text.split(/\s+/).length < 2) return;
+      if (E.hide.indexOf(n.text) >= 0) return;          // a route-map note deleted in edit mode
+      var at = null;
+      if (T) R.lines.some(function(l){ if (l.n && T.mentions(T.norm(n.text), l.n)) { at = l.c[Math.floor(l.c.length / 2)]; return true; } return false; });
+      pinned.push({ text: n.text, at: at });
+    });
+    E.notes.forEach(function(n, i){ pinned.push({ text: n.text, at: n.at, mine: i }); });
+    var pinsLive = !!mode && mode !== 'draw';
+    pinned.forEach(function(p, i){
+      if (!p.at) return;
+      var mk = L.marker(p.at, { icon: L.divIcon({ className: '', html: '<div class="rm-note-pin">' + (i + 1) + '</div>', iconSize: [22, 22], iconAnchor: [11, 11] }), keyboard: false, pane: 'rmPins', interactive: pinsLive, draggable: pinsLive && p.mine != null }).addTo(layers);
+      if (pinsLive) {
+        if (mk.dragging && mk.dragging._draggable) fixDrag(mk.dragging._draggable, st);
+        mk.on('click', function(ev){ L.DomEvent.stopPropagation(ev); opts.onNote && opts.onNote(p); });
+        mk.on('dragend', function(){ if (p.mine != null) opts.onNoteMove && opts.onNoteMove(p.mine, mk.getLatLng()); });
+      }
+    });
+    if (mode === 'paint' || mode === 'x') map.on('click', function(ev){
+      // the nearest street piece or drawn line to the tap
+      var pt = ev.containerPoint, best = null, bd = 24;
+      shown.forEach(function(x){ var d = distToLine(map, pt, x.l.c); if (d < bd) { bd = d; best = { piece: x }; } });
+      E.drawn.forEach(function(d, i){ var dd = distToLine(map, pt, d.c); if (dd <= bd) { bd = dd; best = { drawn: i }; } });
+      if (!best) return;
+      if (best.piece) opts.onPiece && opts.onPiece(pid(best.piece.l), best.piece);
+      else opts.onDrawn && opts.onDrawn(best.drawn);
+    });
+    if (mode === 'note') map.on('click', function(ev){ opts.onMap && opts.onMap(ev.latlng); });
+    if (mode === 'draw') {
+      // freehand: the line follows the finger / mouse exactly; the map doesn't move while drawing
+      map.dragging.disable(); map.touchZoom.disable(); map.doubleClickZoom.disable(); map.boxZoom.disable(); if (map.tap) map.tap.disable();
+      container.classList.add('rm-drawing');
+      var stroke = null, live = null, at = function(e){ return map.mouseEventToLatLng(e); };
+      container.addEventListener('pointerdown', function(e){
+        if (e.button > 0 || (e.target.closest && e.target.closest('.rm-card'))) return;
+        e.preventDefault();
+        try { container.setPointerCapture(e.pointerId); } catch (x) {}
+        stroke = [at(e)];
+        live = L.polyline(stroke, { color: opts.colour, weight: 7, opacity: 1, interactive: false, lineCap: 'round', lineJoin: 'round' }).addTo(layers);
+      });
+      container.addEventListener('pointermove', function(e){
+        if (!stroke) return;
+        e.preventDefault();
+        var p = at(e);
+        if (map.latLngToContainerPoint(p).distanceTo(map.latLngToContainerPoint(stroke[stroke.length - 1])) < 3) return;
+        stroke.push(p); live.addLatLng(p);
+      });
+      var end = function(){
+        if (!stroke) return;
+        var s = stroke; stroke = null;
+        if (s.length < 2) { layers.removeLayer(live); return; }
+        var px = L.LineUtil.simplify(s.map(function(ll){ return map.latLngToContainerPoint(ll); }), 1.5);
+        opts.onStroke && opts.onStroke(px.map(function(p){ var ll = map.containerPointToLatLng(p); return [+ll.lat.toFixed(6), +ll.lng.toFixed(6)]; }));
+      };
+      container.addEventListener('pointerup', end); container.addEventListener('pointercancel', end);
+    }
+    // cards: title + legend, and the notes
+    var sub = o.stream + ' · ' + o.day + (o.week ? ' · Week ' + o.week : '');
+    var card = document.createElement('div'); card.className = 'rm-card rm-key';
+    card.innerHTML = northSvg(st.rot) + '<div class="rm-band" style="background:' + (COL[o.stream] || '#16a34a') + '"></div><div class="rm-title">Run ' + esc(o.run) + '</div><div class="rm-sub">' + esc(sub) + (opts.pageLabel ? ' \u00b7 <b style="color:#111">' + esc(opts.pageLabel) + '</b>' : '') + '</div>' +
+      '<div class="rm-stats"><span><b>' + houses.toLocaleString() + '</b>houses</span><span><b>' + bins.toLocaleString() + '</b>bins</span><span><b>' + esc(R.km) + '</b>km</span></div>' +
+      '<div class="rm-leg">' + legendSections(used, E) + '<div><i style="border-color:#7c3aed"></i>Reverse in</div><div><i style="border-color:#f59e0b"></i>Drive in, back out</div><div><i class="box"></i>School</div><div><i class="dot"></i>House</div><div><i class="num">1</i>Note</div></div>';
+    st.page.appendChild(card);
+    st.keyPos = opts.keyPos || null;
+    if (opts.onKeyMove) keyDraggable(card, st, opts.onKeyMove);
+    if (pinned.length) {
+      var nc = document.createElement('div'); nc.className = 'rm-card rm-notes';
+      nc.innerHTML = '<ol>' + pinned.map(function(p, i){ return '<li><b>' + (i + 1) + '</b><span>' + esc(p.text) + '</span></li>'; }).join('') + '</ol>';
+      st.page.appendChild(nc);
+    }
+    var ft = document.createElement('div'); ft.className = 'rm-foot'; ft.textContent = 'Lukez Bunz run map · ' + new Date().toLocaleDateString('en-AU') + ' · streets © OpenStreetMap contributors';
+    st.page.appendChild(ft);
+    // taps on the cards stay on the cards (they don't add a note or colour the street underneath)
+    Array.prototype.forEach.call(st.page.querySelectorAll('.rm-card, .rm-foot'), function(c){ L.DomEvent.disableClickPropagation(c); });
+    if (opts.view) map.setView(opts.view.c, opts.view.z, { animate: false });
+    else if (opts.fitPts) fitTurned(st, bboxOf(all.concat(opts.fitPts)), all.concat(opts.fitPts));
+    else fitTurned(st, page.b, all);
+    placeCards(st);
+    // while editing the cards stay put (so nothing jumps under your finger); otherwise they move to the emptiest corners
+    if (opts.edit) st.fixed = st.order;
+    map.on('zoomend moveend', function(){ placeCards(st); });
+    return st;
+  }
+
+  /* ---- turning the map ------------------------------------------------------------------------
+     Leaflet can't rotate, so the map element itself is turned with a CSS rotate() inside the page.
+     While turned it is made a square as wide as the page's diagonal (centred on the page), so no
+     corner ever shows blank. Everything that goes from a finger / mouse to the map is then put
+     right for the angle: Leaflet reads positions off the screen assuming nothing is turned, which
+     would make taps land on the wrong street and drags move the map the wrong way.
+       - mouseEventToContainerPoint is replaced on this map (taps, notes, freehand lines, wheel and
+         pinch zoom all go through it)
+       - drags (the map, and your own note pins) are turned back on 'predrag', after undoing the
+         scale Leaflet wrongly applies from the turned element's larger bounding box
+     The cards sit on the page, not in the map, so they stay upright in the page corners, and the
+     street names are re-angled so they never read upside down on the page. */
+  function setGeom(st, rot){
+    var c = st.container, page = st.page, W = page.clientWidth, H = page.clientHeight;
+    rot = ((+rot || 0) % 360 + 360) % 360;
+    var D = rot ? Math.ceil(Math.sqrt(W * W + H * H)) + 4 : 0;
+    var keep = st.map && st.sig !== D ? { c: st.map.getCenter(), z: st.map.getZoom() } : null;
+    if (st.sig !== D) {
+      if (D) { c.style.inset = 'auto'; c.style.width = D + 'px'; c.style.height = D + 'px'; c.style.left = ((W - D) / 2) + 'px'; c.style.top = ((H - D) / 2) + 'px'; }
+      else { c.style.inset = ''; c.style.width = ''; c.style.height = ''; c.style.left = ''; c.style.top = ''; }
+      st.sig = D;
+    }
+    st.rot = rot; st.W = W; st.H = H; st.D = D;
+    c.style.transform = rot ? 'rotate(' + rot + 'deg)' : '';
+    if (keep) { st.map.invalidateSize({ pan: false, animate: false }); st.map.setView(keep.c, keep.z, { animate: false }); }
+  }
+  // map-container pixel -> page pixel, and back
+  function toView(st, x, y){
+    if (!st.rot) return { x: x, y: y };
+    var a = st.rot * Math.PI / 180, dx = x - st.D / 2, dy = y - st.D / 2;
+    return { x: dx * Math.cos(a) - dy * Math.sin(a) + st.W / 2, y: dx * Math.sin(a) + dy * Math.cos(a) + st.H / 2 };
+  }
+  function fromView(st, x, y){
+    if (!st.rot) return { x: x, y: y };
+    var a = -st.rot * Math.PI / 180, dx = x - st.W / 2, dy = y - st.H / 2;
+    return { x: dx * Math.cos(a) - dy * Math.sin(a) + st.D / 2, y: dx * Math.sin(a) + dy * Math.cos(a) + st.D / 2 };
+  }
+  function fixDrag(d, st){
+    if (!d || d._rmTurn) return; d._rmTurn = 1;
+    d.on('predrag', function(){
+      if (!st.rot || !d._newPos || !d._startPos) return;
+      var sc = d._parentScale || {}, sx = isFinite(sc.x) && sc.x ? sc.x : 1, sy = isFinite(sc.y) && sc.y ? sc.y : 1;
+      var ox = (d._newPos.x - d._startPos.x) * sx, oy = (d._newPos.y - d._startPos.y) * sy, a = -st.rot * Math.PI / 180;
+      d._newPos = d._startPos.add(L.point(ox * Math.cos(a) - oy * Math.sin(a), ox * Math.sin(a) + oy * Math.cos(a)));
+    });
+  }
+  function turnAware(st){
+    var map = st.map, base = map.mouseEventToContainerPoint;
+    map.mouseEventToContainerPoint = function(e){
+      if (!st.rot || !e || e.clientX == null) return base.apply(map, arguments);
+      var r = st.page.getBoundingClientRect(), p = fromView(st, e.clientX - r.left - st.page.clientLeft, e.clientY - r.top - st.page.clientTop);
+      return L.point(p.x, p.y);
+    };
+    if (map.dragging && map.dragging._draggable) fixDrag(map.dragging._draggable, st);
+    else map.on('dragstart', function(){ fixDrag(map.dragging && map.dragging._draggable, st); });
+  }
+  // fit the whole run into the page at the current angle (a plain fitBounds only knows north-up)
+  function fitTurned(st, b, pts){
+    var map = st.map;
+    if (!st.rot || !pts || !pts.length) { map.fitBounds([[b[0], b[1]], [b[2], b[3]]], { padding: [14, 14] }); return; }
+    var a = st.rot * Math.PI / 180, ca = Math.cos(a), sa = Math.sin(a), Z = 20, x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+    pts.forEach(function(q){ var p = map.project(q, Z), x = p.x * ca - p.y * sa, y = p.x * sa + p.y * ca; if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; });
+    var w = Math.max(1, x1 - x0), h = Math.max(1, y1 - y0), z = Z + Math.log2(Math.min((st.W - 28) / w, (st.H - 28) / h));
+    var mx = (x0 + x1) / 2, my = (y0 + y1) / 2, c = map.unproject(L.point(mx * ca + my * sa, -mx * sa + my * ca), Z);
+    map.setView(c, Math.min(19, z), { animate: false });
+  }
+
+  // north arrow for the key: points to true north on the page, so it turns with the map
+  function northSvg(rot){
+    return '<div class="rm-north" title="North"><svg viewBox="0 0 28 40" aria-label="North" style="transform:rotate(' + (+rot || 0) + 'deg)">' +
+      '<text x="14" y="10" text-anchor="middle" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="11" fill="#111">N</text>' +
+      '<path d="M14 13 L21 36 L14 31 L7 36 Z" fill="#fff" stroke="#111" stroke-width="1.4" stroke-linejoin="round"/><path d="M14 13 L14 31 L7 36 Z" fill="#111"/></svg></div>';
+  }
+  function setNorth(st){ var n = st.page && st.page.querySelector('.rm-north svg'); if (n) n.style.transform = 'rotate(' + (st.rot || 0) + 'deg)'; }
+  // drag the key anywhere on the page; where it's left is kept as a fraction of the page so the
+  // printed (bigger) page puts it in the same place
+  function keyDraggable(card, st, done){
+    var start = null;
+    card.addEventListener('pointerdown', function(e){
+      if (e.button > 0) return;
+      start = { x: e.clientX, y: e.clientY, l: card.offsetLeft, t: card.offsetTop, moved: false, id: e.pointerId };
+    });
+    card.addEventListener('pointermove', function(e){
+      if (!start) return;
+      var dx = e.clientX - start.x, dy = e.clientY - start.y;
+      if (!start.moved) {
+        if (Math.abs(dx) + Math.abs(dy) < 6) return;
+        start.moved = true; card.classList.add('rm-dragging');
+        try { card.setPointerCapture(start.id); } catch (x) {}
+      }
+      e.preventDefault();
+      var W = st.page.clientWidth, H = st.page.clientHeight;
+      var l = Math.max(0, Math.min(W - card.offsetWidth, start.l + dx)), t = Math.max(0, Math.min(H - card.offsetHeight, start.t + dy));
+      card.style.right = card.style.bottom = ''; card.style.left = l + 'px'; card.style.top = t + 'px';
+    });
+    function end(){
+      if (!start) return;
+      var moved = start.moved; start = null; card.classList.remove('rm-dragging');
+      if (!moved) return;
+      var W = st.page.clientWidth, H = st.page.clientHeight;
+      done({ x: +(card.offsetLeft / W).toFixed(4), y: +(card.offsetTop / H).toFixed(4) });
+    }
+    card.addEventListener('pointerup', end); card.addEventListener('pointercancel', end);
+  }
+
+  // the legend's route colours: just "Route" for a one-colour run; each section, with its name, when the run has several
+  function legendSections(used, E){
+    var cols = Object.keys(used).sort(function(a, b){ return used[b] - used[a]; });
+    if (cols.length <= 1) return '<div><i style="border-color:' + (cols[0] || '#16a34a') + '"></i>' + esc(E.names[cols[0]] || 'Route') + '</div>';
+    return cols.map(function(c){ return '<div><i style="border-color:' + c + '"></i>' + esc(E.names[c] || SECTION_NAMES[c] || 'Section') + '</div>'; }).join('');
+  }
+
+  /* ---- our own street names: along the street, never upside down, never on top of each other ---- */
+  function labels(st){
+    var map = st.map, R = st.R, pane = map.getPane('rmLabels'); pane.innerHTML = '';
+    var m = st.page.getBoundingClientRect(), boxes = [];
+    Array.prototype.forEach.call(st.page.querySelectorAll('.rm-card'), function(c){ var r = c.getBoundingClientRect(); boxes.push([r.left - m.left, r.top - m.top, r.right - m.left, r.bottom - m.top]); });
+    var zoom = map.getZoom(), fs = zoom >= 17 ? 14 : zoom >= 16 ? 13 : 12, W = st.page.clientWidth, H = st.page.clientHeight;
+    var pieces = R.lines.filter(function(l){ return l.n; }).map(function(l){
+      var pts = l.c.map(function(c){ return map.latLngToContainerPoint(c); }), len = 0;
+      for (var i = 1; i < pts.length; i++) len += pts[i].distanceTo(pts[i - 1]);
+      return { n: l.n, pts: pts, len: len };
+    }).sort(function(a, b){ return b.len - a.len; });
+    var named = {};
+    [[fs, 0.55], [fs - 2, 0.35]].forEach(function(pass){ var fsz = pass[0], need = pass[1];
+      pieces.forEach(function(p){
+        if (need < 0.5 && named[p.n]) return;
+        var text = p.n.replace(/\bRoad$/, 'Rd').replace(/\bStreet$/, 'St').replace(/\bAvenue$/, 'Ave').replace(/\bCourt$/, 'Ct').replace(/\bDrive$/, 'Dr').replace(/\bCrescent$/, 'Cres').replace(/\bParade$/, 'Pde').replace(/\bPlace$/, 'Pl').replace(/\bGrove$/, 'Gr').replace(/\bClose$/, 'Cl').replace(/\bHighway$/, 'Hwy').replace(/\bLane$/, 'La').replace(/\bTerrace$/, 'Tce').replace(/\bBoulevard$/, 'Bvd');
+        var w = text.length * fsz * 0.6 + 6;
+        if (named[p.n] && p.len < w * 3) return;
+        if (p.len < w * need) return;
+        var half = p.len / 2, acc = 0, a = p.pts[0], b = p.pts[1] || p.pts[0];
+        for (var i = 1; i < p.pts.length; i++) { var d = p.pts[i].distanceTo(p.pts[i - 1]); if (acc + d >= half) { a = p.pts[i - 1]; b = p.pts[i]; break; } acc += d; }
+        var t = (half - acc) / (a.distanceTo(b) || 1), cx = a.x + (b.x - a.x) * t, cy = a.y + (b.y - a.y) * t;
+        var v = toView(st, cx, cy), mx = v.x, my = v.y;   // where it lands on the page
+        if (mx < 0 || my < 0 || mx > W || my > H) return;
+        // the angle as seen on the page (map angle + the turn), kept readable, i.e. never upside down
+        var ang = Math.atan2(b.y - a.y, b.x - a.x) * 180 / Math.PI + (st.rot || 0);
+        ang = ((ang % 360) + 540) % 360 - 180; if (ang > 90) ang -= 180; if (ang < -90) ang += 180;
+        var rad = ang * Math.PI / 180, hw = Math.abs(Math.cos(rad)) * w / 2 + Math.abs(Math.sin(rad)) * fsz / 2, hh = Math.abs(Math.sin(rad)) * w / 2 + Math.abs(Math.cos(rad)) * fsz / 2;
+        var box = [mx - hw, my - hh, mx + hw, my + hh];
+        if (boxes.some(function(o){ return !(box[2] < o[0] || box[0] > o[2] || box[3] < o[1] || box[1] > o[3]); })) return;
+        boxes.push(box); named[p.n] = 1;
+        var s = document.createElement('div'); s.className = 'rm-lbl'; s.textContent = text; s.style.fontSize = fsz + 'px';
+        var lp = map.containerPointToLayerPoint([cx, cy]);
+        s.style.left = lp.x + 'px'; s.style.top = lp.y + 'px';
+        s.style.transform = 'rotate(' + (ang - (st.rot || 0)).toFixed(1) + 'deg) translate(-50%, -50%)';
+        pane.appendChild(s);
+      });
+    });
+  }
+  function placeCards(st){
+    var map = st.map, R = st.R, c = st.page, W = c.clientWidth, H = c.clientHeight, count = { tl: 0, tr: 0, bl: 0, br: 0 };
+    R.lines.forEach(function(l){ l.c.forEach(function(p0){ var q = map.latLngToContainerPoint(p0), p = toView(st, q.x, q.y); if (p.x < 0 || p.y < 0 || p.x > W || p.y > H) return; count[(p.y < H / 2 ? 't' : 'b') + (p.x < W / 2 ? 'l' : 'r')]++; }); });
+    var order = st.fixed || Object.keys(count).sort(function(a, b){ return count[a] - count[b]; });
+    var kp = st.keyPos, keyCard = c.querySelector('.rm-card.rm-key');
+    if (kp && keyCard) {
+      // the key's corner (a picked one, or the one its dragged spot is nearest) goes first, the rest keep their order
+      var kq = kp.q;
+      if (!kq) {
+        var cx = kp.x * W + keyCard.offsetWidth / 2, cy = kp.y * H + keyCard.offsetHeight / 2;
+        kq = (cy < H / 2 ? 't' : 'b') + (cx < W / 2 ? 'l' : 'r');
+      }
+      order = [kq].concat(order.filter(function(q){ return q !== kq; }));
+    }
+    st.order = order;
+    Array.prototype.forEach.call(c.querySelectorAll('.rm-card'), function(card, i){
+      var q = order[i] || 'tl';
+      card.style.top = card.style.bottom = card.style.left = card.style.right = '';
+      if (card === keyCard && kp && kp.x != null) {
+        card.style.left = Math.max(0, Math.min(W - card.offsetWidth, kp.x * W)) + 'px';
+        card.style.top = Math.max(0, Math.min(H - card.offsetHeight, kp.y * H)) + 'px';
+        return;
+      }
+      card.style[q.charAt(0) === 't' ? 'top' : 'bottom'] = (q.charAt(0) === 't' ? 10 : 22) + 'px';
+      card.style[q.charAt(1) === 'l' ? 'left' : 'right'] = '10px';
+    });
+    clearTimeout(st.t); st.t = setTimeout(function(){ labels(st); }, 60);
+  }
+
+  /* ---- the viewer ---- */
+  var el = null, view = null, curKey = null, pagesCache = [], curPage = 0, pageSize = null;
+  var editing = false, tool = 'paint', colour = '#ff0000', orientOverride = null;
+  /* ---- Pages: split a run over several printed pages ----
+     Each page is { c: [lat, lng] centre, z: map zoom at printed-paper size, o: 'port' | 'land' }, kept per run on
+     this phone (lbRunMapPages). All pages share the run's turn angle, so a page frame is always square to the page. */
+  var pagesMode = false, selPage = 0;
+  function sheetsFor(key){ var a = (lsGet('lbRunMapPages', {}) || {})[key]; return Array.isArray(a) ? a : []; }
+  function saveSheets(key, arr){ var all = lsGet('lbRunMapPages', {}) || {}; if (arr.length) all[key] = arr; else delete all[key]; lsSet('lbRunMapPages', all); }
+  function paperPx(o){ return [(PAGE[o][0] - 1) * MM, (PAGE[o][1] - 1) * MM]; }
+  // a page's rectangle on a drawn map (page pixels), from its centre and zoom
+  function frameRect(st, f){
+    var cp = st.map.latLngToContainerPoint(f.c), v = toView(st, cp.x, cp.y), k = Math.pow(2, st.map.getZoom() - f.z), pp = paperPx(f.o);
+    var w = pp[0] * k, h = pp[1] * k;
+    return { x: v.x - w / 2, y: v.y - h / 2, w: w, h: h, cx: v.x, cy: v.y };
+  }
+  // the page frames on the screen (live: tap to pick, drag to move) or on the printed layout page
+  function drawFrames(st, P, live){
+    st.frameEls = st.frameEls || [];
+    while (st.frameEls.length > P.length) { var gone = st.frameEls.pop(); if (gone.parentNode) gone.parentNode.removeChild(gone); }
+    P.forEach(function(f, i){
+      var d = st.frameEls[i];
+      if (!d) {
+        d = document.createElement('div'); d.className = 'rm-frame' + (live ? ' live' : ''); d.innerHTML = '<b></b><i></i>';
+        st.page.appendChild(d); st.frameEls[i] = d;
+        if (live) frameDrag(d, st, i);
+      }
+      var r = frameRect(st, f);
+      d.style.left = r.x + 'px'; d.style.top = r.y + 'px'; d.style.width = r.w + 'px'; d.style.height = r.h + 'px';
+      d.querySelector('b').textContent = i + 1;
+      d.querySelector('i').textContent = 'Page ' + (i + 1) + (live ? '' : ' of ' + P.length);
+      d.classList.toggle('sel', !!live && i === selPage);
+    });
+  }
+  function frameDrag(d, st, i){
+    var s0 = null;
+    d.addEventListener('pointerdown', function(e){
+      if (e.button > 0) return;
+      e.preventDefault(); e.stopPropagation();
+      var P = sheetsFor(curKey); if (!P[i]) return;
+      if (selPage !== i) { selPage = i; paintTools(); drawFrames(st, P, true); }
+      var r = frameRect(st, P[i]);
+      s0 = { x: e.clientX, y: e.clientY, cx: r.cx, cy: r.cy, moved: false };
+      try { d.setPointerCapture(e.pointerId); } catch (x) {}
+    });
+    d.addEventListener('pointermove', function(e){
+      if (!s0) return;
+      var dx = e.clientX - s0.x, dy = e.clientY - s0.y; if (!s0.moved && Math.abs(dx) + Math.abs(dy) < 4) return;
+      s0.moved = true;
+      var P = sheetsFor(curKey); if (!P[i]) return;
+      var q = fromView(st, s0.cx + dx, s0.cy + dy), ll = st.map.containerPointToLatLng(L.point(q.x, q.y));
+      P[i].c = [+ll.lat.toFixed(6), +ll.lng.toFixed(6)];
+      st._dragP = P; drawFrames(st, P, true);
+    });
+    function end(){ if (!s0) return; var m = s0.moved; s0 = null; if (m && st._dragP) { saveSheets(curKey, st._dragP); st._dragP = null; } }
+    d.addEventListener('pointerup', end); d.addEventListener('pointercancel', end);
+  }
+  // on printed page i: the other pages that touch it - dashed box where they overlap it, and a tab on the edge
+  // pointing the way to them. Pages further away than a third of the page aren't neighbours and get nothing.
+  function drawLinks(st, P, i){
+    var W = st.W, H = st.H, tabs = [];
+    P.forEach(function(f, j){
+      if (j === i) return;
+      var r = frameRect(st, f);
+      var ix0 = Math.max(0, r.x), iy0 = Math.max(0, r.y), ix1 = Math.min(W, r.x + r.w), iy1 = Math.min(H, r.y + r.h);
+      var overlap = ix1 > ix0 && iy1 > iy0;
+      var gapX = Math.max(0, r.x - W, -(r.x + r.w)), gapY = Math.max(0, r.y - H, -(r.y + r.h));
+      if (!overlap && Math.max(gapX, gapY) > Math.min(W, H) / 3) return;
+      if (overlap) {
+        var box = document.createElement('div'); box.className = 'rm-link';
+        box.style.left = r.x + 'px'; box.style.top = r.y + 'px'; box.style.width = r.w + 'px'; box.style.height = r.h + 'px';
+        var lab = document.createElement('span'); lab.textContent = 'Page ' + (j + 1);
+        // label just inside the part of that page that's on this sheet, at the corner nearest this sheet's middle
+        lab.style.left = (Math.min(Math.max(ix0 + 4, W / 2), ix1 - 60) - r.x) + 'px';
+        lab.style.top = (Math.min(Math.max(iy0 + 4, H / 2), iy1 - 20) - r.y) + 'px';
+        // (only when that page's middle is on this sheet - otherwise its edge tab below names it, in the same spot)
+        if (r.cx > 0 && r.cx < W && r.cy > 0 && r.cy < H) box.appendChild(lab);
+        st.page.appendChild(box);
+      }
+      // the tab: where the line from this page's middle to that page's middle leaves this page
+      var dx = r.cx - W / 2, dy = r.cy - H / 2;
+      if (r.cx > 0 && r.cx < W && r.cy > 0 && r.cy < H) return;          // that page sits inside this one: the box says it all
+      var tx = dx ? (W / 2) / Math.abs(dx) : Infinity, ty = dy ? (H / 2) / Math.abs(dy) : Infinity, t = Math.min(tx, ty);
+      var side = tx < ty ? (dx > 0 ? 'r' : 'l') : (dy > 0 ? 'b' : 't');
+      var px = W / 2 + dx * t, py = H / 2 + dy * t;
+      var tab = document.createElement('div'); tab.className = 'rm-tab';
+      tab.textContent = side === 'r' ? 'Page ' + (j + 1) + ' \u2192' : side === 'l' ? '\u2190 Page ' + (j + 1) : side === 't' ? '\u2191 Page ' + (j + 1) : '\u2193 Page ' + (j + 1);
+      st.page.appendChild(tab);
+      var tw = tab.offsetWidth || 70, th = tab.offsetHeight || 22;
+      var x = side === 'r' ? W - tw - 2 : side === 'l' ? 2 : Math.max(30, Math.min(W - tw - 30, px - tw / 2));
+      var y = side === 'b' ? H - th - 2 : side === 't' ? 2 : Math.max(30, Math.min(H - th - 30, py - th / 2));
+      // don't stack two tabs on the same spot
+      for (var k = 0; k < tabs.length; k++) { var o = tabs[k]; if (Math.abs(o.x - x) < tw && Math.abs(o.y - y) < th + 4) { if (side === 'l' || side === 'r') y += th + 6; else x += tw + 6; k = -1; } }
+      tabs.push({ x: x, y: y }); tab.style.left = x + 'px'; tab.style.top = y + 'px';
+    });
+  }
+  function pagesTools(t){
+    var P = sheetsFor(curKey), f = P[selPage];
+    t.innerHTML = '<div class="rm-trow"><button type="button" data-rm="padd">+ Add page</button>' +
+      P.map(function(x, i){ return '<button type="button" data-rm="psel" data-v="' + i + '" class="rm-pchip' + (i === selPage ? ' on' : '') + '">' + (i + 1) + '</button>'; }).join('') +
+      (f ? '<button type="button" data-rm="porient">' + (f.o === 'port' ? 'Portrait' : 'Landscape') + '</button>' +
+        '<button type="button" data-rm="pzin" title="Less area, more detail">Zoom in</button><button type="button" data-rm="pzout" title="More area, less detail">Zoom out</button>' +
+        '<button type="button" data-rm="pdel">Delete page ' + (selPage + 1) + '</button>' : '') +
+      '<button type="button" data-rm="pprint"' + (P.length ? '' : ' disabled') + '>Print all pages (' + (P.length ? P.length + 1 : 0) + ' sheets)</button></div>' +
+      '<div class="rm-hint">' + (P.length
+        ? 'Drag a page\u2019s frame to move it; tap it to pick it. Prints a layout sheet showing where every page sits, then each page, with dashed boxes and edge arrows where it joins the next.'
+        : 'Add a page, then drag its frame to where it should go. Zoom in on a page for more detail; add as many as the run needs.') + '</div>';
+  }
+  function pagesChanged(P){ saveSheets(curKey, P); if (selPage >= P.length) selPage = Math.max(0, P.length - 1); paintTools(); if (view) drawFrames(view, P, true); }
+  // how far each run's map is turned (whole degrees clockwise), kept per run on this phone
+  function rotFor(key){ var r = (lsGet('lbRunMapRot', {}) || {})[key]; return isFinite(+r) ? +r : 0; }
+  function setRot(deg){
+    deg = ((Math.round(deg) % 360) + 360) % 360;
+    var all = lsGet('lbRunMapRot', {}) || {}; if (deg) all[curKey] = deg; else delete all[curKey]; lsSet('lbRunMapRot', all);
+    if (view) { setGeom(view, deg); setNorth(view); placeCards(view); if (pagesMode) drawFrames(view, sheetsFor(curKey), true); }
+    rotLabel();
+  }
+  // a step lands on the next whole multiple of its size, so 5-degree steps square up a 1-degree tweak
+  function stepRot(dir, size){ size = size || 5; var cur = rotFor(curKey); setRot(dir > 0 ? Math.floor(cur / size + 1e-6) * size + size : Math.ceil(cur / size - 1e-6) * size - size); }
+  // where the key goes, per run on this phone: null = emptiest corner, {q:'tl'|'tr'|'bl'|'br'}, or {x,y} (fractions of the page) where it was dragged
+  function keyFor(key){ var k = (lsGet('lbRunMapKey', {}) || {})[key]; return k && (k.q || k.x != null) ? k : null; }
+  function setKey(pos){
+    var all = lsGet('lbRunMapKey', {}) || {}; if (pos) all[curKey] = pos; else delete all[curKey]; lsSet('lbRunMapKey', all);
+    if (view) { view.keyPos = pos; placeCards(view); }
+    keyPicker();
+  }
+  function keyPicker(){
+    var s = el && document.getElementById('rmKey'); if (!s) return;
+    var k = keyFor(curKey), v = !k ? 'auto' : k.q ? k.q : 'drag';
+    s.querySelector('option[value="drag"]').hidden = v !== 'drag';
+    s.value = v;
+  }
+  function rotLabel(){
+    var b = el && el.querySelector('[data-rm="rot0"]'); if (!b) return;
+    var r = rotFor(curKey);
+    b.textContent = !r ? 'N' : r > 180 ? (360 - r) + '\u00b0\u21ba' : r + '\u00b0\u21bb';
+    b.classList.toggle('on', !!r);
+    b.title = r ? 'Turned ' + (r > 180 ? (360 - r) + '\u00b0 left' : r + '\u00b0 right') + ' \u00b7 tap for north up' : 'North up';
+  }
+  var HINT = {
+    paint: 'Pick a colour, then tap a street to put it in that section. Tap a drawn line to delete it. Drag the map to move it.',
+    x: 'Tap a street to take it off the map; tap it again to put it back. Tap a drawn line to delete it.',
+    draw: 'Pick a colour, then drag your finger (or mouse) along the street. The map holds still while drawing - use Colour streets to move it.',
+    note: 'Tap the map where the note goes. Tap a note to change or delete it; drag your own notes to move them.'
+  };
+  /* edit tools: colour swatches, Colour streets / Draw a line / Remove / Add a note, Undo last line, Name the sections */
+  function paintTools(){
+    var t = document.getElementById('rmTools'); if (!t) return;
+    t.style.display = (editing || pagesMode) ? '' : 'none';
+    if (pagesMode && !editing) { pagesTools(t); return; }
+    if (!editing) { t.innerHTML = ''; return; }
+    var E = edits(curKey);
+    var btn = function(v, label){ return '<button type="button" data-rm="tool" data-v="' + v + '" class="' + (tool === v ? 'on' : '') + '">' + label + '</button>'; };
+    t.innerHTML = '<div class="rm-trow"><span class="rm-tl">Colour</span>' + PALETTE.map(function(c){ return '<button type="button" data-rm="colour" data-v="' + c + '" class="rm-sw' + (colour === c ? ' on' : '') + '" style="background:' + c + '" title="' + esc(SECTION_NAMES[c]) + '"></button>'; }).join('') +
+      btn('paint', 'Colour streets') +
+      btn('draw', '<span style="display:inline-block;width:14px;height:4px;vertical-align:middle;margin-right:6px;background:' + colour + '"></span>Draw a line') +
+      btn('x', 'Remove / put back') + btn('note', 'Add a note') +
+      '<button type="button" data-rm="undo"' + (E.drawn.length ? '' : ' disabled') + '>Undo last line</button>' +
+      '<button type="button" data-rm="names">Name the sections</button></div>' +
+      '<div class="rm-hint">' + esc(HINT[tool] || '') + '</div>';
+  }
+  function editHandlers(){
+    return {
+      edit: true, mode: tool, colour: colour,
+      onPiece: function(id, x){
+        var E = edits(curKey);
+        if (tool === 'x') { if (E.pieces[id] === 'x') delete E.pieces[id]; else E.pieces[id] = 'x'; }
+        else if (x.l.s === colour || (!x.l.s && colour === '#16a34a')) delete E.pieces[id]; else E.pieces[id] = colour;
+        saveEdits(curKey, E); renderView(true);
+      },
+      onDrawn: function(i){ if (!confirm('Delete this drawn line?')) return; var E = edits(curKey); E.drawn.splice(i, 1); saveEdits(curKey, E); renderView(true); },
+      onNote: function(p){
+        var E = edits(curKey);
+        var t = prompt('Note (leave empty to delete it):', p.text); if (t === null) return;
+        if (p.mine != null) { if (t.trim()) E.notes[p.mine].text = t.trim(); else E.notes.splice(p.mine, 1); }
+        else { E.hide.push(p.text); if (t.trim()) E.notes.push({ text: t.trim(), at: p.at }); }
+        saveEdits(curKey, E); renderView(true);
+      },
+      onNoteMove: function(i, ll){ var E = edits(curKey); if (E.notes[i]) { E.notes[i].at = [+ll.lat.toFixed(6), +ll.lng.toFixed(6)]; saveEdits(curKey, E); renderView(true); } },
+      onMap: function(ll){ var t = prompt('Note:'); if (!t || !t.trim()) return; var E = edits(curKey); E.notes.push({ text: t.trim(), at: [+ll.lat.toFixed(6), +ll.lng.toFixed(6)] }); saveEdits(curKey, E); renderView(true); },
+      onStroke: function(c){ var E = edits(curKey); E.drawn.push({ c: c, s: colour }); saveEdits(curKey, E); renderView(true); }
+    };
+  }
+  function editNames(){
+    var E = edits(curKey), R = DATA[curKey]; if (!R) return;
+    var cols = {}; R.lines.forEach(function(l){ var ov = E.pieces[pid(l)]; cols[ov && ov !== 'x' ? ov : (l.s || '#16a34a')] = 1; }); E.drawn.forEach(function(d){ cols[d.s] = 1; });
+    Object.keys(cols).forEach(function(c){
+      var t = prompt('Name for the ' + (SECTION_NAMES[c] || c) + ' part of the run (e.g. "Load 1", "Driver 2"):', E.names[c] || '');
+      if (t === null) return; if (t.trim()) E.names[c] = t.trim(); else delete E.names[c];
+    });
+    saveEdits(curKey, E); renderView(true);
+  }
+  function build(){
+    if (el) return;
+    el = document.createElement('div'); el.id = 'lbRunMap';
+    el.innerHTML = '<div class="rm-head"><div class="rm-bar"><select id="rmStream"></select><select id="rmDay"></select><select id="rmRun"></select><span class="rm-sp"></span>' +
+      '<span class="rm-rot"><button type="button" data-rm="rotL" data-step="5" title="Turn the map 5\u00b0 left" aria-label="Turn the map 5 degrees left">\u21ba 5\u00b0</button><button type="button" class="rm-fine" data-rm="rotL" data-step="1" title="Turn the map 1\u00b0 left" aria-label="Turn the map 1 degree left">1\u00b0</button>' +
+      '<button type="button" data-rm="rot0" title="North up">N</button>' +
+      '<button type="button" class="rm-fine" data-rm="rotR" data-step="1" title="Turn the map 1\u00b0 right" aria-label="Turn the map 1 degree right">1\u00b0</button><button type="button" data-rm="rotR" data-step="5" title="Turn the map 5\u00b0 right" aria-label="Turn the map 5 degrees right">5\u00b0 \u21bb</button></span>' +
+      '<select id="rmKey" title="Where the key goes (or drag the key on the map)"><option value="auto">Key: auto</option><option value="tl">Key: top left</option><option value="tr">Key: top right</option><option value="bl">Key: bottom left</option><option value="br">Key: bottom right</option><option value="drag" hidden>Key: where dragged</option></select>' +
+      '<button type="button" data-rm="fit" title="Show the whole run">Whole run</button><button type="button" data-rm="turn" title="Portrait / landscape">Turn page</button><button type="button" data-rm="edit">Edit</button><button type="button" data-rm="pages" title="Split the run over several printed pages">Pages</button><button type="button" data-rm="printview" title="Prints exactly what is on screen">Print</button><button type="button" data-rm="close">Close</button></div>' +
+      '<div id="rmTools" class="rm-tools"></div></div><div id="rmView"></div><div id="rmPrint"></div>';
+    document.body.appendChild(el);
+    el.addEventListener('click', function(e){
+      var b = e.target.closest && e.target.closest('[data-rm]'); if (!b || b.disabled) return;
+      var a = b.getAttribute('data-rm');
+      if (a === 'close') { editing = false; el.style.display = 'none'; return; }
+      if (a === 'printview') printView(false);
+      if (a === 'pages') { pagesMode = !pagesMode; if (pagesMode) editing = false; selPage = 0; renderView(true, true); }
+      if (a === 'padd' && view) {
+        var P = sheetsFor(curKey), po = orientOverride || pagesCache[0].o;
+        // a new page starts in the middle of what's on screen, half the page's width across
+        var zz = view.map.getZoom() + Math.log2(paperPx(po)[0] / (0.5 * view.W));
+        P.push({ c: [+view.map.getCenter().lat.toFixed(6), +view.map.getCenter().lng.toFixed(6)], z: +Math.min(19, zz).toFixed(2), o: po });
+        selPage = P.length - 1; pagesChanged(P);
+      }
+      if (a === 'psel') { selPage = +b.getAttribute('data-v'); paintTools(); if (view) drawFrames(view, sheetsFor(curKey), true); }
+      if (a === 'porient' || a === 'pzin' || a === 'pzout' || a === 'pdel') {
+        var Q = sheetsFor(curKey), f = Q[selPage];
+        if (f) {
+          if (a === 'porient') f.o = f.o === 'port' ? 'land' : 'port';
+          if (a === 'pzin') f.z = +Math.min(19, f.z + 0.25).toFixed(2);
+          if (a === 'pzout') f.z = +Math.max(10, f.z - 0.25).toFixed(2);
+          if (a === 'pdel') Q.splice(selPage, 1);
+          pagesChanged(Q);
+        }
+      }
+      if (a === 'pprint') printView(true);
+      if (a === 'fit') renderView(false);
+      if (a === 'turn') { var pg = pagesCache[curPage] || pagesCache[0]; orientOverride = ((orientOverride || pg.o) === 'land') ? 'port' : 'land'; renderView(true, true); }
+      if (a === 'edit') { editing = !editing; if (editing) pagesMode = false; tool = 'paint'; renderView(true, true); }
+      if (a === 'tool') { tool = b.getAttribute('data-v'); renderView(true); }
+      if (a === 'colour') { colour = b.getAttribute('data-v'); if (tool !== 'draw') tool = 'paint'; renderView(true); }
+      if (a === 'undo') { var E = edits(curKey); if (E.drawn.length) { E.drawn.pop(); saveEdits(curKey, E); } renderView(true); }
+      if (a === 'names') editNames();
+    });
+    ['rmStream', 'rmDay', 'rmRun'].forEach(function(id){ document.getElementById(id).addEventListener('change', function(){ pickerChanged(id); }); });
+    document.getElementById('rmKey').addEventListener('change', function(){ var v = this.value; if (v === 'drag') return; setKey(v === 'auto' ? null : { q: v }); });
+    // the turn buttons act on press, and keep turning while held
+    var holdT = 0, repT = 0;
+    function stopHold(){ clearTimeout(holdT); clearInterval(repT); holdT = repT = 0; }
+    el.addEventListener('pointerdown', function(e){
+      var b = e.target.closest && e.target.closest('[data-rm="rotL"],[data-rm="rotR"],[data-rm="rot0"]'); if (!b || !curKey) return;
+      e.preventDefault();
+      var a = b.getAttribute('data-rm');
+      if (a === 'rot0') { setRot(0); return; }
+      var d = a === 'rotR' ? 1 : -1, sz = +b.getAttribute('data-step') || 5; stepRot(d, sz); stopHold();
+      holdT = setTimeout(function(){ repT = setInterval(function(){ stepRot(d, sz); }, sz === 1 ? 110 : 180); }, 450);
+      try { b.setPointerCapture(e.pointerId); } catch (x) {}
+    });
+    ['pointerup', 'pointercancel', 'lostpointercapture'].forEach(function(n){ el.addEventListener(n, stopHold); });
+    el.addEventListener('contextmenu', function(e){ if (e.target.closest && e.target.closest('.rm-rot')) e.preventDefault(); });
+    // on a keyboard: [ and ] turn 5 degrees, { and } (shift) turn 1 degree, \ back to north up
+    document.addEventListener('keydown', function(e){
+      if (!el || el.style.display === 'none' || !curKey) return;
+      var t = e.target, tag = t && t.tagName; if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || e.ctrlKey || e.metaKey || e.altKey) return;
+      if (e.key === '[') { stepRot(-1, 5); e.preventDefault(); } else if (e.key === ']') { stepRot(1, 5); e.preventDefault(); }
+      else if (e.key === '{') { stepRot(-1, 1); e.preventDefault(); } else if (e.key === '}') { stepRot(1, 1); e.preventDefault(); } else if (e.key === '\\') { setRot(0); e.preventDefault(); }
+    });
+    window.addEventListener('resize', function(){ if (el.style.display !== 'none' && curKey) renderView(true, true); });
+  }
+  // the page on screen: the paper's shape, as big as fits below the top bar (so the page never needs scrolling)
+  function screenSize(o){
+    var head = el.querySelector('.rm-head'), hh = head ? head.offsetHeight : 60;
+    var wmm = PAGE[o][0], hmm = PAGE[o][1];
+    var k = Math.min((window.innerWidth - 20) / (wmm * MM), Math.max(160, window.innerHeight - hh - 20) / (hmm * MM));
+    return { o: o, w: Math.round(wmm * MM * k), h: Math.round(hmm * MM * k) };
+  }
+  function pageDiv(o, size){
+    var d = document.createElement('div'); d.className = 'rm-page rm-' + o;
+    if (size) { d.style.width = size.w + 'px'; d.style.height = size.h + 'px'; }
+    else { d.style.width = (PAGE[o][0] - 1) + 'mm'; d.style.height = (PAGE[o][1] - 1) + 'mm'; }   // 1 mm spare: a hair over the printable height spills onto a second sheet
+    var m = document.createElement('div'); m.className = 'rm-map'; d.appendChild(m);
+    return { page: d, map: m };
+  }
+  function renderView(keep, resize){
+    var host = document.getElementById('rmView');
+    var kept = keep && view ? { c: view.map.getCenter(), z: view.map.getZoom() } : null, keptOrder = keep && view ? view.order : null;
+    if (view) { try { view.map.remove(); } catch (e) {} view = null; }
+    host.innerHTML = '';
+    paintTools();
+    Array.prototype.forEach.call(el.querySelectorAll('[data-rm="edit"]'), function(b){ b.classList.toggle('on', editing); b.textContent = editing ? 'Done editing' : 'Edit'; });
+    var R = DATA[curKey]; if (!R) { host.innerHTML = '<div class="rm-empty">No route map for this run yet.</div>'; return; }
+    var pg = pagesCache[0], o = orientOverride || pg.o;
+    // the page keeps its size while you edit, so the map never shifts under your finger
+    if (!pageSize || !keep || resize || pageSize.o !== o) pageSize = screenSize(o);
+    var d = pageDiv(o, pageSize);
+    host.appendChild(d.page);
+    var opts = editing ? editHandlers() : {};
+    opts.rot = rotFor(curKey);
+    opts.keyPos = keyFor(curKey);
+    opts.onKeyMove = function(pos){ setKey(pos); };
+    if (kept) opts.view = kept;
+    if (editing && keptOrder) opts.order = keptOrder;
+    view = draw(d.map, curKey, R, pg, opts);
+    rotLabel(); keyPicker();
+    Array.prototype.forEach.call(el.querySelectorAll('[data-rm="pages"]'), function(b){ var n = sheetsFor(curKey).length; b.classList.toggle('on', pagesMode); b.textContent = pagesMode ? 'Done with pages' : 'Pages' + (n ? ' (' + n + ')' : ''); });
+    if (pagesMode) {
+      var vw = view, redraw = function(){ drawFrames(vw, sheetsFor(curKey), true); };
+      redraw(); view.map.on('move zoom moveend zoomend', redraw);   // frames follow the map (setRot redraws them after a turn)
+    }
+  }
+  function show(key){
+    curKey = key; curPage = 0; orientOverride = null; pageSize = null;
+    fillPickers(parse(key));
+    pagesCache = DATA[key] ? pagesFor(DATA[key]) : [];
+    renderView();
+  }
+  // Print what's on screen (same page shape and centre, the zoom scaled up by how much bigger the paper is, the cards
+  // in the same corners; the page frames too while in Pages) - or, with all, a layout sheet showing where every page
+  // sits followed by each page, each marked with where it joins its neighbours
+  var printing = [];
+  function printView(all){
+    var R = DATA[curKey]; if (!R || !view) return;
+    var o = orientOverride || pagesCache[0].o, rot = rotFor(curKey), kp = keyFor(curKey), P = sheetsFor(curKey);
+    var screenW = view.page.clientWidth, c = view.map.getCenter(), z = view.map.getZoom(), order = view.order;   // before the screen view is hidden for printing
+    var frames = (pagesMode || all) && P.length > 0;
+    var sheets = [{ o: o, screen: true, order: order, frames: frames, label: frames ? 'Page layout' : '' }];
+    if (all) P.forEach(function(f, i){ sheets.push({ o: f.o, view: { c: f.c, z: f.z }, page: i, label: 'Page ' + (i + 1) + ' of ' + P.length }); });
+    var host = document.getElementById('rmPrint'); printing.forEach(function(s){ try { s.map.remove(); } catch (e) {} }); printing = []; host.innerHTML = '';
+    document.body.classList.add('rm-printing');
+    // (fallback for browsers without named pages - see @page rmport above) put this after the run sheet's @page
+    // rule so it wins while the run map prints, and take it out again afterwards so the run sheet still prints landscape
+    // Only where named pages aren't supported: in Chrome a later unnamed @page size beats the named ones, which
+    // would force every sheet to the same orientation (a portrait page among landscape ones printed landscape)
+    var named = !!(window.CSS && CSS.supports && CSS.supports('page', 'rmport'));
+    var css = document.getElementById('rmPageStyle');
+    if (!css) { css = document.createElement('style'); css.id = 'rmPageStyle'; }
+    if (named) css.textContent = '';
+    else { document.body.appendChild(css); css.textContent = '@media print { @page { size: A4 ' + (o === 'port' ? 'portrait' : 'landscape') + '; margin: 6mm; } }'; }
+    // the layout sheet shows the whole run and every page frame, however the screen happens to be zoomed
+    var fitPts = null;
+    if (all && P.length) {
+      fitPts = [];
+      P.forEach(function(f){ var r = frameRect(view, f); [[r.x, r.y], [r.x + r.w, r.y], [r.x, r.y + r.h], [r.x + r.w, r.y + r.h]].forEach(function(q){ var cq = fromView(view, q[0], q[1]), ll = view.map.containerPointToLatLng(L.point(cq.x, cq.y)); fitPts.push([ll.lat, ll.lng]); }); });
+    }
+    sheets.forEach(function(sh){
+      var d = pageDiv(sh.o, null); host.appendChild(d.page);
+      var v = sh.screen ? (fitPts ? null : { c: c, z: z + Math.log2((d.page.clientWidth || PAGE[sh.o][0] * MM) / screenW) }) : sh.view;
+      var st = draw(d.map, curKey, R, pagesCache[0], { view: v, fitPts: sh.screen ? fitPts : null, order: fitPts ? null : sh.order, rot: rot, keyPos: kp, pageLabel: sh.label });
+      if (sh.frames) drawFrames(st, P, false);
+      if (sh.page != null) drawLinks(st, P, sh.page);
+      printing.push(st);
+    });
+    // print once the street tiles are in (up to 15 s - several pages can take a while on a phone)
+    whenTiles(printing, 15000).then(function(){
+      setTimeout(function(){
+        try { window.print(); } catch (x) {}
+        setTimeout(function(){ try { css.remove(); } catch (e) {} document.body.classList.remove('rm-printing'); printing.forEach(function(s){ try { s.map.remove(); } catch (e) {} }); printing = []; host.innerHTML = ''; }, 800);
+      }, 400);
+    });
+  }
+  function whenTiles(states, ms){
+    return new Promise(function(done){
+      var left = 0, finished = false, finish = function(){ if (!finished) { finished = true; done(); } };
+      states.forEach(function(s){ s.map.eachLayer(function(l){ if (l instanceof L.TileLayer && l.isLoading && l.isLoading()) { left++; l.once('load', function(){ if (--left <= 0) finish(); }); } }); });
+      if (!left) setTimeout(finish, 600);
+      setTimeout(finish, ms);
+    });
+  }
+
+  function keys(){ return Object.keys(DATA || {}); }
+  function fillPickers(o){
+    var ks = keys().map(parse);
+    var streams = ['Garbage', 'Recycling', 'FOGO'].filter(function(s){ return ks.some(function(k){ return k.stream === s; }); });
+    var S = document.getElementById('rmStream'), D = document.getElementById('rmDay'), Rr = document.getElementById('rmRun');
+    S.innerHTML = streams.map(function(s){ return '<option' + (s === o.stream ? ' selected' : '') + '>' + s + '</option>'; }).join('');
+    var dayOpts = [];
+    DAYS.forEach(function(d){
+      if (o.stream === 'Garbage') { if (ks.some(function(k){ return k.stream === 'Garbage' && k.day === d; })) dayOpts.push([d, d]); }
+      else ['A', 'B'].forEach(function(w){ if (ks.some(function(k){ return k.stream === o.stream && k.day === d && k.week === w; })) dayOpts.push([d + '|' + w, d + ' · Week ' + w]); });
+    });
+    var dv = o.stream === 'Garbage' ? o.day : o.day + '|' + o.week;
+    D.innerHTML = dayOpts.map(function(x){ return '<option value="' + x[0] + '"' + (x[0] === dv ? ' selected' : '') + '>' + x[1] + '</option>'; }).join('');
+    var runs = ks.filter(function(k){ return k.stream === o.stream && k.day === o.day && (o.stream === 'Garbage' || k.week === o.week); }).map(function(k){ return k.run; }).sort(function(a, b){ return a.localeCompare(b, undefined, { numeric: true }); });
+    Rr.innerHTML = runs.map(function(r){ return '<option' + (r === o.run ? ' selected' : '') + '>' + esc(r) + '</option>'; }).join('');
+  }
+  function pickerChanged(id){
+    var S = document.getElementById('rmStream').value, Dv = document.getElementById('rmDay').value, Rv = document.getElementById('rmRun').value;
+    var ks = keys().map(parse), o;
+    if (id === 'rmStream') o = ks.filter(function(k){ return k.stream === S; })[0];
+    else {
+      var p = Dv.split('|'); o = { stream: S, day: p[0], week: p[1] || '', run: Rv };
+      if (id === 'rmDay' || !DATA[keyOf(o)]) o = ks.filter(function(k){ return k.stream === S && k.day === p[0] && (S === 'Garbage' || k.week === (p[1] || '')); })[0] || o;
+    }
+    if (o) show(keyOf(o));
+  }
+  function open(key){
+    if (!window.L) return;
+    build(); el.style.display = '';
+    load().then(function(){
+      var k = key || currentKey();
+      if (!k || !DATA[k]) k = Object.keys(DATA).sort()[0] || null;
+      if (!k) { document.getElementById('rmView').innerHTML = '<div class="rm-empty">No run maps yet.</div>'; return; }
+      setTimeout(function(){ show(k); }, 30);
+    });
+  }
+  window.lbRunMapOpen = open;
+  window.lbRunMapDebug = function(){ return { view: view, printing: printing }; };
+  window.lbRunMapPages = function(key){ return DATA && DATA[key] ? pagesFor(DATA[key]) : null; };
+})();
+</script>
+
+<script id="lb-council-requests">
+/* =====================================================================
+   Council requests: load the council's "Resource Pool Requests" sheet
+   (FULL BIN / REPAIR BIN jobs on public street litter bins) and, for each
+   row, work out which of our Street Litter sites it means, which run(s)
+   empty it, whether a scheduled visit has already happened since it was
+   reported, and when it is next due. Results can be exported as a CSV.
+
+   Why: the council sends these several times a week and each row only has
+   free text ("ToiletBloc T173  Shire Hall Beach  Off Esplanade",
+   "Tideways 3098 Point Nepean Road") - never our Site ID - so each one was
+   being worked out by hand from the site list, the map and the run exports.
+
+   How a row is matched (in this order of trust):
+     1. a bin serial written in the row that matches a site's recorded bin
+     2. a house number on a street -> the kerbside house at that address
+        (siteRecords) gives a position -> nearest Street Litter site
+     3. same street + nearest street number (same side of the road scores
+        higher), and landmark words from the address / location field
+        ("Rotaract", "Beach Club") against the site's description
+     4. if that still leaves it unclear and there is signal: a Nominatim
+        search for each part of the address ("Shire Hall Beach, Mornington"),
+        kept only if it lands inside that suburb's sites -> nearest site
+   The council's address field separates its parts with two spaces, which is
+   why the address is split on runs of 2+ spaces for step 4.
+
+   Runs and times come from STREET_LITTER_RUN_DATA (the depot KMZ exports):
+   stops linked to the site's pid first, then unlinked stops within 50 m for
+   sites that were never linked, then the site list's own run days. Times are
+   when the truck usually gets there, not a promise - hence the "~".
+   Nothing here edits a site or sends anything; it is read-only.
+   ===================================================================== */
+(function(){
+  'use strict';
+  var GF = {};
+  function g(n){ try { return (GF[n] || (GF[n] = new Function('return ' + n)))(); } catch (e) { return undefined; } }
+  function $(id){ return document.getElementById(id); }
+  function esc(s){ return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+  var DAYS = ['SUN','MON','TUE','WED','THU','FRI','SAT'];
+  var DAY_NAMES = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+  var MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+  // ---- text normalising --------------------------------------------------------------
+  var ABBR = { RD:'ROAD', ST:'STREET', STR:'STREET', AVE:'AVENUE', AV:'AVENUE', CT:'COURT', CRT:'COURT', DR:'DRIVE', DVE:'DRIVE',
+    PDE:'PARADE', HWY:'HIGHWAY', CRES:'CRESCENT', CR:'CRESCENT', PL:'PLACE', GR:'GROVE', GV:'GROVE', BVD:'BOULEVARD',
+    BLVD:'BOULEVARD', ESP:'ESPLANADE', TCE:'TERRACE', LN:'LANE', CL:'CLOSE', CCT:'CIRCUIT', OPP:'OPPOSITE', MT:'MOUNT',
+    NTH:'NORTH', STH:'SOUTH', RES:'RESERVE', CNR:'CORNER', PK:'PARK' };
+  var TYPES = {}; ['ROAD','STREET','AVENUE','COURT','DRIVE','PARADE','HIGHWAY','CRESCENT','PLACE','GROVE','BOULEVARD','TERRACE',
+    'LANE','CLOSE','WAY','CIRCUIT','RISE','SQUARE','MEWS','TRACK'].forEach(function(t){ TYPES[t] = 1; });
+  // streets that are just one word with no "Road"/"Street" after them
+  var SOLO = { ESPLANADE:1, PROMENADE:1, BROADWAY:1, STRAND:1 };
+  var STOP = {}; ('OFF OPPOSITE NEAR AT OUTSIDE CORNER AND BEHIND NEXT TO THE IN ON OF FRONT BY BIN BINS FULL VIC VICTORIA ' +
+    'OVERFLOWING RUBBISH LITTER STREET ROAD').split(' ').forEach(function(t){ STOP[t] = 1; });
+  // words lots of sites share: worth a little, not enough to pick a site on their own
+  var GENERIC = {}; ('PARK BEACH CARPARK CAR RESERVE TOILET TOILETS BLOCK SHOPS SHOP BUS STOP PLAYGROUND NORTH SOUTH EAST WEST ' +
+    'FORESHORE PIER ENTRANCE LOOKOUT PATH TRACK AREA CENTRE CENTER PICNIC WALKING CLUB').split(' ').forEach(function(t){ GENERIC[t] = 1; });
+
+  function tokens(s){
+    return String(s == null ? '' : s).toUpperCase().replace(/&/g, ' AND ').replace(/[^A-Z0-9]+/g, ' ').trim().split(' ')
+      .filter(Boolean).map(function(t){ return ABBR[t] || t; });
+  }
+  function normSuburb(s){ return tokens(s).join(' '); }
+  // street name = a street-type word plus up to 2 name words before it
+  // (POINT NEPEAN ROAD, TIGA COURT), or a one-word street like ESPLANADE
+  function streetOf(toks){
+    for (var i = toks.length - 1; i >= 0; i--) {
+      var t = toks[i];
+      if (SOLO[t]) return t;
+      if (TYPES[t] && i > 0) {
+        var name = [];
+        for (var j = i - 1; j >= 0 && name.length < 2; j--) {
+          var w = toks[j];
+          if (/\d/.test(w) || STOP[w] || TYPES[w] || SOLO[w]) break;
+          name.unshift(w);
+        }
+        if (name.length) return name.concat(t).join(' ');
+      }
+    }
+    return '';
+  }
+  function sameStreet(a, b){
+    if (!a || !b) return 0;
+    if (a === b) return 2;
+    return (a.slice(-(b.length + 1)) === ' ' + b || b.slice(-(a.length + 1)) === ' ' + a) ? 1 : 0;
+  }
+  function editDist1(a, b){ // true if a and b differ by at most one edit (Rotoract / Rotaract)
+    if (a === b) return true;
+    if (Math.abs(a.length - b.length) > 1) return false;
+    var i = 0, j = 0, d = 0;
+    while (i < a.length && j < b.length) {
+      if (a[i] === b[j]) { i++; j++; continue; }
+      if (++d > 1) return false;
+      if (a.length > b.length) i++; else if (b.length > a.length) j++; else { i++; j++; }
+    }
+    return d + (a.length - i) + (b.length - j) <= 1;
+  }
+  function wordHit(w, set){
+    if (set[w]) return true;
+    if (w.length < 6) return false;
+    for (var k in set) if (k.length >= 6 && editDist1(w, k)) return true;
+    return false;
+  }
+  function metres(la1, ln1, la2, ln2){
+    var R = 6371000, r = Math.PI / 180, x = (ln2 - ln1) * r * Math.cos((la1 + la2) / 2 * r), y = (la2 - la1) * r;
+    return Math.sqrt(x * x + y * y) * R;
+  }
+
+  // ---- Street Litter sites, prepared once ------------------------------------------------
+  var PREP = null;
+  function prepSites(){
+    if (PREP) return PREP;
+    var list = (typeof STREET_LITTER_SITES !== 'undefined' && Array.isArray(STREET_LITTER_SITES)) ? STREET_LITTER_SITES : [];
+    PREP = list.map(function(s){
+      var addr = String(s.addr || ''), cut = -1, re = / - /g, m;
+      // "21 - 159 Ocean Beach Road - Sorrento SHOPS": the first " - " is a number range, not the description split
+      while ((m = re.exec(addr))) { if (/[A-Za-z]/.test(addr.slice(0, m.index))) { cut = m.index; break; } }
+      var head = cut >= 0 ? addr.slice(0, cut) : addr, desc = cut >= 0 ? addr.slice(cut + 3) : '';
+      var ht = tokens(head), street = streetOf(ht);
+      if (!street) street = streetOf(tokens(addr));
+      var opp = /\bopp/i.test(head), nums = [], rm;
+      var rr = /(\d+)\s*-\s*(\d+)|(\d+)/g;
+      var headNums = head.replace(/\bT\d+\b/gi, '');
+      while ((rm = rr.exec(headNums))) {
+        if (rm[1]) nums.push([+rm[1], +rm[2]]); else nums.push([+rm[3], +rm[3]]);
+        if (nums.length > 2) break;
+      }
+      var streetWords = {}; street.split(' ').forEach(function(w){ streetWords[w] = 1; });
+      var words = {};
+      tokens(desc + ' ' + head).forEach(function(w){ if (w.length >= 3 && !/^\d/.test(w) && !STOP[w] && !TYPES[w] && !streetWords[w]) words[w] = 1; });
+      var serials = {};
+      (s.bins || []).forEach(function(b){ var v = String(b.serial || '').replace(/\s+/g, '').toUpperCase(); if (v.length >= 5 && /\d{5,}/.test(v)) serials[v] = 1; });
+      var recycle = /\(R\)/.test(addr) || (!(s.rl || []).length && (s.rr || []).length > 0);
+      return { s: s, recycle: recycle, suburb: normSuburb(s.suburb), street: street, nums: nums, opp: opp, words: words, serials: serials,
+               lat: +s.lat || 0, lng: +s.lng || 0 };
+    });
+    return PREP;
+  }
+
+  // ---- kerbside houses as an offline address -> position lookup ----------------------------
+  var HOUSES = null, HOUSES_N = -1;
+  function houseIndex(){
+    var recs = g('siteRecords') || [];
+    if (HOUSES && HOUSES_N === recs.length) return HOUSES;
+    HOUSES = {}; HOUSES_N = recs.length;
+    recs.forEach(function(r){
+      var lat = +r.lat, lng = +r.lng;
+      if (!(lat && lng)) {
+        var st = r.soloStreams || {}, b = [].concat(st.Garbage || [], st.Recycling || [], st.FOGO || []).filter(function(x){ return +x.lat && +x.lng; })[0];
+        if (b) { lat = +b.lat; lng = +b.lng; }
+      }
+      if (!(lat && lng) || Math.abs(lat) > 90) return;
+      var line = String(r.baseStreetLine || String(r.addressText || '').split(',')[0]);
+      var mm = /^\s*(\d+)[A-Z]?\s+(.+)$/i.exec(line); if (!mm) return;
+      var street = streetOf(tokens(mm[2])); if (!street) return;
+      var sub = normSuburb(String(r.suburbLine || '').replace(/\s*\d{4}\s*$/, ''));
+      var key = sub + '|' + street;
+      (HOUSES[key] || (HOUSES[key] = [])).push({ n: +mm[1], lat: lat, lng: lng, a: line });
+    });
+    return HOUSES;
+  }
+  function housePoint(suburb, street, num){
+    if (!street || !num) return null;
+    var idx = houseIndex(), best = null;
+    Object.keys(idx).forEach(function(k){
+      var p = k.split('|'); if (p[0] !== suburb || !sameStreet(p[1], street)) return;
+      idx[k].forEach(function(h){
+        var d = Math.abs(h.n - num), cost = d + ((h.n % 2) !== (num % 2) ? 3 : 0);
+        if (d <= 20 && (!best || cost < best.cost)) best = { cost: cost, exact: d === 0, lat: h.lat, lng: h.lng, a: h.a };
+      });
+    });
+    return best;
+  }
+
+  // ---- online fallback: Nominatim, only kept if it lands among that suburb's sites -------------
+  var geoCache = {};
+  try { geoCache = JSON.parse(localStorage.getItem('lbCouncilGeoCache') || '{}') || {}; } catch (e) { geoCache = {}; }
+  var lastGeo = 0;
+  function sleep(ms){ return new Promise(function(r){ setTimeout(r, ms); }); }
+  async function nominatim(q, box){
+    var key = q.toUpperCase();
+    if (Object.prototype.hasOwnProperty.call(geoCache, key)) return geoCache[key];
+    if (navigator.onLine === false) return null;
+    var wait = 1100 - (Date.now() - lastGeo); if (wait > 0) await sleep(wait); // Nominatim's 1 request/second rule
+    lastGeo = Date.now();
+    var url = 'https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&countrycodes=au&bounded=1&viewbox=' +
+      [box.w, box.n, box.e, box.s].join(',') + '&q=' + encodeURIComponent(q);
+    var hit = null;
+    try {
+      var ctl = window.AbortController ? new AbortController() : null, t = ctl && setTimeout(function(){ ctl.abort(); }, 8000);
+      var res = await fetch(url, ctl ? { signal: ctl.signal } : {});
+      if (t) clearTimeout(t);
+      if (!res.ok) return null;
+      var arr = await res.json();
+      if (arr && arr[0]) hit = { lat: +arr[0].lat, lng: +arr[0].lon, name: arr[0].display_name || q };
+    } catch (e) { return null; } // offline / timeout: don't cache, try again next import
+    geoCache[key] = hit;
+    try { localStorage.setItem('lbCouncilGeoCache', JSON.stringify(geoCache)); } catch (e) {}
+    return hit;
+  }
+  function suburbBox(sub){
+    var la = [], ln = [];
+    prepSites().forEach(function(p){ if (p.suburb === sub && p.lat) { la.push(p.lat); ln.push(p.lng); } });
+    if (!la.length) return null;
+    var pad = 0.012; // ~1.2 km around the suburb's bins
+    return { s: Math.min.apply(null, la) - pad, n: Math.max.apply(null, la) + pad, w: Math.min.apply(null, ln) - pad, e: Math.max.apply(null, ln) + pad };
+  }
+
+  // ---- scoring one request against the sites -------------------------------------------------
+  function scoreSites(q, pt){
+    var out = [];
+    prepSites().forEach(function(p){
+      if (q.suburb && p.suburb !== q.suburb) return;
+      var sc = 0, why = [], dist = null;
+      if (q.serial && p.serials[q.serial]) { sc += 100; why.push('bin serial ' + q.serial); }
+      var ss = sameStreet(p.street, q.street);
+      if (ss) { sc += ss === 2 ? 30 : 22; }
+      if (ss && q.num && p.nums.length) {
+        var bestD = 1e9, par = false, wide = false;
+        p.nums.forEach(function(r){
+          var d = q.num >= r[0] && q.num <= r[1] ? 0 : Math.min(Math.abs(q.num - r[0]), Math.abs(q.num - r[1]));
+          // a site written as a long stretch ("21 - 159 Ocean Beach Road - Sorrento SHOPS") says
+          // nothing about where on it the bin is, so being inside it is only a weak hint
+          var w = r[1] - r[0] > 12;
+          if (w) { if (d === 0 && bestD > 20) { bestD = 20; par = false; wide = true; } return; }
+          if (d < bestD) { bestD = d; wide = false; par = r[0] === r[1] && (r[0] % 2) === (q.num % 2); }
+        });
+        var ns = Math.max(0, 30 - bestD * 1.5);
+        if (ns > 0) { sc += ns + (par && !p.opp ? 4 : 0); why.push(wide ? 'within ' + p.s.addr.split(/ [A-Z]/)[0] : bestD === 0 ? 'same street number' : bestD + ' numbers along'); }
+      }
+      var kw = 0, kwWords = [];
+      q.words.forEach(function(w){
+        if (wordHit(w, p.words)) { var v = GENERIC[w] ? 4 : 18; kw += v; if (v > 4) kwWords.push(w.charAt(0) + w.slice(1).toLowerCase()); }
+      });
+      if ((q.wordSet.NORTH && p.words.SOUTH) || (q.wordSet.SOUTH && p.words.NORTH)) kw -= 10;
+      sc += kw; if (kwWords.length) why.push('"' + kwWords.join(' ') + '" in its name');
+      // street recycling sites ("(R)", or on a recycling run only) aren't the litter bin
+      // a FULL BIN request is about, unless the request says recycling
+      if (p.recycle && !q.recycle) sc -= 8;
+      if (pt && p.lat) {
+        dist = metres(pt.lat, pt.lng, p.lat, p.lng);
+        sc += Math.max(0, 45 - dist / 8);
+      }
+      out.push({ p: p, score: sc, why: why, dist: dist, strongWord: kwWords.length > 0 });
+    });
+    out.sort(function(a, b){ return b.score - a.score || (a.dist == null ? 1e9 : a.dist) - (b.dist == null ? 1e9 : b.dist); });
+    return out;
+  }
+  function judge(q, list, pt){
+    var a = list[0], b = list[1];
+    if (!a || a.score < 12) return 'none';
+    var gap = a.score - (b ? b.score : 0);
+    if (q.serial && a.p.serials[q.serial]) return 'high';
+    if (pt && a.dist != null && a.dist <= 120 && (!b || b.dist == null || b.dist - a.dist > 35 || gap >= 10)) return 'high';
+    if (sameStreet(a.p.street, q.street) && q.num && a.why.some(function(w){ return w === 'same street number'; }) && gap >= 4) return 'high';
+    if (a.strongWord && sameStreet(a.p.street, q.street) && gap >= 8) return 'high';
+    if (gap < 4) return 'low';
+    return 'medium';
+  }
+
+  async function matchOne(row, allowOnline){
+    var addrT = tokens(row.street), locT = tokens(row.location);
+    var sub = normSuburb(row.suburb), subWords = {}; sub.split(' ').forEach(function(w){ subWords[w] = 1; });
+    var street = streetOf(addrT);
+    var num = +row.house || 0;
+    if (!num) { var nm = /(?:^|\s)(\d{1,5})(?=\s+[A-Za-z])/.exec(row.street || ''); if (nm) num = +nm[1]; }
+    var sm = /\b(\d{6,})\b/.exec((row.detail || '') + ' ' + (row.location || ''));
+    var streetWords = {}; street.split(' ').forEach(function(w){ streetWords[w] = 1; });
+    var wordSet = {}, words = [];
+    addrT.concat(locT).forEach(function(w){
+      if (w.length < 4 || /\d/.test(w) || STOP[w] || TYPES[w] || SOLO[w] || subWords[w] || streetWords[w] || wordSet[w]) return;
+      wordSet[w] = 1; words.push(w);
+    });
+    var q = { suburb: prepSites().some(function(p){ return p.suburb === sub; }) ? sub : '', street: street, num: num,
+              serial: sm ? sm[1] : '', words: words, wordSet: wordSet,
+              recycle: /recycl/i.test([row.street, row.detail, row.location, row.bintype].join(' ')) };
+    var pt = null, how = '';
+    var hp = housePoint(sub, street, num);
+    if (hp) { pt = hp; how = (hp.exact ? 'house at ' : 'nearest house, ') + hp.a; }
+    var list = scoreSites(q, pt), conf = judge(q, list, pt);
+    if (conf !== 'high' && !pt && allowOnline) {
+      var box = suburbBox(sub);
+      if (box) {
+        var parts = String(row.street || '').split(/\s{2,}|,/).map(function(s){ return s.trim(); })
+          .filter(function(s){ return /[A-Za-z]{4,}/.test(s) && !/^(off|opp|opposite|near|cnr|corner)\b/i.test(s); });
+        // a search for just "Ocean Beach Road" lands mid-street and would look far surer than it is:
+        // only search text that names something besides the street
+        function namesAPlace(s){
+          var sw = {}; streetOf(tokens(s)).split(' ').forEach(function(w){ sw[w] = 1; });
+          return tokens(s).some(function(w){ return w.length >= 3 && !/\d/.test(w) && !sw[w] && !STOP[w] && !TYPES[w] && !SOLO[w] && !subWords[w]; });
+        }
+        var qs = [String(row.street || '').replace(/\s+/g, ' ').trim()].concat(parts.sort(function(x, y){ return y.length - x.length; }));
+        if (row.location && /[A-Za-z]{4,}/.test(row.location)) qs.push(row.location.replace(/^(outside|at|near|opposite|opp\.?)\s+/i, ''));
+        qs = qs.filter(namesAPlace);
+        var seen = {};
+        for (var i = 0; i < qs.length && i < 4; i++) {
+          var qq = qs[i] + ', ' + row.suburb + ', Victoria';
+          if (seen[qq.toUpperCase()]) continue; seen[qq.toUpperCase()] = 1;
+          var hit = await nominatim(qq, box);
+          if (hit) { pt = hit; how = 'map search "' + qs[i] + '"'; break; }
+        }
+        if (pt) { list = scoreSites(q, pt); conf = judge(q, list, pt); }
+      }
+    }
+    var top = list[0] && conf !== 'none' ? list[0] : null;
+    var ties = top ? list.filter(function(x){ return top.score - x.score < 4; }).length : 0;
+    var alt = top && conf !== 'high' && list[1] && list[1].score >= 12 ? list[1] : null;
+    return { row: row, q: q, conf: conf, top: top, alt: alt, ties: ties, pt: pt, how: how };
+  }
+
+  // ---- runs, visits since the report, next visit ------------------------------------------------
+  function runsFor(site){
+    var RD = (typeof STREET_LITTER_RUN_DATA !== 'undefined') ? STREET_LITTER_RUN_DATA : null;
+    var by = {}, how = 'stop';
+    function add(day, num, label, time){
+      var k = day + '|' + num;
+      if (!by[k] || (time && (!by[k].time || time < by[k].time))) by[k] = { day: day, num: num, label: label, time: time || '' };
+    }
+    if (RD) {
+      Object.keys(RD).forEach(function(day){ Object.keys(RD[day]).forEach(function(num){
+        (RD[day][num].stops || []).forEach(function(st){ if (st.pid && st.pid === site.pid) add(day, num, RD[day][num].label, st.time); });
+      }); });
+      if (!Object.keys(by).length && +site.lat) {
+        how = 'near';
+        Object.keys(RD).forEach(function(day){ Object.keys(RD[day]).forEach(function(num){
+          (RD[day][num].stops || []).forEach(function(st){
+            if (!st.pid && metres(+site.lat, +site.lng, st.lat, st.lng) <= 50) add(day, num, RD[day][num].label, st.time);
+          });
+        }); });
+      }
+    }
+    // the site list's own run days fill anything the exports don't show (no time known)
+    [].concat(site.rl || [], site.rr || []).forEach(function(r){
+      if (!r.num) return;
+      var days = (r.days && r.days.length) ? r.days : null;
+      var have = Object.keys(by).some(function(k){ return by[k].num === r.num; });
+      if (days) days.forEach(function(d){ if (!by[d + '|' + r.num]) add(d, r.num, r.run, ''); });
+      else if (!have) DAYS.forEach(function(d){ add(d, r.num, r.run, ''); }); // no day = picked up every day
+    });
+    var list = Object.keys(by).map(function(k){ return by[k]; });
+    if (!list.length) how = 'none';
+    else if (how === 'stop' && !list.some(function(x){ return x.time; })) how = 'list';
+    return { list: list, how: how };
+  }
+  function visitsBetween(runs, from, to){
+    var out = [], d = new Date(from.getFullYear(), from.getMonth(), from.getDate());
+    for (var i = 0; i < 16 && d <= to; i++) {
+      var code = DAYS[d.getDay()];
+      runs.forEach(function(r){
+        if (r.day !== code) return;
+        var hm = /^(\d{1,2}):(\d{2})/.exec(r.time || ''), at = new Date(d);
+        if (hm) at.setHours(+hm[1], +hm[2], 0, 0); else at.setHours(12, 0, 0, 0);
+        if (at > from && at <= to) out.push({ at: at, r: r, known: !!hm });
+      });
+      d.setDate(d.getDate() + 1);
+    }
+    return out.sort(function(a, b){ return a.at - b.at; });
+  }
+  function shortRun(r){ return String(r.num || r.label || '').trim(); }
+  function runName(r){ var l = String(r.label || r.num || ''); return l.replace(/\s+-\s+/, ' ').replace(/\b([A-Z])([A-Z]+)\b/g, function(m, a, b){ return a + b.toLowerCase(); }); }
+  function fmtTime(d, known){
+    var h = d.getHours(), m = d.getMinutes(), ap = h < 12 ? 'am' : 'pm', hh = h % 12 || 12;
+    return known ? '~' + hh + (m ? ':' + (m < 10 ? '0' : '') + m : '') + ap : 'time not known';
+  }
+  function fmtDay(d){ return DAY_NAMES[d.getDay()] + ' ' + d.getDate() + ' ' + MONTHS[d.getMonth()]; }
+  function fmtVisit(v){ return fmtDay(v.at) + ', ' + fmtTime(v.at, v.known) + ' (' + shortRun(v.r) + ')'; }
+  function runsSummary(runs){
+    var byRun = {};
+    runs.forEach(function(r){ (byRun[r.num] || (byRun[r.num] = { r: r, days: [] })).days.push(r); });
+    return Object.keys(byRun).sort().map(function(k){
+      var e = byRun[k], ds = e.days.sort(function(a, b){ return (DAYS.indexOf(a.day) + 6) % 7 - (DAYS.indexOf(b.day) + 6) % 7; });
+      var daysTxt = ds.length === 7 && !ds.some(function(x){ return x.time; }) ? 'every day'
+        : ds.map(function(x){ var t = /^(\d{1,2}):(\d{2})/.exec(x.time || ''); return DAY_NAMES[DAYS.indexOf(x.day)] + (t ? ' ' + fmtTime(new Date(2000, 0, 1, +t[1], +t[2]), true) : ''); }).join(', ');
+      return runName(e.r) + ': ' + daysTxt;
+    }).join(' · ');
+  }
+  function schedule(res, now){
+    if (!res.top) return;
+    var site = res.top.p.s, R = runsFor(site);
+    res.runs = R;
+    var rep = res.row.date instanceof Date && !isNaN(res.row.date) ? res.row.date : null;
+    var horizon = new Date(now.getTime() + 8 * 86400000);
+    res.done = rep ? visitsBetween(R.list, rep, now) : [];
+    var nx = visitsBetween(R.list, now, horizon);
+    res.next = nx[0] || null;
+  }
+
+  // ---- reading the sheet ---------------------------------------------------------------------------
+  function colName(ref){ var m = /^([A-Z]+)/.exec(ref || ''), n = 0; if (!m) return -1; for (var i = 0; i < m[1].length; i++) n = n * 26 + m[1].charCodeAt(i) - 64; return n - 1; }
+  function excelDate(v){
+    var f = parseFloat(v); if (!isFinite(f) || f < 20000 || f > 80000) return null;
+    var days = Math.floor(f), secs = Math.round((f - days) * 86400);
+    return new Date(1899, 11, 30 + days, 0, 0, secs);
+  }
+  function textDate(s){
+    s = String(s || '').trim(); if (!s) return null;
+    var m = /^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})(?:[ T,]+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*([ap]m)?)?/i.exec(s);
+    if (m) {
+      var y = +m[3] < 100 ? 2000 + +m[3] : +m[3], h = +(m[4] || 0);
+      if (m[7]) { h = h % 12 + (/p/i.test(m[7]) ? 12 : 0); }
+      return new Date(y, +m[2] - 1, +m[1], h, +(m[5] || 0), +(m[6] || 0));
+    }
+    m = /^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?/.exec(s);
+    if (m) return new Date(+m[1], +m[2] - 1, +m[3], +(m[4] || 0), +(m[5] || 0), +(m[6] || 0));
+    return excelDate(s);
+  }
+  async function readXlsx(buf){
+    if (typeof JSZip === 'undefined') throw new Error('The spreadsheet reader did not load. Check the connection and reload the app, or save the sheet as CSV.');
+    var zip = await JSZip.loadAsync(buf), P = new DOMParser();
+    function xml(path){ var f = zip.file(path); return f ? f.async('string').then(function(t){ return P.parseFromString(t, 'application/xml'); }) : Promise.resolve(null); }
+    var wb = await xml('xl/workbook.xml'), rels = await xml('xl/_rels/workbook.xml.rels');
+    var sheetPath = 'xl/worksheets/sheet1.xml';
+    if (wb && rels) {
+      var sh = wb.getElementsByTagName('sheet')[0], rid = sh && (sh.getAttribute('r:id') || sh.getAttributeNS('http://schemas.openxmlformats.org/officeDocument/2006/relationships', 'id'));
+      Array.prototype.forEach.call(rels.getElementsByTagName('Relationship'), function(r){
+        if (r.getAttribute('Id') === rid) { var t = r.getAttribute('Target') || ''; sheetPath = t.charAt(0) === '/' ? t.slice(1) : 'xl/' + t.replace(/^\.\//, ''); }
+      });
+    }
+    var ssx = await xml('xl/sharedStrings.xml'), shared = [];
+    if (ssx) Array.prototype.forEach.call(ssx.getElementsByTagName('si'), function(si){
+      var s = ''; Array.prototype.forEach.call(si.getElementsByTagName('t'), function(t){ s += t.textContent; }); shared.push(s);
+    });
+    var sx = await xml(sheetPath); if (!sx) throw new Error('That file has no worksheet in it.');
+    var rows = [];
+    Array.prototype.forEach.call(sx.getElementsByTagName('row'), function(rw){
+      var r = [];
+      Array.prototype.forEach.call(rw.getElementsByTagName('c'), function(c, i){
+        var ci = colName(c.getAttribute('r')); if (ci < 0) ci = i;
+        var t = c.getAttribute('t'), vEl = c.getElementsByTagName('v')[0], v = vEl ? vEl.textContent : '';
+        if (t === 's') v = shared[+v] || '';
+        else if (t === 'inlineStr') { v = ''; Array.prototype.forEach.call(c.getElementsByTagName('t'), function(x){ v += x.textContent; }); }
+        r[ci] = v;
+      });
+      rows[(+rw.getAttribute('r') || rows.length + 1) - 1] = r;
+    });
+    return rows.map(function(r){ return r || []; });
+  }
+  function readCsv(text){
+    var rows = [], row = [], cell = '', q = false;
+    text = String(text).replace(/^﻿/, '');
+    for (var i = 0; i < text.length; i++) {
+      var ch = text[i];
+      if (q) { if (ch === '"') { if (text[i + 1] === '"') { cell += '"'; i++; } else q = false; } else cell += ch; }
+      else if (ch === '"') q = true;
+      else if (ch === ',') { row.push(cell); cell = ''; }
+      else if (ch === '\n' || ch === '\r') { if (ch === '\r' && text[i + 1] === '\n') i++; row.push(cell); rows.push(row); row = []; cell = ''; }
+      else cell += ch;
+    }
+    if (cell || row.length) { row.push(cell); rows.push(row); }
+    return rows;
+  }
+  // The council export has a title row, then its field names (REFERENCEID...), then the
+  // same columns with readable names (Reference ID...). Either header row is enough.
+  var COLS = {
+    ref: ['referenceid', 'reference', 'ref', 'requestid'],
+    action: ['actiontype', 'action', 'requesttype'],
+    detail: ['detail', 'details', 'description', 'comments'],
+    street: ['streetaddress', 'address', 'street'],
+    suburb: ['suburbdescription', 'suburb', 'locality'],
+    location: ['location', 'locationdetails'],
+    date: ['datereceived', 'received', 'date', 'datelogged'],
+    house: ['housenumber', 'streetnumber', 'houseno'],
+    bintype: ['bintype', 'selectiontypefield42']
+  };
+  function key(s){ return String(s == null ? '' : s).toLowerCase().replace(/[^a-z0-9]/g, ''); }
+  function tableFrom(rows){
+    var map = null, start = -1;
+    for (var i = 0; i < Math.min(rows.length, 15); i++) {
+      var ks = (rows[i] || []).map(key);
+      if (ks.indexOf('streetaddress') < 0 && ks.indexOf('address') < 0) continue;
+      var m = map || {};
+      Object.keys(COLS).forEach(function(f){
+        if (m[f] != null) return;
+        for (var a = 0; a < COLS[f].length; a++) { var at = ks.indexOf(COLS[f][a]); if (at >= 0) { m[f] = at; break; } }
+      });
+      map = m; start = i + 1;
+    }
+    if (!map || map.street == null || map.suburb == null) return null;
+    var out = [];
+    for (var r = start; r < rows.length; r++) {
+      var rw = rows[r] || [];
+      function v(f){ return map[f] == null ? '' : String(rw[map[f]] == null ? '' : rw[map[f]]).trim(); }
+      if (!v('street') && !v('ref')) continue;
+      var raw = map.date == null ? '' : rw[map.date];
+      var d = /^\d+(\.\d+)?$/.test(String(raw || '').trim()) ? excelDate(raw) : textDate(raw);
+      out.push({ ref: v('ref'), action: v('action'), detail: v('detail'), street: map.street == null ? '' : String(rw[map.street] || ''),
+                 suburb: v('suburb'), location: v('location'), date: d, house: v('house'), bintype: v('bintype') });
+    }
+    return out;
+  }
+
+  // ---- run everything -------------------------------------------------------------------------------
+  async function matchAll(rows, opts){
+    opts = opts || {};
+    var now = opts.now || new Date(), out = [];
+    for (var i = 0; i < rows.length; i++) {
+      if (opts.progress) opts.progress(i, rows.length);
+      var r = await matchOne(rows[i], opts.online !== false);
+      schedule(r, now);
+      out.push(r);
+    }
+    return out;
+  }
+
+  // ---- CSV out ----------------------------------------------------------------------------------------
+  function csvCell(v){ v = v == null ? '' : String(v); return /[",\r\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; }
+  function fmtStamp(d){ return d instanceof Date && !isNaN(d) ? fmtDay(d) + ' ' + d.getFullYear() + ' ' + fmtTime(d, true).slice(1) : ''; }
+  var CONF = { high: 'High', medium: 'Likely', low: 'Unsure', none: 'No match' };
+  function toCsv(results){
+    var head = ['Reference ID', 'Action Type', 'Date Received', 'Street Address', 'Suburb', 'Detail', 'Location',
+      'Matched Bin', 'Site Id', 'Property ID', 'Confidence', 'How matched', 'Distance (m)', 'Other possible bin',
+      'Runs', 'Emptied since reported', 'Next due', 'Lat', 'Lng'];
+    var lines = [head.map(csvCell).join(',')];
+    results.forEach(function(x){
+      var t = x.top, s = t ? t.p.s : {}, row = x.row;
+      lines.push([row.ref, row.action, fmtStamp(row.date), String(row.street).replace(/\s+/g, ' ').trim(), row.suburb, row.detail, row.location,
+        t ? s.addr : '', t ? s.id : '', t ? s.pid : '', CONF[x.conf], howText(x), t && t.dist != null ? Math.round(t.dist) : '',
+        x.alt ? x.alt.p.s.addr + ' (' + x.alt.p.s.id + ')' : '',
+        x.runs ? runsSummary(x.runs.list) : '',
+        x.done && x.done.length ? x.done.map(fmtVisit).join('; ') : (t ? 'No' : ''),
+        x.next ? fmtVisit(x.next) : '', t ? s.lat : '', t ? s.lng : ''].map(csvCell).join(','));
+    });
+    return '﻿' + lines.join('\r\n');
+  }
+  function howText(x){
+    var t = x.top; if (!t) return 'Nothing close enough in ' + (x.row.suburb || 'that suburb');
+    var bits = [];
+    if (x.how) bits.push((t.dist != null ? Math.round(t.dist) + ' m from ' : '') + x.how);
+    bits = bits.concat(t.why.filter(function(w){ return !/numbers along|same street number/.test(w) || !x.how; }));
+    if (!bits.length && t.p.street) bits.push('on ' + t.p.street.toLowerCase().replace(/\b\w/g, function(c){ return c.toUpperCase(); }));
+    if (x.conf === 'low' && x.ties > 1) bits.push(x.ties + ' bins fit equally well');
+    return bits.join(' · ');
+  }
+  function stampName(){ var d = new Date(), p = function(n){ return (n < 10 ? '0' : '') + n; }; return d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()); }
+  function download(name, text){
+    try {
+      var blob = new Blob([text], { type: 'text/csv;charset=utf-8' }), a = document.createElement('a');
+      a.href = URL.createObjectURL(blob); a.download = name; a.style.display = 'none';
+      document.body.appendChild(a); a.click();
+      setTimeout(function(){ try { URL.revokeObjectURL(a.href); a.remove(); } catch (e) {} }, 4000);
+      return true;
+    } catch (e) { return false; }
+  }
+
+  // ---- the sheet ----------------------------------------------------------------------------------------
+  var ICO = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" aria-hidden="true"><path d="M4 3h11l5 5v13H4z"/><path d="M14 3v6h6M8 13h8M8 17h5"/></svg>';
+  var DL = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" aria-hidden="true"><path d="M12 4v11M7 11l5 5 5-5M5 20h14"/></svg>';
+  var UP = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" aria-hidden="true"><path d="M12 16V5M7 9l5-5 5 5M5 20h14"/></svg>';
+  var GO = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="square" aria-hidden="true"><path d="M9 5l7 7-7 7"/></svg>';
+  var css = document.createElement('style');
+  css.textContent = [
+    'html body #lbCouncilSheet{display:none;position:fixed;inset:0;z-index:20500}',
+    'html body #lbCouncilSheet.open{display:block}',
+    'html body #lbCouncilSheet .cr-scrim{position:absolute;inset:0;background:var(--ux-scrim,rgba(0,0,0,.55))}',
+    'html body #lbCouncilSheet .cr-panel{position:absolute;left:0;right:0;bottom:0;max-height:88vh;display:flex;flex-direction:column;background:var(--ux-s1,#15181d);color:var(--ux-text,#f3f4f6);border-top:3px solid var(--ui-accent,#3b82f6);box-shadow:var(--ux-shadow,0 -8px 30px rgba(0,0,0,.4));padding-bottom:var(--ux-safe-b,env(safe-area-inset-bottom,0px));font-family:system-ui,-apple-system,"Segoe UI",sans-serif}',
+    'html body #lbCouncilSheet .cr-head{display:flex;align-items:flex-start;gap:10px;padding:14px 8px 10px 16px;border-bottom:1px solid var(--ux-line,rgba(255,255,255,.1))}',
+    'html body #lbCouncilSheet .cr-head>div{flex:1;min-width:0}',
+    'html body #lbCouncilSheet .cr-head b{display:block;font-size:18px;font-weight:800}',
+    'html body #lbCouncilSheet .cr-sub{display:block;margin-top:2px;font-size:12.5px;color:var(--ux-text-2,#b6bcc6);font-weight:600}',
+    'html body #lbCouncilSheet .cr-x{flex:none;width:44px;height:44px;border:0;background:transparent;color:var(--ux-text-2,#b6bcc6);font-size:28px;line-height:1;cursor:pointer}',
+    'html body #lbCouncilSheet .cr-body{flex:1;overflow:auto;-webkit-overflow-scrolling:touch;padding:4px 0 8px}',
+    'html body #lbCouncilSheet .cr-help{margin:0;padding:12px 16px;font-size:13.5px;line-height:1.5;color:var(--ux-text-2,#b6bcc6)}',
+    'html body #lbCouncilSheet .cr-row{display:block;width:100%;text-align:left;padding:11px 14px 12px 13px;margin:0;background:transparent;color:inherit;border:0;border-left:4px solid var(--ux-line-2,#555);border-bottom:1px solid var(--ux-line,rgba(255,255,255,.1));border-radius:0;box-shadow:none;cursor:pointer;font:inherit}',
+    'html body #lbCouncilSheet .cr-row:active{background:var(--ux-s3,#262b33)}',
+    'html body #lbCouncilSheet .cr-row.c-high{border-left-color:var(--ux-ok,#22c55e)}',
+    'html body #lbCouncilSheet .cr-row.c-medium{border-left-color:var(--ui-accent,#3b82f6)}',
+    'html body #lbCouncilSheet .cr-row.c-low,html body #lbCouncilSheet .cr-row.c-none{border-left-color:var(--ux-warn,#f59e0b)}',
+    'html body #lbCouncilSheet .cr-top{display:flex;flex-wrap:wrap;align-items:center;gap:6px;font-size:11.5px;font-weight:700;color:var(--ux-text-3,#8b93a0)}',
+    'html body #lbCouncilSheet .cr-tag{padding:2px 6px;border-radius:3px;font-size:10.5px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;background:var(--ux-s3,#262b33);color:var(--ux-text,#f3f4f6)}',
+    'html body #lbCouncilSheet .cr-tag.repair{background:color-mix(in srgb,var(--ux-bad,#ef4444) 30%,transparent)}',
+    'html body #lbCouncilSheet .cr-conf.high{color:var(--ux-ok,#22c55e)}',
+    'html body #lbCouncilSheet .cr-conf.medium{color:var(--ui-accent,#60a5fa)}',
+    'html body #lbCouncilSheet .cr-conf.low,html body #lbCouncilSheet .cr-conf.none{color:var(--ux-warn,#f59e0b)}',
+    'html body #lbCouncilSheet .cr-bin{display:flex;align-items:center;gap:6px;margin-top:5px;font-size:15.5px;font-weight:750;line-height:1.25}',
+    'html body #lbCouncilSheet .cr-bin span{flex:1;min-width:0}',
+    'html body #lbCouncilSheet .cr-bin svg{flex:none;color:var(--ux-text-3,#8b93a0)}',
+    'html body #lbCouncilSheet .cr-from,html body #lbCouncilSheet .cr-why,html body #lbCouncilSheet .cr-alt{margin-top:3px;font-size:12.5px;line-height:1.35;color:var(--ux-text-3,#8b93a0);font-weight:600}',
+    'html body #lbCouncilSheet .cr-runs{margin-top:6px;font-size:13px;line-height:1.35;font-weight:650;color:var(--ux-text-2,#d1d5db)}',
+    'html body #lbCouncilSheet .cr-when{display:grid;grid-template-columns:auto 1fr;gap:2px 8px;margin-top:6px;font-size:13px;line-height:1.35}',
+    'html body #lbCouncilSheet .cr-when dt{color:var(--ux-text-3,#8b93a0);font-weight:700}',
+    'html body #lbCouncilSheet .cr-when dd{margin:0;font-weight:700}',
+    'html body #lbCouncilSheet .cr-when dd.ok{color:var(--ux-ok,#22c55e)}',
+    'html body #lbCouncilSheet .cr-when dd.due{color:var(--ux-warn,#f59e0b)}',
+    'html body #lbCouncilSheet .cr-note{padding:0 16px;font-size:12.5px;color:var(--ux-ok,#22c55e);font-weight:700}',
+    'html body #lbCouncilSheet .cr-note:not(:empty){padding:6px 16px}',
+    'html body #lbCouncilSheet .cr-foot{display:flex;gap:8px;padding:10px 12px 12px;border-top:1px solid var(--ux-line,rgba(255,255,255,.1))}',
+    'html body #lbCouncilSheet .cr-btn{flex:1;min-height:48px;display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:0 12px;background:var(--ux-s2,#1d2127);color:var(--ux-text,#f3f4f6);border:1px solid var(--ux-line-2,rgba(255,255,255,.18));border-radius:var(--ux-rad,4px);box-shadow:none;font:700 14px/1.1 system-ui,-apple-system,"Segoe UI",sans-serif;cursor:pointer}',
+    'html body #lbCouncilSheet .cr-btn.primary{background:color-mix(in srgb,var(--ui-accent,#3b82f6) 22%,var(--ux-s2,#1d2127));border-color:color-mix(in srgb,var(--ui-accent,#3b82f6) 55%,transparent)}',
+    'html body #lbCouncilSheet .cr-btn:disabled{opacity:.4;cursor:default}',
+    'html body #lbCouncilSheet .cr-sum{display:flex;flex-wrap:wrap;gap:6px 14px;padding:10px 16px 6px;font-size:12.5px;font-weight:700;color:var(--ux-text-2,#b6bcc6)}',
+    'html body #lbCouncilSheet .cr-sum b{font-size:16px;color:var(--ux-text,#fff);margin-right:3px}',
+    'body:not(.ux2) #lbCouncilSheet .cr-panel{background:#fff;color:#111827}',
+    '@media (min-width:720px){html body #lbCouncilSheet .cr-panel{left:50%;right:auto;bottom:50%;width:620px;max-height:82vh;transform:translate(-50%,50%)}}'
+  ].join('\n');
+  document.head.appendChild(css);
+
+  var sheet = null, results = null, fileName = '', busy = false;
+  function note(msg){ var n = sheet && sheet.querySelector('.cr-note'); if (n) n.textContent = msg || ''; }
+  function build(){
+    if (sheet && sheet.parentNode) return sheet;
+    sheet = document.createElement('div'); sheet.id = 'lbCouncilSheet';
+    sheet.setAttribute('role', 'dialog'); sheet.setAttribute('aria-label', 'Council requests');
+    sheet.innerHTML =
+      '<div class="cr-scrim" data-cr="close"></div>' +
+      '<div class="cr-panel">' +
+        '<div class="cr-head"><div><b>Council requests</b><small class="cr-sub">Which street litter bin, which run, when it’s due</small></div>' +
+        '<button type="button" class="cr-x" data-cr="close" aria-label="Close">&times;</button></div>' +
+        '<div class="cr-body"></div>' +
+        '<div class="cr-note" role="status"></div>' +
+        '<div class="cr-foot">' +
+          '<button type="button" class="cr-btn primary" data-cr="pick">' + UP + '<span>Load sheet</span></button>' +
+          '<button type="button" class="cr-btn" data-cr="export" disabled>' + DL + '<span>Export results</span></button>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(sheet);
+    sheet.addEventListener('click', function(ev){
+      var t = ev.target && ev.target.closest ? ev.target.closest('[data-cr],[data-cr-go]') : null; if (!t) return;
+      var a = t.getAttribute('data-cr');
+      if (a === 'close') close();
+      else if (a === 'pick') pick();
+      else if (a === 'export') exportCsv();
+      else if (t.hasAttribute('data-cr-go')) fly(+t.getAttribute('data-cr-go'));
+    });
+    // drop a file straight onto the sheet on a laptop
+    sheet.addEventListener('dragover', function(ev){ ev.preventDefault(); });
+    sheet.addEventListener('drop', function(ev){ ev.preventDefault(); var f = ev.dataTransfer && ev.dataTransfer.files && ev.dataTransfer.files[0]; if (f) load(f); });
+    return sheet;
+  }
+  function emptyHtml(){
+    return '<p class="cr-help">Load the <b>Resource Pool Requests</b> spreadsheet the council sends (.xlsx, or saved as .csv). ' +
+      'Each request is matched to one of our street litter bins, with the run that empties it, whether it has been emptied since it was reported, and when it’s next due.</p>' +
+      '<p class="cr-help">Matching uses the house numbers, street names and bin descriptions on this phone. For places like “Shire Hall Beach” it also looks the name up on the map when there’s signal.</p>';
+  }
+  function cardHtml(x, i){
+    var row = x.row, t = x.top, s = t ? t.p.s : null;
+    var act = String(row.action || '').trim(), repair = /repair|replace|damag|broken/i.test(act);
+    var h = '<div class="cr-top">' + (act ? '<span class="cr-tag' + (repair ? ' repair' : '') + '">' + esc(act) + '</span>' : '') +
+      '<span>' + esc(row.ref || '') + '</span>' + (row.date ? '<span>· ' + esc(fmtDay(row.date) + ', ' + fmtTime(row.date, true).slice(1)) + '</span>' : '') +
+      '<span class="cr-conf ' + x.conf + '">· ' + esc(CONF[x.conf]) + '</span></div>';
+    var tieTxt = x.conf === 'low' && x.ties > 2 && t.p.street
+      ? x.ties + ' bins on ' + titleCase(t.p.street) + ' fit: not enough in the request to pick one' : '';
+    h += '<div class="cr-bin"><span>' + (tieTxt ? esc(tieTxt) : s ? esc(s.addr) + ', ' + esc(titleCase(s.suburb)) : 'No bin found') + '</span>' + (s && +s.lat && !tieTxt ? GO : '') + '</div>';
+    if (tieTxt) h += '<div class="cr-why">For example ' + esc(s.addr) + ' (Site ' + esc(s.id) + ')</div>';
+    h += '<div class="cr-from">Council: ' + esc(String(row.street || '').replace(/\s+/g, ' ').trim() + (row.suburb ? ', ' + row.suburb : '')) +
+      (row.location ? ' — ' + esc(row.location) : '') + '</div>';
+    if (row.detail) h += '<div class="cr-from">“' + esc(row.detail) + '”</div>';
+    if (!tieTxt) h += '<div class="cr-why">' + esc(howText(x)) + (s ? ' · Site ' + esc(s.id) + ' / Prop ' + esc(s.pid) : '') + '</div>';
+    if (x.alt && !tieTxt) h +='<div class="cr-alt">Or: ' + esc(x.alt.p.s.addr) + ' (Site ' + esc(x.alt.p.s.id) + ')</div>';
+    if (x.runs) {
+      if (x.runs.list.length) {
+        h += '<div class="cr-runs">' + (tieTxt ? 'That bin: ' : '') + esc(runsSummary(x.runs.list)) +
+          (x.runs.how === 'near' ? ' <span class="cr-alt">(from truck stops next to it: this bin isn’t linked to a run)</span>' : '') + '</div>';
+        h += '<dl class="cr-when"><dt>Since reported</dt>' + (x.done && x.done.length
+          ? '<dd class="ok">Emptied ' + esc(fmtVisit(x.done[0])) + (x.done.length > 1 ? ' + ' + (x.done.length - 1) + ' more' : '') + '</dd>'
+          : '<dd class="due">' + (row.date ? 'Not emptied yet' : 'Report date unknown') + '</dd>') +
+          '<dt>Next due</dt><dd>' + (x.next ? esc(fmtVisit(x.next)) : 'Nothing scheduled in the next week') + '</dd></dl>';
+      } else h += '<div class="cr-runs">Not on any run we have data for.</div>';
+    }
+    if (repair) h += '<div class="cr-alt">Needs a repair or new bin: the run won’t fix it.</div>';
+    return '<button type="button" class="cr-row c-' + x.conf + '" data-cr-go="' + i + '">' + h + '</button>';
+  }
+  function titleCase(s){ return String(s || '').toLowerCase().replace(/\b\w/g, function(c){ return c.toUpperCase(); }); }
+  function render(){
+    build();
+    var body = sheet.querySelector('.cr-body'), sub = sheet.querySelector('.cr-sub');
+    var ex = sheet.querySelector('[data-cr="export"]');
+    if (!results) { body.innerHTML = emptyHtml(); ex.disabled = true; return; }
+    var n = results.length, sure = 0, open = 0, done = 0, repair = 0;
+    results.forEach(function(x){
+      if (x.conf === 'high' || x.conf === 'medium') sure++;
+      if (/repair|replace|damag|broken/i.test(x.row.action || '')) repair++;
+      else if (x.done && x.done.length) done++; else open++;
+    });
+    sub.textContent = n + ' request' + (n === 1 ? '' : 's') + (fileName ? ' · ' + fileName : '');
+    var sum = '<div class="cr-sum"><span><b>' + open + '</b>still to empty</span><span><b>' + done + '</b>emptied since reported</span>' +
+      (repair ? '<span><b>' + repair + '</b>repair / new bin</span>' : '') +
+      (n - sure ? '<span><b>' + (n - sure) + '</b>need checking</span>' : '') + '</div>';
+    body.innerHTML = sum + results.map(cardHtml).join('') +
+      '<p class="cr-help">Times are when the truck usually reaches the bin (from the depot run exports), so treat them as a guide. Tap a request to see the bin on the map.</p>';
+    ex.disabled = !n;
+  }
+  function pick(){
+    var inp = document.createElement('input'); inp.type = 'file';
+    inp.accept = '.xlsx,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv'; inp.style.display = 'none';
+    inp.addEventListener('change', function(){ var f = inp.files && inp.files[0]; if (f) load(f); });
+    document.body.appendChild(inp); inp.click(); setTimeout(function(){ try { inp.remove(); } catch (e) {} }, 60000);
+  }
+  async function load(file){
+    if (busy) return; busy = true;
+    build(); open();
+    var body = sheet.querySelector('.cr-body');
+    body.innerHTML = '<p class="cr-help">Reading ' + esc(file.name) + '...</p>'; note('');
+    try {
+      var rows;
+      if (/\.csv$/i.test(file.name) || /csv/.test(file.type)) rows = readCsv(await file.text());
+      else rows = await readXlsx(await file.arrayBuffer());
+      var table = tableFrom(rows);
+      if (!table) throw new Error('Couldn’t find the Street Address and Suburb columns in that sheet. Is it the council’s Resource Pool Requests export?');
+      if (!table.length) throw new Error('That sheet has no requests in it.');
+      if (!prepSites().length) throw new Error('The street litter bin list didn’t load on this phone. Reload the app and try again.');
+      fileName = file.name;
+      results = await matchAll(table, { progress: function(i, n){ body.innerHTML = '<p class="cr-help">Matching ' + (i + 1) + ' of ' + n + '...</p>'; } });
+      render();
+      if (!(g('siteRecords') || []).length) note('House addresses aren’t loaded yet, so house-number matching was skipped. Sync, then load the sheet again.');
+    } catch (e) {
+      console.error(e);
+      body.innerHTML = '<p class="cr-help">' + esc(e && e.message || 'That file could not be read.') + '</p>';
+    } finally { busy = false; }
+  }
+  function exportCsv(){
+    if (!results || !results.length) return;
+    var base = (fileName || 'council-requests').replace(/\.[^.]+$/, '');
+    note(download(base + '-matched-' + stampName() + '.csv', toCsv(results)) ? 'Exported ' + results.length + ' rows.' : 'Could not start the download on this device.');
+  }
+  function fly(i){
+    var x = results && results[i], s = x && x.top && x.top.p.s; if (!s || !+s.lat) return;
+    close();
+    try { if (typeof window.lbCloseSettings === 'function') window.lbCloseSettings(); } catch (e) {}
+    try { if (typeof window.lbCloseDrawer === 'function') window.lbCloseDrawer(); } catch (e) {}
+    try { if (typeof window.switchMainTab === 'function' && g('activeTab') !== 'map') window.switchMainTab('map'); } catch (e) {}
+    try { if (typeof window.lbDisableGpsFollow === 'function') window.lbDisableGpsFollow(); } catch (e) {}
+    try { if (typeof window.filterStreetLitterRun === 'function') window.filterStreetLitterRun(null); } catch (e) {} // make sure the bins are showing
+    setTimeout(function(){
+      var m = g('leafletMap'); if (!m) return;
+      try { m.setView([+s.lat, +s.lng], 18, { animate: true }); } catch (e) {}
+      var mk = (g('streetLitterMarkers') || []).filter(function(k){ return k._slSite && k._slSite.id === s.id; })[0];
+      if (mk) setTimeout(function(){ try { mk.openPopup(); } catch (e) {} }, 450);
+    }, 120);
+  }
+  function open(){
+    try { if (typeof window.lbCloseSettings === 'function') window.lbCloseSettings(); } catch (e) {}
+    try { if (typeof window.lbCloseDrawer === 'function') window.lbCloseDrawer(); } catch (e) {}
+    build(); if (!busy) render();
+    document.body.classList.add('ux-sheet-open'); sheet.classList.add('open');
+  }
+  function close(){
+    document.body.classList.remove('ux-sheet-open');
+    if (sheet) sheet.classList.remove('open');
+  }
+  document.addEventListener('keydown', function(ev){ if (ev.key === 'Escape' && sheet && sheet.classList.contains('open')) close(); });
+
+  // ---- ways in: Edit & settings > Data, and the side menu under Report ------------------------------------
+  function injectSettings(){
+    var d = document.querySelector('#lbSettingsBody #uxStrayRow');
+    if (!d || $('lbCouncilRow')) return;
+    var b = document.createElement('button'); b.type = 'button'; b.id = 'lbCouncilRow'; b.className = 'lb-layer-btn';
+    b.innerHTML = '<span class="lb-ico ux-warn-ico" style="color:var(--ux-text-2)">' + ICO + '</span><span class="lb-label">Council requests: match to street litter bins</span>';
+    d.parentNode.insertBefore(b, d.nextSibling);
+  }
+  function injectDrawer(){
+    var body = $('lbDrawerBody'); if (!body || $('lbCouncilItem')) return;
+    var after = body.querySelector('[data-act="issues"]'); if (!after) return;
+    var b = document.createElement('button'); b.type = 'button'; b.id = 'lbCouncilItem'; b.className = 'lb-drawer-item';
+    b.innerHTML = '<span class="lb-ico">' + ICO.replace('width="18" height="18"', 'width="24" height="24" class="lb-svg-ico"') + '</span>' +
+      '<span class="lb-label">Council requests<span class="lb-sub">Load the council’s sheet · which bin, run, next due</span></span>';
+    after.parentNode.insertBefore(b, after.nextSibling);
+  }
+  document.addEventListener('click', function(ev){
+    var t = ev.target && ev.target.closest ? ev.target.closest('#lbCouncilRow,#lbCouncilItem') : null; if (!t) return;
+    ev.preventDefault(); ev.stopPropagation();
+    open();
+  }, true);
+  setInterval(function(){
+    try { if (document.body.classList.contains('lb-settings-open')) injectSettings(); } catch (e) {}
+    try { injectDrawer(); } catch (e) {}
+  }, 400);
+
+  window.lbCouncilRequests = { open: open, load: load, results: function(){ return results; },
+    _t: { tableFrom: tableFrom, readCsv: readCsv, readXlsx: readXlsx, matchAll: matchAll, toCsv: toCsv, runsFor: runsFor, streetOf: streetOf, tokens: tokens } };
 })();
 </script>
 

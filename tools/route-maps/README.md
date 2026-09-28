@@ -66,3 +66,35 @@ OSM roads from `work/roads.json` + footprint houses -> route, zoom limited to 1/
 by cutting pieces out of pages that *do* place well and re-placing them: only 1 of 12 came back within 25 m (median
 error ~1.4 km). Suburban streets look too alike for a piece of route to be placed on shape alone. Getting these pages in
 needs either the maps' source files (if they carry coordinates) or placing each page by hand once.
+
+**Garbage pages placed from their street-map picture (2026-09-27, `picture_place.py`).** Needs `opencv-python-headless`
+in the venv. The PDF keeps exactly where each page's street-map picture sits on the page, and pages cut from the same
+original street map share pixels, so OpenCV (SIFT + RANSAC) matches an unplaced page's picture to a placed page's and
+carries that page's placement across. Checking both methods against the OSM roads showed the picture transfer is
+accurate and passes on the *source's* quality, and that about half of the shape-fitted pages were 100+ m off (their
+lines were only saved by `snap_modes.py`). So: shape fits are first nudged onto the roads (ICP), only pages within 9 m
+of the roads are used as sources, and a picture-placed page is kept only if it lands within 10 m of the roads and its
+route runs past the run's houses. Writes `work/*-GAR-zpic-<Day>.json` (sorted last, so they replace weaker fits).
+Garbage runs with map lines: 36 -> 40 of 65. The rest are in areas no well-placed page covers, so there's nothing to
+match against. `pub_pages.py` reads the original Publisher files (`brew install libmspub`): plain-text titles and the
+pictures used, but each page crops its picture differently and libmspub doesn't give the crop, so the .pub files alone
+can't place a page. Order after this: `picture_place.py`, `modes_export.py --write`, `snap_modes.py --write`.
+
+**Pages placed from their street names (2026-09-27, `label_place.py` + `ocr/ocr.swift`).** Apple's Vision text
+recognition (built into macOS, run with `swift`) reads the names printed on each page's street-map picture, three
+times (upright and turned both ways, since labels run along the streets). Each capitalised name that matches an OSM
+road near the run votes, for every rotation and zoom, for the shifts that would put it on its own street; the winner is
+then refined by pulling each agreeing name onto its street, and finally nudged onto the roads. Checked on pages whose
+placement is known: 16-19 m from the truth from names alone. It needs no other page to overlap, so it reached most
+pages nothing else could. Pages are kept only when the route ends up on the roads and the names agree (see run_all).
+Garbage runs with map lines: 40 -> 60 of 65. Left: Wed 209, 212, 213 and Thu 210, 215 - rural/regional overview pages
+with suburb names but few street names. Order: `picture_place.py`, `label_place.py --all`, `modes_export.py --write`,
+`snap_modes.py --write`.
+
+**Recycling and FOGO re-placed (2026-09-27, `replace_rec_org.py`).** Every page is re-placed from its street names
+(`label_place.place_by_labels`) and from its old fit nudged onto the roads; the one closer to the roads wins, written to
+`work/*-{REC,ORG}zlab.json` (sorts after the originals). Recycling: 74 by street names, 12 nudged fits, 19 not placed well
+either way; FOGO: 64, 11, 8. **Run maps** (`routes_export.py --write` -> `data/run-routes.json`): each run's route as the
+OSM streets it drives - from the placed pages, plus the streets its houses are on (by address, first house to last) so
+a street a map missed, or a run with no usable page, is still drawn. Full order: `picture_place.py`,
+`label_place.py --all`, `replace_rec_org.py`, `modes_export.py --write`, `snap_modes.py --write`, `routes_export.py --write`.
