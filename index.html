@@ -36061,5 +36061,190 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
 })();
 </script>
 
+<script id="lb-map-rotate-steps">
+/* =====================================================================
+   Rotate the map in 5 degree steps.
+   A compass button in the right-hand map column (needle always points
+   north, the angle shows under it once the map is turned). Tapping it
+   opens a small pop-out beside it: turn left 5, back to north, turn
+   right 5. Hold a turn button to keep turning.
+
+   Why buttons as well as the two-finger twist: the twist is hard to do
+   precisely (and one-handed, or with gloves, not at all), and lining a
+   run up with the screen - e.g. a street that runs NE - wants a fixed,
+   repeatable angle. Steps land on whole multiples of 5, so after a
+   freehand twist the first tap squares it up.
+
+   Uses the same state the twist gesture drives (window.manualMapRotationDeg
+   + applyMapHeadingRotation()), so everything that already counter-rotates
+   the controls/labels keeps working. Track-Up owns the angle while it is
+   on (GPS heading), so a step switches Track-Up off - the map keeps
+   following you - rather than being snapped back by the next GPS fix.
+   Only one button joins the column (the pop-out holds the rest) because
+   the column is already near full height on a phone.
+   ===================================================================== */
+(function(){
+  'use strict';
+  var STEP = 5;
+  function $(id){ return document.getElementById(id); }
+  function norm(d){ return ((d % 360) + 360) % 360; }
+  function current(){ return norm(+window.mapRotationDeg || 0); }
+
+  function setAngle(deg){
+    if (typeof window.applyMapHeadingRotation !== 'function') return;
+    deg = norm(Math.round(deg * 100) / 100);
+    if (window.isTrackUpEnabled) {
+      // leave Track-Up (the toggle also clears the manual angle, so set ours after it)
+      if (typeof window.toggleTrackUpOrientation === 'function') window.toggleTrackUpOrientation();
+      else window.isTrackUpEnabled = false;
+    }
+    window.mapManualOverrideActive = false;
+    try { clearTimeout(window.mapManualOverrideIdleTimer); } catch (e) {}
+    window.manualMapRotationDeg = deg;
+    window.applyMapHeadingRotation();
+    sync();
+  }
+  // +1 turns the map clockwise. Snaps to the next multiple of STEP in that direction.
+  function step(dir){
+    var cur = current(), next;
+    if (dir > 0) next = Math.floor(cur / STEP + 1e-6) * STEP + STEP;
+    else next = Math.ceil(cur / STEP - 1e-6) * STEP - STEP;
+    setAngle(next);
+  }
+  function north(){ setAngle(0); }
+
+  var NEEDLE = '<svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true" class="uxr-needle">' +
+    '<path d="M12 2.5 15.2 12H8.8z" fill="#ef4444"/><path d="M12 21.5 8.8 12h6.4z" fill="currentColor" opacity=".55"/></svg>';
+  var CCW = '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="square" aria-hidden="true"><path d="M4 4v6h6"/><path d="M4.5 10A8 8 0 1 1 6 16.5"/></svg>';
+  var CW = '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="square" aria-hidden="true"><path d="M20 4v6h-6"/><path d="M19.5 10A8 8 0 1 0 18 16.5"/></svg>';
+
+  var css = document.createElement('style');
+  css.textContent = [
+    '#mapFixedSideControls #uxSideRotate{position:relative}',
+    '#mapFixedSideControls #uxSideRotate .uxr-needle{width:24px !important;height:24px !important;transition:transform .25s}',
+    '#mapFixedSideControls #uxSideRotate .uxr-deg{position:absolute;left:0;right:0;bottom:2px;font:800 9.5px/1 system-ui,-apple-system,"Segoe UI",sans-serif !important;letter-spacing:.02em;text-align:center;color:var(--ux-text,#fff);pointer-events:none}',
+    '#mapFixedSideControls #uxSideRotate.turned .uxr-needle{transform-origin:50% 50%}',
+    '#mapFixedSideControls #uxSideRotate.turned{color:var(--ux-acc-text,#fff)}',
+    '#uxRotatePop{position:fixed;z-index:3400;display:none;gap:6px;padding:6px;background:var(--ux-glass,rgba(20,23,28,.92));border:1px solid var(--ux-line-2,rgba(255,255,255,.18));border-radius:var(--ux-rad,4px);box-shadow:var(--ux-shadow-sm,0 4px 14px rgba(0,0,0,.35));-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px)}',
+    '#uxRotatePop.open{display:flex}',
+    '#uxRotatePop button{width:48px;height:48px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px;padding:0;margin:0;border:1px solid var(--ux-line-2,rgba(255,255,255,.18));border-radius:var(--ux-rad,4px);background:var(--ux-s2,#1d2127);color:var(--ux-text,#f3f4f6);font:800 10px/1 system-ui,-apple-system,"Segoe UI",sans-serif;cursor:pointer;touch-action:manipulation;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}',
+    '#uxRotatePop button:active{background:var(--ux-s3,#262b33)}',
+    '#uxRotatePop button b{font-size:15px;line-height:1}',
+    '#uxRotatePop .uxr-n{min-width:56px;width:auto;padding:0 6px}'
+  ].join('\n');
+  document.head.appendChild(css);
+
+  // ---- the column button ------------------------------------------------------
+  function ensureButton(){
+    var col = $('mapFixedSideControls'); if (!col) return null;
+    var b = $('uxSideRotate');
+    if (!b) {
+      b = document.createElement('button');
+      b.type = 'button'; b.id = 'uxSideRotate'; b.className = 'ux-side-btn';
+      b.title = 'Rotate the map'; b.setAttribute('aria-label', 'Rotate the map'); b.setAttribute('aria-expanded', 'false');
+      b.innerHTML = NEEDLE + '<span class="uxr-deg"></span>';
+      b.addEventListener('click', function(ev){ ev.stopPropagation(); toggle(); });
+    }
+    // straight after the follow button; before the Layers button if that's where follow isn't
+    var follow = $('btnTruckFollowTarget'), layers = $('uxSideLayers');
+    var anchor = follow && follow.parentNode === col ? follow.nextSibling : (layers && layers.parentNode === col ? layers : null);
+    if (b.parentNode !== col || (anchor && b.nextSibling !== anchor && b !== anchor)) col.insertBefore(b, anchor);
+    return b;
+  }
+
+  // ---- the pop-out ------------------------------------------------------------
+  var pop = null, idle = 0;
+  function build(){
+    if (pop) return pop;
+    pop = document.createElement('div'); pop.id = 'uxRotatePop'; pop.setAttribute('role', 'group'); pop.setAttribute('aria-label', 'Rotate the map');
+    pop.innerHTML =
+      '<button type="button" data-rot="-1" title="Turn the map left 5°" aria-label="Turn the map left 5 degrees">' + CCW + '<span>5°</span></button>' +
+      '<button type="button" class="uxr-n" data-rot="0" title="Back to north up" aria-label="Back to north up"><b>N</b><span class="uxr-cur">0°</span></button>' +
+      '<button type="button" data-rot="1" title="Turn the map right 5°" aria-label="Turn the map right 5 degrees">' + CW + '<span>5°</span></button>';
+    document.body.appendChild(pop);
+    // press-and-hold keeps turning; a plain tap is one step
+    var holdT = 0, repT = 0;
+    function stopHold(){ clearTimeout(holdT); clearInterval(repT); holdT = repT = 0; }
+    pop.addEventListener('pointerdown', function(ev){
+      var t = ev.target.closest && ev.target.closest('[data-rot]'); if (!t) return;
+      ev.preventDefault(); ev.stopPropagation();
+      var d = +t.getAttribute('data-rot');
+      if (!d) { north(); bump(); return; }
+      step(d); bump();
+      stopHold();
+      holdT = setTimeout(function(){ repT = setInterval(function(){ step(d); bump(); }, 160); }, 450);
+      try { t.setPointerCapture(ev.pointerId); } catch (e) {}
+    });
+    ['pointerup', 'pointercancel', 'lostpointercapture'].forEach(function(n){ pop.addEventListener(n, stopHold); });
+    pop.addEventListener('click', function(ev){ ev.stopPropagation(); });   // steps happen on pointerdown
+    pop.addEventListener('contextmenu', function(ev){ ev.preventDefault(); });
+    return pop;
+  }
+  function place(){
+    var b = $('uxSideRotate'); if (!pop || !b) return;
+    var r = b.getBoundingClientRect(); if (!r.width) { close(); return; }
+    var w = pop.offsetWidth || 180, h = pop.offsetHeight || 60;
+    var lefty = document.body.classList.contains('ux-lefty') || r.left < window.innerWidth / 2;
+    var x = lefty ? r.right + 8 : r.left - 8 - w;
+    var y = Math.max(8, Math.min(window.innerHeight - h - 8, r.top + r.height / 2 - h / 2));
+    pop.style.left = Math.max(8, Math.min(window.innerWidth - w - 8, x)) + 'px';
+    pop.style.top = y + 'px';
+  }
+  function bump(){ clearTimeout(idle); idle = setTimeout(close, 6000); }
+  function open(){
+    build(); pop.classList.add('open'); place(); sync(); bump();
+    var b = $('uxSideRotate'); if (b) b.setAttribute('aria-expanded', 'true');
+  }
+  function close(){
+    clearTimeout(idle);
+    if (pop) pop.classList.remove('open');
+    var b = $('uxSideRotate'); if (b) b.setAttribute('aria-expanded', 'false');
+  }
+  function toggle(){ if (pop && pop.classList.contains('open')) close(); else open(); }
+  document.addEventListener('pointerdown', function(ev){
+    if (!pop || !pop.classList.contains('open')) return;
+    if (ev.target.closest && ev.target.closest('#uxRotatePop,#uxSideRotate')) return;
+    close();
+  }, true);
+  window.addEventListener('resize', function(){ if (pop && pop.classList.contains('open')) place(); });
+
+  // ---- keep the needle / numbers current ----------------------------------------------------
+  var lastSig = '';
+  function sync(){
+    var b = ensureButton(); if (!b) return;
+    var rot = +window.mapRotationDeg || 0, shown = Math.round(norm(rot));
+    if (shown === 360) shown = 0;
+    // "turned" = off north by hand; while Track-Up turns it the needle just follows along
+    var turned = shown !== 0;
+    var txt = shown > 180 ? (360 - shown) + '°↺' : shown + '°↻';
+    var sig = rot.toFixed(1) + '|' + turned + '|' + (window.isTrackUpEnabled ? 1 : 0);
+    if (sig === lastSig) return;
+    lastSig = sig;
+    var needle = b.querySelector('.uxr-needle'); if (needle) needle.style.transform = 'rotate(' + rot + 'deg)';
+    var deg = b.querySelector('.uxr-deg'); if (deg) deg.textContent = turned && !window.isTrackUpEnabled ? txt : '';
+    b.classList.toggle('turned', turned);
+    b.title = turned ? 'Map turned ' + (shown > 180 ? (360 - shown) + '° left' : shown + '° right') + ' · tap to rotate' : 'Rotate the map (north up)';
+    var cur = pop && pop.querySelector('.uxr-cur'); if (cur) cur.textContent = turned ? txt : '0°';
+  }
+  // the map code rebuilds the column wholesale and rotates on every GPS fix, so poll lightly
+  setInterval(function(){ try { sync(); } catch (e) {} }, 300);
+  var prev = window.applyMapHeadingRotation;
+  if (typeof prev === 'function') {
+    window.applyMapHeadingRotation = function(){ var r = prev.apply(this, arguments); try { sync(); } catch (e) {} return r; };
+  }
+  // keyboard on a laptop: [ and ] turn, \ goes back to north (ignored while typing)
+  document.addEventListener('keydown', function(ev){
+    var t = ev.target, tag = t && t.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || (t && t.isContentEditable) || ev.ctrlKey || ev.metaKey || ev.altKey) return;
+    if (!document.body.classList.contains('lb-map-screen') && !$('uxSideRotate')) return;
+    if (ev.key === '[') { step(-1); ev.preventDefault(); }
+    else if (ev.key === ']') { step(1); ev.preventDefault(); }
+    else if (ev.key === '\\') { north(); ev.preventDefault(); }
+  });
+
+  window.lbRotateMap = { step: step, north: north, set: setAngle, open: open, close: close };
+})();
+</script>
+
 </body>
 </html>
