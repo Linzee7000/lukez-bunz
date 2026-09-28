@@ -34804,7 +34804,12 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   #lbRunMap .rm-bar select { min-height: 40px; font: 600 15px system-ui, sans-serif; border-radius: 6px; border: 0; padding: 0 6px; max-width: 42vw; }
   #lbRunMap .rm-bar button { min-height: 40px; padding: 0 14px; font: 700 15px system-ui, sans-serif; border: 0; border-radius: 6px; background: #fff; color: #111; }
   #lbRunMap .rm-bar .rm-sp { flex: 1 1 auto; }
-  #lbRunMap .rm-page { position: relative; margin: 10px auto; background: #fff; box-shadow: 0 2px 12px rgba(0,0,0,.2); }
+  #lbRunMap .rm-bar .rm-rot { display: inline-flex; gap: 2px; }
+  #lbRunMap .rm-bar .rm-rot button { padding: 0 10px; min-width: 44px; touch-action: manipulation; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+  #lbRunMap .rm-bar .rm-rot button[data-rm="rot0"] { min-width: 58px; font-variant-numeric: tabular-nums; }
+  #lbRunMap .rm-bar .rm-rot button[data-rm="rot0"].on { background: #fbbf24; }
+  #lbRunMap .rm-map { transform-origin: 50% 50%; }
+  #lbRunMap .rm-page { position: relative; margin: 10px auto; background: #fff; box-shadow: 0 2px 12px rgba(0,0,0,.2); overflow: hidden; }   /* a turned map is bigger than the page: clip it to the paper */
   #lbRunMap .rm-map { position: absolute; inset: 0; }
   #lbRunMap .rm-map .leaflet-tile-pane { filter: grayscale(1) contrast(.85) brightness(1.1); opacity: .6; }
   #lbRunMap .rm-card { position: absolute; z-index: 800; background: rgba(255,255,255,.94); border: 1px solid #cbd5e1; border-radius: 8px; padding: 10px 12px; box-shadow: 0 1px 6px rgba(0,0,0,.15); max-width: 44%; }
@@ -34940,7 +34945,12 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   function draw(container, key, R, page, opts){
     opts = opts || {};
     var E = edits(key), mode = opts.edit ? opts.mode : '';
+    // the map can be turned (rot, degrees clockwise) inside the page; the page and its cards stay upright
+    var st = { R: R, container: container, page: container.parentNode, fixed: opts.order || null, rot: 0, sig: 0 };
+    setGeom(st, opts.rot || 0);
     var o = parse(key), map = L.map(container, { zoomControl: false, attributionControl: false, zoomSnap: 0.1, zoomDelta: 0.5, fadeAnimation: false, zoomAnimation: false });
+    st.map = map;
+    turnAware(st);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
     map.createPane('rmLabels').style.zIndex = 650; map.createPane('rmPins').style.zIndex = 660;
     var layers = L.layerGroup().addTo(map);
@@ -34986,6 +34996,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       if (!p.at) return;
       var mk = L.marker(p.at, { icon: L.divIcon({ className: '', html: '<div class="rm-note-pin">' + (i + 1) + '</div>', iconSize: [22, 22], iconAnchor: [11, 11] }), keyboard: false, pane: 'rmPins', interactive: pinsLive, draggable: pinsLive && p.mine != null }).addTo(layers);
       if (pinsLive) {
+        if (mk.dragging && mk.dragging._draggable) fixDrag(mk.dragging._draggable, st);
         mk.on('click', function(ev){ L.DomEvent.stopPropagation(ev); opts.onNote && opts.onNote(p); });
         mk.on('dragend', function(){ if (p.mine != null) opts.onNoteMove && opts.onNoteMove(p.mine, mk.getLatLng()); });
       }
@@ -35034,24 +35045,90 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     card.innerHTML = '<div class="rm-band" style="background:' + (COL[o.stream] || '#16a34a') + '"></div><div class="rm-title">Run ' + esc(o.run) + '</div><div class="rm-sub">' + esc(sub) + '</div>' +
       '<div class="rm-stats"><span><b>' + houses.toLocaleString() + '</b>houses</span><span><b>' + bins.toLocaleString() + '</b>bins</span><span><b>' + esc(R.km) + '</b>km</span></div>' +
       '<div class="rm-leg">' + legendSections(used, E) + '<div><i style="border-color:#7c3aed"></i>Reverse in</div><div><i style="border-color:#f59e0b"></i>Drive in, back out</div><div><i class="box"></i>School</div><div><i class="dot"></i>House</div><div><i class="num">1</i>Note</div></div>';
-    container.appendChild(card);
+    st.page.appendChild(card);
     if (pinned.length) {
       var nc = document.createElement('div'); nc.className = 'rm-card rm-notes';
       nc.innerHTML = '<ol>' + pinned.map(function(p, i){ return '<li><b>' + (i + 1) + '</b><span>' + esc(p.text) + '</span></li>'; }).join('') + '</ol>';
-      container.appendChild(nc);
+      st.page.appendChild(nc);
     }
     var ft = document.createElement('div'); ft.className = 'rm-foot'; ft.textContent = 'Lukez Bunz run map · ' + new Date().toLocaleDateString('en-AU') + ' · streets © OpenStreetMap contributors';
-    container.appendChild(ft);
+    st.page.appendChild(ft);
     // taps on the cards stay on the cards (they don't add a note or colour the street underneath)
-    Array.prototype.forEach.call(container.querySelectorAll('.rm-card, .rm-foot'), function(c){ L.DomEvent.disableClickPropagation(c); });
-    var st = { map: map, R: R, container: container, fixed: opts.order || null };
+    Array.prototype.forEach.call(st.page.querySelectorAll('.rm-card, .rm-foot'), function(c){ L.DomEvent.disableClickPropagation(c); });
     if (opts.view) map.setView(opts.view.c, opts.view.z, { animate: false });
-    else map.fitBounds([[page.b[0], page.b[1]], [page.b[2], page.b[3]]], { padding: [14, 14] });
+    else fitTurned(st, page.b, all);
     placeCards(st);
     // while editing the cards stay put (so nothing jumps under your finger); otherwise they move to the emptiest corners
     if (opts.edit) st.fixed = st.order;
     map.on('zoomend moveend', function(){ placeCards(st); });
     return st;
+  }
+
+  /* ---- turning the map ------------------------------------------------------------------------
+     Leaflet can't rotate, so the map element itself is turned with a CSS rotate() inside the page.
+     While turned it is made a square as wide as the page's diagonal (centred on the page), so no
+     corner ever shows blank. Everything that goes from a finger / mouse to the map is then put
+     right for the angle: Leaflet reads positions off the screen assuming nothing is turned, which
+     would make taps land on the wrong street and drags move the map the wrong way.
+       - mouseEventToContainerPoint is replaced on this map (taps, notes, freehand lines, wheel and
+         pinch zoom all go through it)
+       - drags (the map, and your own note pins) are turned back on 'predrag', after undoing the
+         scale Leaflet wrongly applies from the turned element's larger bounding box
+     The cards sit on the page, not in the map, so they stay upright in the page corners, and the
+     street names are re-angled so they never read upside down on the page. */
+  function setGeom(st, rot){
+    var c = st.container, page = st.page, W = page.clientWidth, H = page.clientHeight;
+    rot = ((+rot || 0) % 360 + 360) % 360;
+    var D = rot ? Math.ceil(Math.sqrt(W * W + H * H)) + 4 : 0;
+    var keep = st.map && st.sig !== D ? { c: st.map.getCenter(), z: st.map.getZoom() } : null;
+    if (st.sig !== D) {
+      if (D) { c.style.inset = 'auto'; c.style.width = D + 'px'; c.style.height = D + 'px'; c.style.left = ((W - D) / 2) + 'px'; c.style.top = ((H - D) / 2) + 'px'; }
+      else { c.style.inset = ''; c.style.width = ''; c.style.height = ''; c.style.left = ''; c.style.top = ''; }
+      st.sig = D;
+    }
+    st.rot = rot; st.W = W; st.H = H; st.D = D;
+    c.style.transform = rot ? 'rotate(' + rot + 'deg)' : '';
+    if (keep) { st.map.invalidateSize({ pan: false, animate: false }); st.map.setView(keep.c, keep.z, { animate: false }); }
+  }
+  // map-container pixel -> page pixel, and back
+  function toView(st, x, y){
+    if (!st.rot) return { x: x, y: y };
+    var a = st.rot * Math.PI / 180, dx = x - st.D / 2, dy = y - st.D / 2;
+    return { x: dx * Math.cos(a) - dy * Math.sin(a) + st.W / 2, y: dx * Math.sin(a) + dy * Math.cos(a) + st.H / 2 };
+  }
+  function fromView(st, x, y){
+    if (!st.rot) return { x: x, y: y };
+    var a = -st.rot * Math.PI / 180, dx = x - st.W / 2, dy = y - st.H / 2;
+    return { x: dx * Math.cos(a) - dy * Math.sin(a) + st.D / 2, y: dx * Math.sin(a) + dy * Math.cos(a) + st.D / 2 };
+  }
+  function fixDrag(d, st){
+    if (!d || d._rmTurn) return; d._rmTurn = 1;
+    d.on('predrag', function(){
+      if (!st.rot || !d._newPos || !d._startPos) return;
+      var sc = d._parentScale || {}, sx = isFinite(sc.x) && sc.x ? sc.x : 1, sy = isFinite(sc.y) && sc.y ? sc.y : 1;
+      var ox = (d._newPos.x - d._startPos.x) * sx, oy = (d._newPos.y - d._startPos.y) * sy, a = -st.rot * Math.PI / 180;
+      d._newPos = d._startPos.add(L.point(ox * Math.cos(a) - oy * Math.sin(a), ox * Math.sin(a) + oy * Math.cos(a)));
+    });
+  }
+  function turnAware(st){
+    var map = st.map, base = map.mouseEventToContainerPoint;
+    map.mouseEventToContainerPoint = function(e){
+      if (!st.rot || !e || e.clientX == null) return base.apply(map, arguments);
+      var r = st.page.getBoundingClientRect(), p = fromView(st, e.clientX - r.left - st.page.clientLeft, e.clientY - r.top - st.page.clientTop);
+      return L.point(p.x, p.y);
+    };
+    if (map.dragging && map.dragging._draggable) fixDrag(map.dragging._draggable, st);
+    else map.on('dragstart', function(){ fixDrag(map.dragging && map.dragging._draggable, st); });
+  }
+  // fit the whole run into the page at the current angle (a plain fitBounds only knows north-up)
+  function fitTurned(st, b, pts){
+    var map = st.map;
+    if (!st.rot || !pts || !pts.length) { map.fitBounds([[b[0], b[1]], [b[2], b[3]]], { padding: [14, 14] }); return; }
+    var a = st.rot * Math.PI / 180, ca = Math.cos(a), sa = Math.sin(a), Z = 20, x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+    pts.forEach(function(q){ var p = map.project(q, Z), x = p.x * ca - p.y * sa, y = p.x * sa + p.y * ca; if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; });
+    var w = Math.max(1, x1 - x0), h = Math.max(1, y1 - y0), z = Z + Math.log2(Math.min((st.W - 28) / w, (st.H - 28) / h));
+    var mx = (x0 + x1) / 2, my = (y0 + y1) / 2, c = map.unproject(L.point(mx * ca + my * sa, -mx * sa + my * ca), Z);
+    map.setView(c, Math.min(19, z), { animate: false });
   }
 
   // the legend's route colours: just "Route" for a one-colour run; each section, with its name, when the run has several
@@ -35064,9 +35141,9 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   /* ---- our own street names: along the street, never upside down, never on top of each other ---- */
   function labels(st){
     var map = st.map, R = st.R, pane = map.getPane('rmLabels'); pane.innerHTML = '';
-    var m = st.container.getBoundingClientRect(), boxes = [];
-    Array.prototype.forEach.call(st.container.querySelectorAll('.rm-card'), function(c){ var r = c.getBoundingClientRect(); boxes.push([r.left - m.left, r.top - m.top, r.right - m.left, r.bottom - m.top]); });
-    var zoom = map.getZoom(), fs = zoom >= 17 ? 14 : zoom >= 16 ? 13 : 12, W = st.container.clientWidth, H = st.container.clientHeight;
+    var m = st.page.getBoundingClientRect(), boxes = [];
+    Array.prototype.forEach.call(st.page.querySelectorAll('.rm-card'), function(c){ var r = c.getBoundingClientRect(); boxes.push([r.left - m.left, r.top - m.top, r.right - m.left, r.bottom - m.top]); });
+    var zoom = map.getZoom(), fs = zoom >= 17 ? 14 : zoom >= 16 ? 13 : 12, W = st.page.clientWidth, H = st.page.clientHeight;
     var pieces = R.lines.filter(function(l){ return l.n; }).map(function(l){
       var pts = l.c.map(function(c){ return map.latLngToContainerPoint(c); }), len = 0;
       for (var i = 1; i < pts.length; i++) len += pts[i].distanceTo(pts[i - 1]);
@@ -35082,24 +35159,27 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
         if (p.len < w * need) return;
         var half = p.len / 2, acc = 0, a = p.pts[0], b = p.pts[1] || p.pts[0];
         for (var i = 1; i < p.pts.length; i++) { var d = p.pts[i].distanceTo(p.pts[i - 1]); if (acc + d >= half) { a = p.pts[i - 1]; b = p.pts[i]; break; } acc += d; }
-        var t = (half - acc) / (a.distanceTo(b) || 1), mx = a.x + (b.x - a.x) * t, my = a.y + (b.y - a.y) * t;
+        var t = (half - acc) / (a.distanceTo(b) || 1), cx = a.x + (b.x - a.x) * t, cy = a.y + (b.y - a.y) * t;
+        var v = toView(st, cx, cy), mx = v.x, my = v.y;   // where it lands on the page
         if (mx < 0 || my < 0 || mx > W || my > H) return;
-        var ang = Math.atan2(b.y - a.y, b.x - a.x) * 180 / Math.PI; if (ang > 90) ang -= 180; if (ang < -90) ang += 180;
+        // the angle as seen on the page (map angle + the turn), kept readable, i.e. never upside down
+        var ang = Math.atan2(b.y - a.y, b.x - a.x) * 180 / Math.PI + (st.rot || 0);
+        ang = ((ang % 360) + 540) % 360 - 180; if (ang > 90) ang -= 180; if (ang < -90) ang += 180;
         var rad = ang * Math.PI / 180, hw = Math.abs(Math.cos(rad)) * w / 2 + Math.abs(Math.sin(rad)) * fsz / 2, hh = Math.abs(Math.sin(rad)) * w / 2 + Math.abs(Math.cos(rad)) * fsz / 2;
         var box = [mx - hw, my - hh, mx + hw, my + hh];
         if (boxes.some(function(o){ return !(box[2] < o[0] || box[0] > o[2] || box[3] < o[1] || box[1] > o[3]); })) return;
         boxes.push(box); named[p.n] = 1;
         var s = document.createElement('div'); s.className = 'rm-lbl'; s.textContent = text; s.style.fontSize = fsz + 'px';
-        var lp = map.containerPointToLayerPoint([mx, my]);
+        var lp = map.containerPointToLayerPoint([cx, cy]);
         s.style.left = lp.x + 'px'; s.style.top = lp.y + 'px';
-        s.style.transform = 'rotate(' + ang.toFixed(1) + 'deg) translate(-50%, -50%)';
+        s.style.transform = 'rotate(' + (ang - (st.rot || 0)).toFixed(1) + 'deg) translate(-50%, -50%)';
         pane.appendChild(s);
       });
     });
   }
   function placeCards(st){
-    var map = st.map, R = st.R, c = st.container, W = c.clientWidth, H = c.clientHeight, count = { tl: 0, tr: 0, bl: 0, br: 0 };
-    R.lines.forEach(function(l){ l.c.forEach(function(p0){ var p = map.latLngToContainerPoint(p0); if (p.x < 0 || p.y < 0 || p.x > W || p.y > H) return; count[(p.y < H / 2 ? 't' : 'b') + (p.x < W / 2 ? 'l' : 'r')]++; }); });
+    var map = st.map, R = st.R, c = st.page, W = c.clientWidth, H = c.clientHeight, count = { tl: 0, tr: 0, bl: 0, br: 0 };
+    R.lines.forEach(function(l){ l.c.forEach(function(p0){ var q = map.latLngToContainerPoint(p0), p = toView(st, q.x, q.y); if (p.x < 0 || p.y < 0 || p.x > W || p.y > H) return; count[(p.y < H / 2 ? 't' : 'b') + (p.x < W / 2 ? 'l' : 'r')]++; }); });
     var order = st.fixed || Object.keys(count).sort(function(a, b){ return count[a] - count[b]; });
     st.order = order;
     Array.prototype.forEach.call(c.querySelectorAll('.rm-card'), function(card, i){
@@ -35114,6 +35194,22 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   /* ---- the viewer ---- */
   var el = null, view = null, curKey = null, pagesCache = [], curPage = 0, pageSize = null;
   var editing = false, tool = 'paint', colour = '#ff0000', orientOverride = null;
+  // how far each run's map is turned (degrees clockwise, steps of 5), kept per run on this phone
+  function rotFor(key){ var r = (lsGet('lbRunMapRot', {}) || {})[key]; return isFinite(+r) ? +r : 0; }
+  function setRot(deg){
+    deg = ((Math.round(deg / 5) * 5) % 360 + 360) % 360;
+    var all = lsGet('lbRunMapRot', {}) || {}; if (deg) all[curKey] = deg; else delete all[curKey]; lsSet('lbRunMapRot', all);
+    if (view) { setGeom(view, deg); placeCards(view); }
+    rotLabel();
+  }
+  function stepRot(dir){ var cur = rotFor(curKey); setRot(dir > 0 ? Math.floor(cur / 5 + 1e-6) * 5 + 5 : Math.ceil(cur / 5 - 1e-6) * 5 - 5); }
+  function rotLabel(){
+    var b = el && el.querySelector('[data-rm="rot0"]'); if (!b) return;
+    var r = rotFor(curKey);
+    b.textContent = !r ? 'N' : r > 180 ? (360 - r) + '\u00b0\u21ba' : r + '\u00b0\u21bb';
+    b.classList.toggle('on', !!r);
+    b.title = r ? 'Turned ' + (r > 180 ? (360 - r) + '\u00b0 left' : r + '\u00b0 right') + ' \u00b7 tap for north up' : 'North up';
+  }
   var HINT = {
     paint: 'Pick a colour, then tap a street to put it in that section. Tap a drawn line to delete it. Drag the map to move it.',
     x: 'Tap a street to take it off the map; tap it again to put it back. Tap a drawn line to delete it.',
@@ -35169,6 +35265,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     if (el) return;
     el = document.createElement('div'); el.id = 'lbRunMap';
     el.innerHTML = '<div class="rm-head"><div class="rm-bar"><select id="rmStream"></select><select id="rmDay"></select><select id="rmRun"></select><span class="rm-sp"></span>' +
+      '<span class="rm-rot"><button type="button" data-rm="rotL" title="Turn the map 5\u00b0 left" aria-label="Turn the map 5 degrees left">\u21ba 5\u00b0</button><button type="button" data-rm="rot0" title="North up">N</button><button type="button" data-rm="rotR" title="Turn the map 5\u00b0 right" aria-label="Turn the map 5 degrees right">5\u00b0 \u21bb</button></span>' +
       '<button type="button" data-rm="fit" title="Show the whole run">Whole run</button><button type="button" data-rm="turn" title="Portrait / landscape">Turn page</button><button type="button" data-rm="edit">Edit</button><button type="button" data-rm="printview" title="Prints exactly what is on screen">Print</button><button type="button" data-rm="close">Close</button></div>' +
       '<div id="rmTools" class="rm-tools"></div></div><div id="rmView"></div><div id="rmPrint"></div>';
     document.body.appendChild(el);
@@ -35186,6 +35283,26 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       if (a === 'names') editNames();
     });
     ['rmStream', 'rmDay', 'rmRun'].forEach(function(id){ document.getElementById(id).addEventListener('change', function(){ pickerChanged(id); }); });
+    // the turn buttons act on press, and keep turning while held
+    var holdT = 0, repT = 0;
+    function stopHold(){ clearTimeout(holdT); clearInterval(repT); holdT = repT = 0; }
+    el.addEventListener('pointerdown', function(e){
+      var b = e.target.closest && e.target.closest('[data-rm="rotL"],[data-rm="rotR"],[data-rm="rot0"]'); if (!b || !curKey) return;
+      e.preventDefault();
+      var a = b.getAttribute('data-rm');
+      if (a === 'rot0') { setRot(0); return; }
+      var d = a === 'rotR' ? 1 : -1; stepRot(d); stopHold();
+      holdT = setTimeout(function(){ repT = setInterval(function(){ stepRot(d); }, 180); }, 450);
+      try { b.setPointerCapture(e.pointerId); } catch (x) {}
+    });
+    ['pointerup', 'pointercancel', 'lostpointercapture'].forEach(function(n){ el.addEventListener(n, stopHold); });
+    el.addEventListener('contextmenu', function(e){ if (e.target.closest && e.target.closest('.rm-rot')) e.preventDefault(); });
+    // on a keyboard: [ and ] turn, \ back to north up
+    document.addEventListener('keydown', function(e){
+      if (!el || el.style.display === 'none' || !curKey) return;
+      var t = e.target, tag = t && t.tagName; if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || e.ctrlKey || e.metaKey || e.altKey) return;
+      if (e.key === '[') { stepRot(-1); e.preventDefault(); } else if (e.key === ']') { stepRot(1); e.preventDefault(); } else if (e.key === '\\') { setRot(0); e.preventDefault(); }
+    });
     window.addEventListener('resize', function(){ if (el.style.display !== 'none' && curKey) renderView(true, true); });
   }
   // the page on screen: the paper's shape, as big as fits below the top bar (so the page never needs scrolling)
@@ -35216,9 +35333,11 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var d = pageDiv(o, pageSize);
     host.appendChild(d.page);
     var opts = editing ? editHandlers() : {};
+    opts.rot = rotFor(curKey);
     if (kept) opts.view = kept;
     if (editing && keptOrder) opts.order = keptOrder;
     view = draw(d.map, curKey, R, pg, opts);
+    rotLabel();
   }
   function show(key){
     curKey = key; curPage = 0; orientOverride = null; pageSize = null;
@@ -35232,15 +35351,15 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   function printView(){
     var R = DATA[curKey]; if (!R || !view) return;
     var o = orientOverride || pagesCache[0].o;
-    var screenW = view.container.clientWidth, c = view.map.getCenter(), z = view.map.getZoom(), order = view.order;   // before the screen view is hidden for printing
+    var screenW = view.page.clientWidth, c = view.map.getCenter(), z = view.map.getZoom(), order = view.order;   // before the screen view is hidden for printing
     var host = document.getElementById('rmPrint'); printing.forEach(function(s){ try { s.map.remove(); } catch (e) {} }); printing = []; host.innerHTML = '';
     document.body.classList.add('rm-printing');
     var css = document.getElementById('rmPageStyle');
     if (!css) { css = document.createElement('style'); css.id = 'rmPageStyle'; document.head.appendChild(css); }
     css.textContent = '@media print { @page { size: A4 ' + (o === 'port' ? 'portrait' : 'landscape') + '; margin: 6mm; } }';
     var d = pageDiv(o, null); host.appendChild(d.page);
-    var paperW = d.map.clientWidth || PAGE[o][0] * MM;
-    printing.push(draw(d.map, curKey, R, pagesCache[0], { view: { c: c, z: z + Math.log2(paperW / screenW) }, order: order }));
+    var paperW = d.page.clientWidth || PAGE[o][0] * MM;
+    printing.push(draw(d.map, curKey, R, pagesCache[0], { view: { c: c, z: z + Math.log2(paperW / screenW) }, order: order, rot: rotFor(curKey) }));
     setTimeout(function(){
       try { window.print(); } catch (x) {}
       setTimeout(function(){ document.body.classList.remove('rm-printing'); printing.forEach(function(s){ try { s.map.remove(); } catch (e) {} }); printing = []; host.innerHTML = ''; }, 800);
@@ -36058,191 +36177,6 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
 
   window.lbCouncilRequests = { open: open, load: load, results: function(){ return results; },
     _t: { tableFrom: tableFrom, readCsv: readCsv, readXlsx: readXlsx, matchAll: matchAll, toCsv: toCsv, runsFor: runsFor, streetOf: streetOf, tokens: tokens } };
-})();
-</script>
-
-<script id="lb-map-rotate-steps">
-/* =====================================================================
-   Rotate the map in 5 degree steps.
-   A compass button in the right-hand map column (needle always points
-   north, the angle shows under it once the map is turned). Tapping it
-   opens a small pop-out beside it: turn left 5, back to north, turn
-   right 5. Hold a turn button to keep turning.
-
-   Why buttons as well as the two-finger twist: the twist is hard to do
-   precisely (and one-handed, or with gloves, not at all), and lining a
-   run up with the screen - e.g. a street that runs NE - wants a fixed,
-   repeatable angle. Steps land on whole multiples of 5, so after a
-   freehand twist the first tap squares it up.
-
-   Uses the same state the twist gesture drives (window.manualMapRotationDeg
-   + applyMapHeadingRotation()), so everything that already counter-rotates
-   the controls/labels keeps working. Track-Up owns the angle while it is
-   on (GPS heading), so a step switches Track-Up off - the map keeps
-   following you - rather than being snapped back by the next GPS fix.
-   Only one button joins the column (the pop-out holds the rest) because
-   the column is already near full height on a phone.
-   ===================================================================== */
-(function(){
-  'use strict';
-  var STEP = 5;
-  function $(id){ return document.getElementById(id); }
-  function norm(d){ return ((d % 360) + 360) % 360; }
-  function current(){ return norm(+window.mapRotationDeg || 0); }
-
-  function setAngle(deg){
-    if (typeof window.applyMapHeadingRotation !== 'function') return;
-    deg = norm(Math.round(deg * 100) / 100);
-    if (window.isTrackUpEnabled) {
-      // leave Track-Up (the toggle also clears the manual angle, so set ours after it)
-      if (typeof window.toggleTrackUpOrientation === 'function') window.toggleTrackUpOrientation();
-      else window.isTrackUpEnabled = false;
-    }
-    window.mapManualOverrideActive = false;
-    try { clearTimeout(window.mapManualOverrideIdleTimer); } catch (e) {}
-    window.manualMapRotationDeg = deg;
-    window.applyMapHeadingRotation();
-    sync();
-  }
-  // +1 turns the map clockwise. Snaps to the next multiple of STEP in that direction.
-  function step(dir){
-    var cur = current(), next;
-    if (dir > 0) next = Math.floor(cur / STEP + 1e-6) * STEP + STEP;
-    else next = Math.ceil(cur / STEP - 1e-6) * STEP - STEP;
-    setAngle(next);
-  }
-  function north(){ setAngle(0); }
-
-  var NEEDLE = '<svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true" class="uxr-needle">' +
-    '<path d="M12 2.5 15.2 12H8.8z" fill="#ef4444"/><path d="M12 21.5 8.8 12h6.4z" fill="currentColor" opacity=".55"/></svg>';
-  var CCW = '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="square" aria-hidden="true"><path d="M4 4v6h6"/><path d="M4.5 10A8 8 0 1 1 6 16.5"/></svg>';
-  var CW = '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="square" aria-hidden="true"><path d="M20 4v6h-6"/><path d="M19.5 10A8 8 0 1 0 18 16.5"/></svg>';
-
-  var css = document.createElement('style');
-  css.textContent = [
-    '#mapFixedSideControls #uxSideRotate{position:relative}',
-    '#mapFixedSideControls #uxSideRotate .uxr-needle{width:24px !important;height:24px !important;transition:transform .25s}',
-    '#mapFixedSideControls #uxSideRotate .uxr-deg{position:absolute;left:0;right:0;bottom:2px;font:800 9.5px/1 system-ui,-apple-system,"Segoe UI",sans-serif !important;letter-spacing:.02em;text-align:center;color:var(--ux-text,#fff);pointer-events:none}',
-    '#mapFixedSideControls #uxSideRotate.turned .uxr-needle{transform-origin:50% 50%}',
-    '#mapFixedSideControls #uxSideRotate.turned{color:var(--ux-acc-text,#fff)}',
-    '#uxRotatePop{position:fixed;z-index:3400;display:none;gap:6px;padding:6px;background:var(--ux-glass,rgba(20,23,28,.92));border:1px solid var(--ux-line-2,rgba(255,255,255,.18));border-radius:var(--ux-rad,4px);box-shadow:var(--ux-shadow-sm,0 4px 14px rgba(0,0,0,.35));-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px)}',
-    '#uxRotatePop.open{display:flex}',
-    '#uxRotatePop button{width:48px;height:48px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px;padding:0;margin:0;border:1px solid var(--ux-line-2,rgba(255,255,255,.18));border-radius:var(--ux-rad,4px);background:var(--ux-s2,#1d2127);color:var(--ux-text,#f3f4f6);font:800 10px/1 system-ui,-apple-system,"Segoe UI",sans-serif;cursor:pointer;touch-action:manipulation;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}',
-    '#uxRotatePop button:active{background:var(--ux-s3,#262b33)}',
-    '#uxRotatePop button b{font-size:15px;line-height:1}',
-    '#uxRotatePop .uxr-n{min-width:56px;width:auto;padding:0 6px}'
-  ].join('\n');
-  document.head.appendChild(css);
-
-  // ---- the column button ------------------------------------------------------
-  function ensureButton(){
-    var col = $('mapFixedSideControls'); if (!col) return null;
-    var b = $('uxSideRotate');
-    if (!b) {
-      b = document.createElement('button');
-      b.type = 'button'; b.id = 'uxSideRotate'; b.className = 'ux-side-btn';
-      b.title = 'Rotate the map'; b.setAttribute('aria-label', 'Rotate the map'); b.setAttribute('aria-expanded', 'false');
-      b.innerHTML = NEEDLE + '<span class="uxr-deg"></span>';
-      b.addEventListener('click', function(ev){ ev.stopPropagation(); toggle(); });
-    }
-    // straight after the follow button; before the Layers button if that's where follow isn't
-    var follow = $('btnTruckFollowTarget'), layers = $('uxSideLayers');
-    var anchor = follow && follow.parentNode === col ? follow.nextSibling : (layers && layers.parentNode === col ? layers : null);
-    if (b.parentNode !== col || (anchor && b.nextSibling !== anchor && b !== anchor)) col.insertBefore(b, anchor);
-    return b;
-  }
-
-  // ---- the pop-out ------------------------------------------------------------
-  var pop = null, idle = 0;
-  function build(){
-    if (pop) return pop;
-    pop = document.createElement('div'); pop.id = 'uxRotatePop'; pop.setAttribute('role', 'group'); pop.setAttribute('aria-label', 'Rotate the map');
-    pop.innerHTML =
-      '<button type="button" data-rot="-1" title="Turn the map left 5°" aria-label="Turn the map left 5 degrees">' + CCW + '<span>5°</span></button>' +
-      '<button type="button" class="uxr-n" data-rot="0" title="Back to north up" aria-label="Back to north up"><b>N</b><span class="uxr-cur">0°</span></button>' +
-      '<button type="button" data-rot="1" title="Turn the map right 5°" aria-label="Turn the map right 5 degrees">' + CW + '<span>5°</span></button>';
-    document.body.appendChild(pop);
-    // press-and-hold keeps turning; a plain tap is one step
-    var holdT = 0, repT = 0;
-    function stopHold(){ clearTimeout(holdT); clearInterval(repT); holdT = repT = 0; }
-    pop.addEventListener('pointerdown', function(ev){
-      var t = ev.target.closest && ev.target.closest('[data-rot]'); if (!t) return;
-      ev.preventDefault(); ev.stopPropagation();
-      var d = +t.getAttribute('data-rot');
-      if (!d) { north(); bump(); return; }
-      step(d); bump();
-      stopHold();
-      holdT = setTimeout(function(){ repT = setInterval(function(){ step(d); bump(); }, 160); }, 450);
-      try { t.setPointerCapture(ev.pointerId); } catch (e) {}
-    });
-    ['pointerup', 'pointercancel', 'lostpointercapture'].forEach(function(n){ pop.addEventListener(n, stopHold); });
-    pop.addEventListener('click', function(ev){ ev.stopPropagation(); });   // steps happen on pointerdown
-    pop.addEventListener('contextmenu', function(ev){ ev.preventDefault(); });
-    return pop;
-  }
-  function place(){
-    var b = $('uxSideRotate'); if (!pop || !b) return;
-    var r = b.getBoundingClientRect(); if (!r.width) { close(); return; }
-    var w = pop.offsetWidth || 180, h = pop.offsetHeight || 60;
-    var lefty = document.body.classList.contains('ux-lefty') || r.left < window.innerWidth / 2;
-    var x = lefty ? r.right + 8 : r.left - 8 - w;
-    var y = Math.max(8, Math.min(window.innerHeight - h - 8, r.top + r.height / 2 - h / 2));
-    pop.style.left = Math.max(8, Math.min(window.innerWidth - w - 8, x)) + 'px';
-    pop.style.top = y + 'px';
-  }
-  function bump(){ clearTimeout(idle); idle = setTimeout(close, 6000); }
-  function open(){
-    build(); pop.classList.add('open'); place(); sync(); bump();
-    var b = $('uxSideRotate'); if (b) b.setAttribute('aria-expanded', 'true');
-  }
-  function close(){
-    clearTimeout(idle);
-    if (pop) pop.classList.remove('open');
-    var b = $('uxSideRotate'); if (b) b.setAttribute('aria-expanded', 'false');
-  }
-  function toggle(){ if (pop && pop.classList.contains('open')) close(); else open(); }
-  document.addEventListener('pointerdown', function(ev){
-    if (!pop || !pop.classList.contains('open')) return;
-    if (ev.target.closest && ev.target.closest('#uxRotatePop,#uxSideRotate')) return;
-    close();
-  }, true);
-  window.addEventListener('resize', function(){ if (pop && pop.classList.contains('open')) place(); });
-
-  // ---- keep the needle / numbers current ----------------------------------------------------
-  var lastSig = '';
-  function sync(){
-    var b = ensureButton(); if (!b) return;
-    var rot = +window.mapRotationDeg || 0, shown = Math.round(norm(rot));
-    if (shown === 360) shown = 0;
-    // "turned" = off north by hand; while Track-Up turns it the needle just follows along
-    var turned = shown !== 0;
-    var txt = shown > 180 ? (360 - shown) + '°↺' : shown + '°↻';
-    var sig = rot.toFixed(1) + '|' + turned + '|' + (window.isTrackUpEnabled ? 1 : 0);
-    if (sig === lastSig) return;
-    lastSig = sig;
-    var needle = b.querySelector('.uxr-needle'); if (needle) needle.style.transform = 'rotate(' + rot + 'deg)';
-    var deg = b.querySelector('.uxr-deg'); if (deg) deg.textContent = turned && !window.isTrackUpEnabled ? txt : '';
-    b.classList.toggle('turned', turned);
-    b.title = turned ? 'Map turned ' + (shown > 180 ? (360 - shown) + '° left' : shown + '° right') + ' · tap to rotate' : 'Rotate the map (north up)';
-    var cur = pop && pop.querySelector('.uxr-cur'); if (cur) cur.textContent = turned ? txt : '0°';
-  }
-  // the map code rebuilds the column wholesale and rotates on every GPS fix, so poll lightly
-  setInterval(function(){ try { sync(); } catch (e) {} }, 300);
-  var prev = window.applyMapHeadingRotation;
-  if (typeof prev === 'function') {
-    window.applyMapHeadingRotation = function(){ var r = prev.apply(this, arguments); try { sync(); } catch (e) {} return r; };
-  }
-  // keyboard on a laptop: [ and ] turn, \ goes back to north (ignored while typing)
-  document.addEventListener('keydown', function(ev){
-    var t = ev.target, tag = t && t.tagName;
-    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || (t && t.isContentEditable) || ev.ctrlKey || ev.metaKey || ev.altKey) return;
-    if (!document.body.classList.contains('lb-map-screen') && !$('uxSideRotate')) return;
-    if (ev.key === '[') { step(-1); ev.preventDefault(); }
-    else if (ev.key === ']') { step(1); ev.preventDefault(); }
-    else if (ev.key === '\\') { north(); ev.preventDefault(); }
-  });
-
-  window.lbRotateMap = { step: step, north: north, set: setAngle, open: open, close: close };
 })();
 </script>
 
