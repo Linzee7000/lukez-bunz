@@ -34872,6 +34872,24 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   #rmPrint .rm-page.rm-port { page: rmport; }
   #rmPrint .rm-page.rm-land { page: rmland; }
   #rmPrint .rm-page:last-child { break-after: auto; page-break-after: auto; }
+  /* Pages: each printed page is a frame on the map (layout view and the printed layout page); on each printed
+     page the neighbouring pages show as dashed boxes (where they overlap it) and edge tabs (which way they carry on) */
+  #lbRunMap .rm-frame { position: absolute; z-index: 700; box-sizing: border-box; border: 2.5px dashed #1d4ed8; background: rgba(29,78,216,.05); pointer-events: none; }
+  #lbRunMap .rm-frame.live { pointer-events: auto; cursor: move; touch-action: none; }
+  #lbRunMap .rm-frame.sel { border-style: solid; border-color: #dc2626; background: rgba(220,38,38,.06); }
+  #lbRunMap .rm-frame > b { position: absolute; left: -2px; top: -2px; min-width: 26px; height: 26px; padding: 0 6px; box-sizing: border-box; background: #1d4ed8; color: #fff; font: 800 15px/26px system-ui, sans-serif; text-align: center; border-radius: 0 0 6px 0; }
+  #lbRunMap .rm-frame.sel > b { background: #dc2626; }
+  #lbRunMap .rm-frame > i { position: absolute; left: 30px; top: 3px; font: 700 11px/1.2 system-ui, sans-serif; font-style: normal; color: #1d4ed8; background: rgba(255,255,255,.85); padding: 1px 4px; border-radius: 3px; white-space: nowrap; }
+  #lbRunMap .rm-link { position: absolute; z-index: 690; box-sizing: border-box; border: 2px dashed #334155; pointer-events: none; }
+  #lbRunMap .rm-link > span { position: absolute; background: #334155; color: #fff; font: 800 11px/1 system-ui, sans-serif; padding: 3px 6px; border-radius: 3px; white-space: nowrap; }
+  #lbRunMap .rm-tab { position: absolute; z-index: 820; background: #111827; color: #fff; font: 800 12px/1 system-ui, sans-serif; padding: 5px 8px; border-radius: 4px; white-space: nowrap; pointer-events: none; box-shadow: 0 1px 4px rgba(0,0,0,.3); }
+  #lbRunMap .rm-tools .rm-pchip { min-width: 40px; }
+  /* no tint on paper: with "background graphics" off (the default on phones) a see-through fill prints as solid
+     white and hides the route under every page frame */
+  @media print { #lbRunMap .rm-frame, #lbRunMap .rm-link { background: none !important; } }
+  /* print this map's own colours even with "background graphics" off: otherwise the edge tabs, page labels, frame
+     numbers and note pins (white text on a dark fill) come out as white on white, and the key loses its white card */
+  #lbRunMap .rm-page, #lbRunMap .rm-page * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   @media print {
     /* everything but the run map is hidden on paper. The extra :not(#rm-none) only raises the specificity, so
        app overlays with strong "html body.ux2 #id { display: ... !important }" rules (e.g. the #uxToast notice)
@@ -35060,7 +35078,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     // cards: title + legend, and the notes
     var sub = o.stream + ' · ' + o.day + (o.week ? ' · Week ' + o.week : '');
     var card = document.createElement('div'); card.className = 'rm-card rm-key';
-    card.innerHTML = northSvg(st.rot) + '<div class="rm-band" style="background:' + (COL[o.stream] || '#16a34a') + '"></div><div class="rm-title">Run ' + esc(o.run) + '</div><div class="rm-sub">' + esc(sub) + '</div>' +
+    card.innerHTML = northSvg(st.rot) + '<div class="rm-band" style="background:' + (COL[o.stream] || '#16a34a') + '"></div><div class="rm-title">Run ' + esc(o.run) + '</div><div class="rm-sub">' + esc(sub) + (opts.pageLabel ? ' \u00b7 <b style="color:#111">' + esc(opts.pageLabel) + '</b>' : '') + '</div>' +
       '<div class="rm-stats"><span><b>' + houses.toLocaleString() + '</b>houses</span><span><b>' + bins.toLocaleString() + '</b>bins</span><span><b>' + esc(R.km) + '</b>km</span></div>' +
       '<div class="rm-leg">' + legendSections(used, E) + '<div><i style="border-color:#7c3aed"></i>Reverse in</div><div><i style="border-color:#f59e0b"></i>Drive in, back out</div><div><i class="box"></i>School</div><div><i class="dot"></i>House</div><div><i class="num">1</i>Note</div></div>';
     st.page.appendChild(card);
@@ -35076,6 +35094,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     // taps on the cards stay on the cards (they don't add a note or colour the street underneath)
     Array.prototype.forEach.call(st.page.querySelectorAll('.rm-card, .rm-foot'), function(c){ L.DomEvent.disableClickPropagation(c); });
     if (opts.view) map.setView(opts.view.c, opts.view.z, { animate: false });
+    else if (opts.fitPts) fitTurned(st, bboxOf(all.concat(opts.fitPts)), all.concat(opts.fitPts));
     else fitTurned(st, page.b, all);
     placeCards(st);
     // while editing the cards stay put (so nothing jumps under your finger); otherwise they move to the emptiest corners
@@ -35267,12 +35286,118 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   /* ---- the viewer ---- */
   var el = null, view = null, curKey = null, pagesCache = [], curPage = 0, pageSize = null;
   var editing = false, tool = 'paint', colour = '#ff0000', orientOverride = null;
+  /* ---- Pages: split a run over several printed pages ----
+     Each page is { c: [lat, lng] centre, z: map zoom at printed-paper size, o: 'port' | 'land' }, kept per run on
+     this phone (lbRunMapPages). All pages share the run's turn angle, so a page frame is always square to the page. */
+  var pagesMode = false, selPage = 0;
+  function sheetsFor(key){ var a = (lsGet('lbRunMapPages', {}) || {})[key]; return Array.isArray(a) ? a : []; }
+  function saveSheets(key, arr){ var all = lsGet('lbRunMapPages', {}) || {}; if (arr.length) all[key] = arr; else delete all[key]; lsSet('lbRunMapPages', all); }
+  function paperPx(o){ return [(PAGE[o][0] - 1) * MM, (PAGE[o][1] - 1) * MM]; }
+  // a page's rectangle on a drawn map (page pixels), from its centre and zoom
+  function frameRect(st, f){
+    var cp = st.map.latLngToContainerPoint(f.c), v = toView(st, cp.x, cp.y), k = Math.pow(2, st.map.getZoom() - f.z), pp = paperPx(f.o);
+    var w = pp[0] * k, h = pp[1] * k;
+    return { x: v.x - w / 2, y: v.y - h / 2, w: w, h: h, cx: v.x, cy: v.y };
+  }
+  // the page frames on the screen (live: tap to pick, drag to move) or on the printed layout page
+  function drawFrames(st, P, live){
+    st.frameEls = st.frameEls || [];
+    while (st.frameEls.length > P.length) { var gone = st.frameEls.pop(); if (gone.parentNode) gone.parentNode.removeChild(gone); }
+    P.forEach(function(f, i){
+      var d = st.frameEls[i];
+      if (!d) {
+        d = document.createElement('div'); d.className = 'rm-frame' + (live ? ' live' : ''); d.innerHTML = '<b></b><i></i>';
+        st.page.appendChild(d); st.frameEls[i] = d;
+        if (live) frameDrag(d, st, i);
+      }
+      var r = frameRect(st, f);
+      d.style.left = r.x + 'px'; d.style.top = r.y + 'px'; d.style.width = r.w + 'px'; d.style.height = r.h + 'px';
+      d.querySelector('b').textContent = i + 1;
+      d.querySelector('i').textContent = 'Page ' + (i + 1) + (live ? '' : ' of ' + P.length);
+      d.classList.toggle('sel', !!live && i === selPage);
+    });
+  }
+  function frameDrag(d, st, i){
+    var s0 = null;
+    d.addEventListener('pointerdown', function(e){
+      if (e.button > 0) return;
+      e.preventDefault(); e.stopPropagation();
+      var P = sheetsFor(curKey); if (!P[i]) return;
+      if (selPage !== i) { selPage = i; paintTools(); drawFrames(st, P, true); }
+      var r = frameRect(st, P[i]);
+      s0 = { x: e.clientX, y: e.clientY, cx: r.cx, cy: r.cy, moved: false };
+      try { d.setPointerCapture(e.pointerId); } catch (x) {}
+    });
+    d.addEventListener('pointermove', function(e){
+      if (!s0) return;
+      var dx = e.clientX - s0.x, dy = e.clientY - s0.y; if (!s0.moved && Math.abs(dx) + Math.abs(dy) < 4) return;
+      s0.moved = true;
+      var P = sheetsFor(curKey); if (!P[i]) return;
+      var q = fromView(st, s0.cx + dx, s0.cy + dy), ll = st.map.containerPointToLatLng(L.point(q.x, q.y));
+      P[i].c = [+ll.lat.toFixed(6), +ll.lng.toFixed(6)];
+      st._dragP = P; drawFrames(st, P, true);
+    });
+    function end(){ if (!s0) return; var m = s0.moved; s0 = null; if (m && st._dragP) { saveSheets(curKey, st._dragP); st._dragP = null; } }
+    d.addEventListener('pointerup', end); d.addEventListener('pointercancel', end);
+  }
+  // on printed page i: the other pages that touch it - dashed box where they overlap it, and a tab on the edge
+  // pointing the way to them. Pages further away than a third of the page aren't neighbours and get nothing.
+  function drawLinks(st, P, i){
+    var W = st.W, H = st.H, tabs = [];
+    P.forEach(function(f, j){
+      if (j === i) return;
+      var r = frameRect(st, f);
+      var ix0 = Math.max(0, r.x), iy0 = Math.max(0, r.y), ix1 = Math.min(W, r.x + r.w), iy1 = Math.min(H, r.y + r.h);
+      var overlap = ix1 > ix0 && iy1 > iy0;
+      var gapX = Math.max(0, r.x - W, -(r.x + r.w)), gapY = Math.max(0, r.y - H, -(r.y + r.h));
+      if (!overlap && Math.max(gapX, gapY) > Math.min(W, H) / 3) return;
+      if (overlap) {
+        var box = document.createElement('div'); box.className = 'rm-link';
+        box.style.left = r.x + 'px'; box.style.top = r.y + 'px'; box.style.width = r.w + 'px'; box.style.height = r.h + 'px';
+        var lab = document.createElement('span'); lab.textContent = 'Page ' + (j + 1);
+        // label just inside the part of that page that's on this sheet, at the corner nearest this sheet's middle
+        lab.style.left = (Math.min(Math.max(ix0 + 4, W / 2), ix1 - 60) - r.x) + 'px';
+        lab.style.top = (Math.min(Math.max(iy0 + 4, H / 2), iy1 - 20) - r.y) + 'px';
+        // (only when that page's middle is on this sheet - otherwise its edge tab below names it, in the same spot)
+        if (r.cx > 0 && r.cx < W && r.cy > 0 && r.cy < H) box.appendChild(lab);
+        st.page.appendChild(box);
+      }
+      // the tab: where the line from this page's middle to that page's middle leaves this page
+      var dx = r.cx - W / 2, dy = r.cy - H / 2;
+      if (r.cx > 0 && r.cx < W && r.cy > 0 && r.cy < H) return;          // that page sits inside this one: the box says it all
+      var tx = dx ? (W / 2) / Math.abs(dx) : Infinity, ty = dy ? (H / 2) / Math.abs(dy) : Infinity, t = Math.min(tx, ty);
+      var side = tx < ty ? (dx > 0 ? 'r' : 'l') : (dy > 0 ? 'b' : 't');
+      var px = W / 2 + dx * t, py = H / 2 + dy * t;
+      var tab = document.createElement('div'); tab.className = 'rm-tab';
+      tab.textContent = side === 'r' ? 'Page ' + (j + 1) + ' \u2192' : side === 'l' ? '\u2190 Page ' + (j + 1) : side === 't' ? '\u2191 Page ' + (j + 1) : '\u2193 Page ' + (j + 1);
+      st.page.appendChild(tab);
+      var tw = tab.offsetWidth || 70, th = tab.offsetHeight || 22;
+      var x = side === 'r' ? W - tw - 2 : side === 'l' ? 2 : Math.max(30, Math.min(W - tw - 30, px - tw / 2));
+      var y = side === 'b' ? H - th - 2 : side === 't' ? 2 : Math.max(30, Math.min(H - th - 30, py - th / 2));
+      // don't stack two tabs on the same spot
+      for (var k = 0; k < tabs.length; k++) { var o = tabs[k]; if (Math.abs(o.x - x) < tw && Math.abs(o.y - y) < th + 4) { if (side === 'l' || side === 'r') y += th + 6; else x += tw + 6; k = -1; } }
+      tabs.push({ x: x, y: y }); tab.style.left = x + 'px'; tab.style.top = y + 'px';
+    });
+  }
+  function pagesTools(t){
+    var P = sheetsFor(curKey), f = P[selPage];
+    t.innerHTML = '<div class="rm-trow"><button type="button" data-rm="padd">+ Add page</button>' +
+      P.map(function(x, i){ return '<button type="button" data-rm="psel" data-v="' + i + '" class="rm-pchip' + (i === selPage ? ' on' : '') + '">' + (i + 1) + '</button>'; }).join('') +
+      (f ? '<button type="button" data-rm="porient">' + (f.o === 'port' ? 'Portrait' : 'Landscape') + '</button>' +
+        '<button type="button" data-rm="pzin" title="Less area, more detail">Zoom in</button><button type="button" data-rm="pzout" title="More area, less detail">Zoom out</button>' +
+        '<button type="button" data-rm="pdel">Delete page ' + (selPage + 1) + '</button>' : '') +
+      '<button type="button" data-rm="pprint"' + (P.length ? '' : ' disabled') + '>Print all pages (' + (P.length ? P.length + 1 : 0) + ' sheets)</button></div>' +
+      '<div class="rm-hint">' + (P.length
+        ? 'Drag a page\u2019s frame to move it; tap it to pick it. Prints a layout sheet showing where every page sits, then each page, with dashed boxes and edge arrows where it joins the next.'
+        : 'Add a page, then drag its frame to where it should go. Zoom in on a page for more detail; add as many as the run needs.') + '</div>';
+  }
+  function pagesChanged(P){ saveSheets(curKey, P); if (selPage >= P.length) selPage = Math.max(0, P.length - 1); paintTools(); if (view) drawFrames(view, P, true); }
   // how far each run's map is turned (whole degrees clockwise), kept per run on this phone
   function rotFor(key){ var r = (lsGet('lbRunMapRot', {}) || {})[key]; return isFinite(+r) ? +r : 0; }
   function setRot(deg){
     deg = ((Math.round(deg) % 360) + 360) % 360;
     var all = lsGet('lbRunMapRot', {}) || {}; if (deg) all[curKey] = deg; else delete all[curKey]; lsSet('lbRunMapRot', all);
-    if (view) { setGeom(view, deg); setNorth(view); placeCards(view); }
+    if (view) { setGeom(view, deg); setNorth(view); placeCards(view); if (pagesMode) drawFrames(view, sheetsFor(curKey), true); }
     rotLabel();
   }
   // a step lands on the next whole multiple of its size, so 5-degree steps square up a 1-degree tweak
@@ -35306,7 +35431,9 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   /* edit tools: colour swatches, Colour streets / Draw a line / Remove / Add a note, Undo last line, Name the sections */
   function paintTools(){
     var t = document.getElementById('rmTools'); if (!t) return;
-    t.style.display = editing ? '' : 'none'; if (!editing) { t.innerHTML = ''; return; }
+    t.style.display = (editing || pagesMode) ? '' : 'none';
+    if (pagesMode && !editing) { pagesTools(t); return; }
+    if (!editing) { t.innerHTML = ''; return; }
     var E = edits(curKey);
     var btn = function(v, label){ return '<button type="button" data-rm="tool" data-v="' + v + '" class="' + (tool === v ? 'on' : '') + '">' + label + '</button>'; };
     t.innerHTML = '<div class="rm-trow"><span class="rm-tl">Colour</span>' + PALETTE.map(function(c){ return '<button type="button" data-rm="colour" data-v="' + c + '" class="rm-sw' + (colour === c ? ' on' : '') + '" style="background:' + c + '" title="' + esc(SECTION_NAMES[c]) + '"></button>'; }).join('') +
@@ -35356,17 +35483,37 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       '<button type="button" data-rm="rot0" title="North up">N</button>' +
       '<button type="button" class="rm-fine" data-rm="rotR" data-step="1" title="Turn the map 1\u00b0 right" aria-label="Turn the map 1 degree right">1\u00b0</button><button type="button" data-rm="rotR" data-step="5" title="Turn the map 5\u00b0 right" aria-label="Turn the map 5 degrees right">5\u00b0 \u21bb</button></span>' +
       '<select id="rmKey" title="Where the key goes (or drag the key on the map)"><option value="auto">Key: auto</option><option value="tl">Key: top left</option><option value="tr">Key: top right</option><option value="bl">Key: bottom left</option><option value="br">Key: bottom right</option><option value="drag" hidden>Key: where dragged</option></select>' +
-      '<button type="button" data-rm="fit" title="Show the whole run">Whole run</button><button type="button" data-rm="turn" title="Portrait / landscape">Turn page</button><button type="button" data-rm="edit">Edit</button><button type="button" data-rm="printview" title="Prints exactly what is on screen">Print</button><button type="button" data-rm="close">Close</button></div>' +
+      '<button type="button" data-rm="fit" title="Show the whole run">Whole run</button><button type="button" data-rm="turn" title="Portrait / landscape">Turn page</button><button type="button" data-rm="edit">Edit</button><button type="button" data-rm="pages" title="Split the run over several printed pages">Pages</button><button type="button" data-rm="printview" title="Prints exactly what is on screen">Print</button><button type="button" data-rm="close">Close</button></div>' +
       '<div id="rmTools" class="rm-tools"></div></div><div id="rmView"></div><div id="rmPrint"></div>';
     document.body.appendChild(el);
     el.addEventListener('click', function(e){
       var b = e.target.closest && e.target.closest('[data-rm]'); if (!b || b.disabled) return;
       var a = b.getAttribute('data-rm');
       if (a === 'close') { editing = false; el.style.display = 'none'; return; }
-      if (a === 'printview') printView();
+      if (a === 'printview') printView(false);
+      if (a === 'pages') { pagesMode = !pagesMode; if (pagesMode) editing = false; selPage = 0; renderView(true, true); }
+      if (a === 'padd' && view) {
+        var P = sheetsFor(curKey), po = orientOverride || pagesCache[0].o;
+        // a new page starts in the middle of what's on screen, half the page's width across
+        var zz = view.map.getZoom() + Math.log2(paperPx(po)[0] / (0.5 * view.W));
+        P.push({ c: [+view.map.getCenter().lat.toFixed(6), +view.map.getCenter().lng.toFixed(6)], z: +Math.min(19, zz).toFixed(2), o: po });
+        selPage = P.length - 1; pagesChanged(P);
+      }
+      if (a === 'psel') { selPage = +b.getAttribute('data-v'); paintTools(); if (view) drawFrames(view, sheetsFor(curKey), true); }
+      if (a === 'porient' || a === 'pzin' || a === 'pzout' || a === 'pdel') {
+        var Q = sheetsFor(curKey), f = Q[selPage];
+        if (f) {
+          if (a === 'porient') f.o = f.o === 'port' ? 'land' : 'port';
+          if (a === 'pzin') f.z = +Math.min(19, f.z + 0.25).toFixed(2);
+          if (a === 'pzout') f.z = +Math.max(10, f.z - 0.25).toFixed(2);
+          if (a === 'pdel') Q.splice(selPage, 1);
+          pagesChanged(Q);
+        }
+      }
+      if (a === 'pprint') printView(true);
       if (a === 'fit') renderView(false);
       if (a === 'turn') { var pg = pagesCache[curPage] || pagesCache[0]; orientOverride = ((orientOverride || pg.o) === 'land') ? 'port' : 'land'; renderView(true, true); }
-      if (a === 'edit') { editing = !editing; tool = 'paint'; renderView(true, true); }
+      if (a === 'edit') { editing = !editing; if (editing) pagesMode = false; tool = 'paint'; renderView(true, true); }
       if (a === 'tool') { tool = b.getAttribute('data-v'); renderView(true); }
       if (a === 'colour') { colour = b.getAttribute('data-v'); if (tool !== 'draw') tool = 'paint'; renderView(true); }
       if (a === 'undo') { var E = edits(curKey); if (E.drawn.length) { E.drawn.pop(); saveEdits(curKey, E); } renderView(true); }
@@ -35432,6 +35579,11 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     if (editing && keptOrder) opts.order = keptOrder;
     view = draw(d.map, curKey, R, pg, opts);
     rotLabel(); keyPicker();
+    Array.prototype.forEach.call(el.querySelectorAll('[data-rm="pages"]'), function(b){ var n = sheetsFor(curKey).length; b.classList.toggle('on', pagesMode); b.textContent = pagesMode ? 'Done with pages' : 'Pages' + (n ? ' (' + n + ')' : ''); });
+    if (pagesMode) {
+      var vw = view, redraw = function(){ drawFrames(vw, sheetsFor(curKey), true); };
+      redraw(); view.map.on('move zoom moveend zoomend', redraw);   // frames follow the map (setRot redraws them after a turn)
+    }
   }
   function show(key){
     curKey = key; curPage = 0; orientOverride = null; pageSize = null;
@@ -35439,28 +35591,57 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     pagesCache = DATA[key] ? pagesFor(DATA[key]) : [];
     renderView();
   }
-  // Print exactly what is on screen: same page shape, same centre, the zoom scaled up by how much bigger the paper is,
-  // and the cards in the same corners
+  // Print what's on screen (same page shape and centre, the zoom scaled up by how much bigger the paper is, the cards
+  // in the same corners; the page frames too while in Pages) - or, with all, a layout sheet showing where every page
+  // sits followed by each page, each marked with where it joins its neighbours
   var printing = [];
-  function printView(){
+  function printView(all){
     var R = DATA[curKey]; if (!R || !view) return;
-    var o = orientOverride || pagesCache[0].o;
+    var o = orientOverride || pagesCache[0].o, rot = rotFor(curKey), kp = keyFor(curKey), P = sheetsFor(curKey);
     var screenW = view.page.clientWidth, c = view.map.getCenter(), z = view.map.getZoom(), order = view.order;   // before the screen view is hidden for printing
+    var frames = (pagesMode || all) && P.length > 0;
+    var sheets = [{ o: o, screen: true, order: order, frames: frames, label: frames ? 'Page layout' : '' }];
+    if (all) P.forEach(function(f, i){ sheets.push({ o: f.o, view: { c: f.c, z: f.z }, page: i, label: 'Page ' + (i + 1) + ' of ' + P.length }); });
     var host = document.getElementById('rmPrint'); printing.forEach(function(s){ try { s.map.remove(); } catch (e) {} }); printing = []; host.innerHTML = '';
     document.body.classList.add('rm-printing');
     // (fallback for browsers without named pages - see @page rmport above) put this after the run sheet's @page
     // rule so it wins while the run map prints, and take it out again afterwards so the run sheet still prints landscape
+    // Only where named pages aren't supported: in Chrome a later unnamed @page size beats the named ones, which
+    // would force every sheet to the same orientation (a portrait page among landscape ones printed landscape)
+    var named = !!(window.CSS && CSS.supports && CSS.supports('page', 'rmport'));
     var css = document.getElementById('rmPageStyle');
     if (!css) { css = document.createElement('style'); css.id = 'rmPageStyle'; }
-    document.body.appendChild(css);
-    css.textContent = '@media print { @page { size: A4 ' + (o === 'port' ? 'portrait' : 'landscape') + '; margin: 6mm; } }';
-    var d = pageDiv(o, null); host.appendChild(d.page);
-    var paperW = d.page.clientWidth || PAGE[o][0] * MM;
-    printing.push(draw(d.map, curKey, R, pagesCache[0], { view: { c: c, z: z + Math.log2(paperW / screenW) }, order: order, rot: rotFor(curKey), keyPos: keyFor(curKey) }));
-    setTimeout(function(){
-      try { window.print(); } catch (x) {}
-      setTimeout(function(){ try { css.remove(); } catch (e) {} document.body.classList.remove('rm-printing'); printing.forEach(function(s){ try { s.map.remove(); } catch (e) {} }); printing = []; host.innerHTML = ''; }, 800);
-    }, 1800);
+    if (named) css.textContent = '';
+    else { document.body.appendChild(css); css.textContent = '@media print { @page { size: A4 ' + (o === 'port' ? 'portrait' : 'landscape') + '; margin: 6mm; } }'; }
+    // the layout sheet shows the whole run and every page frame, however the screen happens to be zoomed
+    var fitPts = null;
+    if (all && P.length) {
+      fitPts = [];
+      P.forEach(function(f){ var r = frameRect(view, f); [[r.x, r.y], [r.x + r.w, r.y], [r.x, r.y + r.h], [r.x + r.w, r.y + r.h]].forEach(function(q){ var cq = fromView(view, q[0], q[1]), ll = view.map.containerPointToLatLng(L.point(cq.x, cq.y)); fitPts.push([ll.lat, ll.lng]); }); });
+    }
+    sheets.forEach(function(sh){
+      var d = pageDiv(sh.o, null); host.appendChild(d.page);
+      var v = sh.screen ? (fitPts ? null : { c: c, z: z + Math.log2((d.page.clientWidth || PAGE[sh.o][0] * MM) / screenW) }) : sh.view;
+      var st = draw(d.map, curKey, R, pagesCache[0], { view: v, fitPts: sh.screen ? fitPts : null, order: fitPts ? null : sh.order, rot: rot, keyPos: kp, pageLabel: sh.label });
+      if (sh.frames) drawFrames(st, P, false);
+      if (sh.page != null) drawLinks(st, P, sh.page);
+      printing.push(st);
+    });
+    // print once the street tiles are in (up to 15 s - several pages can take a while on a phone)
+    whenTiles(printing, 15000).then(function(){
+      setTimeout(function(){
+        try { window.print(); } catch (x) {}
+        setTimeout(function(){ try { css.remove(); } catch (e) {} document.body.classList.remove('rm-printing'); printing.forEach(function(s){ try { s.map.remove(); } catch (e) {} }); printing = []; host.innerHTML = ''; }, 800);
+      }, 400);
+    });
+  }
+  function whenTiles(states, ms){
+    return new Promise(function(done){
+      var left = 0, finished = false, finish = function(){ if (!finished) { finished = true; done(); } };
+      states.forEach(function(s){ s.map.eachLayer(function(l){ if (l instanceof L.TileLayer && l.isLoading && l.isLoading()) { left++; l.once('load', function(){ if (--left <= 0) finish(); }); } }); });
+      if (!left) setTimeout(finish, 600);
+      setTimeout(finish, ms);
+    });
   }
 
   function keys(){ return Object.keys(DATA || {}); }
