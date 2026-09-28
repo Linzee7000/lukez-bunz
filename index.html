@@ -35289,5 +35289,777 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
 })();
 </script>
 
+<script id="lb-council-requests">
+/* =====================================================================
+   Council requests: load the council's "Resource Pool Requests" sheet
+   (FULL BIN / REPAIR BIN jobs on public street litter bins) and, for each
+   row, work out which of our Street Litter sites it means, which run(s)
+   empty it, whether a scheduled visit has already happened since it was
+   reported, and when it is next due. Results can be exported as a CSV.
+
+   Why: the council sends these several times a week and each row only has
+   free text ("ToiletBloc T173  Shire Hall Beach  Off Esplanade",
+   "Tideways 3098 Point Nepean Road") - never our Site ID - so each one was
+   being worked out by hand from the site list, the map and the run exports.
+
+   How a row is matched (in this order of trust):
+     1. a bin serial written in the row that matches a site's recorded bin
+     2. a house number on a street -> the kerbside house at that address
+        (siteRecords) gives a position -> nearest Street Litter site
+     3. same street + nearest street number (same side of the road scores
+        higher), and landmark words from the address / location field
+        ("Rotaract", "Beach Club") against the site's description
+     4. if that still leaves it unclear and there is signal: a Nominatim
+        search for each part of the address ("Shire Hall Beach, Mornington"),
+        kept only if it lands inside that suburb's sites -> nearest site
+   The council's address field separates its parts with two spaces, which is
+   why the address is split on runs of 2+ spaces for step 4.
+
+   Runs and times come from STREET_LITTER_RUN_DATA (the depot KMZ exports):
+   stops linked to the site's pid first, then unlinked stops within 50 m for
+   sites that were never linked, then the site list's own run days. Times are
+   when the truck usually gets there, not a promise - hence the "~".
+   Nothing here edits a site or sends anything; it is read-only.
+   ===================================================================== */
+(function(){
+  'use strict';
+  var GF = {};
+  function g(n){ try { return (GF[n] || (GF[n] = new Function('return ' + n)))(); } catch (e) { return undefined; } }
+  function $(id){ return document.getElementById(id); }
+  function esc(s){ return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+  var DAYS = ['SUN','MON','TUE','WED','THU','FRI','SAT'];
+  var DAY_NAMES = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+  var MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+  // ---- text normalising --------------------------------------------------------------
+  var ABBR = { RD:'ROAD', ST:'STREET', STR:'STREET', AVE:'AVENUE', AV:'AVENUE', CT:'COURT', CRT:'COURT', DR:'DRIVE', DVE:'DRIVE',
+    PDE:'PARADE', HWY:'HIGHWAY', CRES:'CRESCENT', CR:'CRESCENT', PL:'PLACE', GR:'GROVE', GV:'GROVE', BVD:'BOULEVARD',
+    BLVD:'BOULEVARD', ESP:'ESPLANADE', TCE:'TERRACE', LN:'LANE', CL:'CLOSE', CCT:'CIRCUIT', OPP:'OPPOSITE', MT:'MOUNT',
+    NTH:'NORTH', STH:'SOUTH', RES:'RESERVE', CNR:'CORNER', PK:'PARK' };
+  var TYPES = {}; ['ROAD','STREET','AVENUE','COURT','DRIVE','PARADE','HIGHWAY','CRESCENT','PLACE','GROVE','BOULEVARD','TERRACE',
+    'LANE','CLOSE','WAY','CIRCUIT','RISE','SQUARE','MEWS','TRACK'].forEach(function(t){ TYPES[t] = 1; });
+  // streets that are just one word with no "Road"/"Street" after them
+  var SOLO = { ESPLANADE:1, PROMENADE:1, BROADWAY:1, STRAND:1 };
+  var STOP = {}; ('OFF OPPOSITE NEAR AT OUTSIDE CORNER AND BEHIND NEXT TO THE IN ON OF FRONT BY BIN BINS FULL VIC VICTORIA ' +
+    'OVERFLOWING RUBBISH LITTER STREET ROAD').split(' ').forEach(function(t){ STOP[t] = 1; });
+  // words lots of sites share: worth a little, not enough to pick a site on their own
+  var GENERIC = {}; ('PARK BEACH CARPARK CAR RESERVE TOILET TOILETS BLOCK SHOPS SHOP BUS STOP PLAYGROUND NORTH SOUTH EAST WEST ' +
+    'FORESHORE PIER ENTRANCE LOOKOUT PATH TRACK AREA CENTRE CENTER PICNIC WALKING CLUB').split(' ').forEach(function(t){ GENERIC[t] = 1; });
+
+  function tokens(s){
+    return String(s == null ? '' : s).toUpperCase().replace(/&/g, ' AND ').replace(/[^A-Z0-9]+/g, ' ').trim().split(' ')
+      .filter(Boolean).map(function(t){ return ABBR[t] || t; });
+  }
+  function normSuburb(s){ return tokens(s).join(' '); }
+  // street name = a street-type word plus up to 2 name words before it
+  // (POINT NEPEAN ROAD, TIGA COURT), or a one-word street like ESPLANADE
+  function streetOf(toks){
+    for (var i = toks.length - 1; i >= 0; i--) {
+      var t = toks[i];
+      if (SOLO[t]) return t;
+      if (TYPES[t] && i > 0) {
+        var name = [];
+        for (var j = i - 1; j >= 0 && name.length < 2; j--) {
+          var w = toks[j];
+          if (/\d/.test(w) || STOP[w] || TYPES[w] || SOLO[w]) break;
+          name.unshift(w);
+        }
+        if (name.length) return name.concat(t).join(' ');
+      }
+    }
+    return '';
+  }
+  function sameStreet(a, b){
+    if (!a || !b) return 0;
+    if (a === b) return 2;
+    return (a.slice(-(b.length + 1)) === ' ' + b || b.slice(-(a.length + 1)) === ' ' + a) ? 1 : 0;
+  }
+  function editDist1(a, b){ // true if a and b differ by at most one edit (Rotoract / Rotaract)
+    if (a === b) return true;
+    if (Math.abs(a.length - b.length) > 1) return false;
+    var i = 0, j = 0, d = 0;
+    while (i < a.length && j < b.length) {
+      if (a[i] === b[j]) { i++; j++; continue; }
+      if (++d > 1) return false;
+      if (a.length > b.length) i++; else if (b.length > a.length) j++; else { i++; j++; }
+    }
+    return d + (a.length - i) + (b.length - j) <= 1;
+  }
+  function wordHit(w, set){
+    if (set[w]) return true;
+    if (w.length < 6) return false;
+    for (var k in set) if (k.length >= 6 && editDist1(w, k)) return true;
+    return false;
+  }
+  function metres(la1, ln1, la2, ln2){
+    var R = 6371000, r = Math.PI / 180, x = (ln2 - ln1) * r * Math.cos((la1 + la2) / 2 * r), y = (la2 - la1) * r;
+    return Math.sqrt(x * x + y * y) * R;
+  }
+
+  // ---- Street Litter sites, prepared once ------------------------------------------------
+  var PREP = null;
+  function prepSites(){
+    if (PREP) return PREP;
+    var list = (typeof STREET_LITTER_SITES !== 'undefined' && Array.isArray(STREET_LITTER_SITES)) ? STREET_LITTER_SITES : [];
+    PREP = list.map(function(s){
+      var addr = String(s.addr || ''), cut = -1, re = / - /g, m;
+      // "21 - 159 Ocean Beach Road - Sorrento SHOPS": the first " - " is a number range, not the description split
+      while ((m = re.exec(addr))) { if (/[A-Za-z]/.test(addr.slice(0, m.index))) { cut = m.index; break; } }
+      var head = cut >= 0 ? addr.slice(0, cut) : addr, desc = cut >= 0 ? addr.slice(cut + 3) : '';
+      var ht = tokens(head), street = streetOf(ht);
+      if (!street) street = streetOf(tokens(addr));
+      var opp = /\bopp/i.test(head), nums = [], rm;
+      var rr = /(\d+)\s*-\s*(\d+)|(\d+)/g;
+      var headNums = head.replace(/\bT\d+\b/gi, '');
+      while ((rm = rr.exec(headNums))) {
+        if (rm[1]) nums.push([+rm[1], +rm[2]]); else nums.push([+rm[3], +rm[3]]);
+        if (nums.length > 2) break;
+      }
+      var streetWords = {}; street.split(' ').forEach(function(w){ streetWords[w] = 1; });
+      var words = {};
+      tokens(desc + ' ' + head).forEach(function(w){ if (w.length >= 3 && !/^\d/.test(w) && !STOP[w] && !TYPES[w] && !streetWords[w]) words[w] = 1; });
+      var serials = {};
+      (s.bins || []).forEach(function(b){ var v = String(b.serial || '').replace(/\s+/g, '').toUpperCase(); if (v.length >= 5 && /\d{5,}/.test(v)) serials[v] = 1; });
+      var recycle = /\(R\)/.test(addr) || (!(s.rl || []).length && (s.rr || []).length > 0);
+      return { s: s, recycle: recycle, suburb: normSuburb(s.suburb), street: street, nums: nums, opp: opp, words: words, serials: serials,
+               lat: +s.lat || 0, lng: +s.lng || 0 };
+    });
+    return PREP;
+  }
+
+  // ---- kerbside houses as an offline address -> position lookup ----------------------------
+  var HOUSES = null, HOUSES_N = -1;
+  function houseIndex(){
+    var recs = g('siteRecords') || [];
+    if (HOUSES && HOUSES_N === recs.length) return HOUSES;
+    HOUSES = {}; HOUSES_N = recs.length;
+    recs.forEach(function(r){
+      var lat = +r.lat, lng = +r.lng;
+      if (!(lat && lng)) {
+        var st = r.soloStreams || {}, b = [].concat(st.Garbage || [], st.Recycling || [], st.FOGO || []).filter(function(x){ return +x.lat && +x.lng; })[0];
+        if (b) { lat = +b.lat; lng = +b.lng; }
+      }
+      if (!(lat && lng) || Math.abs(lat) > 90) return;
+      var line = String(r.baseStreetLine || String(r.addressText || '').split(',')[0]);
+      var mm = /^\s*(\d+)[A-Z]?\s+(.+)$/i.exec(line); if (!mm) return;
+      var street = streetOf(tokens(mm[2])); if (!street) return;
+      var sub = normSuburb(String(r.suburbLine || '').replace(/\s*\d{4}\s*$/, ''));
+      var key = sub + '|' + street;
+      (HOUSES[key] || (HOUSES[key] = [])).push({ n: +mm[1], lat: lat, lng: lng, a: line });
+    });
+    return HOUSES;
+  }
+  function housePoint(suburb, street, num){
+    if (!street || !num) return null;
+    var idx = houseIndex(), best = null;
+    Object.keys(idx).forEach(function(k){
+      var p = k.split('|'); if (p[0] !== suburb || !sameStreet(p[1], street)) return;
+      idx[k].forEach(function(h){
+        var d = Math.abs(h.n - num), cost = d + ((h.n % 2) !== (num % 2) ? 3 : 0);
+        if (d <= 20 && (!best || cost < best.cost)) best = { cost: cost, exact: d === 0, lat: h.lat, lng: h.lng, a: h.a };
+      });
+    });
+    return best;
+  }
+
+  // ---- online fallback: Nominatim, only kept if it lands among that suburb's sites -------------
+  var geoCache = {};
+  try { geoCache = JSON.parse(localStorage.getItem('lbCouncilGeoCache') || '{}') || {}; } catch (e) { geoCache = {}; }
+  var lastGeo = 0;
+  function sleep(ms){ return new Promise(function(r){ setTimeout(r, ms); }); }
+  async function nominatim(q, box){
+    var key = q.toUpperCase();
+    if (Object.prototype.hasOwnProperty.call(geoCache, key)) return geoCache[key];
+    if (navigator.onLine === false) return null;
+    var wait = 1100 - (Date.now() - lastGeo); if (wait > 0) await sleep(wait); // Nominatim's 1 request/second rule
+    lastGeo = Date.now();
+    var url = 'https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&countrycodes=au&bounded=1&viewbox=' +
+      [box.w, box.n, box.e, box.s].join(',') + '&q=' + encodeURIComponent(q);
+    var hit = null;
+    try {
+      var ctl = window.AbortController ? new AbortController() : null, t = ctl && setTimeout(function(){ ctl.abort(); }, 8000);
+      var res = await fetch(url, ctl ? { signal: ctl.signal } : {});
+      if (t) clearTimeout(t);
+      if (!res.ok) return null;
+      var arr = await res.json();
+      if (arr && arr[0]) hit = { lat: +arr[0].lat, lng: +arr[0].lon, name: arr[0].display_name || q };
+    } catch (e) { return null; } // offline / timeout: don't cache, try again next import
+    geoCache[key] = hit;
+    try { localStorage.setItem('lbCouncilGeoCache', JSON.stringify(geoCache)); } catch (e) {}
+    return hit;
+  }
+  function suburbBox(sub){
+    var la = [], ln = [];
+    prepSites().forEach(function(p){ if (p.suburb === sub && p.lat) { la.push(p.lat); ln.push(p.lng); } });
+    if (!la.length) return null;
+    var pad = 0.012; // ~1.2 km around the suburb's bins
+    return { s: Math.min.apply(null, la) - pad, n: Math.max.apply(null, la) + pad, w: Math.min.apply(null, ln) - pad, e: Math.max.apply(null, ln) + pad };
+  }
+
+  // ---- scoring one request against the sites -------------------------------------------------
+  function scoreSites(q, pt){
+    var out = [];
+    prepSites().forEach(function(p){
+      if (q.suburb && p.suburb !== q.suburb) return;
+      var sc = 0, why = [], dist = null;
+      if (q.serial && p.serials[q.serial]) { sc += 100; why.push('bin serial ' + q.serial); }
+      var ss = sameStreet(p.street, q.street);
+      if (ss) { sc += ss === 2 ? 30 : 22; }
+      if (ss && q.num && p.nums.length) {
+        var bestD = 1e9, par = false, wide = false;
+        p.nums.forEach(function(r){
+          var d = q.num >= r[0] && q.num <= r[1] ? 0 : Math.min(Math.abs(q.num - r[0]), Math.abs(q.num - r[1]));
+          // a site written as a long stretch ("21 - 159 Ocean Beach Road - Sorrento SHOPS") says
+          // nothing about where on it the bin is, so being inside it is only a weak hint
+          var w = r[1] - r[0] > 12;
+          if (w) { if (d === 0 && bestD > 20) { bestD = 20; par = false; wide = true; } return; }
+          if (d < bestD) { bestD = d; wide = false; par = r[0] === r[1] && (r[0] % 2) === (q.num % 2); }
+        });
+        var ns = Math.max(0, 30 - bestD * 1.5);
+        if (ns > 0) { sc += ns + (par && !p.opp ? 4 : 0); why.push(wide ? 'within ' + p.s.addr.split(/ [A-Z]/)[0] : bestD === 0 ? 'same street number' : bestD + ' numbers along'); }
+      }
+      var kw = 0, kwWords = [];
+      q.words.forEach(function(w){
+        if (wordHit(w, p.words)) { var v = GENERIC[w] ? 4 : 18; kw += v; if (v > 4) kwWords.push(w.charAt(0) + w.slice(1).toLowerCase()); }
+      });
+      if ((q.wordSet.NORTH && p.words.SOUTH) || (q.wordSet.SOUTH && p.words.NORTH)) kw -= 10;
+      sc += kw; if (kwWords.length) why.push('"' + kwWords.join(' ') + '" in its name');
+      // street recycling sites ("(R)", or on a recycling run only) aren't the litter bin
+      // a FULL BIN request is about, unless the request says recycling
+      if (p.recycle && !q.recycle) sc -= 8;
+      if (pt && p.lat) {
+        dist = metres(pt.lat, pt.lng, p.lat, p.lng);
+        sc += Math.max(0, 45 - dist / 8);
+      }
+      out.push({ p: p, score: sc, why: why, dist: dist, strongWord: kwWords.length > 0 });
+    });
+    out.sort(function(a, b){ return b.score - a.score || (a.dist == null ? 1e9 : a.dist) - (b.dist == null ? 1e9 : b.dist); });
+    return out;
+  }
+  function judge(q, list, pt){
+    var a = list[0], b = list[1];
+    if (!a || a.score < 12) return 'none';
+    var gap = a.score - (b ? b.score : 0);
+    if (q.serial && a.p.serials[q.serial]) return 'high';
+    if (pt && a.dist != null && a.dist <= 120 && (!b || b.dist == null || b.dist - a.dist > 35 || gap >= 10)) return 'high';
+    if (sameStreet(a.p.street, q.street) && q.num && a.why.some(function(w){ return w === 'same street number'; }) && gap >= 4) return 'high';
+    if (a.strongWord && sameStreet(a.p.street, q.street) && gap >= 8) return 'high';
+    if (gap < 4) return 'low';
+    return 'medium';
+  }
+
+  async function matchOne(row, allowOnline){
+    var addrT = tokens(row.street), locT = tokens(row.location);
+    var sub = normSuburb(row.suburb), subWords = {}; sub.split(' ').forEach(function(w){ subWords[w] = 1; });
+    var street = streetOf(addrT);
+    var num = +row.house || 0;
+    if (!num) { var nm = /(?:^|\s)(\d{1,5})(?=\s+[A-Za-z])/.exec(row.street || ''); if (nm) num = +nm[1]; }
+    var sm = /\b(\d{6,})\b/.exec((row.detail || '') + ' ' + (row.location || ''));
+    var streetWords = {}; street.split(' ').forEach(function(w){ streetWords[w] = 1; });
+    var wordSet = {}, words = [];
+    addrT.concat(locT).forEach(function(w){
+      if (w.length < 4 || /\d/.test(w) || STOP[w] || TYPES[w] || SOLO[w] || subWords[w] || streetWords[w] || wordSet[w]) return;
+      wordSet[w] = 1; words.push(w);
+    });
+    var q = { suburb: prepSites().some(function(p){ return p.suburb === sub; }) ? sub : '', street: street, num: num,
+              serial: sm ? sm[1] : '', words: words, wordSet: wordSet,
+              recycle: /recycl/i.test([row.street, row.detail, row.location, row.bintype].join(' ')) };
+    var pt = null, how = '';
+    var hp = housePoint(sub, street, num);
+    if (hp) { pt = hp; how = (hp.exact ? 'house at ' : 'nearest house, ') + hp.a; }
+    var list = scoreSites(q, pt), conf = judge(q, list, pt);
+    if (conf !== 'high' && !pt && allowOnline) {
+      var box = suburbBox(sub);
+      if (box) {
+        var parts = String(row.street || '').split(/\s{2,}|,/).map(function(s){ return s.trim(); })
+          .filter(function(s){ return /[A-Za-z]{4,}/.test(s) && !/^(off|opp|opposite|near|cnr|corner)\b/i.test(s); });
+        // a search for just "Ocean Beach Road" lands mid-street and would look far surer than it is:
+        // only search text that names something besides the street
+        function namesAPlace(s){
+          var sw = {}; streetOf(tokens(s)).split(' ').forEach(function(w){ sw[w] = 1; });
+          return tokens(s).some(function(w){ return w.length >= 3 && !/\d/.test(w) && !sw[w] && !STOP[w] && !TYPES[w] && !SOLO[w] && !subWords[w]; });
+        }
+        var qs = [String(row.street || '').replace(/\s+/g, ' ').trim()].concat(parts.sort(function(x, y){ return y.length - x.length; }));
+        if (row.location && /[A-Za-z]{4,}/.test(row.location)) qs.push(row.location.replace(/^(outside|at|near|opposite|opp\.?)\s+/i, ''));
+        qs = qs.filter(namesAPlace);
+        var seen = {};
+        for (var i = 0; i < qs.length && i < 4; i++) {
+          var qq = qs[i] + ', ' + row.suburb + ', Victoria';
+          if (seen[qq.toUpperCase()]) continue; seen[qq.toUpperCase()] = 1;
+          var hit = await nominatim(qq, box);
+          if (hit) { pt = hit; how = 'map search "' + qs[i] + '"'; break; }
+        }
+        if (pt) { list = scoreSites(q, pt); conf = judge(q, list, pt); }
+      }
+    }
+    var top = list[0] && conf !== 'none' ? list[0] : null;
+    var ties = top ? list.filter(function(x){ return top.score - x.score < 4; }).length : 0;
+    var alt = top && conf !== 'high' && list[1] && list[1].score >= 12 ? list[1] : null;
+    return { row: row, q: q, conf: conf, top: top, alt: alt, ties: ties, pt: pt, how: how };
+  }
+
+  // ---- runs, visits since the report, next visit ------------------------------------------------
+  function runsFor(site){
+    var RD = (typeof STREET_LITTER_RUN_DATA !== 'undefined') ? STREET_LITTER_RUN_DATA : null;
+    var by = {}, how = 'stop';
+    function add(day, num, label, time){
+      var k = day + '|' + num;
+      if (!by[k] || (time && (!by[k].time || time < by[k].time))) by[k] = { day: day, num: num, label: label, time: time || '' };
+    }
+    if (RD) {
+      Object.keys(RD).forEach(function(day){ Object.keys(RD[day]).forEach(function(num){
+        (RD[day][num].stops || []).forEach(function(st){ if (st.pid && st.pid === site.pid) add(day, num, RD[day][num].label, st.time); });
+      }); });
+      if (!Object.keys(by).length && +site.lat) {
+        how = 'near';
+        Object.keys(RD).forEach(function(day){ Object.keys(RD[day]).forEach(function(num){
+          (RD[day][num].stops || []).forEach(function(st){
+            if (!st.pid && metres(+site.lat, +site.lng, st.lat, st.lng) <= 50) add(day, num, RD[day][num].label, st.time);
+          });
+        }); });
+      }
+    }
+    // the site list's own run days fill anything the exports don't show (no time known)
+    [].concat(site.rl || [], site.rr || []).forEach(function(r){
+      if (!r.num) return;
+      var days = (r.days && r.days.length) ? r.days : null;
+      var have = Object.keys(by).some(function(k){ return by[k].num === r.num; });
+      if (days) days.forEach(function(d){ if (!by[d + '|' + r.num]) add(d, r.num, r.run, ''); });
+      else if (!have) DAYS.forEach(function(d){ add(d, r.num, r.run, ''); }); // no day = picked up every day
+    });
+    var list = Object.keys(by).map(function(k){ return by[k]; });
+    if (!list.length) how = 'none';
+    else if (how === 'stop' && !list.some(function(x){ return x.time; })) how = 'list';
+    return { list: list, how: how };
+  }
+  function visitsBetween(runs, from, to){
+    var out = [], d = new Date(from.getFullYear(), from.getMonth(), from.getDate());
+    for (var i = 0; i < 16 && d <= to; i++) {
+      var code = DAYS[d.getDay()];
+      runs.forEach(function(r){
+        if (r.day !== code) return;
+        var hm = /^(\d{1,2}):(\d{2})/.exec(r.time || ''), at = new Date(d);
+        if (hm) at.setHours(+hm[1], +hm[2], 0, 0); else at.setHours(12, 0, 0, 0);
+        if (at > from && at <= to) out.push({ at: at, r: r, known: !!hm });
+      });
+      d.setDate(d.getDate() + 1);
+    }
+    return out.sort(function(a, b){ return a.at - b.at; });
+  }
+  function shortRun(r){ return String(r.num || r.label || '').trim(); }
+  function runName(r){ var l = String(r.label || r.num || ''); return l.replace(/\s+-\s+/, ' ').replace(/\b([A-Z])([A-Z]+)\b/g, function(m, a, b){ return a + b.toLowerCase(); }); }
+  function fmtTime(d, known){
+    var h = d.getHours(), m = d.getMinutes(), ap = h < 12 ? 'am' : 'pm', hh = h % 12 || 12;
+    return known ? '~' + hh + (m ? ':' + (m < 10 ? '0' : '') + m : '') + ap : 'time not known';
+  }
+  function fmtDay(d){ return DAY_NAMES[d.getDay()] + ' ' + d.getDate() + ' ' + MONTHS[d.getMonth()]; }
+  function fmtVisit(v){ return fmtDay(v.at) + ', ' + fmtTime(v.at, v.known) + ' (' + shortRun(v.r) + ')'; }
+  function runsSummary(runs){
+    var byRun = {};
+    runs.forEach(function(r){ (byRun[r.num] || (byRun[r.num] = { r: r, days: [] })).days.push(r); });
+    return Object.keys(byRun).sort().map(function(k){
+      var e = byRun[k], ds = e.days.sort(function(a, b){ return (DAYS.indexOf(a.day) + 6) % 7 - (DAYS.indexOf(b.day) + 6) % 7; });
+      var daysTxt = ds.length === 7 && !ds.some(function(x){ return x.time; }) ? 'every day'
+        : ds.map(function(x){ var t = /^(\d{1,2}):(\d{2})/.exec(x.time || ''); return DAY_NAMES[DAYS.indexOf(x.day)] + (t ? ' ' + fmtTime(new Date(2000, 0, 1, +t[1], +t[2]), true) : ''); }).join(', ');
+      return runName(e.r) + ': ' + daysTxt;
+    }).join(' · ');
+  }
+  function schedule(res, now){
+    if (!res.top) return;
+    var site = res.top.p.s, R = runsFor(site);
+    res.runs = R;
+    var rep = res.row.date instanceof Date && !isNaN(res.row.date) ? res.row.date : null;
+    var horizon = new Date(now.getTime() + 8 * 86400000);
+    res.done = rep ? visitsBetween(R.list, rep, now) : [];
+    var nx = visitsBetween(R.list, now, horizon);
+    res.next = nx[0] || null;
+  }
+
+  // ---- reading the sheet ---------------------------------------------------------------------------
+  function colName(ref){ var m = /^([A-Z]+)/.exec(ref || ''), n = 0; if (!m) return -1; for (var i = 0; i < m[1].length; i++) n = n * 26 + m[1].charCodeAt(i) - 64; return n - 1; }
+  function excelDate(v){
+    var f = parseFloat(v); if (!isFinite(f) || f < 20000 || f > 80000) return null;
+    var days = Math.floor(f), secs = Math.round((f - days) * 86400);
+    return new Date(1899, 11, 30 + days, 0, 0, secs);
+  }
+  function textDate(s){
+    s = String(s || '').trim(); if (!s) return null;
+    var m = /^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})(?:[ T,]+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*([ap]m)?)?/i.exec(s);
+    if (m) {
+      var y = +m[3] < 100 ? 2000 + +m[3] : +m[3], h = +(m[4] || 0);
+      if (m[7]) { h = h % 12 + (/p/i.test(m[7]) ? 12 : 0); }
+      return new Date(y, +m[2] - 1, +m[1], h, +(m[5] || 0), +(m[6] || 0));
+    }
+    m = /^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?/.exec(s);
+    if (m) return new Date(+m[1], +m[2] - 1, +m[3], +(m[4] || 0), +(m[5] || 0), +(m[6] || 0));
+    return excelDate(s);
+  }
+  async function readXlsx(buf){
+    if (typeof JSZip === 'undefined') throw new Error('The spreadsheet reader did not load. Check the connection and reload the app, or save the sheet as CSV.');
+    var zip = await JSZip.loadAsync(buf), P = new DOMParser();
+    function xml(path){ var f = zip.file(path); return f ? f.async('string').then(function(t){ return P.parseFromString(t, 'application/xml'); }) : Promise.resolve(null); }
+    var wb = await xml('xl/workbook.xml'), rels = await xml('xl/_rels/workbook.xml.rels');
+    var sheetPath = 'xl/worksheets/sheet1.xml';
+    if (wb && rels) {
+      var sh = wb.getElementsByTagName('sheet')[0], rid = sh && (sh.getAttribute('r:id') || sh.getAttributeNS('http://schemas.openxmlformats.org/officeDocument/2006/relationships', 'id'));
+      Array.prototype.forEach.call(rels.getElementsByTagName('Relationship'), function(r){
+        if (r.getAttribute('Id') === rid) { var t = r.getAttribute('Target') || ''; sheetPath = t.charAt(0) === '/' ? t.slice(1) : 'xl/' + t.replace(/^\.\//, ''); }
+      });
+    }
+    var ssx = await xml('xl/sharedStrings.xml'), shared = [];
+    if (ssx) Array.prototype.forEach.call(ssx.getElementsByTagName('si'), function(si){
+      var s = ''; Array.prototype.forEach.call(si.getElementsByTagName('t'), function(t){ s += t.textContent; }); shared.push(s);
+    });
+    var sx = await xml(sheetPath); if (!sx) throw new Error('That file has no worksheet in it.');
+    var rows = [];
+    Array.prototype.forEach.call(sx.getElementsByTagName('row'), function(rw){
+      var r = [];
+      Array.prototype.forEach.call(rw.getElementsByTagName('c'), function(c, i){
+        var ci = colName(c.getAttribute('r')); if (ci < 0) ci = i;
+        var t = c.getAttribute('t'), vEl = c.getElementsByTagName('v')[0], v = vEl ? vEl.textContent : '';
+        if (t === 's') v = shared[+v] || '';
+        else if (t === 'inlineStr') { v = ''; Array.prototype.forEach.call(c.getElementsByTagName('t'), function(x){ v += x.textContent; }); }
+        r[ci] = v;
+      });
+      rows[(+rw.getAttribute('r') || rows.length + 1) - 1] = r;
+    });
+    return rows.map(function(r){ return r || []; });
+  }
+  function readCsv(text){
+    var rows = [], row = [], cell = '', q = false;
+    text = String(text).replace(/^﻿/, '');
+    for (var i = 0; i < text.length; i++) {
+      var ch = text[i];
+      if (q) { if (ch === '"') { if (text[i + 1] === '"') { cell += '"'; i++; } else q = false; } else cell += ch; }
+      else if (ch === '"') q = true;
+      else if (ch === ',') { row.push(cell); cell = ''; }
+      else if (ch === '\n' || ch === '\r') { if (ch === '\r' && text[i + 1] === '\n') i++; row.push(cell); rows.push(row); row = []; cell = ''; }
+      else cell += ch;
+    }
+    if (cell || row.length) { row.push(cell); rows.push(row); }
+    return rows;
+  }
+  // The council export has a title row, then its field names (REFERENCEID...), then the
+  // same columns with readable names (Reference ID...). Either header row is enough.
+  var COLS = {
+    ref: ['referenceid', 'reference', 'ref', 'requestid'],
+    action: ['actiontype', 'action', 'requesttype'],
+    detail: ['detail', 'details', 'description', 'comments'],
+    street: ['streetaddress', 'address', 'street'],
+    suburb: ['suburbdescription', 'suburb', 'locality'],
+    location: ['location', 'locationdetails'],
+    date: ['datereceived', 'received', 'date', 'datelogged'],
+    house: ['housenumber', 'streetnumber', 'houseno'],
+    bintype: ['bintype', 'selectiontypefield42']
+  };
+  function key(s){ return String(s == null ? '' : s).toLowerCase().replace(/[^a-z0-9]/g, ''); }
+  function tableFrom(rows){
+    var map = null, start = -1;
+    for (var i = 0; i < Math.min(rows.length, 15); i++) {
+      var ks = (rows[i] || []).map(key);
+      if (ks.indexOf('streetaddress') < 0 && ks.indexOf('address') < 0) continue;
+      var m = map || {};
+      Object.keys(COLS).forEach(function(f){
+        if (m[f] != null) return;
+        for (var a = 0; a < COLS[f].length; a++) { var at = ks.indexOf(COLS[f][a]); if (at >= 0) { m[f] = at; break; } }
+      });
+      map = m; start = i + 1;
+    }
+    if (!map || map.street == null || map.suburb == null) return null;
+    var out = [];
+    for (var r = start; r < rows.length; r++) {
+      var rw = rows[r] || [];
+      function v(f){ return map[f] == null ? '' : String(rw[map[f]] == null ? '' : rw[map[f]]).trim(); }
+      if (!v('street') && !v('ref')) continue;
+      var raw = map.date == null ? '' : rw[map.date];
+      var d = /^\d+(\.\d+)?$/.test(String(raw || '').trim()) ? excelDate(raw) : textDate(raw);
+      out.push({ ref: v('ref'), action: v('action'), detail: v('detail'), street: map.street == null ? '' : String(rw[map.street] || ''),
+                 suburb: v('suburb'), location: v('location'), date: d, house: v('house'), bintype: v('bintype') });
+    }
+    return out;
+  }
+
+  // ---- run everything -------------------------------------------------------------------------------
+  async function matchAll(rows, opts){
+    opts = opts || {};
+    var now = opts.now || new Date(), out = [];
+    for (var i = 0; i < rows.length; i++) {
+      if (opts.progress) opts.progress(i, rows.length);
+      var r = await matchOne(rows[i], opts.online !== false);
+      schedule(r, now);
+      out.push(r);
+    }
+    return out;
+  }
+
+  // ---- CSV out ----------------------------------------------------------------------------------------
+  function csvCell(v){ v = v == null ? '' : String(v); return /[",\r\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; }
+  function fmtStamp(d){ return d instanceof Date && !isNaN(d) ? fmtDay(d) + ' ' + d.getFullYear() + ' ' + fmtTime(d, true).slice(1) : ''; }
+  var CONF = { high: 'High', medium: 'Likely', low: 'Unsure', none: 'No match' };
+  function toCsv(results){
+    var head = ['Reference ID', 'Action Type', 'Date Received', 'Street Address', 'Suburb', 'Detail', 'Location',
+      'Matched Bin', 'Site Id', 'Property ID', 'Confidence', 'How matched', 'Distance (m)', 'Other possible bin',
+      'Runs', 'Emptied since reported', 'Next due', 'Lat', 'Lng'];
+    var lines = [head.map(csvCell).join(',')];
+    results.forEach(function(x){
+      var t = x.top, s = t ? t.p.s : {}, row = x.row;
+      lines.push([row.ref, row.action, fmtStamp(row.date), String(row.street).replace(/\s+/g, ' ').trim(), row.suburb, row.detail, row.location,
+        t ? s.addr : '', t ? s.id : '', t ? s.pid : '', CONF[x.conf], howText(x), t && t.dist != null ? Math.round(t.dist) : '',
+        x.alt ? x.alt.p.s.addr + ' (' + x.alt.p.s.id + ')' : '',
+        x.runs ? runsSummary(x.runs.list) : '',
+        x.done && x.done.length ? x.done.map(fmtVisit).join('; ') : (t ? 'No' : ''),
+        x.next ? fmtVisit(x.next) : '', t ? s.lat : '', t ? s.lng : ''].map(csvCell).join(','));
+    });
+    return '﻿' + lines.join('\r\n');
+  }
+  function howText(x){
+    var t = x.top; if (!t) return 'Nothing close enough in ' + (x.row.suburb || 'that suburb');
+    var bits = [];
+    if (x.how) bits.push((t.dist != null ? Math.round(t.dist) + ' m from ' : '') + x.how);
+    bits = bits.concat(t.why.filter(function(w){ return !/numbers along|same street number/.test(w) || !x.how; }));
+    if (!bits.length && t.p.street) bits.push('on ' + t.p.street.toLowerCase().replace(/\b\w/g, function(c){ return c.toUpperCase(); }));
+    if (x.conf === 'low' && x.ties > 1) bits.push(x.ties + ' bins fit equally well');
+    return bits.join(' · ');
+  }
+  function stampName(){ var d = new Date(), p = function(n){ return (n < 10 ? '0' : '') + n; }; return d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()); }
+  function download(name, text){
+    try {
+      var blob = new Blob([text], { type: 'text/csv;charset=utf-8' }), a = document.createElement('a');
+      a.href = URL.createObjectURL(blob); a.download = name; a.style.display = 'none';
+      document.body.appendChild(a); a.click();
+      setTimeout(function(){ try { URL.revokeObjectURL(a.href); a.remove(); } catch (e) {} }, 4000);
+      return true;
+    } catch (e) { return false; }
+  }
+
+  // ---- the sheet ----------------------------------------------------------------------------------------
+  var ICO = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" aria-hidden="true"><path d="M4 3h11l5 5v13H4z"/><path d="M14 3v6h6M8 13h8M8 17h5"/></svg>';
+  var DL = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" aria-hidden="true"><path d="M12 4v11M7 11l5 5 5-5M5 20h14"/></svg>';
+  var UP = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" aria-hidden="true"><path d="M12 16V5M7 9l5-5 5 5M5 20h14"/></svg>';
+  var GO = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="square" aria-hidden="true"><path d="M9 5l7 7-7 7"/></svg>';
+  var css = document.createElement('style');
+  css.textContent = [
+    'html body #lbCouncilSheet{display:none;position:fixed;inset:0;z-index:20500}',
+    'html body #lbCouncilSheet.open{display:block}',
+    'html body #lbCouncilSheet .cr-scrim{position:absolute;inset:0;background:var(--ux-scrim,rgba(0,0,0,.55))}',
+    'html body #lbCouncilSheet .cr-panel{position:absolute;left:0;right:0;bottom:0;max-height:88vh;display:flex;flex-direction:column;background:var(--ux-s1,#15181d);color:var(--ux-text,#f3f4f6);border-top:3px solid var(--ui-accent,#3b82f6);box-shadow:var(--ux-shadow,0 -8px 30px rgba(0,0,0,.4));padding-bottom:var(--ux-safe-b,env(safe-area-inset-bottom,0px));font-family:system-ui,-apple-system,"Segoe UI",sans-serif}',
+    'html body #lbCouncilSheet .cr-head{display:flex;align-items:flex-start;gap:10px;padding:14px 8px 10px 16px;border-bottom:1px solid var(--ux-line,rgba(255,255,255,.1))}',
+    'html body #lbCouncilSheet .cr-head>div{flex:1;min-width:0}',
+    'html body #lbCouncilSheet .cr-head b{display:block;font-size:18px;font-weight:800}',
+    'html body #lbCouncilSheet .cr-sub{display:block;margin-top:2px;font-size:12.5px;color:var(--ux-text-2,#b6bcc6);font-weight:600}',
+    'html body #lbCouncilSheet .cr-x{flex:none;width:44px;height:44px;border:0;background:transparent;color:var(--ux-text-2,#b6bcc6);font-size:28px;line-height:1;cursor:pointer}',
+    'html body #lbCouncilSheet .cr-body{flex:1;overflow:auto;-webkit-overflow-scrolling:touch;padding:4px 0 8px}',
+    'html body #lbCouncilSheet .cr-help{margin:0;padding:12px 16px;font-size:13.5px;line-height:1.5;color:var(--ux-text-2,#b6bcc6)}',
+    'html body #lbCouncilSheet .cr-row{display:block;width:100%;text-align:left;padding:11px 14px 12px 13px;margin:0;background:transparent;color:inherit;border:0;border-left:4px solid var(--ux-line-2,#555);border-bottom:1px solid var(--ux-line,rgba(255,255,255,.1));border-radius:0;box-shadow:none;cursor:pointer;font:inherit}',
+    'html body #lbCouncilSheet .cr-row:active{background:var(--ux-s3,#262b33)}',
+    'html body #lbCouncilSheet .cr-row.c-high{border-left-color:var(--ux-ok,#22c55e)}',
+    'html body #lbCouncilSheet .cr-row.c-medium{border-left-color:var(--ui-accent,#3b82f6)}',
+    'html body #lbCouncilSheet .cr-row.c-low,html body #lbCouncilSheet .cr-row.c-none{border-left-color:var(--ux-warn,#f59e0b)}',
+    'html body #lbCouncilSheet .cr-top{display:flex;flex-wrap:wrap;align-items:center;gap:6px;font-size:11.5px;font-weight:700;color:var(--ux-text-3,#8b93a0)}',
+    'html body #lbCouncilSheet .cr-tag{padding:2px 6px;border-radius:3px;font-size:10.5px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;background:var(--ux-s3,#262b33);color:var(--ux-text,#f3f4f6)}',
+    'html body #lbCouncilSheet .cr-tag.repair{background:color-mix(in srgb,var(--ux-bad,#ef4444) 30%,transparent)}',
+    'html body #lbCouncilSheet .cr-conf.high{color:var(--ux-ok,#22c55e)}',
+    'html body #lbCouncilSheet .cr-conf.medium{color:var(--ui-accent,#60a5fa)}',
+    'html body #lbCouncilSheet .cr-conf.low,html body #lbCouncilSheet .cr-conf.none{color:var(--ux-warn,#f59e0b)}',
+    'html body #lbCouncilSheet .cr-bin{display:flex;align-items:center;gap:6px;margin-top:5px;font-size:15.5px;font-weight:750;line-height:1.25}',
+    'html body #lbCouncilSheet .cr-bin span{flex:1;min-width:0}',
+    'html body #lbCouncilSheet .cr-bin svg{flex:none;color:var(--ux-text-3,#8b93a0)}',
+    'html body #lbCouncilSheet .cr-from,html body #lbCouncilSheet .cr-why,html body #lbCouncilSheet .cr-alt{margin-top:3px;font-size:12.5px;line-height:1.35;color:var(--ux-text-3,#8b93a0);font-weight:600}',
+    'html body #lbCouncilSheet .cr-runs{margin-top:6px;font-size:13px;line-height:1.35;font-weight:650;color:var(--ux-text-2,#d1d5db)}',
+    'html body #lbCouncilSheet .cr-when{display:grid;grid-template-columns:auto 1fr;gap:2px 8px;margin-top:6px;font-size:13px;line-height:1.35}',
+    'html body #lbCouncilSheet .cr-when dt{color:var(--ux-text-3,#8b93a0);font-weight:700}',
+    'html body #lbCouncilSheet .cr-when dd{margin:0;font-weight:700}',
+    'html body #lbCouncilSheet .cr-when dd.ok{color:var(--ux-ok,#22c55e)}',
+    'html body #lbCouncilSheet .cr-when dd.due{color:var(--ux-warn,#f59e0b)}',
+    'html body #lbCouncilSheet .cr-note{padding:0 16px;font-size:12.5px;color:var(--ux-ok,#22c55e);font-weight:700}',
+    'html body #lbCouncilSheet .cr-note:not(:empty){padding:6px 16px}',
+    'html body #lbCouncilSheet .cr-foot{display:flex;gap:8px;padding:10px 12px 12px;border-top:1px solid var(--ux-line,rgba(255,255,255,.1))}',
+    'html body #lbCouncilSheet .cr-btn{flex:1;min-height:48px;display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:0 12px;background:var(--ux-s2,#1d2127);color:var(--ux-text,#f3f4f6);border:1px solid var(--ux-line-2,rgba(255,255,255,.18));border-radius:var(--ux-rad,4px);box-shadow:none;font:700 14px/1.1 system-ui,-apple-system,"Segoe UI",sans-serif;cursor:pointer}',
+    'html body #lbCouncilSheet .cr-btn.primary{background:color-mix(in srgb,var(--ui-accent,#3b82f6) 22%,var(--ux-s2,#1d2127));border-color:color-mix(in srgb,var(--ui-accent,#3b82f6) 55%,transparent)}',
+    'html body #lbCouncilSheet .cr-btn:disabled{opacity:.4;cursor:default}',
+    'html body #lbCouncilSheet .cr-sum{display:flex;flex-wrap:wrap;gap:6px 14px;padding:10px 16px 6px;font-size:12.5px;font-weight:700;color:var(--ux-text-2,#b6bcc6)}',
+    'html body #lbCouncilSheet .cr-sum b{font-size:16px;color:var(--ux-text,#fff);margin-right:3px}',
+    'body:not(.ux2) #lbCouncilSheet .cr-panel{background:#fff;color:#111827}',
+    '@media (min-width:720px){html body #lbCouncilSheet .cr-panel{left:50%;right:auto;bottom:50%;width:620px;max-height:82vh;transform:translate(-50%,50%)}}'
+  ].join('\n');
+  document.head.appendChild(css);
+
+  var sheet = null, results = null, fileName = '', busy = false;
+  function note(msg){ var n = sheet && sheet.querySelector('.cr-note'); if (n) n.textContent = msg || ''; }
+  function build(){
+    if (sheet && sheet.parentNode) return sheet;
+    sheet = document.createElement('div'); sheet.id = 'lbCouncilSheet';
+    sheet.setAttribute('role', 'dialog'); sheet.setAttribute('aria-label', 'Council requests');
+    sheet.innerHTML =
+      '<div class="cr-scrim" data-cr="close"></div>' +
+      '<div class="cr-panel">' +
+        '<div class="cr-head"><div><b>Council requests</b><small class="cr-sub">Which street litter bin, which run, when it’s due</small></div>' +
+        '<button type="button" class="cr-x" data-cr="close" aria-label="Close">&times;</button></div>' +
+        '<div class="cr-body"></div>' +
+        '<div class="cr-note" role="status"></div>' +
+        '<div class="cr-foot">' +
+          '<button type="button" class="cr-btn primary" data-cr="pick">' + UP + '<span>Load sheet</span></button>' +
+          '<button type="button" class="cr-btn" data-cr="export" disabled>' + DL + '<span>Export results</span></button>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(sheet);
+    sheet.addEventListener('click', function(ev){
+      var t = ev.target && ev.target.closest ? ev.target.closest('[data-cr],[data-cr-go]') : null; if (!t) return;
+      var a = t.getAttribute('data-cr');
+      if (a === 'close') close();
+      else if (a === 'pick') pick();
+      else if (a === 'export') exportCsv();
+      else if (t.hasAttribute('data-cr-go')) fly(+t.getAttribute('data-cr-go'));
+    });
+    // drop a file straight onto the sheet on a laptop
+    sheet.addEventListener('dragover', function(ev){ ev.preventDefault(); });
+    sheet.addEventListener('drop', function(ev){ ev.preventDefault(); var f = ev.dataTransfer && ev.dataTransfer.files && ev.dataTransfer.files[0]; if (f) load(f); });
+    return sheet;
+  }
+  function emptyHtml(){
+    return '<p class="cr-help">Load the <b>Resource Pool Requests</b> spreadsheet the council sends (.xlsx, or saved as .csv). ' +
+      'Each request is matched to one of our street litter bins, with the run that empties it, whether it has been emptied since it was reported, and when it’s next due.</p>' +
+      '<p class="cr-help">Matching uses the house numbers, street names and bin descriptions on this phone. For places like “Shire Hall Beach” it also looks the name up on the map when there’s signal.</p>';
+  }
+  function cardHtml(x, i){
+    var row = x.row, t = x.top, s = t ? t.p.s : null;
+    var act = String(row.action || '').trim(), repair = /repair|replace|damag|broken/i.test(act);
+    var h = '<div class="cr-top">' + (act ? '<span class="cr-tag' + (repair ? ' repair' : '') + '">' + esc(act) + '</span>' : '') +
+      '<span>' + esc(row.ref || '') + '</span>' + (row.date ? '<span>· ' + esc(fmtDay(row.date) + ', ' + fmtTime(row.date, true).slice(1)) + '</span>' : '') +
+      '<span class="cr-conf ' + x.conf + '">· ' + esc(CONF[x.conf]) + '</span></div>';
+    var tieTxt = x.conf === 'low' && x.ties > 2 && t.p.street
+      ? x.ties + ' bins on ' + titleCase(t.p.street) + ' fit: not enough in the request to pick one' : '';
+    h += '<div class="cr-bin"><span>' + (tieTxt ? esc(tieTxt) : s ? esc(s.addr) + ', ' + esc(titleCase(s.suburb)) : 'No bin found') + '</span>' + (s && +s.lat && !tieTxt ? GO : '') + '</div>';
+    if (tieTxt) h += '<div class="cr-why">For example ' + esc(s.addr) + ' (Site ' + esc(s.id) + ')</div>';
+    h += '<div class="cr-from">Council: ' + esc(String(row.street || '').replace(/\s+/g, ' ').trim() + (row.suburb ? ', ' + row.suburb : '')) +
+      (row.location ? ' — ' + esc(row.location) : '') + '</div>';
+    if (row.detail) h += '<div class="cr-from">“' + esc(row.detail) + '”</div>';
+    if (!tieTxt) h += '<div class="cr-why">' + esc(howText(x)) + (s ? ' · Site ' + esc(s.id) + ' / Prop ' + esc(s.pid) : '') + '</div>';
+    if (x.alt && !tieTxt) h +='<div class="cr-alt">Or: ' + esc(x.alt.p.s.addr) + ' (Site ' + esc(x.alt.p.s.id) + ')</div>';
+    if (x.runs) {
+      if (x.runs.list.length) {
+        h += '<div class="cr-runs">' + (tieTxt ? 'That bin: ' : '') + esc(runsSummary(x.runs.list)) +
+          (x.runs.how === 'near' ? ' <span class="cr-alt">(from truck stops next to it: this bin isn’t linked to a run)</span>' : '') + '</div>';
+        h += '<dl class="cr-when"><dt>Since reported</dt>' + (x.done && x.done.length
+          ? '<dd class="ok">Emptied ' + esc(fmtVisit(x.done[0])) + (x.done.length > 1 ? ' + ' + (x.done.length - 1) + ' more' : '') + '</dd>'
+          : '<dd class="due">' + (row.date ? 'Not emptied yet' : 'Report date unknown') + '</dd>') +
+          '<dt>Next due</dt><dd>' + (x.next ? esc(fmtVisit(x.next)) : 'Nothing scheduled in the next week') + '</dd></dl>';
+      } else h += '<div class="cr-runs">Not on any run we have data for.</div>';
+    }
+    if (repair) h += '<div class="cr-alt">Needs a repair or new bin: the run won’t fix it.</div>';
+    return '<button type="button" class="cr-row c-' + x.conf + '" data-cr-go="' + i + '">' + h + '</button>';
+  }
+  function titleCase(s){ return String(s || '').toLowerCase().replace(/\b\w/g, function(c){ return c.toUpperCase(); }); }
+  function render(){
+    build();
+    var body = sheet.querySelector('.cr-body'), sub = sheet.querySelector('.cr-sub');
+    var ex = sheet.querySelector('[data-cr="export"]');
+    if (!results) { body.innerHTML = emptyHtml(); ex.disabled = true; return; }
+    var n = results.length, sure = 0, open = 0, done = 0, repair = 0;
+    results.forEach(function(x){
+      if (x.conf === 'high' || x.conf === 'medium') sure++;
+      if (/repair|replace|damag|broken/i.test(x.row.action || '')) repair++;
+      else if (x.done && x.done.length) done++; else open++;
+    });
+    sub.textContent = n + ' request' + (n === 1 ? '' : 's') + (fileName ? ' · ' + fileName : '');
+    var sum = '<div class="cr-sum"><span><b>' + open + '</b>still to empty</span><span><b>' + done + '</b>emptied since reported</span>' +
+      (repair ? '<span><b>' + repair + '</b>repair / new bin</span>' : '') +
+      (n - sure ? '<span><b>' + (n - sure) + '</b>need checking</span>' : '') + '</div>';
+    body.innerHTML = sum + results.map(cardHtml).join('') +
+      '<p class="cr-help">Times are when the truck usually reaches the bin (from the depot run exports), so treat them as a guide. Tap a request to see the bin on the map.</p>';
+    ex.disabled = !n;
+  }
+  function pick(){
+    var inp = document.createElement('input'); inp.type = 'file';
+    inp.accept = '.xlsx,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv'; inp.style.display = 'none';
+    inp.addEventListener('change', function(){ var f = inp.files && inp.files[0]; if (f) load(f); });
+    document.body.appendChild(inp); inp.click(); setTimeout(function(){ try { inp.remove(); } catch (e) {} }, 60000);
+  }
+  async function load(file){
+    if (busy) return; busy = true;
+    build(); open();
+    var body = sheet.querySelector('.cr-body');
+    body.innerHTML = '<p class="cr-help">Reading ' + esc(file.name) + '...</p>'; note('');
+    try {
+      var rows;
+      if (/\.csv$/i.test(file.name) || /csv/.test(file.type)) rows = readCsv(await file.text());
+      else rows = await readXlsx(await file.arrayBuffer());
+      var table = tableFrom(rows);
+      if (!table) throw new Error('Couldn’t find the Street Address and Suburb columns in that sheet. Is it the council’s Resource Pool Requests export?');
+      if (!table.length) throw new Error('That sheet has no requests in it.');
+      if (!prepSites().length) throw new Error('The street litter bin list didn’t load on this phone. Reload the app and try again.');
+      fileName = file.name;
+      results = await matchAll(table, { progress: function(i, n){ body.innerHTML = '<p class="cr-help">Matching ' + (i + 1) + ' of ' + n + '...</p>'; } });
+      render();
+      if (!(g('siteRecords') || []).length) note('House addresses aren’t loaded yet, so house-number matching was skipped. Sync, then load the sheet again.');
+    } catch (e) {
+      console.error(e);
+      body.innerHTML = '<p class="cr-help">' + esc(e && e.message || 'That file could not be read.') + '</p>';
+    } finally { busy = false; }
+  }
+  function exportCsv(){
+    if (!results || !results.length) return;
+    var base = (fileName || 'council-requests').replace(/\.[^.]+$/, '');
+    note(download(base + '-matched-' + stampName() + '.csv', toCsv(results)) ? 'Exported ' + results.length + ' rows.' : 'Could not start the download on this device.');
+  }
+  function fly(i){
+    var x = results && results[i], s = x && x.top && x.top.p.s; if (!s || !+s.lat) return;
+    close();
+    try { if (typeof window.lbCloseSettings === 'function') window.lbCloseSettings(); } catch (e) {}
+    try { if (typeof window.lbCloseDrawer === 'function') window.lbCloseDrawer(); } catch (e) {}
+    try { if (typeof window.switchMainTab === 'function' && g('activeTab') !== 'map') window.switchMainTab('map'); } catch (e) {}
+    try { if (typeof window.lbDisableGpsFollow === 'function') window.lbDisableGpsFollow(); } catch (e) {}
+    try { if (typeof window.filterStreetLitterRun === 'function') window.filterStreetLitterRun(null); } catch (e) {} // make sure the bins are showing
+    setTimeout(function(){
+      var m = g('leafletMap'); if (!m) return;
+      try { m.setView([+s.lat, +s.lng], 18, { animate: true }); } catch (e) {}
+      var mk = (g('streetLitterMarkers') || []).filter(function(k){ return k._slSite && k._slSite.id === s.id; })[0];
+      if (mk) setTimeout(function(){ try { mk.openPopup(); } catch (e) {} }, 450);
+    }, 120);
+  }
+  function open(){
+    try { if (typeof window.lbCloseSettings === 'function') window.lbCloseSettings(); } catch (e) {}
+    try { if (typeof window.lbCloseDrawer === 'function') window.lbCloseDrawer(); } catch (e) {}
+    build(); if (!busy) render();
+    document.body.classList.add('ux-sheet-open'); sheet.classList.add('open');
+  }
+  function close(){
+    document.body.classList.remove('ux-sheet-open');
+    if (sheet) sheet.classList.remove('open');
+  }
+  document.addEventListener('keydown', function(ev){ if (ev.key === 'Escape' && sheet && sheet.classList.contains('open')) close(); });
+
+  // ---- ways in: Edit & settings > Data, and the side menu under Report ------------------------------------
+  function injectSettings(){
+    var d = document.querySelector('#lbSettingsBody #uxStrayRow');
+    if (!d || $('lbCouncilRow')) return;
+    var b = document.createElement('button'); b.type = 'button'; b.id = 'lbCouncilRow'; b.className = 'lb-layer-btn';
+    b.innerHTML = '<span class="lb-ico ux-warn-ico" style="color:var(--ux-text-2)">' + ICO + '</span><span class="lb-label">Council requests: match to street litter bins</span>';
+    d.parentNode.insertBefore(b, d.nextSibling);
+  }
+  function injectDrawer(){
+    var body = $('lbDrawerBody'); if (!body || $('lbCouncilItem')) return;
+    var after = body.querySelector('[data-act="issues"]'); if (!after) return;
+    var b = document.createElement('button'); b.type = 'button'; b.id = 'lbCouncilItem'; b.className = 'lb-drawer-item';
+    b.innerHTML = '<span class="lb-ico">' + ICO.replace('width="18" height="18"', 'width="24" height="24" class="lb-svg-ico"') + '</span>' +
+      '<span class="lb-label">Council requests<span class="lb-sub">Load the council’s sheet · which bin, run, next due</span></span>';
+    after.parentNode.insertBefore(b, after.nextSibling);
+  }
+  document.addEventListener('click', function(ev){
+    var t = ev.target && ev.target.closest ? ev.target.closest('#lbCouncilRow,#lbCouncilItem') : null; if (!t) return;
+    ev.preventDefault(); ev.stopPropagation();
+    open();
+  }, true);
+  setInterval(function(){
+    try { if (document.body.classList.contains('lb-settings-open')) injectSettings(); } catch (e) {}
+    try { injectDrawer(); } catch (e) {}
+  }, 400);
+
+  window.lbCouncilRequests = { open: open, load: load, results: function(){ return results; },
+    _t: { tableFrom: tableFrom, readCsv: readCsv, readXlsx: readXlsx, matchAll: matchAll, toCsv: toCsv, runsFor: runsFor, streetOf: streetOf, tokens: tokens } };
+})();
+</script>
+
 </body>
 </html>
