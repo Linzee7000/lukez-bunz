@@ -34807,6 +34807,12 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   #lbRunMap .rm-bar .rm-rot { display: inline-flex; gap: 2px; }
   #lbRunMap .rm-bar .rm-rot button { padding: 0 10px; min-width: 44px; touch-action: manipulation; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
   #lbRunMap .rm-bar .rm-rot button[data-rm="rot0"] { min-width: 58px; font-variant-numeric: tabular-nums; }
+  #lbRunMap .rm-bar .rm-rot button.rm-fine { padding: 0 8px; min-width: 40px; background: #e5e7eb; }
+  #lbRunMap .rm-bar #rmKey { max-width: 36vw; }
+  #lbRunMap .rm-card.rm-key { padding-right: 44px; cursor: grab; touch-action: none; }
+  #lbRunMap .rm-card.rm-key.rm-dragging { cursor: grabbing; box-shadow: 0 4px 18px rgba(0,0,0,.3); outline: 2px dashed #64748b; }
+  #lbRunMap .rm-north { position: absolute; top: 8px; right: 8px; width: 28px; height: 40px; pointer-events: none; }
+  #lbRunMap .rm-north svg { display: block; width: 28px; height: 40px; transform-origin: 50% 50%; }
   #lbRunMap .rm-bar .rm-rot button[data-rm="rot0"].on { background: #fbbf24; }
   #lbRunMap .rm-map { transform-origin: 50% 50%; }
   #lbRunMap .rm-page { position: relative; margin: 10px auto; background: #fff; box-shadow: 0 2px 12px rgba(0,0,0,.2); overflow: hidden; }   /* a turned map is bigger than the page: clip it to the paper */
@@ -35041,11 +35047,13 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     }
     // cards: title + legend, and the notes
     var sub = o.stream + ' · ' + o.day + (o.week ? ' · Week ' + o.week : '');
-    var card = document.createElement('div'); card.className = 'rm-card';
-    card.innerHTML = '<div class="rm-band" style="background:' + (COL[o.stream] || '#16a34a') + '"></div><div class="rm-title">Run ' + esc(o.run) + '</div><div class="rm-sub">' + esc(sub) + '</div>' +
+    var card = document.createElement('div'); card.className = 'rm-card rm-key';
+    card.innerHTML = northSvg(st.rot) + '<div class="rm-band" style="background:' + (COL[o.stream] || '#16a34a') + '"></div><div class="rm-title">Run ' + esc(o.run) + '</div><div class="rm-sub">' + esc(sub) + '</div>' +
       '<div class="rm-stats"><span><b>' + houses.toLocaleString() + '</b>houses</span><span><b>' + bins.toLocaleString() + '</b>bins</span><span><b>' + esc(R.km) + '</b>km</span></div>' +
       '<div class="rm-leg">' + legendSections(used, E) + '<div><i style="border-color:#7c3aed"></i>Reverse in</div><div><i style="border-color:#f59e0b"></i>Drive in, back out</div><div><i class="box"></i>School</div><div><i class="dot"></i>House</div><div><i class="num">1</i>Note</div></div>';
     st.page.appendChild(card);
+    st.keyPos = opts.keyPos || null;
+    if (opts.onKeyMove) keyDraggable(card, st, opts.onKeyMove);
     if (pinned.length) {
       var nc = document.createElement('div'); nc.className = 'rm-card rm-notes';
       nc.innerHTML = '<ol>' + pinned.map(function(p, i){ return '<li><b>' + (i + 1) + '</b><span>' + esc(p.text) + '</span></li>'; }).join('') + '</ol>';
@@ -35131,6 +35139,44 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     map.setView(c, Math.min(19, z), { animate: false });
   }
 
+  // north arrow for the key: points to true north on the page, so it turns with the map
+  function northSvg(rot){
+    return '<div class="rm-north" title="North"><svg viewBox="0 0 28 40" aria-label="North" style="transform:rotate(' + (+rot || 0) + 'deg)">' +
+      '<text x="14" y="10" text-anchor="middle" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="11" fill="#111">N</text>' +
+      '<path d="M14 13 L21 36 L14 31 L7 36 Z" fill="#fff" stroke="#111" stroke-width="1.4" stroke-linejoin="round"/><path d="M14 13 L14 31 L7 36 Z" fill="#111"/></svg></div>';
+  }
+  function setNorth(st){ var n = st.page && st.page.querySelector('.rm-north svg'); if (n) n.style.transform = 'rotate(' + (st.rot || 0) + 'deg)'; }
+  // drag the key anywhere on the page; where it's left is kept as a fraction of the page so the
+  // printed (bigger) page puts it in the same place
+  function keyDraggable(card, st, done){
+    var start = null;
+    card.addEventListener('pointerdown', function(e){
+      if (e.button > 0) return;
+      start = { x: e.clientX, y: e.clientY, l: card.offsetLeft, t: card.offsetTop, moved: false, id: e.pointerId };
+    });
+    card.addEventListener('pointermove', function(e){
+      if (!start) return;
+      var dx = e.clientX - start.x, dy = e.clientY - start.y;
+      if (!start.moved) {
+        if (Math.abs(dx) + Math.abs(dy) < 6) return;
+        start.moved = true; card.classList.add('rm-dragging');
+        try { card.setPointerCapture(start.id); } catch (x) {}
+      }
+      e.preventDefault();
+      var W = st.page.clientWidth, H = st.page.clientHeight;
+      var l = Math.max(0, Math.min(W - card.offsetWidth, start.l + dx)), t = Math.max(0, Math.min(H - card.offsetHeight, start.t + dy));
+      card.style.right = card.style.bottom = ''; card.style.left = l + 'px'; card.style.top = t + 'px';
+    });
+    function end(){
+      if (!start) return;
+      var moved = start.moved; start = null; card.classList.remove('rm-dragging');
+      if (!moved) return;
+      var W = st.page.clientWidth, H = st.page.clientHeight;
+      done({ x: +(card.offsetLeft / W).toFixed(4), y: +(card.offsetTop / H).toFixed(4) });
+    }
+    card.addEventListener('pointerup', end); card.addEventListener('pointercancel', end);
+  }
+
   // the legend's route colours: just "Route" for a one-colour run; each section, with its name, when the run has several
   function legendSections(used, E){
     var cols = Object.keys(used).sort(function(a, b){ return used[b] - used[a]; });
@@ -35181,10 +35227,25 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var map = st.map, R = st.R, c = st.page, W = c.clientWidth, H = c.clientHeight, count = { tl: 0, tr: 0, bl: 0, br: 0 };
     R.lines.forEach(function(l){ l.c.forEach(function(p0){ var q = map.latLngToContainerPoint(p0), p = toView(st, q.x, q.y); if (p.x < 0 || p.y < 0 || p.x > W || p.y > H) return; count[(p.y < H / 2 ? 't' : 'b') + (p.x < W / 2 ? 'l' : 'r')]++; }); });
     var order = st.fixed || Object.keys(count).sort(function(a, b){ return count[a] - count[b]; });
+    var kp = st.keyPos, keyCard = c.querySelector('.rm-card.rm-key');
+    if (kp && keyCard) {
+      // the key's corner (a picked one, or the one its dragged spot is nearest) goes first, the rest keep their order
+      var kq = kp.q;
+      if (!kq) {
+        var cx = kp.x * W + keyCard.offsetWidth / 2, cy = kp.y * H + keyCard.offsetHeight / 2;
+        kq = (cy < H / 2 ? 't' : 'b') + (cx < W / 2 ? 'l' : 'r');
+      }
+      order = [kq].concat(order.filter(function(q){ return q !== kq; }));
+    }
     st.order = order;
     Array.prototype.forEach.call(c.querySelectorAll('.rm-card'), function(card, i){
       var q = order[i] || 'tl';
       card.style.top = card.style.bottom = card.style.left = card.style.right = '';
+      if (card === keyCard && kp && kp.x != null) {
+        card.style.left = Math.max(0, Math.min(W - card.offsetWidth, kp.x * W)) + 'px';
+        card.style.top = Math.max(0, Math.min(H - card.offsetHeight, kp.y * H)) + 'px';
+        return;
+      }
       card.style[q.charAt(0) === 't' ? 'top' : 'bottom'] = (q.charAt(0) === 't' ? 10 : 22) + 'px';
       card.style[q.charAt(1) === 'l' ? 'left' : 'right'] = '10px';
     });
@@ -35194,15 +35255,29 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   /* ---- the viewer ---- */
   var el = null, view = null, curKey = null, pagesCache = [], curPage = 0, pageSize = null;
   var editing = false, tool = 'paint', colour = '#ff0000', orientOverride = null;
-  // how far each run's map is turned (degrees clockwise, steps of 5), kept per run on this phone
+  // how far each run's map is turned (whole degrees clockwise), kept per run on this phone
   function rotFor(key){ var r = (lsGet('lbRunMapRot', {}) || {})[key]; return isFinite(+r) ? +r : 0; }
   function setRot(deg){
-    deg = ((Math.round(deg / 5) * 5) % 360 + 360) % 360;
+    deg = ((Math.round(deg) % 360) + 360) % 360;
     var all = lsGet('lbRunMapRot', {}) || {}; if (deg) all[curKey] = deg; else delete all[curKey]; lsSet('lbRunMapRot', all);
-    if (view) { setGeom(view, deg); placeCards(view); }
+    if (view) { setGeom(view, deg); setNorth(view); placeCards(view); }
     rotLabel();
   }
-  function stepRot(dir){ var cur = rotFor(curKey); setRot(dir > 0 ? Math.floor(cur / 5 + 1e-6) * 5 + 5 : Math.ceil(cur / 5 - 1e-6) * 5 - 5); }
+  // a step lands on the next whole multiple of its size, so 5-degree steps square up a 1-degree tweak
+  function stepRot(dir, size){ size = size || 5; var cur = rotFor(curKey); setRot(dir > 0 ? Math.floor(cur / size + 1e-6) * size + size : Math.ceil(cur / size - 1e-6) * size - size); }
+  // where the key goes, per run on this phone: null = emptiest corner, {q:'tl'|'tr'|'bl'|'br'}, or {x,y} (fractions of the page) where it was dragged
+  function keyFor(key){ var k = (lsGet('lbRunMapKey', {}) || {})[key]; return k && (k.q || k.x != null) ? k : null; }
+  function setKey(pos){
+    var all = lsGet('lbRunMapKey', {}) || {}; if (pos) all[curKey] = pos; else delete all[curKey]; lsSet('lbRunMapKey', all);
+    if (view) { view.keyPos = pos; placeCards(view); }
+    keyPicker();
+  }
+  function keyPicker(){
+    var s = el && document.getElementById('rmKey'); if (!s) return;
+    var k = keyFor(curKey), v = !k ? 'auto' : k.q ? k.q : 'drag';
+    s.querySelector('option[value="drag"]').hidden = v !== 'drag';
+    s.value = v;
+  }
   function rotLabel(){
     var b = el && el.querySelector('[data-rm="rot0"]'); if (!b) return;
     var r = rotFor(curKey);
@@ -35265,7 +35340,10 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     if (el) return;
     el = document.createElement('div'); el.id = 'lbRunMap';
     el.innerHTML = '<div class="rm-head"><div class="rm-bar"><select id="rmStream"></select><select id="rmDay"></select><select id="rmRun"></select><span class="rm-sp"></span>' +
-      '<span class="rm-rot"><button type="button" data-rm="rotL" title="Turn the map 5\u00b0 left" aria-label="Turn the map 5 degrees left">\u21ba 5\u00b0</button><button type="button" data-rm="rot0" title="North up">N</button><button type="button" data-rm="rotR" title="Turn the map 5\u00b0 right" aria-label="Turn the map 5 degrees right">5\u00b0 \u21bb</button></span>' +
+      '<span class="rm-rot"><button type="button" data-rm="rotL" data-step="5" title="Turn the map 5\u00b0 left" aria-label="Turn the map 5 degrees left">\u21ba 5\u00b0</button><button type="button" class="rm-fine" data-rm="rotL" data-step="1" title="Turn the map 1\u00b0 left" aria-label="Turn the map 1 degree left">1\u00b0</button>' +
+      '<button type="button" data-rm="rot0" title="North up">N</button>' +
+      '<button type="button" class="rm-fine" data-rm="rotR" data-step="1" title="Turn the map 1\u00b0 right" aria-label="Turn the map 1 degree right">1\u00b0</button><button type="button" data-rm="rotR" data-step="5" title="Turn the map 5\u00b0 right" aria-label="Turn the map 5 degrees right">5\u00b0 \u21bb</button></span>' +
+      '<select id="rmKey" title="Where the key goes (or drag the key on the map)"><option value="auto">Key: auto</option><option value="tl">Key: top left</option><option value="tr">Key: top right</option><option value="bl">Key: bottom left</option><option value="br">Key: bottom right</option><option value="drag" hidden>Key: where dragged</option></select>' +
       '<button type="button" data-rm="fit" title="Show the whole run">Whole run</button><button type="button" data-rm="turn" title="Portrait / landscape">Turn page</button><button type="button" data-rm="edit">Edit</button><button type="button" data-rm="printview" title="Prints exactly what is on screen">Print</button><button type="button" data-rm="close">Close</button></div>' +
       '<div id="rmTools" class="rm-tools"></div></div><div id="rmView"></div><div id="rmPrint"></div>';
     document.body.appendChild(el);
@@ -35283,6 +35361,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       if (a === 'names') editNames();
     });
     ['rmStream', 'rmDay', 'rmRun'].forEach(function(id){ document.getElementById(id).addEventListener('change', function(){ pickerChanged(id); }); });
+    document.getElementById('rmKey').addEventListener('change', function(){ var v = this.value; if (v === 'drag') return; setKey(v === 'auto' ? null : { q: v }); });
     // the turn buttons act on press, and keep turning while held
     var holdT = 0, repT = 0;
     function stopHold(){ clearTimeout(holdT); clearInterval(repT); holdT = repT = 0; }
@@ -35291,17 +35370,18 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       e.preventDefault();
       var a = b.getAttribute('data-rm');
       if (a === 'rot0') { setRot(0); return; }
-      var d = a === 'rotR' ? 1 : -1; stepRot(d); stopHold();
-      holdT = setTimeout(function(){ repT = setInterval(function(){ stepRot(d); }, 180); }, 450);
+      var d = a === 'rotR' ? 1 : -1, sz = +b.getAttribute('data-step') || 5; stepRot(d, sz); stopHold();
+      holdT = setTimeout(function(){ repT = setInterval(function(){ stepRot(d, sz); }, sz === 1 ? 110 : 180); }, 450);
       try { b.setPointerCapture(e.pointerId); } catch (x) {}
     });
     ['pointerup', 'pointercancel', 'lostpointercapture'].forEach(function(n){ el.addEventListener(n, stopHold); });
     el.addEventListener('contextmenu', function(e){ if (e.target.closest && e.target.closest('.rm-rot')) e.preventDefault(); });
-    // on a keyboard: [ and ] turn, \ back to north up
+    // on a keyboard: [ and ] turn 5 degrees, { and } (shift) turn 1 degree, \ back to north up
     document.addEventListener('keydown', function(e){
       if (!el || el.style.display === 'none' || !curKey) return;
       var t = e.target, tag = t && t.tagName; if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || e.ctrlKey || e.metaKey || e.altKey) return;
-      if (e.key === '[') { stepRot(-1); e.preventDefault(); } else if (e.key === ']') { stepRot(1); e.preventDefault(); } else if (e.key === '\\') { setRot(0); e.preventDefault(); }
+      if (e.key === '[') { stepRot(-1, 5); e.preventDefault(); } else if (e.key === ']') { stepRot(1, 5); e.preventDefault(); }
+      else if (e.key === '{') { stepRot(-1, 1); e.preventDefault(); } else if (e.key === '}') { stepRot(1, 1); e.preventDefault(); } else if (e.key === '\\') { setRot(0); e.preventDefault(); }
     });
     window.addEventListener('resize', function(){ if (el.style.display !== 'none' && curKey) renderView(true, true); });
   }
@@ -35334,10 +35414,12 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     host.appendChild(d.page);
     var opts = editing ? editHandlers() : {};
     opts.rot = rotFor(curKey);
+    opts.keyPos = keyFor(curKey);
+    opts.onKeyMove = function(pos){ setKey(pos); };
     if (kept) opts.view = kept;
     if (editing && keptOrder) opts.order = keptOrder;
     view = draw(d.map, curKey, R, pg, opts);
-    rotLabel();
+    rotLabel(); keyPicker();
   }
   function show(key){
     curKey = key; curPage = 0; orientOverride = null; pageSize = null;
@@ -35359,7 +35441,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     css.textContent = '@media print { @page { size: A4 ' + (o === 'port' ? 'portrait' : 'landscape') + '; margin: 6mm; } }';
     var d = pageDiv(o, null); host.appendChild(d.page);
     var paperW = d.page.clientWidth || PAGE[o][0] * MM;
-    printing.push(draw(d.map, curKey, R, pagesCache[0], { view: { c: c, z: z + Math.log2(paperW / screenW) }, order: order, rot: rotFor(curKey) }));
+    printing.push(draw(d.map, curKey, R, pagesCache[0], { view: { c: c, z: z + Math.log2(paperW / screenW) }, order: order, rot: rotFor(curKey), keyPos: keyFor(curKey) }));
     setTimeout(function(){
       try { window.print(); } catch (x) {}
       setTimeout(function(){ document.body.classList.remove('rm-printing'); printing.forEach(function(s){ try { s.map.remove(); } catch (e) {} }); printing = []; host.innerHTML = ''; }, 800);
