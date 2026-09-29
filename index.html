@@ -24011,6 +24011,39 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     const P = e && e.p && store.parcels[e.p];
     return P ? toLatLngs(P.o, null) : null;
   }
+  // Which houses are on the lot under a tapped point (the map's "tap a property boundary" card). Every house
+  // counts, not just the run's - a tap is how you look up a place you're not collecting today. Returns
+  // { sites, ring } (ring = [[lat,lng],...] to highlight) or null. A lot nobody's pin was matched to (a
+  // neighbour, a park) falls back to the nearest house pin within 15 m of the tap.
+  function sitesAt(lat, lng) {
+    lat = Number(lat); lng = Number(lng);
+    if (!isFinite(lat) || !isFinite(lng)) return null;
+    sitesIndexed();
+    for (let i = 0; i < handDrawnSites.length; i++) {
+      const s = handDrawnSites[i], f = [];
+      s.boundary.forEach(p => f.push(Number(p[1]), Number(p[0])));
+      if (ringContains(f, lng, lat)) return { sites: [s], ring: s.boundary.map(p => [Number(p[0]), Number(p[1])]) };
+    }
+    if (!parcelIndexed) buildParcelIndex();
+    const inLot = P => P && P.b && lng >= P.b[0] && lng <= P.b[2] && lat >= P.b[1] && lat <= P.b[3]
+      && ringContains(P.o, lng, lat) && !(P.h && P.h.some(h => ringContains(h, lng, lat)));
+    let pid = null;
+    (parcelCells.get(cellKey(lng, lat)) || []).concat(parcelBig).forEach(id => {
+      const P = store.parcels[id];
+      if (inLot(P) && (!pid || (P.a || Infinity) < (store.parcels[pid].a || Infinity))) pid = id;
+    });
+    const pad = 0.0005, near = sitesInView({ w: lng - pad, e: lng + pad, s: lat - pad, n: lat + pad });
+    if (pid) {
+      const on = near.filter(s => { const e = store.sites[siteKey(s)]; return e && e.p === pid && !(Array.isArray(s.boundary) && s.boundary.length >= 3); });
+      if (on.length) return { sites: on, ring: toLatLngs(store.parcels[pid].o, null) };
+    }
+    // the lot itself, for the outline, from the loaded tiles if it isn't one of the stored (matched) lots
+    let ring = pid ? toLatLngs(store.parcels[pid].o, null) : null;
+    if (!ring) tiles.forEach(t => { if (!ring) t.parcels.forEach(P => { if (ring || P.road) return; P.parts.forEach(part => { if (!ring && partContains(part, lng, lat)) ring = toLatLngs(part.o, null); }); }); });
+    let best = null, bestD = 15;
+    near.forEach(s => { const pt = sitePoint(s); if (!pt) return; const d = metresBetween(lat, lng, pt.lat, pt.lng); if (d < bestD) { bestD = d; best = s; } });
+    return best ? { sites: [best], ring } : (ring ? { sites: [], ring } : null);
+  }
   async function matchSite(site) {
     await ensureLoaded();
     const pt = sitePoint(site);
@@ -24789,6 +24822,8 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     matchSite: matchSite,
     infoFor: infoFor,
     boundaryFor: boundaryFor,
+    sitesAt: sitesAt,
+    isOn: isOn,
     matchAllUI: matchAllUI,
     matchViewUI: matchViewUI,
     clearAllUI: clearAllUI,
@@ -25292,6 +25327,12 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
      null when there's nothing ahead within reach. both(site) = a house where both kerbs are worked. */
   // (8 m behind still counts - the bin being emptied sits about there, at the arm, behind the GPS in the cab)
   const NB_BEHIND_M = 8, NB_SAME_MAX = 1000, NB_TURN_MAX = 450, NB_AHEAD_MIN = 5;
+  // the house you're at: the bin arm sits NB_ARM_M behind the GPS; a house with no lot is NB_AT_M either side
+  // of its pin; a lot only counts if it comes within NB_LOT_ROAD_M of the street line
+  const NB_ARM_M = 4, NB_AT_M = 8, NB_LOT_ROAD_M = 30;
+  function lotOf(site) {
+    try { const r = window.lbParcels && window.lbParcels.boundaryFor ? window.lbParcels.boundaryFor(site) : null; return r && r.length >= 3 ? r : null; } catch (e) { return null; }
+  }
   function strayIds() {
     if (run.strays) return run.strays;
     const ids = new Set();
@@ -25318,6 +25359,31 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     if (id) {
       const entry = getEntry(id);
       classify(entry, truck, heading);
+      // 0. the house you're at right now. The box is for the bin you're emptying - its number is what you
+      // need while you're there - so a house stays up while its frontage is beside the bin arm (a few metres
+      // behind the GPS in the cab), even after its bins are flipped, and the box only moves on once you're
+      // past it. (It used to jump to the next house the moment this one's bins were done, or while you were
+      // still level with it.) The frontage is the lot's property boundary along the street; a house with
+      // no lot uses its pin +/- NB_AT_M.
+      const armAt = -NB_ARM_M;
+      let here = null, hereD = Infinity;
+      entry.items.forEach(it => {
+        if (!it.onRun || !it.bins || strays.has(siteIdOf(it.site))) return;
+        geo(it);
+        if (wantKey && it.side !== wantKey && !(both && both(it.site))) return;
+        let lo = it._along - NB_AT_M, hi = it._along + NB_AT_M, mid = it._along;
+        const ring = lotOf(it.site);
+        if (ring) {
+          let a0 = Infinity, a1 = -Infinity, near = Infinity;
+          ring.forEach(p => { const v = local({ lat: p[0], lng: p[1] }, truck); const a = hx * v.x + hy * v.y; a0 = Math.min(a0, a); a1 = Math.max(a1, a); near = Math.min(near, Math.abs(hx * v.y - hy * v.x)); });
+          if (near > NB_LOT_ROAD_M) return;          // a lot that doesn't reach this street
+          lo = a0 - 1; hi = a1 + 1; mid = (a0 + a1) / 2;
+        }
+        if (armAt < lo || armAt > hi) return;
+        const d = Math.abs(mid - armAt);
+        if (d < hereD) { hereD = d; here = it; }
+      });
+      if (here) return here.site;
       let best = null;
       entry.items.forEach(it => {
         if (!ok(it)) return;
@@ -34322,6 +34388,112 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
 })();
 
 
+
+/* ========== Tap a property boundary: the bins at that address ==========
+   With Property boundaries on, tapping inside a lot shows what's collected there - every stream, bin number,
+   size and run, whatever run it's on (the next-bin box only ever shows the run you're driving). Taps meant for
+   something else are left alone: a bin's own popup wins, and drawing, picking a spot on the map or selecting
+   houses all use the tap themselves. */
+(function(){
+  var STREAMS = [
+    { k: 'Garbage',   run: 'garRun', icon: 'garbage.png', col: '#dc2626', week: false },
+    { k: 'Recycling', run: 'recRun', icon: 'recycle.png', col: '#eab308', week: true },
+    { k: 'FOGO',      run: 'fogRun', icon: 'fogo.png',    col: '#16a34a', week: true }
+  ];
+  var MAX_SITES = 8;
+  var lastPopupAt = 0, ours = null, outline = null, bound = null;
+  function h(v){ return String(v == null ? '' : v).replace(/[&<>"']/g, function(c){ return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+  function busy(){
+    try {
+      if (document.body.classList.contains('ux-picking')) return true;
+      var cb = document.getElementById('mapContextBar');
+      if (cb && cb.style.display && cb.style.display !== 'none') return true;
+      if (typeof collectionPointMode !== 'undefined' && collectionPointMode) return true;
+      if (typeof geofenceDrawActive !== 'undefined' && geofenceDrawActive) return true;
+      if (typeof collectionSelectionActive !== 'undefined' && collectionSelectionActive) return true;
+    } catch (e) {}
+    return false;
+  }
+  function binsOf(site){
+    var council = typeof activeFilterDataSource !== 'undefined' && activeFilterDataSource === 'council';
+    return (council ? site.councilStreams : site.soloStreams) || {};
+  }
+  function siteHTML(site){
+    var sch = site.soloSchedule || {}, all = binsOf(site), wk = String(sch.weekLetter || '').trim().toUpperCase();
+    var done = (typeof servicedBinSerials !== 'undefined' && servicedBinSerials) ? servicedBinSerials : null;
+    var addr = String(site.addressText || site.baseStreetLine || 'Address unknown').split(',')[0].trim();
+    var sub = String(site.suburbLine || '').trim();
+    var rows = '';
+    STREAMS.forEach(function(st){
+      var bins = all[st.k] || [], run = String(sch[st.run] || '').trim();
+      if (!bins.length && !run) return;
+      var runTxt = run ? 'Run ' + h(run) + (st.week && wk ? ' ' + h(wk) : '') : 'No run';
+      var list = bins.length ? bins.map(function(b){
+        var ok = done && b.serial && done.has(b.serial);
+        return '<div class="ux-lot-bin"><b>' + h(b.serial || 'No number') + '</b>' + (b.size ? ' <span>' + h(b.size) + '</span>' : '') + (ok ? ' <i>✓ emptied</i>' : '') + '</div>';
+      }).join('') : '<div class="ux-lot-bin"><span>No bin listed</span></div>';
+      rows += '<div class="ux-lot-row" style="border-left-color:' + st.col + '"><img class="icon-img" src="' + st.icon + '" alt=""><div class="ux-lot-run">' + runTxt + '</div><div class="ux-lot-bins">' + list + '</div></div>';
+    });
+    if (String(sch.recSummerRun || '').trim()) rows += '<div class="ux-lot-row" style="border-left-color:#f59e0b">☀️<div class="ux-lot-run">Summer run ' + h(sch.recSummerRun) + '</div><div class="ux-lot-bins"></div></div>';
+    if (!rows) rows = '<div class="map-popup-meta">No bins listed at this address.</div>';
+    var id = String(site.propId || site.siteId || '');
+    var notes = String(site.runFlags || '').trim();
+    return '<div class="ux-lot-site">'
+      + '<div class="map-popup-title">' + h(addr) + '</div>'
+      + '<div class="map-popup-meta">' + h([sub, sch.day].filter(Boolean).join(' · ')) + '</div>'
+      + (notes ? '<div class="map-popup-meta">🚩 ' + h(notes) + '</div>' : '')
+      + rows
+      + (id && typeof openPropertyInspectModal === 'function' ? '<div class="map-popup-actions"><button type="button" class="map-popup-btn" onclick="openPropertyInspectModal(\'' + id.replace(/[^\w.-]/g, '') + '\')">Property</button></div>' : '')
+      + '</div>';
+  }
+  function clear(){ if (outline) { try { outline.remove(); } catch (e) {} outline = null; } }
+  function show(latlng){
+    var r = null;
+    try { r = window.lbParcels.sitesAt(latlng.lat, latlng.lng); } catch (e) { r = null; }
+    if (!r || (!r.sites.length && !r.ring)) return;
+    clear();
+    if (r.ring) { try { outline = L.polygon(r.ring, { interactive: false, color: '#f97316', weight: 3, fillColor: '#f97316', fillOpacity: 0.15 }).addTo(leafletMap); } catch (e) {} }
+    var sites = r.sites.slice(0, MAX_SITES);
+    var html = '<div class="map-popup ux-lot-pop">'
+      + (r.sites.length > 1 ? '<div class="map-popup-meta">' + r.sites.length + ' addresses on this lot' + (r.sites.length > MAX_SITES ? ' (first ' + MAX_SITES + ')' : '') + '</div>' : '')
+      + (sites.length ? sites.map(siteHTML).join('') : '<div class="map-popup-title">No address on this lot</div><div class="map-popup-meta">Nobody\'s bins are listed here.</div>')
+      + '</div>';
+    ours = L.popup({ maxWidth: 290, autoPanPadding: [20, 90], className: 'ux-lot-popup' }).setLatLng(latlng).setContent(html);
+    ours.on('remove', function(){ clear(); ours = null; });
+    ours.openOn(leafletMap);
+  }
+  function onTap(ev){
+    try {
+      if (!ev || !ev.latlng || !window.lbParcels || !window.lbParcels.sitesAt) return;
+      if (!window.lbParcels.isOn() || !(window.lbParcels._t.lastDraw() > 0)) return;   // boundaries switched off or zoomed out past them
+      if (busy() || Date.now() - lastPopupAt < 400) return;
+      var at = ev.latlng;
+      // a bin's own popup opens from the same tap (its click bubbles up to the map) - give it a moment, and leave it be
+      setTimeout(function(){ if (Date.now() - lastPopupAt >= 400 && !busy()) show(at); }, 60);
+    } catch (e) {}
+  }
+  function bind(){
+    if (typeof leafletMap === 'undefined' || !leafletMap || bound === leafletMap) return;
+    bound = leafletMap;
+    leafletMap.on('popupopen', function(ev){ if (!ours || ev.popup !== ours) lastPopupAt = Date.now(); });
+    leafletMap.on('click', onTap);
+  }
+  var prevInit = window.initLeafletMap;
+  if (typeof prevInit === 'function') window.initLeafletMap = function(){ var out = prevInit.apply(this, arguments); try { bind(); } catch (e) {} return out; };
+  bind();
+  var prevTab = window.lbNotifyTabChanged;
+  window.lbNotifyTabChanged = function(tab){ var out = typeof prevTab === 'function' ? prevTab.apply(this, arguments) : undefined; try { bind(); } catch (e) {} return out; };
+  var css = document.createElement('style');
+  css.textContent = '.ux-lot-pop{max-height:52vh;overflow-y:auto;min-width:210px}'
+    + '.ux-lot-site+.ux-lot-site{border-top:1px solid rgba(100,116,139,.35);margin-top:10px;padding-top:8px}'
+    + '.ux-lot-row{display:grid;grid-template-columns:22px auto 1fr;align-items:center;gap:6px;border-left:4px solid;padding:4px 0 4px 6px;margin-top:6px;font-size:13px}'
+    + '.ux-lot-row .icon-img{width:20px;height:20px}'
+    + '.ux-lot-run{font-weight:700;white-space:nowrap}'
+    + '.ux-lot-bins{text-align:right;font-size:12.5px}'
+    + '.ux-lot-bin b{font-weight:800;letter-spacing:.2px}'
+    + '.ux-lot-bin span{opacity:.7}.ux-lot-bin i{font-style:normal;color:#16a34a;font-weight:700}';
+  document.head.appendChild(css);
+})();
 </script>
 
 <!-- =====================================================================
