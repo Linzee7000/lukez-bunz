@@ -17160,7 +17160,10 @@ window.addEventListener('DOMContentLoaded', async () => {
     if (userCurrentLocation) {
       records.forEach(site => {
         const bd = binDistBySite.get(String(site.propId || site.siteId || ''));
-        if (bd !== undefined && bd < nearestBinDist && onWantedSide(site)) { nearestBinDist = bd; nearestBinSite = site; }
+        // (and its house nearby too: a bin pinned in the wrong place - a Mount Martha house's bin sitting
+        // in Rosebud - isn't "the bin at the truck")
+        if (bd !== undefined && bd < nearestBinDist && onWantedSide(site) && site.lat && Number(site.lat) !== 0
+          && getDistanceMeters(userCurrentLocation.lat, userCurrentLocation.lng, Number(site.lat), Number(site.lng)) <= 80) { nearestBinDist = bd; nearestBinSite = site; }
         if (site.lat && site.lng && Number(site.lat) !== 0) {
           let d = getDistanceMeters(userCurrentLocation.lat, userCurrentLocation.lng, Number(site.lat), Number(site.lng));
           if (bd !== undefined && bd < d) d = bd;
@@ -17170,7 +17173,16 @@ window.addEventListener('DOMContentLoaded', async () => {
         }
       });
     }
-    const currentSite = (nearestBinSite && nearestBinDist <= BIN_AT_TRUCK_M) ? nearestBinSite
+    // In the order the truck gets to them - same street ahead on your side, else the next street off to
+    // your side, else the next turn (lbNextBin, in lb-street-stats, which knows the run's streets and
+    // each house's kerb). The nearest-on-your-side pick below is only the fallback for when that
+    // isn't available (no run indexed yet).
+    let nb;
+    try { if (typeof window.lbNextBin === 'function' && userCurrentLocation) nb = window.lbNextBin(userCurrentLocation, lastValidHeading || 0, wantSide === 'left' ? 'L' : wantSide === 'right' ? 'R' : null, isBothSidesSite); } catch (e) { nb = undefined; }
+    // (lbNextBin covers the bin beside the truck too, and judges its kerb by the street's odd/even sides,
+    // which a few metres of GPS error can't flip - so when it has an answer, it decides.)
+    const currentSite = nb !== undefined ? nb
+      : (nearestBinSite && nearestBinDist <= BIN_AT_TRUCK_M) ? nearestBinSite
       : (nearestSameSideSite && nearestSameSideDist <= 300) ? nearestSameSideSite : null;
     if (currentSite) lastSideOfTravel = isBothSidesSite(currentSite) ? null : (sideOfSite(currentSite) || lastSideOfTravel);
     const mapLiveStreet = q('mapLiveStreet');
@@ -25200,6 +25212,128 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     return out;
   }
 
+
+  /* ---------- the truck on the road, not where the GPS dot is ----------
+     Which kerb a house is on is worked out from where the truck is. GPS is often 5-10 m out - enough to put
+     the dot in the front yards on one side, and then that side's houses read as the OTHER side (and where
+     only one side has houses nearby, the odd/even vote can't correct it). So, when the run's streets are
+     known (data/run-routes.json - the OpenStreetMap streets each run drives, as the run maps use), the
+     truck is put on the nearest point of the street it's on, within 25 m, for the side test. */
+  let routeData = null, routeLoading = false;
+  function loadRoutes() {
+    if (routeData || routeLoading) return;
+    routeLoading = true;
+    fetch('data/run-routes.json').then(r => r.ok ? r.json() : null).then(d => { routeData = (d && d.runs) || {}; }).catch(() => { routeData = {}; });
+  }
+  function routeKeys() {
+    const st = (typeof activeFilterStream !== 'undefined') ? activeFilterStream : '';
+    if (!/^(Garbage|Recycling|FOGO)$/.test(st)) return [];
+    let day = String((typeof activeFilterDay !== 'undefined' && activeFilterDay) || '');
+    day = day.charAt(0).toUpperCase() + day.slice(1).toLowerCase();
+    const wk = String((typeof activeFilterWeek !== 'undefined' && activeFilterWeek) || '').toUpperCase();
+    const out = [];
+    let runs = []; try { runs = Array.from(selectedMapRuns()); } catch (e) {}
+    runs.forEach(r => {
+      const R = String(r).toUpperCase();
+      if (st === 'Garbage') out.push('Garbage#' + day + '#' + R);
+      else { out.push(st + '#' + day + '#' + wk + '#' + R); out.push(st + '#' + day + '##' + R); }
+    });
+    return out;
+  }
+  function onRoad(truck, streetName) {
+    if (!truck) return truck;
+    if (!routeData) { loadRoutes(); return truck; }
+    let best = null, bd = 25;
+    routeKeys().forEach(k => {
+      const r = routeData[k]; if (!r || !Array.isArray(r.lines)) return;
+      r.lines.forEach(L => {
+        if (streetName && normStreet(L.n) !== streetName) return;
+        const c = L.c || [];
+        for (let i = 1; i < c.length; i++) {
+          const a = local({ lat: c[i - 1][0], lng: c[i - 1][1] }, truck), b = local({ lat: c[i][0], lng: c[i][1] }, truck);
+          const dx = b.x - a.x, dy = b.y - a.y, L2 = dx * dx + dy * dy;
+          const t = L2 ? Math.max(0, Math.min(1, -(a.x * dx + a.y * dy) / L2)) : 0;
+          const px = a.x + t * dx, py = a.y + t * dy, d = Math.hypot(px, py);
+          if (d < bd) { bd = d; best = { x: px, y: py }; }
+        }
+      });
+    });
+    if (!best) return truck;
+    return { lat: truck.lat + best.y / M_LAT, lng: truck.lng + best.x / (M_LNG * Math.cos(truck.lat * Math.PI / 180)) };
+  }
+
+  /* ---------- the next bin (the Map's next-bin box) ----------
+     In the order the truck will get to it, not "nearest in a straight line" (which picked a house in the
+     next street over - Ashden Square from Besgrove St beside the Olympic reserve - and, from a house pin in
+     the wrong place, a Dunns Rd, Mount Martha house in Rosebud):
+       1. the street you're on: the next house with a bin still to do on your side (the side being collected,
+          by the same odd/even-aware sides as the strip) - the one beside you or the first one ahead;
+       2. otherwise the next street off to your side (left) ahead - its house nearest you, the first you'd
+          reach turning in;
+       3. otherwise the next street ahead either way (the next turn).
+     Houses flagged as in the wrong place ("locations look wrong") are left out. Only houses on the run with
+     a bin not yet emptied count. Returns undefined when the run isn't indexed (the caller falls back),
+     null when there's nothing ahead within reach. both(site) = a house where both kerbs are worked. */
+  // (8 m behind still counts - the bin being emptied sits about there, at the arm, behind the GPS in the cab)
+  const NB_BEHIND_M = 8, NB_SAME_MAX = 1000, NB_TURN_MAX = 450, NB_AHEAD_MIN = 5;
+  function strayIds() {
+    if (run.strays) return run.strays;
+    const ids = new Set();
+    try { if (typeof window.lbStraySites === 'function') window.lbStraySites(run.items.map(it => it.site)).forEach((v, site) => ids.add(siteIdOf(site))); } catch (e) {}
+    return (run.strays = ids);
+  }
+  function leftToDo(it) {
+    if (!it.onRun || !it.bins) return 0;
+    const done = (typeof servicedBinSerials !== 'undefined' && servicedBinSerials) ? servicedBinSerials : null;
+    if (!done || !it.serials || !it.serials.length) return it.bins;
+    return it.serials.filter(x => !x || !done.has(x)).length;
+  }
+  function nextBin(truck, heading, want, both) {
+    if (!run || !run.items.length || !truck) return undefined;
+    const strays = strayIds();
+    const id = pickStreet(truck);
+    if (id) { const st0 = run.streets.get(id); truck = onRoad(truck, st0 && st0.name); }
+    const hr = heading * Math.PI / 180, hx = Math.sin(hr), hy = Math.cos(hr);
+    const geo = it => { const v = local(it.pos, truck); it._along = hx * v.x + hy * v.y; it._left = hx * v.y - hy * v.x; it._d = Math.hypot(v.x, v.y); return it; };
+    const ok = it => it.onRun && leftToDo(it) > 0 && !strays.has(siteIdOf(it.site));
+    const wantKey = want === 'L' || want === 'R' ? want : null;
+
+    // 1. this street
+    if (id) {
+      const entry = getEntry(id);
+      classify(entry, truck, heading);
+      let best = null;
+      entry.items.forEach(it => {
+        if (!ok(it)) return;
+        geo(it);
+        if (it._along < -NB_BEHIND_M || it._along > NB_SAME_MAX) return;
+        if (wantKey && it.side !== wantKey && !(both && both(it.site))) return;
+        if (!best || it._along < best._along) best = it;
+      });
+      if (best) return best.site;
+    }
+
+    // 2 and 3. the next street off to your side ahead, else the next street ahead either way
+    const streets = [];
+    run.streets.forEach(st => {
+      if (st.id === id) return;
+      let entryIt = null, near = null;
+      st.items.forEach(it => {
+        if (!ok(it)) return;
+        geo(it);
+        if (it._d > NB_TURN_MAX) return;
+        if (it._along > NB_AHEAD_MIN && (!entryIt || it._along < entryIt._along)) entryIt = it;
+        if (!near || it._d < near._d) near = it;
+      });
+      if (entryIt && near) streets.push({ st, entry: entryIt, near });
+    });
+    if (!streets.length) return null;
+    const onSide = wantKey ? streets.filter(x => (x.entry._left > 0) === (wantKey === 'L')) : streets;
+    const pool = onSide.length ? onSide : streets;
+    pool.sort((a, b) => a.entry._along - b.entry._along);
+    return pool[0].near.site;
+  }
+
   /* ---------- which street is the truck on ---------- */
   let curId = null;
 
@@ -25300,7 +25434,8 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
         drawStrip(tally(entry.items));   // sides unchanged, but bins may have been emptied since
         return;
       }
-      classify(entry, truck, heading);
+      const stn = run.streets.get(id);
+      classify(entry, onRoad(truck, stn && stn.name), heading);
       const t = tally(entry.items);
       lastCalc = { id, pos: { lat: truck.lat, lng: truck.lng }, heading, tally: t };
       drawStrip(t);
@@ -25321,6 +25456,7 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
 
   setInterval(tick, TICK_MS);
 
+  window.lbNextBin = nextBin;
   window.lbStreetStats = {
     refresh: tick,
     _t: { normStreet, houseNo, parseLineNo, classify, tally, pickStreet, setSites, getEntry, angDiff, local,
