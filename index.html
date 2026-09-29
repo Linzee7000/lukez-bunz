@@ -5101,6 +5101,8 @@ const STREET_LITTER_SERVICE_LEVELS = {"seasons":[{"key":"tourist1","label":"Tour
   let streetHashIndex = new Map();
   let userCurrentLocation = null;
   let lastValidHeading = 0;
+  // reversing: see the LOCKED HEADING ENGINE in onGpsPositionSuccess
+  const lbReverseState = { on: false, since: 0, lastMotion: null };
   // Distance (metres) from the truck to the next/current bin address, kept
   // in sync with the floating 📍 badge so the new meta line above the
   // speed digits (#hudSpeedMeta / #mapSpeedMeta) can show the same number
@@ -17556,20 +17558,34 @@ window.addEventListener('DOMContentLoaded', async () => {
     recordSnailTrailPoint(userCurrentLocation.lat, userCurrentLocation.lng);
 
     // --- LOCKED HEADING ENGINE (Prevents 180° flips & snaps) ---
+    // lastValidHeading is the way the TRUCK FACES, not the way it's moving. The phone's GPS heading is the
+    // direction of movement, so reversing turned it round 180°: the truck icon spun, and left and right
+    // swapped - the next-bin box, the L/R strip and the bin flip check all went to the other kerb. (The
+    // phone's own heading was always taken as it came; only the worked-out one had the 180° guard.) Now a
+    // jump of more than 150° in one step at walking pace is the truck starting to reverse (a U-turn turns
+    // through the angles in between), and while reversing the truck faces opposite the way it's moving -
+    // following the reverse round a corner. The next jump back is driving forward again; over 15 km/h or
+    // after 90 s it's taken as forward regardless, so a GPS glitch can't leave it backwards.
     if (speedKmh >= 4) {
+      let motion = null;
       if (pos.coords.heading !== null && !isNaN(pos.coords.heading) && pos.coords.heading >= 0) {
-        lastValidHeading = Math.round(pos.coords.heading);
+        motion = pos.coords.heading;
       } else if (lastGpsCoords.lat !== 0) {
         const deltaDist = getDistanceMeters(lastGpsCoords.lat, lastGpsCoords.lng, userCurrentLocation.lat, userCurrentLocation.lng);
         if (deltaDist >= 4.0) {
           const calcHeading = getBearing(lastGpsCoords.lat, lastGpsCoords.lng, userCurrentLocation.lat, userCurrentLocation.lng);
-          if (!isNaN(calcHeading)) {
-            const diff = Math.abs((calcHeading - lastValidHeading + 180) % 360 - 180);
-            if (diff < 140 || lastValidHeading === 0) {
-              lastValidHeading = Math.round(calcHeading);
-            }
-          }
+          if (!isNaN(calcHeading)) motion = calcHeading;
         }
+      }
+      if (motion !== null) {
+        motion = Math.round(motion) % 360;
+        const R = lbReverseState, now = Date.now();
+        const jump = R.lastMotion !== null && Math.abs((motion - R.lastMotion + 540) % 360 - 180) > 150;
+        if (speedKmh > 15 || (R.on && now - R.since > 90000)) R.on = false;
+        else if (jump) { R.on = !R.on; R.since = now; }
+        R.lastMotion = motion;
+        lastValidHeading = R.on ? (motion + 180) % 360 : motion;
+        if (window.lbReversing !== R.on) { window.lbReversing = R.on; document.body.classList.toggle('lb-reversing', R.on); }
       }
     }
     // If stopped or < 4 km/h, lastValidHeading remains locked to your last driving direction
