@@ -17065,12 +17065,20 @@ window.addEventListener('DOMContentLoaded', async () => {
     // direction of travel (not a fixed compass side) - same +/-70deg
     // left/right cone as the bin-passing check further down, with a
     // dead-ahead/dead-behind gap that counts as neither.
+    //
+    // Measured as how far the house is off the truck's line, in metres, not by the angle to it: a house
+    // 40 m up the road on the left kerb is only a few degrees off dead ahead, so the old +/-70deg cone
+    // called it "neither" and the pick skipped the next house on your side for one round the corner.
+    // More than 2 m off the line is a side; well behind the truck (25 m+) doesn't count - it's been passed.
     const sideOfSite = (site) => {
       if (!userCurrentLocation || !site || !site.lat || !site.lng || Number(site.lat) === 0) return null;
       const bearing = getBearing(userCurrentLocation.lat, userCurrentLocation.lng, Number(site.lat), Number(site.lng));
-      const relAngle = (bearing - (lastValidHeading || 0) + 360) % 360;
-      if (relAngle >= 200 && relAngle <= 340) return 'left';
-      if (relAngle >= 20 && relAngle <= 160) return 'right';
+      const rel = ((bearing - (lastValidHeading || 0) + 360) % 360) * Math.PI / 180;
+      const d = getDistanceMeters(userCurrentLocation.lat, userCurrentLocation.lng, Number(site.lat), Number(site.lng));
+      const across = d * Math.sin(rel), along = d * Math.cos(rel);   // + = right of the line / ahead
+      if (along < -25) return null;
+      if (across <= -2) return 'left';
+      if (across >= 2) return 'right';
       return null;
     };
     // Collection points and drive-in/reverse-in streets are the only cases
@@ -17097,39 +17105,35 @@ window.addEventListener('DOMContentLoaded', async () => {
         if (prev === undefined || d < prev) binDistBySite.set(k, d);
       });
     }
-    // A bin this close is the one being worked: its house wins outright, whichever kerb it's on.
+    // Which kerb the next bin is on: the side being collected (Edit & settings > Which side to collect,
+    // Left by default) in the direction of travel. Both kerbs only where both get worked in one pass -
+    // reverse-in / drive-out and drive-in / reverse-out streets and collection points (isBothSidesSite)
+    // - or with "Both Sides" picked. It used to take any bin within 10 m "whichever kerb it's on" and
+    // then stick to whichever kerb it last picked: across a narrow street, with GPS a few metres out,
+    // the far kerb's bin was often the nearer one, and once it had picked that side it stayed there
+    // (Harridge St heading west showed 26 - the north side - instead of the odd numbers on the left).
+    // Nothing on the right kerb within range now means no next bin, not a jump across the road.
+    const wantSide = (travelMode === 'left' || travelMode === 'right') ? travelMode : null;
+    const onWantedSide = (site) => !wantSide || isBothSidesSite(site) || sideOfSite(site) === wantSide;
+    // A bin this close is the one being worked: its house wins outright, if it's on the right kerb.
     const BIN_AT_TRUCK_M = 10;
     let nearestBinSite = null, nearestBinDist = Infinity;
     if (userCurrentLocation) {
       records.forEach(site => {
         const bd = binDistBySite.get(String(site.propId || site.siteId || ''));
-        if (bd !== undefined && bd < nearestBinDist) { nearestBinDist = bd; nearestBinSite = site; }
+        if (bd !== undefined && bd < nearestBinDist && onWantedSide(site)) { nearestBinDist = bd; nearestBinSite = site; }
         if (site.lat && site.lng && Number(site.lat) !== 0) {
           let d = getDistanceMeters(userCurrentLocation.lat, userCurrentLocation.lng, Number(site.lat), Number(site.lng));
           if (bd !== undefined && bd < d) d = bd;
           if (d < nearestDistOverall) { nearestDistOverall = d; nearestSiteOverall = site; }
-          if (lastSideOfTravel && d < nearestSameSideDist && !isBothSidesSite(site) && sideOfSite(site) === lastSideOfTravel) {
-            nearestSameSideDist = d; nearestSameSideSite = site;
-          }
+          // with the run's bins on the map, only houses that have one count (it's the next *bin*)
+          if (d < nearestSameSideDist && (bd !== undefined || !binDistBySite.size) && onWantedSide(site)) { nearestSameSideDist = d; nearestSameSideSite = site; }
         }
       });
     }
-    // Stick to the same kerb the driver was just working - only falls
-    // back to the plain "nearest overall" pick (which can jump across the
-    // road) once there's nothing left on that side within range, e.g. the
-    // street's ended and it's time to move on.
     const currentSite = (nearestBinSite && nearestBinDist <= BIN_AT_TRUCK_M) ? nearestBinSite
-      : (nearestSameSideSite && nearestSameSideDist <= 300)
-      ? nearestSameSideSite
-      : (nearestDistOverall <= 300 ? nearestSiteOverall : null);
-
-    // Remember which kerb this pick is on for next time. A collection
-    // point / drive-in / reverse-in pick doesn't set a side (both kerbs
-    // are fair game there), so it clears the pin rather than locking the
-    // next pick to whichever side it happened to be nearest on.
-    if (currentSite) {
-      lastSideOfTravel = isBothSidesSite(currentSite) ? null : (sideOfSite(currentSite) || lastSideOfTravel);
-    }
+      : (nearestSameSideSite && nearestSameSideDist <= 300) ? nearestSameSideSite : null;
+    if (currentSite) lastSideOfTravel = isBothSidesSite(currentSite) ? null : (sideOfSite(currentSite) || lastSideOfTravel);
     const mapLiveStreet = q('mapLiveStreet');
     if (mapLiveStreet) {
       const propStreetName = currentSite ? (currentSite.baseStreetLine || currentSite.addressText?.split(',')[0] || '').trim() : 'Scanning Street...';
@@ -32001,6 +32005,10 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
         stats.forEach(function(e){ grp.appendChild(e); });
       }
     }
+    // the GPS accuracy rides at the end of the numbers row: left in the box on its own it wrapped onto
+    // a header row of its own whenever the numbers filled the width
+    var gpe = $('uxmsGps'), sg = $('uxMsStats');
+    if (gpe && sg && gpe.parentNode !== sg) sg.appendChild(gpe);
     return box;
   }
   // beside the name when they fit, on a line of their own when they do not
@@ -32028,6 +32036,11 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var t = badge ? clean(badge.textContent) : '';
     put('uxmsGps', /±/.test(t) ? t.replace(/\s+/g, '') : '');
     var gp = $('uxmsGps'); if (gp) gp.classList.toggle('searching', !!(badge && badge.classList.contains('searching')));
+    // With Nerd mode's GPS strip on the map it's said there already.
+    if (gp) {
+      var strip = $('uxNerdStrip'), dup = !!(strip && strip.offsetParent !== null && getComputedStyle(strip).display !== 'none');
+      if (dup) gp.style.setProperty('display', 'none', 'important'); else gp.style.removeProperty('display');   // (the row's items are display:flex !important)
+    }
   }
   setInterval(function(){ if (document.body.getAttribute('data-ux-screen') === 'map' && !document.hidden) tick(); }, 900);
   var prevInfo = window.updateMapHeaderInfo;
@@ -33654,7 +33667,16 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       s.innerHTML = '<div class="uxgs-stars" id="uxGtaStars" aria-label="Wanted level"></div><div class="uxgs-ticks" id="uxGtaTicks" aria-live="polite"></div>';
       document.body.appendChild(s);
     }
-    s.style.top = (headerBottom() + 6) + 'px';
+    var top = headerBottom() + 6;
+    s.style.top = top + 'px';
+    // Clear of the map's button column (zoom, fullscreen, locate) when that's on the right: the stars
+    // used to sit on top of the + button.
+    var right = 10, col = document.body.getAttribute('data-ux-screen') === 'map' ? $('mapFixedSideControls') : null;
+    if (col && col.offsetParent !== null) {
+      var cr = col.getBoundingClientRect();
+      if (cr.width && cr.left > window.innerWidth / 2 && cr.top < top + 140 && cr.bottom > top) right = Math.round(window.innerWidth - cr.left + 8);
+    }
+    s.style.right = right + 'px';
     return s;
   }
   var fuelLine = null;
@@ -33685,7 +33707,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   // A speeding stretch ends after 8 s back under the limit, and then comes the fine, by the worst
   // point of it - about the Victorian amounts (2026: $227 under 10 km/h over ... $2,171 45+ over;
   // the middle bands are approximate). No limit known = no stars and no fine.
-  var W = { L: 0, last: 0, since: 0, ep: null, under: 0, missSeen: -1, missAcc: 0 };
+  var W = { L: 0, last: 0, since: 0, ep: null, under: 0, missSeen: -1, missAcc: 0, t0: 0 };
   function limitNow(){
     var sg = document.getElementById('mapSpeedLimitSign');
     if (!sg || sg.classList.contains('speed-sign-hidden')) return 0;
@@ -33721,7 +33743,10 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     // bins driven past: missedBinSerials only grows while a run is worked, so a drop is a new run and
     // a big jump is the run's progress being restored - neither is new driving
     var ms = g('missedBinSerials'), n = (ms && ms.size != null) ? ms.size : 0;
-    if (W.missSeen < 0 || n < W.missSeen || n - W.missSeen > 30) W.missSeen = n;
+    if (!W.t0) W.t0 = now;
+    // (the run's progress comes back from the phone's storage a bit after the app opens, sometimes in
+    // pieces - the first minute only sets the starting point)
+    if (W.missSeen < 0 || n < W.missSeen || n - W.missSeen > 30 || now - W.t0 < 60000) W.missSeen = n;
     else if (n > W.missSeen) {
       W.missAcc += n - W.missSeen; W.missSeen = n;
       while (W.missAcc >= 10) { W.missAcc -= 10; raise(W.L + 1); feed('item', '10 bins driven past <em style="color:#ff6b6b">wanted +1</em>', '#e05252'); }
@@ -33742,7 +33767,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   var wasOn = false, lastPickCheck = 0;
   function tick(){
     var on = !!opts().game;
-    if (!on) { if (wasOn) { clearPickups(); primed = false; var gs = $('uxGtaStack'); if (gs) gs.remove(); W.L = 0; W.ep = null; W.missSeen = -1; } wasOn = false; return; }
+    if (!on) { if (wasOn) { clearPickups(); primed = false; var gs = $('uxGtaStack'); if (gs) gs.remove(); W.L = 0; W.ep = null; W.missSeen = -1; W.t0 = 0; } wasOn = false; return; }
     wasOn = true;
     rollDay();
     var H = null; try { H = health(); } catch (e) {}
@@ -33772,6 +33797,32 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   }
   setInterval(function(){ try { tick(); } catch (e) { console.warn('GTA mode:', e); } }, 1000);
   window.uxGta = { stats: function(){ return JSON.parse(JSON.stringify(S)); }, big: big, feed: feed, play: play, _t: { wanted: function(){ return JSON.parse(JSON.stringify(W)); }, ticker: ticker, spawn: spawn, live: function(){ return live; }, health: health, fuelRate: fuelRate, fuelInfo: fuelInfo, resetRate: function(){ rateMemo = null; } } };
+})();
+
+/* =====================================================================
+   Keep the big speed number clear of the map's button column.
+   The speed sits at the bottom right, over the street strip; the column (zoom, zoom level, fullscreen,
+   locate) comes down the right edge, and on a tall column (a foldable, landscape, the zoom level box
+   showing) its bottom buttons ran into the digits. When they would overlap, the number moves left of
+   the column; when there's room again it goes back.
+   ===================================================================== */
+(function(){
+  'use strict';
+  function check(){
+    if (document.body.getAttribute('data-ux-screen') !== 'map' || document.hidden) return;
+    var sp = document.getElementById('mapLiveSpeed'), col = document.getElementById('mapFixedSideControls');
+    if (!sp) return;
+    var shift = 0;
+    if (col && col.offsetParent !== null) {
+      sp.style.transform = '';
+      var a = sp.getBoundingClientRect(), c = col.getBoundingClientRect();
+      // (6 px either way counts as touching)
+      if (a.width && c.width && a.right > c.left - 6 && a.left < c.right && a.bottom > c.top - 6 && a.top < c.bottom + 6) shift = Math.ceil(a.right - c.left + 8);
+    }
+    sp.style.transform = shift ? 'translateX(-' + shift + 'px)' : '';
+  }
+  setInterval(check, 1000);
+  window.addEventListener('resize', function(){ setTimeout(check, 50); });
 })();
 
 /* =====================================================================
