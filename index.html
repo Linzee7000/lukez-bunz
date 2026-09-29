@@ -11720,8 +11720,39 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
     return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
   }
 
+  // Every bin emptied (or missed) today, whatever run was selected at the time - 'runProgressDay'. The
+  // per-selection record below only ever held ONE selection, so picking another run (or, on a shift,
+  // adding the run being driven through) threw away every flip done so far today. Now a run coming
+  // back into the selection gets its bins back from here.
+  let runProgressDay = null;
+  async function dayProgress() {
+    if (!runProgressDay || runProgressDay.day !== todayKey()) {
+      let d = null; try { d = await loadFromDB('runProgressDay'); } catch (e) {}
+      runProgressDay = (d && d.day === todayKey()) ? { day: d.day, serviced: new Set(d.serviced || []), missed: new Set(d.missed || []) }
+        : { day: todayKey(), serviced: new Set(), missed: new Set() };
+    }
+    return runProgressDay;
+  }
+  // The bin serials on the selected run(s) - same rule as the run's bin total.
+  function serialsOnSelectedRuns() {
+    const out = new Set(), streams = visibleStreams();
+    const recs = (typeof siteRecords !== 'undefined' && Array.isArray(siteRecords)) ? siteRecords : [];
+    recs.forEach(site => streams.forEach(sk => {
+      if (!streamMatchesSelectedRun(site, sk)) return;
+      const src = activeFilterDataSource === 'council' ? site.councilStreams : site.soloStreams;
+      ((src && src[sk]) || []).forEach(b => { const x = String((b && b.serial) || '').trim().toUpperCase(); if (x) out.add(x); });
+    }));
+    return out;
+  }
+
   async function saveRunProgress() {
     if (!selectedRunsSet || selectedRunsSet.size === 0) return;
+    try {
+      const dp = await dayProgress();
+      servicedBinSerials.forEach(x => { dp.serviced.add(x); dp.missed.delete(x); });
+      missedBinSerials.forEach(x => { if (!dp.serviced.has(x)) dp.missed.add(x); });
+      await saveToDB('runProgressDay', { day: dp.day, serviced: Array.from(dp.serviced), missed: Array.from(dp.missed) });
+    } catch (e) {}
     await saveToDB('runProgressState', {
       signature: runProgressSignature(),
       day: todayKey(),
@@ -11772,9 +11803,17 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
       servicedBinSerials = new Set(stored.serviced || []);
       missedBinSerials = new Set(stored.missed || []);
     } else {
-      // A different run just got filtered, or it's a new day: start fresh.
-      servicedBinSerials = new Set();
-      missedBinSerials = new Set();
+      // A different run just got filtered, or it's a new day: start from what's already been done
+      // today on the run(s) now selected (nothing, on a new day).
+      const dp = await dayProgress();
+      if (dp.serviced.size || dp.missed.size) {
+        const mine = serialsOnSelectedRuns();
+        servicedBinSerials = new Set(Array.from(dp.serviced).filter(x => mine.has(x)));
+        missedBinSerials = new Set(Array.from(dp.missed).filter(x => mine.has(x) && !servicedBinSerials.has(x)));
+      } else {
+        servicedBinSerials = new Set();
+        missedBinSerials = new Set();
+      }
       await saveRunProgress();
     }
     runProgressSyncedKey = syncKey;
@@ -24864,8 +24903,8 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
         that appears when the truck is on a street the run works.
         One block hard against the left edge (left kerb) and one against
         the right edge (right kerb), each showing:
-           house icon  = houses on THIS run on that side of the street
-           bin icon    = bins those houses have on this run
+           house icon  = houses on THIS run on that side of the street still to do
+           bin icon    = bins those houses have on this run not yet emptied (both count down)
            crossed bin = houses with no bin allocated
 
         "No bin" means: a property on this street with no bin recorded
@@ -24990,6 +25029,18 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     });
     return total;
   }
+  // The serials of those same bins (upper-cased, as the map and the flip tracking use them).
+  function serialsOnRun(site) {
+    const out = [];
+    const streams = (typeof visibleStreams === 'function') ? visibleStreams() : ['Garbage', 'Recycling', 'FOGO'];
+    const ds = (typeof activeFilterDataSource !== 'undefined') ? activeFilterDataSource : 'all';
+    streams.forEach(streamKey => {
+      if (typeof streamMatchesSelectedRun === 'function' && !streamMatchesSelectedRun(site, streamKey)) return;
+      const source = ds === 'council' ? site.councilStreams : site.soloStreams;
+      ((source && source[streamKey]) || []).forEach(b => out.push(String((b && b.serial) || '').trim().toUpperCase()));
+    });
+    return out;
+  }
   // Any bin at all, any stream, in whichever data source is being used.
   function anyBins(site) {
     const ds = (typeof activeFilterDataSource !== 'undefined') ? activeFilterDataSource : 'all';
@@ -25037,7 +25088,7 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
       if (!pos) return;
       const sid = streetIdOf(site);
       if (!sid) return;
-      const it = { site, pos, sid: sid.id, num: houseNo(site), onRun: true, bins: binsOnRun(site) };
+      const it = { site, pos, sid: sid.id, num: houseNo(site), onRun: true, bins: binsOnRun(site), serials: serialsOnRun(site) };
       it.parity = it.num === null ? null : (it.num % 2 === 0 ? 'even' : 'odd');
       it.none = it.bins === 0;
       items.push(it);
@@ -25129,12 +25180,21 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     return state.oddSide ? 'parity' : 'geometry';
   }
 
+  // Houses and bins STILL TO DO on each side: a bin comes off as it's emptied (servicedBinSerials), and a
+  // house when it has no bins left - so the numbers count down as the truck works the street. (They
+  // used to be the street's totals and never moved.) A bin with no serial can't be ticked off, so it
+  // stays counted.
   function tally(items) {
     const out = { L: { houses: 0, bins: 0, none: 0 }, R: { houses: 0, bins: 0, none: 0 } };
+    const done = (typeof servicedBinSerials !== 'undefined' && servicedBinSerials) ? servicedBinSerials : null;
     items.forEach(it => {
       const s = out[it.side];
       if (!s) return;
-      if (it.onRun) { s.houses++; s.bins += it.bins; }
+      if (it.onRun) {
+        let left = it.bins;
+        if (done && it.serials && it.serials.length) left = it.serials.filter(x => !x || !done.has(x)).length;
+        if (left > 0) { s.houses++; s.bins += left; }
+      }
       if (it.none) s.none++;
     });
     return out;
@@ -25237,7 +25297,7 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
       if (lastCalc && lastCalc.id === id
           && distM(truck, lastCalc.pos) < MOVE_RECALC_M
           && angDiff(heading, lastCalc.heading) < TURN_RECALC_DEG) {
-        drawStrip(lastCalc.tally);
+        drawStrip(tally(entry.items));   // sides unchanged, but bins may have been emptied since
         return;
       }
       classify(entry, truck, heading);
@@ -26539,6 +26599,24 @@ body.ux2 .ux-gta-fuel{display:flex;align-items:center;justify-content:space-betw
 body.ux2 .ux-gta-price{display:inline-flex;align-items:center;gap:4px;font-weight:700;color:var(--ux-text)}
 body.ux2 .ux-gta-price input{width:76px;min-height:38px;padding:0 8px;font-size:16px;font-weight:700;text-align:right;background:var(--ux-s2);color:var(--ux-text);border:1px solid var(--ux-line-2);border-radius:var(--ux-rad)}
 #uxGtaHealth .uxgh-cash.neg{color:#e05252}
+/* End of shift: money made and lost, and why (GTA game mode) */
+#uxShiftSummary{position:fixed;inset:0;z-index:30500;display:flex;align-items:center;justify-content:center;padding:16px;background:rgba(0,0,0,.6)}
+#uxShiftSummary .uxss-box{width:100%;max-width:420px;max-height:88vh;overflow:auto;background:rgba(10,10,10,.95);color:#fff;border-top:4px solid #f0c850;border-radius:var(--ux-rad, 4px);padding:16px 18px 14px;box-shadow:0 12px 40px rgba(0,0,0,.6)}
+#uxShiftSummary .uxss-h{font-family:"Pricedown", "Pricedown Bl", "Anton", Impact, "Arial Black", sans-serif;font-size:34px;line-height:1.1;color:#f0c850;text-transform:uppercase;letter-spacing:.03em;text-shadow:2px 0 0 #000, -2px 0 0 #000, 0 2px 0 #000, 0 -2px 0 #000;margin-bottom:6px}
+#uxShiftSummary .uxss-sec{margin:12px 0 4px;font-size:11px;font-weight:800;letter-spacing:.12em;text-transform:uppercase;color:#9a9a9a}
+#uxShiftSummary .uxss-r{display:flex;justify-content:space-between;align-items:baseline;gap:12px;padding:6px 0;border-bottom:1px solid rgba(255,255,255,.08)}
+#uxShiftSummary .uxss-r span{display:flex;flex-direction:column;gap:2px;min-width:0}
+#uxShiftSummary .uxss-r b{font-size:15px}
+#uxShiftSummary .uxss-r i{font-style:normal;font-size:12.5px;color:#b5b5b5}
+#uxShiftSummary .uxss-r em{font-style:normal;font-family:"Pricedown", "Pricedown Bl", "Anton", Impact, "Arial Black", sans-serif;font-size:22px;color:#72cc72;white-space:nowrap}
+#uxShiftSummary .uxss-r.neg em{color:#e05252}
+#uxShiftSummary .uxss-none{padding:6px 0;font-size:13px;color:#b5b5b5}
+#uxShiftSummary .uxss-net, #uxShiftSummary .uxss-tot{display:flex;justify-content:space-between;align-items:baseline;margin-top:12px;font-size:14px;font-weight:700;text-transform:uppercase;letter-spacing:.06em}
+#uxShiftSummary .uxss-net b, #uxShiftSummary .uxss-tot b{font-family:"Pricedown", "Pricedown Bl", "Anton", Impact, "Arial Black", sans-serif;font-weight:400;font-size:30px;color:#72cc72;letter-spacing:.02em}
+#uxShiftSummary .uxss-net.neg b{color:#e05252}
+#uxShiftSummary .uxss-tot{margin-top:2px;color:#c9c9c9}
+#uxShiftSummary .uxss-tot b{font-size:22px;color:#fff}
+#uxShiftSummary .uxss-ok{display:block;width:100%;min-height:48px;margin-top:14px;border:0;border-radius:var(--ux-rad, 4px);background:#fff;color:#000;font-size:16px;font-weight:800;cursor:pointer}
 /* Wanted stars and money coming off (diesel, fines): a stack just under the top bar, top right */
 #uxGtaStack{position:fixed;right:10px;top:90px;z-index:29000;display:flex;flex-direction:column;align-items:flex-end;gap:2px;pointer-events:none}
 body:not(.ux-gta-game) #uxGtaStack{display:none}
@@ -26638,6 +26716,18 @@ body.ux2 .ux-skin-pv i:nth-child(2){top:20px;right:22px}
 body.ux2 .ux-skin-pv b{position:absolute;left:10px;bottom:5px;width:40%;height:3px;border-radius:2px;background:var(--p-t)}
 body.ux2 .ux-skin-pv em{position:absolute;right:6px;top:20px;width:10px;height:10px;border-radius:calc(var(--ux-rad) / 2);background:var(--ui-accent)}
 @media (max-width: 360px){body.ux2 .ux-skins{grid-template-columns:repeat(2, minmax(0, 1fr))}}
+/* "Driving through run 221 - tap to switch" chip, centred under the top bar */
+#uxRunHereChip{position:fixed;left:50%;transform:translateX(-50%);z-index:1200;display:inline-flex;align-items:center;gap:8px;min-height:40px;padding:0 14px;border:0;border-left:4px solid var(--rh-c, #facc15);border-radius:var(--ux-rad, 4px);background:var(--ux-glass-solid, #0e131a);color:var(--ux-text, #fff);box-shadow:0 4px 16px rgba(0,0,0,.45);font-size:14px;cursor:pointer;white-space:nowrap}
+#uxRunHereChip .icon-img{width:18px;height:18px}
+#uxRunHereChip b{font-size:16px;font-weight:800}
+#uxRunHereChip span{font-size:12px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--ux-text-2, #adb9c8)}
+#uxRunHereChip.s-garbage{--rh-c:#dc2626}
+#uxRunHereChip.s-recycling, #uxRunHereChip.s-summerrecycling{--rh-c:#facc15}
+#uxRunHereChip.s-fogo{--rh-c:#16a34a}
+body:not(.lb-map-screen) #uxRunHereChip, body.ux-picking #uxRunHereChip{display:none !important}
+/* Nerd mode's GPS row under the street name: only as wide as its text (like the street row above it),
+   not the full width, so the speed number at the right can sit beside it */
+html body.ux2 #uxCardStack #uxNerdStrip{width:fit-content !important;max-width:calc(100% - 120px) !important}
 /* The break clock on the Shift screen (moved from Layers): the countdown box and "I started earlier";
    its start/end break, start clock and new shift rows are the Shift screen's own buttons already. */
 #uxShift .uxs-bclock{margin:10px 0 4px}
@@ -33283,7 +33373,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     return {
       day: o.day || '', bins: Array.isArray(o.bins) ? o.bins : [], cash: +o.cash || 0, armour: +o.armour || 0, pk: +o.pk || 0,
       found: (o.found && typeof o.found === 'object') ? o.found : {}, done: (o.done && typeof o.done === 'object') ? o.done : {},
-      wasted: o.wasted || 0, healed: o.healed || 0,
+      wasted: o.wasted || 0, healed: o.healed || 0, led: (o.led && typeof o.led === 'object') ? o.led : null,
       price: (+o.price > 0.5 && +o.price < 6) ? +o.price : 2.70,
       fuelShift: o.fuelShift || '', fuelKm: +o.fuelKm || 0, fuelL: +o.fuelL || 0, fuelCost: +o.fuelCost || 0
     };
@@ -33386,7 +33476,20 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   function esc(s){ return String(s).replace(/[&<>"]/g, function(c){ return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
 
   var cashFlash = 0;
-  function addCash(n){ S.cash += n; cashFlash = Date.now(); }
+  // The shift's money, by reason, for the summary at End shift (see shiftSummary). Kept in S.led, for
+  // the shift that's running; a new shift starts a new one.
+  function led(){
+    var sh = null; try { sh = window.uxShiftState ? window.uxShiftState() : null; } catch (e) {}
+    if (!sh || !sh.id) return null;
+    if (!S.led || S.led.shift !== sh.id) S.led = { shift: sh.id, start: sh.start, cash0: S.cash, bins: 0, binsN: 0, bonus: 0, bonusN: 0, pick: 0, pickN: 0, diesel: 0, km: 0, litres: 0, fines: 0, fineList: [], shown: false };
+    return S.led;
+  }
+  // why: 'bins' (n = how many), 'bonus' (milestones, runs done), 'pick' (pickups)
+  function addCash(n, why, count){
+    S.cash += n; cashFlash = Date.now();
+    var L = led(); if (!L || !why) return;
+    L[why] = (L[why] || 0) + n; L[why + 'N'] = (L[why + 'N'] || 0) + (count || 1);
+  }
 
   // ---- health = the break clock -----------------------------------------------------------
   var needCache = {};
@@ -33504,16 +33607,16 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     drop(p);
     if (p.k === 'cash') {
       var amt = [100, 250, 250, 500, 500, 1000][Math.floor(Math.random() * 6)];
-      addCash(amt); feed('cash', 'Cash <em>+' + money(amt) + '</em>'); play('cash');
+      addCash(amt, 'pick'); feed('cash', 'Cash <em>+' + money(amt) + '</em>'); play('cash');
     } else if (p.k === 'armour') {
       S.armour = Math.min(100, S.armour + 25); feed('armour', 'Body armour <em>+25</em>', '#3d8fd6'); play('armour');
     } else if (p.k === 'pkg') {
-      S.pk = Math.min(100, S.pk + 1); addCash(100);
+      S.pk = Math.min(100, S.pk + 1); addCash(100, 'pick');
       feed('pkg', 'Hidden package <em>' + S.pk + ' of 100</em>', '#f0c850');
       if (S.pk % 10 === 0) big('Hidden packages', S.pk + ' of 100 found', 'gold', 'mission'); else play('pickup');
     } else {
       var name = JUNK[Math.floor(Math.random() * JUNK.length)], val = 20 + Math.floor(Math.random() * 29) * 10;
-      S.found[name] = (S.found[name] || 0) + 1; addCash(val);
+      S.found[name] = (S.found[name] || 0) + 1; addCash(val, 'pick');
       feed('item', 'Found: ' + esc(name) + ' <em>+' + money(val) + '</em>', '#c77dff'); play('pickup');
     }
     save();
@@ -33534,15 +33637,15 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     // storage after the first look) - nobody empties 30 bins in two seconds.
     if (!primed || added > 30) { primed = true; if (runKey) S.done[runKey] = 1; if (added) save(); return; }
     if (added) {
-      addCash(added * 10);
+      addCash(added * 10, 'bins', added);
       var after = S.bins.length;
       if (Math.floor(after / 100) > Math.floor(before / 100)) {
-        addCash(1000);
+        addCash(1000, 'bonus');
         big(Math.floor(after / 100) * 100 + ' bins', 'Respect +  ' + money(1000), 'gold', 'mission');
       }
     }
     if (runKey && !S.done[runKey]) {
-      S.done[runKey] = 1; addCash(2500);
+      S.done[runKey] = 1; addCash(2500, 'bonus');
       setTimeout(function(){ big('Mission passed', HT.run + '  ' + money(2500), 'gold', 'mission'); }, added && Math.floor(S.bins.length / 100) > Math.floor(before / 100) ? 3600 : 0);
     }
     if (added || runKey) save();
@@ -33623,6 +33726,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     if (dk < 0.25) return;
     var rate = fuelRate(sh.truck).r, litres = dk * rate / 100, cost = litres * S.price, before = S.fuelCost;
     S.fuelKm = km; S.fuelL += litres; S.fuelCost += cost; S.cash -= cost;
+    var Lg = led(); if (Lg) { Lg.diesel += cost; Lg.km += dk; Lg.litres += litres; Lg.rate = rate; Lg.price = S.price; }
     ticker('fuel', cost, 'Diesel');
     if (Math.floor(S.fuelCost / 100) > Math.floor(before / 100)) {
       feed('cash', 'Diesel this shift <em style="color:#ff6b6b">-' + money(S.fuelCost) + '</em> · ' + Math.round(S.fuelL) + ' L', '#e05252');
@@ -33743,7 +33847,9 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
         if (!W.under) W.under = now;
         if (now - W.under >= 8000) {
           var ep = W.ep, f = fineFor(ep.max); W.ep = null; W.under = 0;
-          S.cash -= f; S.fines = (S.fines || 0) + f; save();
+          S.cash -= f; S.fines = (S.fines || 0) + f;
+          var Lf = led(); if (Lf) { Lf.fines += f; Lf.fineList.push({ t: Date.now(), over: Math.round(ep.max), lim: ep.lim, amt: f }); }
+          save();
           ticker('fine', f, 'Speeding fine', 6000);
           feed('cash', 'Speeding fine <em style="color:#ff6b6b">-' + money(f) + '</em> · ' + Math.round(ep.max) + ' km/h over in a ' + ep.lim, '#e05252');
           play('fine');
@@ -33773,6 +33879,43 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     st.setAttribute('aria-label', 'Wanted level ' + W.L + ' of 5');
   }
 
+  // ---- End of shift: what you made and lost, and why ----------------------------------------------
+  // Shows once the shift has been ended (after the End shift sheet - fuel, km and so on - is done):
+  // the shift that was running is gone and its ledger hasn't been shown yet.
+  var lastShiftId = null;
+  function hm2(t){ try { return new Date(t).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }); } catch (e) { return ''; } }
+  function shiftSummary(L){
+    var row = function(label, sub, amt, neg){ return '<div class="uxss-r' + (neg ? ' neg' : '') + '"><span><b>' + esc(label) + '</b>' + (sub ? '<i>' + esc(sub) + '</i>' : '') + '</span><em>' + (neg ? '-' : '+') + (neg ? money2(amt) : money(amt)) + '</em></div>'; };
+    var made = L.bins + L.bonus + L.pick, lost = L.diesel + L.fines, net = made - lost;
+    var h = '<div class="uxss-box" role="dialog" aria-label="Shift summary"><div class="uxss-h">Shift complete</div>' +
+      '<div class="uxss-sec">Made</div>' +
+      row('Bins emptied', L.binsN + ' \u00d7 $10', L.bins) +
+      (L.bonusN ? row('Milestones and runs done', L.bonusN + (L.bonusN === 1 ? ' bonus' : ' bonuses'), L.bonus) : '') +
+      (L.pickN ? row('Pickups', L.pickN + ' picked up on the way', L.pick) : '') +
+      '<div class="uxss-sec">Lost</div>' +
+      row('Diesel', L.km.toFixed(1) + ' km \u00b7 ' + L.litres.toFixed(1) + ' L' + (L.rate ? ' at ' + L.rate.toFixed(1) + ' L/100km' : '') + (L.price ? ', $' + L.price.toFixed(2) + '/L' : ''), L.diesel, true) +
+      (L.fineList.length ? L.fineList.map(function(f){ return row('Speeding fine', f.over + ' km/h over in a ' + f.lim + ' at ' + hm2(f.t), f.amt, true); }).join('') : '<div class="uxss-none">No speeding fines. Nice.</div>') +
+      '<div class="uxss-net' + (net < 0 ? ' neg' : '') + '"><span>This shift</span><b>' + (net < 0 ? '-' : '+') + money(Math.abs(net)) + '</b></div>' +
+      '<div class="uxss-tot"><span>Cash now</span><b>' + money(S.cash) + '</b></div>' +
+      '<button type="button" class="uxss-ok">Done</button></div>';
+    var el = document.createElement('div'); el.id = 'uxShiftSummary'; el.innerHTML = h;
+    el.addEventListener('click', function(ev){ if (ev.target === el || (ev.target.closest && ev.target.closest('.uxss-ok'))) el.remove(); });
+    var old = $('uxShiftSummary'); if (old) old.remove();
+    document.body.appendChild(el);
+    play(net >= 0 ? 'mission' : 'fine');
+  }
+  function shiftEndTick(){
+    var sh = null; try { sh = window.uxShiftState ? window.uxShiftState() : null; } catch (e) {}
+    if (sh && sh.id) { lastShiftId = sh.id; led(); return; }
+    if (lastShiftId && S.led && S.led.shift === lastShiftId && !S.led.shown) {
+      // wait for the End shift sheet (fuel, km, hours) to be put away first
+      var open = document.querySelector('#uxShift.open, #uxRs.open');
+      if (open) return;
+      S.led.shown = true; save(); shiftSummary(S.led);
+    }
+    lastShiftId = null;
+  }
+
   // ---- the loop ----------------------------------------------------------------------------
   var wasOn = false, lastPickCheck = 0;
   function tick(){
@@ -33792,6 +33935,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       S.healed = H.key; save(); feed('heart', 'Health restored - <em>break done</em>', '#5fc15f'); play('heal');
     }
     try { wantedTick(); } catch (e) {}
+    try { shiftEndTick(); } catch (e) {}
     var now = Date.now();
     if (now - lastPickCheck < 2000) return;
     lastPickCheck = now;
@@ -33810,32 +33954,151 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
 })();
 
 /* =====================================================================
+   Off your run, driving through another one on the same stream: a chip at the top says which run
+   it is ("Recycling 221 - tap to switch"), and a tap puts that run on the map (on a shift the
+   shift's own run stays on too - see "the shift's run stays put"). Flipped bins aren't lost by
+   switching: every bin emptied today is kept (runProgressDay) and comes back with its run.
+
+   "Off your run" = no house on the selected run within 40 m; "another run" = the nearest house
+   within 45 m on the same stream, day and week whose run isn't selected. It has to say the same
+   run two looks running (2 s apart) before the chip shows, so it doesn't flicker at run edges.
+
+   Also: bins on the truck now - the run sheet's count since the last tip (a tip starts it again) -
+   as a truck number in the map's numbers row, whenever a shift is on.
+   ===================================================================== */
+(function(){
+  'use strict';
+  var GF = {};
+  function g(n){ try { return (GF[n] || (GF[n] = new Function('return typeof ' + n + ' === "undefined" ? undefined : ' + n)))(); } catch (e) { return undefined; } }
+  function $(id){ return document.getElementById(id); }
+  var FIELD = { Garbage: 'garRun', Recycling: 'recRun', SummerRecycling: 'summerRun', FOGO: 'fogRun' };
+  var LABEL = { Garbage: 'Garbage', Recycling: 'Recycling', SummerRecycling: 'Summer recycling', FOGO: 'FOGO' };
+  var ICO = { Garbage: 'garbage.png', Recycling: 'recycle.png', SummerRecycling: 'summer.png', FOGO: 'fogo.png' };
+  function d3(x){ return String(x || '').trim().slice(0, 3).toLowerCase(); }
+  function metres(a, b){ var kx = 111320 * Math.cos(a.lat * Math.PI / 180); return Math.hypot((b.lng - a.lng) * kx, (b.lat - a.lat) * 110540); }
+
+  function runHere(){
+    var st = g('activeFilterStream'), f = FIELD[st], sel = g('selectedRunsSet'), pos = g('userCurrentLocation');
+    if (!f || !sel || !sel.size || !pos || !isFinite(pos.lat)) return null;
+    var match = g('streamMatchesSelectedRun'), vs = g('visibleStreams');
+    if (typeof match !== 'function') return null;
+    // (the same fields the app's getSiteRuns reads - that one isn't reachable from here)
+    var gsr = function(site){ var x = site.soloSchedule || site; return { day: x.day || site['Solo Collection Day'], week: String(x.weekLetter || site['Solo Week Cycle'] || '').trim().toUpperCase(), garRun: x.garRun, recRun: x.recRun, summerRun: x.recSummerRun || x.summerRun, fogRun: x.fogRun }; };
+    var sk = (typeof vs === 'function' ? vs() : [st])[0];
+    var recs = g('siteRecords') || [], day = d3(g('activeFilterDay')), week = String(g('activeFilterWeek') || '').trim().toUpperCase();
+    var dLat = 45 / 110540, dLng = 45 / (111320 * Math.cos(pos.lat * Math.PI / 180));
+    var best = null, bd = Infinity;
+    for (var i = 0; i < recs.length; i++) {
+      var site = recs[i], la = +site.lat, ln = +site.lng;
+      if (!la || Math.abs(la - pos.lat) > dLat || Math.abs(ln - pos.lng) > dLng) continue;
+      var d = metres(pos, { lat: la, lng: ln }); if (d > 45) continue;
+      if (match(site, sk)) { if (d <= 40) return null; continue; }          // still on the selected run
+      var it = gsr(site), run = String(it[f] || '').trim(); if (!run) continue;
+      if (day && it.day && d3(it.day) !== day) continue;
+      if (week && st !== 'Garbage' && st !== 'SummerRecycling' && it.week && it.week !== week) continue;
+      if (sel.has(run.toLowerCase())) continue;
+      if (d < bd) { bd = d; best = run; }
+    }
+    return best;
+  }
+
+  var chip = null, seen = null, shown = null;
+  function place(){
+    var b = 0;
+    ['mapNormalTopBar', 'lbStreetSides'].forEach(function(id){ var e = $(id); if (!e || getComputedStyle(e).display === 'none') return; var r = e.getBoundingClientRect(); if (r.height && r.bottom > b && r.bottom < 300) b = r.bottom; });
+    chip.style.top = Math.round((b || 80) + 6) + 'px';
+  }
+  function show(run){
+    var st = g('activeFilterStream');
+    if (!chip) {
+      chip = document.createElement('button'); chip.type = 'button'; chip.id = 'uxRunHereChip';
+      chip.addEventListener('click', function(){
+        var r = chip._run, s = g('activeFilterStream'); if (!r) return;
+        var fn = window.selectRunOnDrive;
+        if (typeof fn === 'function') fn(r, s === 'SummerRecycling' ? 'Recycling' : s, g('activeFilterDay'), g('activeFilterWeek'), s === 'SummerRecycling');
+        try { if (typeof window.renderMapData === 'function') window.renderMapData(); } catch (e) {}
+        chip.style.display = 'none'; shown = null; seen = null;
+      });
+      document.body.appendChild(chip);
+    }
+    chip._run = run;
+    if (shown !== run) {
+      chip.className = 'ux-run-here s-' + String(st || '').toLowerCase();
+      chip.innerHTML = '<img class="icon-img" src="' + (ICO[st] || 'recycle.png') + '" alt=""><b></b><span>Tap to switch</span>';
+      chip.querySelector('b').textContent = (LABEL[st] || st) + ' ' + run;
+      shown = run;
+    }
+    place();
+    chip.style.display = '';
+  }
+  function hide(){ if (chip) chip.style.display = 'none'; shown = null; }
+
+  function truckCount(){
+    var grp = $('uxMsStats'), sh = null; try { sh = window.uxShiftState ? window.uxShiftState() : null; } catch (e) {}
+    var el = $('uxmsTruck');
+    var R = null; try { R = sh && window.lbRunSheet && window.lbRunSheet._t ? window.lbRunSheet._t.get(sh.id) : null; } catch (e) {}
+    var n = R && R.cur && typeof R.cur.n === 'number' ? R.cur.n : null;
+    if (!grp || n === null) { if (el) el.style.setProperty('display', 'none', 'important'); return; }
+    if (!el) {
+      el = document.createElement('span'); el.id = 'uxmsTruck'; el.className = 'map-run-stat uxms-truck';
+      el.title = 'Bins on the truck now (since the last tip)';
+      el.innerHTML = '<svg class="lb-street-ico" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M2 7h11v9H2zM13 10h4l3 3v3h-7z"/><circle cx="6" cy="17.5" r="1.8"/><circle cx="16.5" cy="17.5" r="1.8"/></svg><b></b>';
+      var gp = $('uxmsGps'); if (gp && gp.parentNode === grp) grp.insertBefore(el, gp); else grp.appendChild(el);
+    }
+    el.style.removeProperty('display');
+    var b = el.querySelector('b'); if (b.textContent !== String(n)) b.textContent = String(n);
+  }
+
+  function tick(){
+    if (document.hidden || document.body.getAttribute('data-ux-screen') !== 'map') { hide(); return; }
+    try { truckCount(); } catch (e) {}
+    var r = null; try { r = runHere(); } catch (e) {}
+    if (r && r === seen) show(r); else if (!r) hide();
+    seen = r;
+  }
+  setInterval(tick, 2000);
+  window.uxRunHere = { tick: tick, runHere: runHere };
+})();
+
+/* =====================================================================
    Keep the big speed number clear of the map's button column.
    The speed sits at the bottom right, over the street strip; the column (zoom, zoom level, fullscreen,
    locate) comes down the right edge, and on a tall column (a foldable, landscape, the zoom level box
-   showing) its bottom buttons ran into the digits. When they would overlap, the number shrinks a
-   little to fit under the column (moving left of it only if it would get too small); when there's
-   room again it goes back to full size.
+   showing) its bottom buttons ran into the digits. So the number sits evenly spaced between the
+   bottom of the column and the next-bin bar below, a little smaller if the gap is tight (moving left
+   of the column only if it would get too small). The GPS row under the street name is only as wide as
+   its text, so the number can come down beside it.
    ===================================================================== */
 (function(){
   'use strict';
   function check(){
     if (document.body.getAttribute('data-ux-screen') !== 'map' || document.hidden) return;
     var sp = document.getElementById('mapLiveSpeed'), col = document.getElementById('mapFixedSideControls');
+    var strip = document.getElementById('uxStreetStrip'), stack = document.getElementById('uxCardStack');
     if (!sp) return;
-    var t = '';
+    sp.style.transform = '';
+    var a = sp.getBoundingClientRect(); if (!a.width || !a.height) return;
+    // the space it has: from the bottom of the button column (or the top of the street row, if the
+    // column isn't above it) down to the next-bin bar
+    var top = strip ? strip.getBoundingClientRect().top : a.top, bottom = a.bottom;
+    var bar = stack ? stack.querySelector('.map-telemetry-banner') : null;
+    if (bar) { var br = bar.getBoundingClientRect(); if (br.height && br.top > a.top) bottom = br.top; }
     if (col && col.offsetParent !== null) {
-      sp.style.transform = '';
-      var a = sp.getBoundingClientRect(), c = col.getBoundingClientRect();
-      if (a.width && c.width && a.right > c.left && a.left < c.right && a.bottom > c.top && a.top < c.bottom) {
-        // It belongs at the right edge under the locate button, so first make it a little smaller to fit
-        // under the column (shrinking toward its bottom right corner); only if that would make it too
-        // small does it move left of the column instead.
-        var sc = (a.bottom - c.bottom - 4) / a.height;
-        t = sc >= 0.6 ? 'scale(' + sc.toFixed(3) + ')' : 'translateX(-' + Math.ceil(a.right - c.left + 8) + 'px)';
+      var c = col.getBoundingClientRect();
+      if (c.width && a.right > c.left && a.left < c.right && c.bottom > top && c.bottom < bottom) top = c.bottom;
+    }
+    var room = bottom - top - 8, t = '';
+    if (room > 20) {
+      // evenly spaced between the button above and the bar below; a little smaller if it doesn't fit
+      var sc = Math.min(1, room / a.height);
+      if (sc >= 0.6) {
+        var dy = Math.round((top + bottom) / 2 - (a.top + a.bottom) / 2);
+        t = 'translateY(' + dy + 'px)' + (sc < 1 ? ' scale(' + sc.toFixed(3) + ')' : '');
+      } else if (col) {
+        var c2 = col.getBoundingClientRect(); t = 'translateX(-' + Math.ceil(a.right - c2.left + 8) + 'px)';
       }
     }
-    sp.style.transformOrigin = '100% 100%';
+    sp.style.transformOrigin = '100% 50%';
     sp.style.transform = t;
   }
   setInterval(check, 1000);
