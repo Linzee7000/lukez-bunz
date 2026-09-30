@@ -5136,6 +5136,20 @@ const STREET_LITTER_SERVICE_LEVELS = {"seasons":[{"key":"tourist1","label":"Tour
   // silly speed for a second, the old "over 20 km/h, trust the way it's going" rule took the jump as the
   // truck's facing, and it then drove forward with the sides swapped.
   const LB_ACCEL_KMH_S = 8;
+  // GPS log: every fix as the phone gave it and what the app made of it, the last ~15 minutes, kept in
+  // memory (and saved every 30 s) so a problem out on the road - reversing, a jump - can be sent in and
+  // looked at (Customize > Nerd mode > Send GPS log). Nerd mode's GPS strip shows the live side of it.
+  let lbLastFixT = 0;
+  const lbGpsLog = (() => { try { const a = JSON.parse(localStorage.getItem('lbGpsLog') || '[]'); return Array.isArray(a) ? a : []; } catch (e) { return []; } })();
+  window.lbGpsLog = lbGpsLog;
+  window.lbGpsDiag = { at: 0, ps: null, acc: null };
+  function lbGpsLogAdd(e) {
+    e.at = Date.now();
+    lbGpsLog.push(e);
+    while (lbGpsLog.length > 1200 || (lbGpsLog.length && e.at - lbGpsLog[0].at > 15 * 60000)) lbGpsLog.shift();
+    if (e.k === 'fix') window.lbGpsDiag = { at: e.at, ps: e.ps, acc: e.acc, age: Math.round((e.at - e.t) / 1000) };
+  }
+  setInterval(() => { try { localStorage.setItem('lbGpsLog', JSON.stringify(lbGpsLog)); } catch (e) {} }, 30000);
   const lbSpeedFixes = [];
   let lbSpeedLast = { v: 0, t: 0 };
   let lbLastFixJumped = false;   // this fix leapt further than the truck could have driven (ignored for heading)
@@ -9153,6 +9167,7 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
 
   function onGpsPositionError(err) {
     console.warn("GPS Error:", err);
+    lbGpsLogAdd({ k: 'err', code: err && err.code, msg: String(err && err.message || '').slice(0, 60) });
     updateGpsBadgeUI(false, "⚠️ Tap GPS");
 
     // A watch that errors (timeout, kCLErrorLocationUnknown, etc.) can
@@ -9218,6 +9233,7 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
     if (gpsWatchId !== null) {
       navigator.geolocation.clearWatch(gpsWatchId);
     }
+    lbGpsLogAdd({ k: 'restart' });
 
     acquireGpsWakeLock();
 
@@ -17635,6 +17651,13 @@ window.addEventListener('DOMContentLoaded', async () => {
   
   /* GPS Position Watcher */
   window.onGpsPositionSuccess = function(pos) {
+    // A fix taken BEFORE the last one we used, arriving late - the one-off getCurrentPosition every GPS
+    // restart makes (maximumAge 30 s) can hand back a cached position from half a minute ago - would snap
+    // the truck back to where it was. Ignore it.
+    const fixT = Number(pos.timestamp) || Date.now();
+    // (only a fix up to a minute older - anything odder is the phone's clock, and must not block every fix)
+    if (lbLastFixT && fixT < lbLastFixT && lbLastFixT - fixT < 60000) { lbGpsLogAdd({ k: 'old', t: fixT }); return; }
+    lbLastFixT = fixT;
     const accuracy = Math.round(pos.coords.accuracy);
     const speedKmh = lbSpeedFromFix(pos);
     window.lbSpeedKmh = speedKmh;   // read by the property-boundary layer, which holds off downloading while driving fast
@@ -17707,6 +17730,9 @@ window.addEventListener('DOMContentLoaded', async () => {
       }
     }
     // If stopped or < 4 km/h, lastValidHeading remains locked to your last driving direction
+    lbGpsLogAdd({ k: 'fix', t: fixT, lat: +pos.coords.latitude.toFixed(6), lng: +pos.coords.longitude.toFixed(6), acc: accuracy,
+      ps: pos.coords.speed == null ? null : Math.round(pos.coords.speed * 36) / 10, ph: pos.coords.heading == null ? null : Math.round(pos.coords.heading),
+      v: speedKmh, j: lbLastFixJumped ? 1 : 0, f: lastValidHeading, r: lbReverseState.on ? 1 : 0 });
 
     updateGpsBadgeUI(true, `🟢 ±${accuracy}m`);
 
@@ -29346,6 +29372,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
           '<div class="ux-cz-field"><div class="ux-cz-fl">Layers button</div>' + seg('qside', [['menu', 'With menu'], ['zoom', 'With zoom']]) + '</div>' +
           '<div class="ux-cz-sec">Detail</div>' +
           '<div class="ux-nerd-card">' + sw('nerd', 'Nerd mode', 'Shows the extra numbers: side counts, zoom, heading, distances, bin counts, collection dates and a live GPS strip on the map.') + '</div>' +
+          '<div class="ux-cz-field"><div class="ux-cz-fl">GPS log (last 15 min)</div><button type="button" class="btn-cancel" onclick="window.lbSendGpsLog && window.lbSendGpsLog()">Send GPS log</button></div>' +
           '<div class="ux-cz-sec">Choose what shows</div>' +
           '<div class="ux-cz-hint">These switches override Nerd mode for that one item.</div>' +
           groups +
@@ -29477,6 +29504,13 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var loc = (typeof userCurrentLocation !== 'undefined') ? userCurrentLocation : null;
     if (loc) parts.push(loc.lat.toFixed(5) + ', ' + loc.lng.toFixed(5));
     else parts.push('no GPS fix');
+    // how long since the phone last gave a position, and the speed it said (the app's number is the big one) -
+    // enough to see out on the road whether the GPS stalls, e.g. while reversing
+    var dg = window.lbGpsDiag;
+    if (dg && dg.at) {
+      var ago = Math.round((Date.now() - dg.at) / 1000);
+      parts.push((ago > 2 ? 'last fix ' + ago + 's ago' : 'fix now') + ' · phone ' + (dg.ps == null ? '–' : Math.round(dg.ps)) + ' km/h' + (window.lbReversing ? ' · R' : ''));
+    }
     try { if (typeof leafletMap !== 'undefined' && leafletMap && leafletMap.getZoom) parts.push('z' + leafletMap.getZoom()); } catch (e) {}
     el.textContent = parts.join('  ·  ');
     // sit just above whatever is at the bottom of the map (address card or context bar)
@@ -34541,6 +34575,35 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   var prevInit = window.initLeafletMap;
   if (typeof prevInit === 'function') window.initLeafletMap = function(){ var out = prevInit.apply(this, arguments); try { restore(); } catch (e) {} return out; };
   restore();
+})();
+
+/* ========== Send GPS log ==========
+   Customize > Send GPS log: the last 15 minutes of GPS fixes (see lbGpsLog in the main script) as a small CSV,
+   through the phone's share sheet (email it, drop it in a chat) or, where sharing isn't available, copied. */
+(function(){
+  function hms(ms){ var d = new Date(ms); return d.toTimeString().slice(0, 8) + '.' + String(Math.floor(d.getMilliseconds() / 100)); }
+  function csv(){
+    var rows = ['arrived,kind,fix_time,lat,lng,acc_m,phone_kmh,phone_heading,app_kmh,jump,facing,reversing,note'];
+    (window.lbGpsLog || []).forEach(function(e){
+      rows.push([hms(e.at), e.k, e.t ? hms(e.t) : '', e.lat == null ? '' : e.lat, e.lng == null ? '' : e.lng, e.acc == null ? '' : e.acc,
+        e.ps == null ? '' : e.ps, e.ph == null ? '' : e.ph, e.v == null ? '' : e.v, e.j || '', e.f == null ? '' : e.f, e.r || '',
+        e.k === 'err' ? ('code ' + e.code + ' ' + (e.msg || '')).replace(/,/g, ' ') : ''].join(','));
+    });
+    rows.push('# ' + navigator.userAgent.replace(/,/g, ' '));
+    return rows.join('\n');
+  }
+  window.lbSendGpsLog = async function(){
+    var text = csv(), n = (window.lbGpsLog || []).length;
+    if (!n) { customAlert('No GPS readings recorded yet - drive with the app open, then try again.'); return; }
+    var name = 'gps-log-' + new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-') + '.csv';
+    try {
+      var file = new File([text], name, { type: 'text/csv' });
+      if (navigator.canShare && navigator.canShare({ files: [file] })) { await navigator.share({ files: [file], title: 'Lukez Bunz GPS log' }); return; }
+      if (navigator.share) { await navigator.share({ title: 'Lukez Bunz GPS log', text: text }); return; }
+    } catch (e) { if (e && e.name === 'AbortError') return; }
+    try { await navigator.clipboard.writeText(text); customAlert('GPS log copied (' + n + ' readings) - paste it into a message.'); }
+    catch (e) { customAlert("Couldn't share or copy the GPS log on this phone."); }
+  };
 })();
 
 /* ========== Tap a property boundary: the bins at that address ==========
