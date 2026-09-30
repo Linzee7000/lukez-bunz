@@ -5102,7 +5102,46 @@ const STREET_LITTER_SERVICE_LEVELS = {"seasons":[{"key":"tourist1","label":"Tour
   let userCurrentLocation = null;
   let lastValidHeading = 0;
   // reversing: see the LOCKED HEADING ENGINE in onGpsPositionSuccess
-  const lbReverseState = { on: false, since: 0, lastMotion: null };
+  const lbReverseState = { on: false, since: 0, init: false };
+  // The way the truck has actually gone over the last few metres: the bearing from the newest fix back to the
+  // most recent one at least the GPS wander away (5 m or the accuracy, within 6 s). null until it has moved
+  // that far, or when the fix is too rough to tell.
+  function lbMovedBearing() {
+    const f = lbSpeedFixes;
+    if (f.length < 2) return null;
+    const cur = f[f.length - 1];
+    if (cur.acc > 20) return null;
+    const need = Math.max(5, cur.acc);
+    for (let i = f.length - 2; i >= 0; i--) {
+      const a = f[i];
+      if (cur.t - a.t > 6000) break;
+      if (getDistanceMeters(a.lat, a.lng, cur.lat, cur.lng) >= need) return getBearing(a.lat, a.lng, cur.lat, cur.lng);
+    }
+    return null;
+  }
+  // Speed. The phone's own speed reading is often missing at walking pace - null, or -1 on iPhones - and
+  // reversing is exactly that: the readout sat on 0 (or showed "-4") the whole way back up a street, even
+  // after the stale-fix fix (maximumAge: 0). So with no reading from the phone, the speed is worked out from
+  // how far the fixes moved over the last few seconds (straight line, oldest fix 2-8 s back), and only
+  // once that's clearly more than the GPS wander (the fixes' accuracy) - a parked truck with a jittery fix
+  // must not read as moving. A phone that says exactly 0 is overruled only by a bigger, clearer move.
+  const lbSpeedFixes = [];
+  function lbSpeedFromFix(pos) {
+    const c = pos.coords, t = Number(pos.timestamp) || Date.now(), acc = Number(c.accuracy) || 30;
+    const native = (c.speed !== null && c.speed !== undefined && !isNaN(c.speed) && c.speed >= 0) ? c.speed * 3.6 : null;
+    const fixes = lbSpeedFixes;
+    if (fixes.length && t < fixes[fixes.length - 1].t) fixes.length = 0;   // clock went backwards - start again
+    fixes.push({ lat: c.latitude, lng: c.longitude, t, acc });
+    while (fixes.length > 1 && t - fixes[0].t > 8000) fixes.shift();
+    if (native !== null && native > 0) return Math.round(native);
+    const a = fixes[0], dt = (t - a.t) / 1000;
+    if (dt < 2 || acc > 25) return native !== null ? Math.round(native) : 0;
+    const d = getDistanceMeters(a.lat, a.lng, c.latitude, c.longitude);
+    const wander = Math.max(a.acc, acc);
+    const need = native === null ? Math.max(4, wander) : Math.max(6, 1.5 * wander);
+    const kmh = d / dt * 3.6;
+    return (d >= need && kmh >= 2 && kmh < 60) ? Math.round(kmh) : 0;
+  }
   // Distance (metres) from the truck to the next/current bin address, kept
   // in sync with the floating 📍 badge so the new meta line above the
   // speed digits (#hudSpeedMeta / #mapSpeedMeta) can show the same number
@@ -7377,6 +7416,7 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
   let mapRotateGestureActive = false;
   let mapRotateGestureStartAngle = 0;
   let mapRotateGestureStartRotation = 0;
+  let mapRotateGestureTurning = false;   // past the dead zone (see touchmove)
   function twoTouchAngleDeg(touches) {
     const dx = touches[1].clientX - touches[0].clientX;
     const dy = touches[1].clientY - touches[0].clientY;
@@ -7396,6 +7436,7 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
       // gesture, not Leaflet's own listener on this same element.
       ev.preventDefault();
       mapRotateGestureActive = true;
+      mapRotateGestureTurning = false;
       mapRotateGestureStartAngle = twoTouchAngleDeg(ev.touches);
       // Twisting while Track-Up/Follow are live pauses them (rather than
       // switching them off) so the map can be spun to look around; start
@@ -7409,6 +7450,15 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
       if (!mapRotateGestureActive || ev.touches.length !== 2) return;
       ev.preventDefault();
       const angleNow = twoTouchAngleDeg(ev.touches);
+      // A pinch-zoom always twists the fingers a little, and that used to leave the map turned a few
+      // degrees with Track-Up off - and Leaflet scrolls a turned map at an angle, so it slid off
+      // sideways as if Track-Up were still on. Only a deliberate twist (20°+) turns the map now,
+      // starting from that point so it doesn't jump.
+      if (!mapRotateGestureTurning) {
+        if (Math.abs((angleNow - mapRotateGestureStartAngle + 540) % 360 - 180) < 20) return;
+        mapRotateGestureTurning = true;
+        mapRotateGestureStartAngle = angleNow;
+      }
       const deltaDeg = angleNow - mapRotateGestureStartAngle;
       manualMapRotationDeg = ((mapRotateGestureStartRotation + deltaDeg) % 360 + 360) % 360;
       bumpMapManualOverrideIdleTimer();
@@ -15704,6 +15754,14 @@ window.addEventListener('DOMContentLoaded', async () => {
     hasAutoCenteredTruck = false;
     mapManualOverrideActive = false;
     clearTimeout(mapManualOverrideIdleTimer);
+    // Track-Up only means anything while the map follows you (see cycleMapFollowMode). Code that turned
+    // follow off on its own (jumping the map to a street or house, the choose-on-map picker) left Track-Up
+    // on underneath: the button said "map stays put" while the map kept turning with the truck, and
+    // scrolling a turned map slides it off at an angle. So turning follow off turns Track-Up off too.
+    if (!isTruckFollowEnabled && isTrackUpEnabled) {
+      isTrackUpEnabled = false;
+      manualMapRotationDeg = 0;
+    }
 
     const btn = document.getElementById('btnTruckFollowTarget');
     if (btn) {
@@ -15829,7 +15887,9 @@ window.addEventListener('DOMContentLoaded', async () => {
   // page or filtered on the Map page (see applyUnifiedModal), since that's
   // the point the driver is about to start following that run.
   function enableTrackUpOrientation() {
-    if (isTrackUpEnabled) return;
+    // (not while the map isn't following you - a run picked while looking round the map turned it to the
+    // truck's heading with nothing following, the "off but still turning" state)
+    if (isTrackUpEnabled || !isTruckFollowEnabled) return;
     isTrackUpEnabled = true;
     const btn = document.getElementById('btnTrackUpOrientation');
     if (btn) {
@@ -17542,7 +17602,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   /* GPS Position Watcher */
   window.onGpsPositionSuccess = function(pos) {
     const accuracy = Math.round(pos.coords.accuracy);
-    const speedKmh = pos.coords.speed !== null && !isNaN(pos.coords.speed) ? Math.round(pos.coords.speed * 3.6) : 0;
+    const speedKmh = lbSpeedFromFix(pos);
     window.lbSpeedKmh = speedKmh;   // read by the property-boundary layer, which holds off downloading while driving fast
     
     currentMapSpeedKmh = speedKmh;
@@ -17560,17 +17620,20 @@ window.addEventListener('DOMContentLoaded', async () => {
     // --- LOCKED HEADING ENGINE (Prevents 180° flips & snaps) ---
     // lastValidHeading is the way the TRUCK FACES, not the way it's moving. The phone's GPS heading is the
     // direction of movement, so reversing turned it round 180°: the truck icon spun, and left and right
-    // swapped - the next-bin box, the L/R strip and the bin flip check all went to the other kerb. (The
-    // phone's own heading was always taken as it came; only the worked-out one had the 180° guard.) Now a
-    // jump of more than 150° in one step at walking pace is the truck starting to reverse (a U-turn turns
-    // through the angles in between), and while reversing the truck faces opposite the way it's moving -
-    // following the reverse round a corner. The next jump back is driving forward again; over 15 km/h or
-    // after 90 s it's taken as forward regardless, so a GPS glitch can't leave it backwards.
+    // swapped - the next-bin box, the L/R strip and the bin flip check all went to the other kerb.
+    // Reversing is judged from the ground actually covered (lbMovedBearing: the last few metres of fixes)
+    // against the way the truck faces: going more than 110° away from it is backwards. It used to wait for
+    // the phone's heading to jump 180° in one fix, but phones smooth their heading - it swung round over a
+    // few fixes as the reverse started, each step looked like an ordinary turn, and the truck turned round
+    // with it (first real reverse, 30 Sep). So at walking pace the facing now only follows the phone's
+    // heading when the ground covered agrees with it, and while reversing it stays opposite the way it's
+    // going (following a reverse round a corner). Over 20 km/h, or after 3 minutes "reversing" (the facing
+    // must have been wrong to start with), the way it's going is taken as forward.
     if (speedKmh >= 4) {
-      let motion = null;
-      if (pos.coords.heading !== null && !isNaN(pos.coords.heading) && pos.coords.heading >= 0) {
-        motion = pos.coords.heading;
-      } else if (lastGpsCoords.lat !== 0) {
+      const native = (pos.coords.heading !== null && !isNaN(pos.coords.heading) && pos.coords.heading >= 0) ? pos.coords.heading : null;
+      const moved = lbMovedBearing();
+      let motion = native !== null ? native : moved;
+      if (motion === null && lastGpsCoords.lat !== 0) {
         const deltaDist = getDistanceMeters(lastGpsCoords.lat, lastGpsCoords.lng, userCurrentLocation.lat, userCurrentLocation.lng);
         if (deltaDist >= 4.0) {
           const calcHeading = getBearing(lastGpsCoords.lat, lastGpsCoords.lng, userCurrentLocation.lat, userCurrentLocation.lng);
@@ -17578,13 +17641,24 @@ window.addEventListener('DOMContentLoaded', async () => {
         }
       }
       if (motion !== null) {
-        motion = Math.round(motion) % 360;
         const R = lbReverseState, now = Date.now();
-        const jump = R.lastMotion !== null && Math.abs((motion - R.lastMotion + 540) % 360 - 180) > 150;
-        if (speedKmh > 15 || (R.on && now - R.since > 90000)) R.on = false;
-        else if (jump) { R.on = !R.on; R.since = now; }
-        R.lastMotion = motion;
-        lastValidHeading = R.on ? (motion + 180) % 360 : motion;
+        const off = (a, b) => Math.abs((a - b + 540) % 360 - 180);
+        const facing = R.init ? lastValidHeading : null;
+        let rev = false;
+        if (facing !== null && speedKmh <= 20) rev = moved !== null ? off(moved, facing) > 110 : off(motion, facing) > 150;
+        if (rev && !R.on) R.since = now;
+        const tooLong = rev && now - R.since > 180000;
+        if (tooLong) rev = false;
+        R.on = rev;
+        let next = facing;
+        if (facing === null || speedKmh > 20 || tooLong) next = motion;
+        else if (rev) { if (moved !== null) next = (moved + 180) % 360; }
+        // forward: follow the phone's heading while the ground covered agrees; sideways-looking wobble
+        // (70-110° off) changes nothing
+        else if (moved !== null) { if (off(moved, facing) <= 70) next = off(motion, moved) <= 70 ? motion : moved; }
+        // not moved far enough to tell yet: only a quicker truck's own heading is trusted on its own
+        else if (speedKmh >= 12 && off(motion, facing) <= 150) next = motion;
+        if (next !== null) { lastValidHeading = Math.round(next) % 360; R.init = true; }
         if (window.lbReversing !== R.on) { window.lbReversing = R.on; document.body.classList.toggle('lb-reversing', R.on); }
       }
     }
@@ -28655,10 +28729,9 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   function restoreMapModes(s){
     // Put GPS-follow / Track-Up back the way the driver had them.
     try {
-      var fb = document.getElementById('btnTruckFollowTarget');
-      if (s.wasFollow && fb && !fb.classList.contains('active') && window.toggleTruckFollow) window.toggleTruckFollow();
-      var tb = document.getElementById('btnTrackUpOrientation');
-      if (s.wasTrackUp && tb && !tb.classList.contains('active') && window.toggleTrackUpOrientation) window.toggleTrackUpOrientation();
+      if (s.wasFollow && !isTruckFollowEnabled && window.toggleTruckFollow) window.toggleTruckFollow();
+      if (s.wasTrackUp && !window.isTrackUpEnabled && window.toggleTrackUpOrientation) window.toggleTrackUpOrientation();
+      if (typeof window.updateMapFollowModeButton === 'function') window.updateMapFollowModeButton();
     } catch (e) {}
   }
 
@@ -28711,11 +28784,13 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     if (typeof window.uxClosePanels === 'function') window.uxClosePanels();
 
     // 3. the map must stay where the driver puts it
-    st.wasFollow = !!(document.getElementById('btnTruckFollowTarget') || {classList:{contains:function(){return false;}}}).classList.contains('active');
-    st.wasTrackUp = !!(document.getElementById('btnTrackUpOrientation') || {classList:{contains:function(){return false;}}}).classList.contains('active');
+    // (read from the app's own flags - the separate Track-Up button this used to read is gone, so Track-Up
+    // was never switched off for the pick, or put back after)
+    st.wasFollow = typeof isTruckFollowEnabled !== 'undefined' && !!isTruckFollowEnabled;
+    st.wasTrackUp = !!window.isTrackUpEnabled;
     try {
-      if (st.wasFollow && window.toggleTruckFollow) window.toggleTruckFollow();
       if (st.wasTrackUp && window.toggleTrackUpOrientation) window.toggleTrackUpOrientation();
+      if (st.wasFollow && window.toggleTruckFollow) window.toggleTruckFollow();
     } catch (e) {}
 
     // 4. pin
@@ -34388,6 +34463,40 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
 })();
 
 
+
+/* ========== Remember Track-Up across a reload ==========
+   The follow button's mode (map stays put / follows you / follows you and turns with you) was never saved,
+   so a refresh always came back as "follows you, north up" and Track-Up had to be turned on again. The
+   choice made with the button is kept now and Track-Up comes back after a reload. "Map stays put" comes
+   back as following, as a fresh start always has - opening the map on a truck that's driving off
+   without you isn't what anyone wants. Only the button saves it: editing modes that switch following off
+   for a moment don't change what comes back. */
+(function(){
+  var KEY = 'lukezBunzMapMode';
+  function save(){
+    try {
+      var f = typeof isTruckFollowEnabled !== 'undefined' && !!isTruckFollowEnabled;
+      localStorage.setItem(KEY, !f ? 'free' : (window.isTrackUpEnabled ? 'trackup' : 'follow'));
+    } catch (e) {}
+  }
+  var prevCycle = window.cycleMapFollowMode;
+  if (typeof prevCycle === 'function') window.cycleMapFollowMode = function(){ var out = prevCycle.apply(this, arguments); save(); return out; };
+  var restored = false;
+  function restore(){
+    if (restored || typeof leafletMap === 'undefined' || !leafletMap) return;
+    restored = true;
+    setTimeout(function(){
+      try {
+        if (localStorage.getItem(KEY) !== 'trackup') return;
+        if (typeof isTruckFollowEnabled === 'undefined' || !isTruckFollowEnabled || window.isTrackUpEnabled) return;
+        if (typeof window.toggleTrackUpOrientation === 'function') window.toggleTrackUpOrientation();
+      } catch (e) {}
+    }, 1500);
+  }
+  var prevInit = window.initLeafletMap;
+  if (typeof prevInit === 'function') window.initLeafletMap = function(){ var out = prevInit.apply(this, arguments); try { restore(); } catch (e) {} return out; };
+  restore();
+})();
 
 /* ========== Tap a property boundary: the bins at that address ==========
    With Property boundaries on, tapping inside a lot shows what's collected there - every stream, bin number,
