@@ -5102,9 +5102,10 @@ const STREET_LITTER_SERVICE_LEVELS = {"seasons":[{"key":"tourist1","label":"Tour
   let userCurrentLocation = null;
   let lastValidHeading = 0;
   // reversing: see the LOCKED HEADING ENGINE in onGpsPositionSuccess
-  // on: reversing now; init: the facing has been set at least once; pend: fixes in a row that look backwards
-  // (two are needed to start reversing); revMs: moving time spent reversing; fastN: fixes in a row over 15 km/h
-  const lbReverseState = { on: false, init: false, pend: 0, revMs: 0, fastN: 0, lastT: 0 };
+  // on: reversing now; init: the facing has been set at least once; stopped: stood still since the last move;
+  // stopFacing/stopPos: the facing and position when it moved off; resumeN: fixes since moving off;
+  // revMs: moving time spent reversing; fastN: fixes in a row at 14 km/h+
+  const lbReverseState = { on: false, init: false, stopped: false, stopFacing: 0, stopPos: null, resumeN: 0, revMs: 0, fastN: 0, lastT: 0 };
   // The way the truck has actually gone over the last few metres: the bearing from the newest fix back to the
   // most recent one at least the GPS wander away (5 m or the accuracy, within 6 s). null until it has moved
   // that far, or when the fix is too rough to tell.
@@ -5172,15 +5173,18 @@ const STREET_LITTER_SERVICE_LEVELS = {"seasons":[{"key":"tourist1","label":"Tour
     else fixes.push({ lat: c.latitude, lng: c.longitude, t, acc });
     while (fixes.length > 1 && t - fixes[0].t > 8000) fixes.shift();
     let v;
+    // A phone that gives a speed is believed, 0 included - on the 30 Sep log the phone said 0 the moment the
+    // truck stopped, but the worked-out speed (from the last 8 s of fixes, still covering the braking) kept
+    // showing 9, 7, 5 for another few seconds. Worked out only when the phone gives none.
     if (jump) v = lbSpeedLast.v;   // keep the last good speed through a jumped fix
-    else if (native !== null && native > 0) v = native;
+    else if (native !== null) v = native;
     else {
-      v = native !== null ? native : 0;
+      v = 0;
       const a = fixes[0], dt = (t - a.t) / 1000;
       if (dt >= 2 && acc <= 25) {
         const d = getDistanceMeters(a.lat, a.lng, c.latitude, c.longitude);
         const wander = Math.max(a.acc, acc);
-        const need = native === null ? Math.max(4, wander) : Math.max(6, 1.5 * wander);
+        const need = Math.max(4, wander);
         const kmh = d / dt * 3.6;
         if (d >= need && kmh >= 2 && kmh < 60) v = kmh;
       }
@@ -17678,56 +17682,67 @@ window.addEventListener('DOMContentLoaded', async () => {
     // lastValidHeading is the way the TRUCK FACES, not the way it's moving. The phone's GPS heading is the
     // direction of movement, so reversing turned it round 180°: the truck icon spun, and left and right
     // swapped - the next-bin box, the L/R strip and the bin flip check all went to the other kerb.
-    // Reversing is judged from the ground actually covered (lbMovedBearing: the last few metres of fixes)
-    // against the way the truck faces: going more than 110° away from it is backwards. (Waiting for the
-    // phone's heading to jump 180° didn't work - phones smooth their heading, it swung round over a few
-    // fixes and the truck turned with it.) At walking pace the facing only follows the phone's heading when
-    // the ground covered agrees, and while reversing it stays opposite the way it's going, following a
-    // reverse round a corner a little at a time.
-    // One bad fix must not turn the truck round (30 Sep: a GPS jump while reversing gave a silly speed, the
-    // then "over 20 km/h, trust the way it's going" rule took the jump as the facing, and the truck then
-    // drove forward with the sides swapped). So: jumped fixes are ignored here (lbLastFixJumped), reversing
-    // only starts after two backward-looking fixes in a row at reversing speed, and the facing is only
-    // taken as wrong once the truck keeps going "backwards" faster than a truck reverses (15 km/h+ for 3
-    // fixes) or for more than a minute of moving.
-    if (speedKmh >= 4 && !lbLastFixJumped) {
-      const native = (pos.coords.heading !== null && !isNaN(pos.coords.heading) && pos.coords.heading >= 0) ? pos.coords.heading : null;
-      const moved = lbMovedBearing();
-      let motion = native !== null ? native : moved;
-      if (motion === null && lastGpsCoords.lat !== 0) {
-        const deltaDist = getDistanceMeters(lastGpsCoords.lat, lastGpsCoords.lng, userCurrentLocation.lat, userCurrentLocation.lng);
-        if (deltaDist >= 4.0) {
-          const calcHeading = getBearing(lastGpsCoords.lat, lastGpsCoords.lng, userCurrentLocation.lat, userCurrentLocation.lng);
-          if (!isNaN(calcHeading)) motion = calcHeading;
+    // A truck can only go from forwards to reverse (or back) when it has stopped. So forwards or backwards is
+    // decided as it moves off from a stop - moving off within 90° of the way it faced is forwards, more is
+    // reversing - re-checked over its first few metres, and then held until it stops again, with the facing
+    // following the turns as it goes (the way it's moving, or opposite that when reversing). Earlier tries
+    // judged it afresh on every fix and got a stop-start turn around wrong (30 Sep log: creeping round a
+    // tight turn, stopping and carrying on turning looked like reversing, and it stayed "reversing" for two
+    // minutes). Fixes that leapt further than the truck could have driven are ignored (lbLastFixJumped);
+    // one odd fix more than 100° off while moving is skipped; and "reversing" at 14 km/h+ for 3 fixes, or
+    // for over a minute of moving, was really forwards.
+    if (!lbLastFixJumped) {
+      const R = lbReverseState;
+      if (speedKmh < 1.5) { if (R.init) R.stopped = true; }
+      else if (speedKmh >= 3) {
+        const native = (pos.coords.heading !== null && !isNaN(pos.coords.heading) && pos.coords.heading >= 0) ? pos.coords.heading : null;
+        const moved = lbMovedBearing();
+        const off = (a, b) => Math.abs((a - b + 540) % 360 - 180);
+        // the way it's moving: the phone's heading, unless the last few metres actually driven say otherwise
+        // (while reversing - slow, where the phone's heading is least sure of itself - the metres driven lead)
+        let motion = native;
+        if (moved !== null && (motion === null || off(motion, moved) > 90 || lbReverseState.on)) motion = moved;
+        if (motion === null && lastGpsCoords.lat !== 0) {
+          const deltaDist = getDistanceMeters(lastGpsCoords.lat, lastGpsCoords.lng, userCurrentLocation.lat, userCurrentLocation.lng);
+          if (deltaDist >= 4.0) {
+            const calcHeading = getBearing(lastGpsCoords.lat, lastGpsCoords.lng, userCurrentLocation.lat, userCurrentLocation.lng);
+            if (!isNaN(calcHeading)) motion = calcHeading;
+          }
+        }
+        if (motion !== null) {
+          const now = Date.now(), dtMs = R.lastT ? Math.min(5000, now - R.lastT) : 1000;
+          R.lastT = now;
+          const facing = R.init ? lastValidHeading : null;
+          let next = facing;
+          if (facing === null) { R.on = false; next = motion; }
+          else {
+            if (R.stopped) { R.stopped = false; R.stopFacing = facing; R.stopPos = { lat: userCurrentLocation.lat, lng: userCurrentLocation.lng }; R.resumeN = 0; }
+            const fromStop = R.stopPos ? getDistanceMeters(R.stopPos.lat, R.stopPos.lng, userCurrentLocation.lat, userCurrentLocation.lng) : Infinity;
+            if (R.stopPos && R.resumeN < 8 && fromStop < 12) {
+              // just moved off: forwards or backwards against the way it faced when it stopped. The first fix
+              // decides; the next few metres only overturn that when they're plainly the other way (a stale
+              // phone heading on the first fix) - a tight turn can be 90°+ round within 12 m of moving off
+              // (the 30 Sep U-turn was 99°), which isn't reversing.
+              R.resumeN++;
+              const o = off(motion, R.stopFacing);
+              // (two fixes in a row - one fix a couple of metres the wrong way is GPS wobble)
+              if (R.resumeN === 1) { R.on = o > 90; R.flipN = 0; }
+              else if ((R.on && o < 30) || (!R.on && o > 150)) { if (++R.flipN >= 2) { R.on = !R.on; R.flipN = 0; } }
+              else R.flipN = 0;
+              next = R.on ? (motion + 180) % 360 : motion;
+            } else {
+              R.stopPos = null;
+              const want = R.on ? (motion + 180) % 360 : motion;
+              if (off(want, facing) <= 100) next = want;
+            }
+          }
+          R.fastN = speedKmh >= 14 ? R.fastN + 1 : 0;
+          R.revMs = R.on ? R.revMs + dtMs : 0;
+          if (R.on && (R.fastN >= 3 || R.revMs > 60000)) { R.on = false; R.revMs = 0; R.stopPos = null; next = motion; }
+          if (next !== null) { lastValidHeading = Math.round(next) % 360; R.init = true; }
         }
       }
-      if (motion !== null) {
-        const R = lbReverseState, now = Date.now();
-        const dtMs = R.lastT ? Math.min(5000, now - R.lastT) : 1000;
-        R.lastT = now;
-        const off = (a, b) => Math.abs((a - b + 540) % 360 - 180);
-        const facing = R.init ? lastValidHeading : null;
-        R.fastN = speedKmh > 15 ? R.fastN + 1 : 0;
-        const back = facing !== null && (moved !== null ? off(moved, facing) > 110 : off(motion, facing) > 150);
-        R.pend = back ? R.pend + 1 : 0;
-        let rev = R.on ? back : (back && R.pend >= 2 && speedKmh <= 15);
-        R.revMs = rev ? R.revMs + dtMs : 0;
-        const wrong = back && (R.fastN >= 3 || R.revMs > 60000);
-        if (wrong) rev = false;
-        R.on = rev;
-        let next = facing;
-        if (facing === null || wrong) next = moved !== null ? moved : motion;
-        else if (rev) { if (moved !== null && off((moved + 180) % 360, facing) <= 45) next = (moved + 180) % 360; }
-        else if (back) { /* a single backward-looking fix - wait for the next before believing it */ }
-        // forward: follow the phone's heading while the ground covered agrees; sideways-looking wobble
-        // (70-110° off) changes nothing
-        else if (moved !== null) { if (off(moved, facing) <= 70) next = off(motion, moved) <= 70 ? motion : moved; }
-        // not moved far enough to tell yet: only a quicker truck's own heading is trusted on its own
-        else if (speedKmh >= 12 && off(motion, facing) <= 150) next = motion;
-        if (wrong) { R.pend = 0; R.revMs = 0; }
-        if (next !== null) { lastValidHeading = Math.round(next) % 360; R.init = true; }
-        if (window.lbReversing !== R.on) { window.lbReversing = R.on; document.body.classList.toggle('lb-reversing', R.on); }
-      }
+      if (window.lbReversing !== R.on) { window.lbReversing = R.on; document.body.classList.toggle('lb-reversing', R.on); }
     }
     // If stopped or < 4 km/h, lastValidHeading remains locked to your last driving direction
     lbGpsLogAdd({ k: 'fix', t: fixT, lat: +pos.coords.latitude.toFixed(6), lng: +pos.coords.longitude.toFixed(6), acc: accuracy,
