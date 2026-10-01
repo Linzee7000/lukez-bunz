@@ -22791,24 +22791,11 @@ body.stream-slr .lb-layers-head .icon-img { filter: brightness(0); }
     get state() { return { running: timer.running, ms: elapsedMs(), label: timer.label, key: timer.key || '' }; }
   };
 
+  // The run timer isn't shown here any more: it's on the side menu's shift sheet, and having it in two places
+  // was confusing. Layers just has a line saying you're on shift, linking to that sheet (filled in by the side
+  // menu block, lbShiftSheet). The timer itself (lbRunTimer) still runs.
   function timerHtml() {
-    const running = timer.running;
-    const sub = timer.label ? 'Time on ' + esc(timer.label) : (running || timer.accrued ? 'Run timer' : 'Not started - starts with GO, follows the run you drive');
-    return `
-      <div class="lb-layers-sect">Current run</div>
-      <div class="lb-timer ${running ? 'running' : ''}">
-        <div class="lb-timer-read" id="lbTimerRead">${fmt(elapsedMs())}</div>
-        <div class="lb-timer-sub">${sub}</div>
-      </div>
-      <button type="button" class="lb-layer-btn" data-lbtimer="${running ? 'pause' : 'resume'}">
-        <span class="lb-ico">${running ? '⏸' : '▶️'}</span>
-        <span class="lb-label">${running ? 'Pause timer' : (timer.accrued ? 'Resume timer' : 'Start timer')}</span>
-      </button>
-      <button type="button" class="lb-layer-btn danger" data-lbtimer="reset">
-        <img class="icon-img" src="minus.png" alt=""><span class="lb-label">Reset timer</span>
-      </button>`;
-    // The break clock used to follow here; it's on the Shift screen now, under Start break / Back to work,
-    // which drive the same clock (Layers is for what shows on the map).
+    return '<div id="lbLayersShift"></div>';
   }
 
   // Only the digits are repainted on the tick - rebuilding the whole
@@ -34907,7 +34894,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   // ---- the sheet ----
   function screensHtml(){
     var cur = g('activeTab');
-    var b = function(act, tab, ico, label){ return '<button type="button" class="lbss-scr' + (cur === tab ? ' on' : '') + '" data-act="' + act + '">' + ico + '<span>' + label + '</span></button>'; };
+    var b = function(act, tab, ico, label){ return '<button type="button" class="lbss-scr' + (cur === tab ? ' on' : '') + '" data-lbscr="' + tab + '">' + ico + '<span>' + label + '</span></button>'; };
     var svgHome = '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" aria-hidden="true"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9v10.5a1 1 0 0 0 1 1h4v-6h4v6h4a1 1 0 0 0 1-1V9"/></svg>';
     return b('go-home', 'welcome', svgHome, 'Home') + b('go-map', 'map', '<img class="icon-img" src="map.png" alt="">', 'Map') +
       b('go-hud', 'hud', '<img class="icon-img" src="drive.png" alt="">', 'Streets') + b('go-search', 'search', '<img class="icon-img" src="search.png" alt="">', 'Search');
@@ -34954,23 +34941,52 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       (window.lbRunSheet ? '<button type="button" data-lbss="rs">Run sheet</button>' : '') + '</div>';
   }
   var lastPaint = 0;
+  // ---- the same top on both panels: Menu | Layers tabs, a search box, and the screen buttons ----
+  // (The menu and Layers had their own buttons on the edge of the map, easy to mix up. Now either panel can
+  // switch to the other from its tabs, and both search and go to any screen the same way.)
+  var SEARCH_SVG = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="square" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 5 5"/></svg>';
+  function tabsHtml(which){
+    return '<button type="button" class="lbp-tab' + (which === 'menu' ? ' on' : '') + '" data-lbtab="menu"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="square" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg>Menu</button>' +
+      '<button type="button" class="lbp-tab' + (which === 'layers' ? ' on' : '') + '" data-lbtab="layers"><img class="icon-img" src="layers.png" alt="">Layers</button>';
+  }
+  function panelTop(panelId, which){
+    var panel = $(panelId); if (!panel) return;
+    var head = panel.querySelector(which === 'menu' ? '.lb-drawer-head' : '.lb-layers-head'); if (!head) return;
+    var tabs = panel.querySelector('.lbp-tabs');
+    if (!tabs) { tabs = document.createElement('div'); tabs.className = 'lbp-tabs'; tabs.innerHTML = tabsHtml(which); panel.insertBefore(tabs, panel.firstChild); }
+    if (which === 'layers' && !panel.querySelector('.lbp-search')) {
+      var sr = document.createElement('div'); sr.className = 'lbp-search';
+      sr.innerHTML = '<span class="lbp-sico">' + SEARCH_SVG + '</span><input type="search" inputmode="search" autocomplete="off" placeholder="Bin serial, address or street...">';
+      tabs.parentNode.insertBefore(sr, tabs.nextSibling);
+    }
+    var scr = panel.querySelector('.lbp-screens');
+    if (!scr) { scr = document.createElement('div'); scr.className = 'lbp-screens lbss-screens'; head.parentNode.insertBefore(scr, head.nextSibling); }
+    var h = screensHtml(); if (scr.innerHTML !== h) scr.innerHTML = h;
+  }
+  function layersShift(){
+    var el = $('lbLayersShift'); if (!el) return;
+    var sh = window.uxShiftState ? window.uxShiftState() : null;
+    if (!sh) { if (el.innerHTML) el.innerHTML = ''; return; }
+    var v = null; try { v = window.lbBreakClock && window.lbBreakClock.view ? window.lbBreakClock.view() : null; } catch (e) {}
+    var brk = !v ? '' : v.mode === 'break' ? 'on a break' : v.mode === 'working' ? (v.remaining <= 0 ? 'break overdue' : 'next break ' + hm(v.remaining)) : '';
+    var ico = ICON[sh.stream] ? '<img class="icon-img" src="' + ICON[sh.stream] + '" alt="">' : '';
+    var h = '<button type="button" class="lbp-shiftlink" data-lbtab="menu">' + ico + '<span><b>On shift' + (sh.run ? ' · ' + esc(String(sh.run).toUpperCase() + (sh.week ? ' ' + sh.week : '')) : '') + '</b>' +
+      (brk ? '<i>' + esc(brk) + '</i>' : '') + '</span><em>Shift details \u203a</em></button>';
+    if (el.innerHTML !== h) el.innerHTML = h;
+  }
   function inject(){
     var body = $('lbDrawerBody'); if (!body) return;
+    panelTop('lbDrawer', 'menu');
     var isMenu = !!body.querySelector('[data-act="drive"]');
-    var scr = $('lbssScreens'), sheet = $('lbShiftSheet');
+    var sheet = $('lbShiftSheet');
     if (!isMenu) { return; }
-    if (!scr) {
-      scr = document.createElement('div'); scr.id = 'lbssScreens'; scr.className = 'lbss-screens';
-      body.insertBefore(scr, body.firstChild);
-    }
     var sh = window.uxShiftState ? window.uxShiftState() : null;
-    var scrHtml = screensHtml(); if (scr.innerHTML !== scrHtml) scr.innerHTML = scrHtml;
-    // the old Screens section at the bottom goes - the row above does it
+    // the old Screens section at the bottom goes - the buttons at the top do it
     body.querySelectorAll('.lb-sect-details > summary').forEach(function(su){ if ((su.textContent || '').trim() === 'Screens') su.parentNode.style.display = 'none'; });
     if (!sh) { if (sheet) sheet.remove(); return; }
     if (!sheet) {
       sheet = document.createElement('div'); sheet.id = 'lbShiftSheet'; sheet.className = 'lbss';
-      scr.parentNode.insertBefore(sheet, scr.nextSibling);
+      body.insertBefore(sheet, body.firstChild);
       sheet.innerHTML = sheetHtml(sh); lastPaint = Date.now(); return;
     }
     if (Date.now() - lastPaint >= 1000) {
@@ -34981,6 +34997,30 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       if (bb) { var onB = (function(){ try { var s0 = window.lbBreakClock.state, b = s0.breaks[s0.breaks.length - 1]; return !!(b && b.e == null); } catch (e) { return false; } })(); bb.textContent = onB ? 'Back to work' : 'Start break'; bb.classList.toggle('go', onB); }
     }
   }
+  function closePanels(){
+    document.body.classList.remove('lb-layers-open');
+    if (typeof window.lbCloseDrawer === 'function') window.lbCloseDrawer();
+  }
+  document.addEventListener('click', function(ev){
+    var t = ev.target && ev.target.closest ? ev.target.closest('[data-lbtab], [data-lbscr]') : null; if (!t) return;
+    ev.preventDefault(); ev.stopPropagation();
+    var tab = t.getAttribute('data-lbtab'), scr = t.getAttribute('data-lbscr');
+    if (tab === 'menu') { document.body.classList.remove('lb-layers-open'); if (window.lbOpenDrawer) window.lbOpenDrawer(); inject(); return; }
+    if (tab === 'layers') {
+      if (typeof activeTab !== 'undefined' && activeTab !== 'map' && typeof switchMainTab === 'function') { closePanels(); switchMainTab('map'); setTimeout(function(){ if (window.lbOpenLayers) window.lbOpenLayers(); }, 700); return; }
+      if (window.lbOpenLayers) window.lbOpenLayers(); return;
+    }
+    if (scr) { closePanels(); if (typeof switchMainTab === 'function') switchMainTab(scr); }
+  }, true);
+  // Layers' search box hands what's typed to the menu's search (the results list lives there)
+  document.addEventListener('input', function(ev){
+    if (!ev.target || !ev.target.closest || !ev.target.closest('#lbLayers .lbp-search')) return;
+    var q = ev.target.value; ev.target.value = '';
+    document.body.classList.remove('lb-layers-open');
+    if (window.lbOpenDrawer) window.lbOpenDrawer();
+    var inp = $('lbDrawerInput');
+    if (inp) { inp.value = q; inp.dispatchEvent(new Event('input', { bubbles: true })); try { inp.focus(); inp.setSelectionRange(q.length, q.length); } catch (e) {} }
+  });
   document.addEventListener('click', function(ev){
     var b = ev.target && ev.target.closest ? ev.target.closest('[data-lbss]') : null; if (!b) return;
     ev.preventDefault();
@@ -35001,17 +35041,47 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       var sh = window.uxShiftState ? window.uxShiftState() : null;
       if (sh) { moveTick(sh); timerTick(sh); }
       if (document.body.classList.contains('lb-drawer-open')) inject();
+      if (document.body.classList.contains('lb-layers-open')) { panelTop('lbLayers', 'layers'); layersShift(); }
     } catch (e) {}
   }, 500);
+  // draw the top straight away when either panel opens, not on the next tick
+  var oL = window.lbOpenLayers, oD = window.lbOpenDrawer;
+  if (typeof oL === 'function') window.lbOpenLayers = function(){ var r = oL.apply(this, arguments); try { panelTop('lbLayers', 'layers'); layersShift(); } catch (e) {} return r; };
+  if (typeof oD === 'function') window.lbOpenDrawer = function(){ var r = oD.apply(this, arguments); try { inject(); } catch (e) {} return r; };
+  // (the edge buttons open the panels without those functions - catch the panel opening itself)
+  new MutationObserver(function(){
+    try {
+      var c = document.body.classList;
+      if (c.contains('lb-drawer-open')) inject();
+      if (c.contains('lb-layers-open')) { panelTop('lbLayers', 'layers'); layersShift(); }
+    } catch (e) {}
+  }).observe(document.body, { attributes: true, attributeFilter: ['class'] });
   window.lbShiftSheet = { _t: { runNow: runNow, inject: inject, liveHtml: liveHtml } };
 
   var css = document.createElement('style');
   css.textContent =
-    '#lbssScreens{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin:2px 0 8px}' +
-    '#lbssScreens .lbss-scr{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;min-height:54px;padding:6px 2px;border:1px solid var(--ux-line-2,rgba(255,255,255,.15));border-radius:var(--ux-rad,6px);background:transparent;color:var(--ux-text,#f1f5f9);font-size:12px;font-weight:700;cursor:pointer}' +
-    '#lbssScreens .lbss-scr .icon-img{width:22px;height:22px;filter:brightness(0) invert(1)}' +
-    'body.ux-light #lbssScreens .lbss-scr .icon-img{filter:none}' +
-    '#lbssScreens .lbss-scr.on{border-color:var(--ui-accent,#b5451b);background:color-mix(in srgb,var(--ui-accent,#b5451b) 22%,transparent)}' +
+    '.lbp-tabs{display:grid;grid-template-columns:1fr 1fr;flex-shrink:0;border-bottom:1px solid var(--ux-line,rgba(255,255,255,.12))}' +
+    '.lbp-tab{display:flex;align-items:center;justify-content:center;gap:8px;min-height:46px;border:0;border-bottom:3px solid transparent;background:transparent;color:var(--ux-text-2,#adb9c8);font-size:15px;font-weight:800;cursor:pointer}' +
+    '.lbp-tab .icon-img{width:18px;height:18px;filter:brightness(0) invert(.75)}' +
+    '.lbp-tab.on{color:var(--ux-text,#fff);border-bottom-color:var(--ui-accent,#b5451b);background:color-mix(in srgb,var(--ui-accent,#b5451b) 12%,transparent)}' +
+    '.lbp-tab.on .icon-img{filter:brightness(0) invert(1)}' +
+    'body.ux-light .lbp-tab .icon-img{filter:none;opacity:.6}body.ux-light .lbp-tab.on .icon-img{opacity:1}' +
+    '.lbp-search{display:flex;align-items:center;gap:8px;flex-shrink:0;margin:10px 14px 0;padding:0 10px;height:44px;border:1px solid var(--ux-line-2,rgba(255,255,255,.18));border-radius:var(--ux-rad,6px);background:var(--ux-s2,#0f1620);color:var(--ux-text-2,#adb9c8)}' +
+    '.lbp-search input{flex:1;min-width:0;height:100%;border:0;background:transparent;color:var(--ux-text,#fff);font-size:16px;outline:none}' +
+    '.lbp-screens{flex-shrink:0;padding:8px 14px 2px}' +
+    '#lbLayers .lb-layers-head > .icon-img, #lbLayers .lb-layers-head .lb-layers-title{display:none !important}' +
+    '#lbLayers .lb-layers-head{justify-content:flex-end !important;padding-top:8px !important;padding-bottom:8px !important}' +
+    '#lbLayers .lb-layers-head::after{display:none !important}' +
+    '#lbLayersShift .lbp-shiftlink{display:flex;align-items:center;gap:10px;width:100%;min-height:48px;margin:4px 0 8px;padding:6px 12px;border:1px solid var(--ux-line-2,rgba(255,255,255,.15));border-left:3px solid var(--ui-accent,#b5451b);border-radius:var(--ux-rad,6px);background:transparent;color:var(--ux-text,#fff);text-align:left;cursor:pointer}' +
+    '#lbLayersShift .lbp-shiftlink .icon-img{width:20px;height:20px}' +
+    '#lbLayersShift .lbp-shiftlink span{display:flex;flex-direction:column;flex:1;min-width:0}' +
+    '#lbLayersShift .lbp-shiftlink b{font-size:14px}#lbLayersShift .lbp-shiftlink i{font-style:normal;font-size:12px;opacity:.75}' +
+    '#lbLayersShift .lbp-shiftlink em{font-style:normal;font-size:13px;font-weight:700;color:var(--ui-accent,#f97316);white-space:nowrap}' +
+    '.lbss-screens{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}' +
+    '.lbss-screens .lbss-scr{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;min-height:54px;padding:6px 2px;border:1px solid var(--ux-line-2,rgba(255,255,255,.15));border-radius:var(--ux-rad,6px);background:transparent;color:var(--ux-text,#f1f5f9);font-size:12px;font-weight:700;cursor:pointer}' +
+    '.lbss-screens .lbss-scr .icon-img{width:22px;height:22px;filter:brightness(0) invert(1)}' +
+    'body.ux-light .lbss-screens .lbss-scr .icon-img{filter:none}' +
+    '.lbss-screens .lbss-scr.on{border-color:var(--ui-accent,#b5451b);background:color-mix(in srgb,var(--ui-accent,#b5451b) 22%,transparent)}' +
     '#lbShiftSheet{border:1px solid var(--ux-line-2,rgba(255,255,255,.15));border-left:3px solid var(--ui-accent,#b5451b);border-radius:var(--ux-rad,6px);padding:10px 10px 8px;margin:0 0 10px;color:var(--ux-text,#f1f5f9)}' +
     '#lbShiftSheet .lbss-top{display:flex;align-items:baseline;flex-wrap:wrap;gap:4px 8px}' +
     '#lbShiftSheet .lbss-top b{font-size:20px;font-weight:800}' +
