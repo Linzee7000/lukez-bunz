@@ -13087,7 +13087,13 @@ window.addEventListener('DOMContentLoaded', async () => {
     mapSelectMode = true;
     mapEditingActive = true;
     updateMapTelemetryVisibility();
-    disableGpsFollow();
+    // disableGpsFollow lives inside a different script block's own IIFE,
+    // so the bare name isn't reachable here and this call has always
+    // thrown ReferenceError, silently breaking "Select house"/Map Tools
+    // for every caller. That block already publishes the same function
+    // as window.lbDisableGpsFollow for exactly this kind of cross-block
+    // call - use that instead.
+    if (typeof window.lbDisableGpsFollow === 'function') window.lbDisableGpsFollow();
     document.getElementById('propertyFocusToolbar').style.display = 'flex';
     const title = mapFocusPropId
       ? (() => { const s = siteRecords.find(x => String(x.propId || x.siteId) === mapFocusPropId); return s ? (s.baseStreetLine || s.addressText || 'Property').split(',')[0] : 'Property'; })()
@@ -22097,11 +22103,30 @@ body.stream-slr .lb-layers-head .icon-img { filter: brightness(0); }
     const id = String(propId);
     const site = recs().find(s => String(s.propId || s.siteId) === id);
     window.lbClearMapFocus();
+    // Force this property's own marker to draw even if it falls outside
+    // the active run/day/week filter. mapFocusPropId + renderMapData is
+    // the main map script's existing property-focus mechanism (the same
+    // one Map Tools' "Select house" uses, via its own showPropertyOnMap -
+    // see that function's comment for why this drawer has to call it this
+    // way instead of directly). Without this, jumping here from a search
+    // result outside the active filter just centred on an empty spot with
+    // a decorative highlight pin and no actual bin/house icon under it -
+    // and opening the tools panel (rather than leaving this set forever)
+    // gives a Close button to get back out of the single-property view.
+    if (typeof mapFocusPropId !== 'undefined') mapFocusPropId = id;
     goToMap(() => {
       const m = map();
       const p = site && pt(site.lat, site.lng);
       if (!m || !p) return;
       stopFollow();
+      // try/catch so a problem inside the tools panel (a different
+      // script block entirely) can never take down the core "make this
+      // marker visible" fix below it with it.
+      let panelOpened = false;
+      if (typeof openMapToolsPanel === 'function') {
+        try { openMapToolsPanel(); panelOpened = true; } catch (e) {}
+      }
+      if (!panelOpened && typeof window.renderMapData === 'function') window.renderMapData();
       m.setView([p.lat, p.lng], 20, { animate: true });
       dropPin(p.lat, p.lng, streetLabelOf(site));
       // The pin above is just a highlight ring (non-interactive), so on
@@ -22151,10 +22176,19 @@ body.stream-slr .lb-layers-head .icon-img { filter: brightness(0); }
     }
     if (!target) target = pt(site.lat, site.lng);
     window.lbClearMapFocus();
+    // Same reasoning as showPropertyOnMap above - force this bin's own
+    // property marker to draw regardless of the active filter, and open
+    // the tools panel so there's a Close button out of single-property focus.
+    if (typeof mapFocusPropId !== 'undefined') mapFocusPropId = id;
     goToMap(() => {
       const m = map();
       if (!m || !target) return;
       stopFollow();
+      let panelOpened = false;
+      if (typeof openMapToolsPanel === 'function') {
+        try { openMapToolsPanel(); panelOpened = true; } catch (e) {}
+      }
+      if (!panelOpened && typeof window.renderMapData === 'function') window.renderMapData();
       m.setView([target.lat, target.lng], 21, { animate: true });
       dropPin(target.lat, target.lng, 'Bin ' + serial);
     });
@@ -22352,13 +22386,23 @@ body.stream-slr .lb-layers-head .icon-img { filter: brightness(0); }
       }
 
       if (bins.length < CAPS.bin) {
+        // The same physical bin is routinely recorded in both soloStreams
+        // and councilStreams (our own copy of it and the council's copy
+        // of the same real-world bin) - without deduping, a serial match
+        // hit both arrays and the same bin's row showed up twice in a
+        // row in the results list.
+        const seenBinKeys = new Set();
         for (const group of [s.soloStreams, s.councilStreams]) {
           if (!group) continue;
           for (const k of Object.keys(group)) {
             for (const b of (group[k] || [])) {
-              if (b && String(b.serial || '').toLowerCase().includes(q)) {
-                bins.push({ site: s, serial: b.serial, size: b.size || '', stream: k });
-              }
+              if (!b) continue;
+              const serial = String(b.serial || '');
+              if (!serial.toLowerCase().includes(q)) continue;
+              const dedupeKey = k + '|' + serial.toLowerCase();
+              if (seenBinKeys.has(dedupeKey)) continue;
+              seenBinKeys.add(dedupeKey);
+              bins.push({ site: s, serial: b.serial, size: b.size || '', stream: k });
             }
           }
         }
