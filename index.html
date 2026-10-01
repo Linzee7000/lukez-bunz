@@ -5101,6 +5101,137 @@ const STREET_LITTER_SERVICE_LEVELS = {"seasons":[{"key":"tourist1","label":"Tour
   let streetHashIndex = new Map();
   let userCurrentLocation = null;
   let lastValidHeading = 0;
+  // reversing: see the LOCKED HEADING ENGINE in onGpsPositionSuccess
+  // on: reversing now; init: the facing has been set at least once; stopped: stood still since the last move;
+  // stopFacing/stopPos: the facing and position when it moved off; resumeN: fixes since moving off;
+  // revMs: moving time spent reversing; fastN: fixes in a row at 14 km/h+
+  const lbReverseState = { on: false, init: false, stopped: false, stopFacing: 0, stopPos: null, resumeN: 0, revMs: 0, fastN: 0, lastT: 0 };
+  // (A version learnt whether the phone's heading was the way it points or the way it moves, then always
+  // believed it. The same phone does both - 1 Oct log: pointing where the truck faced reversing in Matthew St,
+  // the way it moved reversing out of Augusta St minutes later - so it's judged afresh each time, and what
+  // that version saved is cleared.)
+  try { localStorage.removeItem('lbHeadingKind'); } catch (e) {}
+  // The way the truck has actually gone over the last few metres: the bearing from the newest fix back to the
+  // most recent one at least the GPS wander away (5 m or the accuracy, within 6 s). null until it has moved
+  // that far, or when the fix is too rough to tell.
+  function lbMovedBearing(minM) {
+    const f = lbSpeedFixes;
+    if (f.length < 2) return null;
+    const cur = f[f.length - 1];
+    if (cur.acc > 20) return null;
+    const need = Math.max(minM || 5, cur.acc * (minM ? 0.75 : 1));
+    for (let i = f.length - 2; i >= 0; i--) {
+      const a = f[i];
+      if (cur.t - a.t > 6000) break;
+      if (getDistanceMeters(a.lat, a.lng, cur.lat, cur.lng) >= need) return getBearing(a.lat, a.lng, cur.lat, cur.lng);
+    }
+    return null;
+  }
+  // Speed. The phone's own speed reading is often missing at walking pace - null, or -1 on iPhones - and
+  // reversing is exactly that: the readout sat on 0 (or showed "-4") the whole way back up a street, even
+  // after the stale-fix fix (maximumAge: 0). So with no reading from the phone, the speed is worked out from
+  // how far the fixes moved over the last few seconds (straight line, oldest fix 2-8 s back), and only
+  // once that's clearly more than the GPS wander (the fixes' accuracy) - a parked truck with a jittery fix
+  // must not read as moving. A phone that says exactly 0 is overruled only by a bigger, clearer move.
+  //
+  // A truck can't gain more than about LB_ACCEL_KMH_S km/h in a second, so a reading that jumps up faster than
+  // that is GPS noise and is held to what the truck could really have reached. And a fix that leaps further
+  // than the truck could have driven since the last one (a GPS jump, common reversing between houses and
+  // under trees) is left out of the metres used for the speed and for "which way is it going", so one bad
+  // fix can't turn the truck round - which is what the first real reverse on 30 Sep did: a jump gave a
+  // silly speed for a second, the old "over 20 km/h, trust the way it's going" rule took the jump as the
+  // truck's facing, and it then drove forward with the sides swapped.
+  const LB_ACCEL_KMH_S = 8;
+  // GPS log: every fix as the phone gave it and what the app made of it, the last ~15 minutes, kept in
+  // memory (and saved every 30 s) so a problem out on the road - reversing, a jump - can be sent in and
+  // looked at (Customize > Nerd mode > Send GPS log). Nerd mode's GPS strip shows the live side of it.
+  let lbLastFixT = 0;
+  const lbGpsLog = (() => { try { const a = JSON.parse(localStorage.getItem('lbGpsLog') || '[]'); return Array.isArray(a) ? a : []; } catch (e) { return []; } })();
+  window.lbGpsLog = lbGpsLog;
+  window.lbGpsDiag = { at: 0, ps: null, acc: null };
+  function lbGpsLogAdd(e) {
+    e.at = Date.now();
+    lbGpsLog.push(e);
+    while (lbGpsLog.length > 1200 || (lbGpsLog.length && e.at - lbGpsLog[0].at > 15 * 60000)) lbGpsLog.shift();
+    if (e.k === 'fix') window.lbGpsDiag = { at: e.at, ps: e.ps, acc: e.acc, age: Math.round((e.at - e.t) / 1000) };
+  }
+  setInterval(() => { try { localStorage.setItem('lbGpsLog', JSON.stringify(lbGpsLog)); } catch (e) {} }, 30000);
+  // While the position is frozen (lbFrozenN), ask the phone for a brand-new reading every 5 s, and restart the
+  // GPS watch every 30 s - an experiment to wake Android's GPS during a slow reverse; the GPS log records each
+  // try ('poke' / 'restart') so the next log shows whether it helps. A parked truck gets the same, harmlessly.
+  let lbPokeAt = 0, lbPokeRestartAt = 0;
+  function lbPokeFrozenGps() {
+    if (lbFrozenN < 5 || !navigator.geolocation) return;
+    const now = Date.now();
+    if (now - lbPokeAt < (lbFrozenN > 300 ? 30000 : 5000)) return;   // (5 min frozen: most likely really parked - try less often)
+    lbPokeAt = now;
+    lbGpsLogAdd({ k: 'poke' });
+    try {
+      navigator.geolocation.getCurrentPosition(p => { lbGpsLogAdd({ k: 'pokefix', t: Number(p.timestamp) || 0 }); onGpsPositionSuccess(p); }, () => {}, { enableHighAccuracy: true, maximumAge: 0, timeout: 8000 });
+    } catch (e) {}
+    if (!lbPokeRestartAt) lbPokeRestartAt = now;
+    else if (now - lbPokeRestartAt >= 30000) { lbPokeRestartAt = now; try { startLiveLocationWatcher(); } catch (e) {} }
+  }
+  const lbSpeedFixes = [];
+  let lbSpeedLast = { v: 0, t: 0 };
+  let lbLastFixJumped = false;   // this fix leapt further than the truck could have driven (ignored for heading)
+  window.lbGpsJumpAt = 0;
+  // Frozen GPS. The driver's Android stops reading the GPS when it decides the phone is standing still - and a
+  // slow, smooth reverse fools it: on the 1 Oct log the same position, speed 0, came back for 67 s, 73 s and
+  // 165 s while the truck reversed up three streets off Watson Rd, so the truck sat at the end of each street;
+  // then the position caught up in 30-60 m leaps once it drove off. lbFrozenN counts fixes in a row at exactly
+  // the same spot (a real fix always wobbles a little), and while it's frozen the phone is asked for a fresh
+  // reading (see lbPokeFrozenGps).
+  let lbFrozenN = 0, lbJumpCand = null, lbSpeedReset = false;
+  function lbSpeedFromFix(pos) {
+    const c = pos.coords, t = Number(pos.timestamp) || Date.now(), acc = Number(c.accuracy) || 30;
+    const native = (c.speed !== null && c.speed !== undefined && !isNaN(c.speed) && c.speed >= 0) ? c.speed * 3.6 : null;
+    const fixes = lbSpeedFixes;
+    if (fixes.length && t < fixes[fixes.length - 1].t) fixes.length = 0;   // clock went backwards - start again
+    const prev = fixes[fixes.length - 1];
+    const wasFrozen = lbFrozenN >= 3;
+    lbFrozenN = (prev && t > prev.t && prev.lat === c.latitude && prev.lng === c.longitude) ? lbFrozenN + 1 : 0;   // (a NEW fix at exactly the same spot)
+    let jump = false;
+    lbSpeedReset = false;
+    if (prev) {
+      const step = getDistanceMeters(prev.lat, prev.lng, c.latitude, c.longitude), sdt = Math.max(0.5, (t - prev.t) / 1000);
+      // further than the truck could have gone (its last speed plus a hard acceleration, and the GPS wander)
+      const could = (Math.max(lbSpeedLast.v, native || 0, 10) / 3.6 + LB_ACCEL_KMH_S / 3.6 * sdt) * sdt + Math.max(prev.acc, acc) + 5;
+      jump = step > could && sdt < 10;
+      // ...but not a leap out of a frozen stretch (the phone catching up with where the truck really is), nor
+      // one the next fix carries on from (a one-off glitch comes back; a correction stays)
+      const cand = lbJumpCand;
+      lbJumpCand = null;
+      const carriesOn = cand && getDistanceMeters(cand.lat, cand.lng, c.latitude, c.longitude) <= Math.max(15, (Math.max(native || 0, 10) / 3.6 + 3) * Math.max(1, (t - cand.t) / 1000) + acc);
+      if (jump && (wasFrozen || carriesOn)) { jump = false; fixes.length = 0; lbSpeedReset = true; }
+      else if (jump) lbJumpCand = { lat: c.latitude, lng: c.longitude, t };
+    }
+    lbLastFixJumped = jump;
+    if (jump) { window.lbGpsJumpAt = t; }
+    else fixes.push({ lat: c.latitude, lng: c.longitude, t, acc });
+    while (fixes.length > 1 && t - fixes[0].t > 8000) fixes.shift();
+    let v;
+    // A phone that gives a speed is believed, 0 included - on the 30 Sep log the phone said 0 the moment the
+    // truck stopped, but the worked-out speed (from the last 8 s of fixes, still covering the braking) kept
+    // showing 9, 7, 5 for another few seconds. Worked out only when the phone gives none.
+    if (jump) v = lbSpeedLast.v;   // keep the last good speed through a jumped fix
+    else if (native !== null) v = native;
+    else {
+      v = 0;
+      const a = fixes[0], dt = (t - a.t) / 1000;
+      if (dt >= 2 && acc <= 25) {
+        const d = getDistanceMeters(a.lat, a.lng, c.latitude, c.longitude);
+        const wander = Math.max(a.acc, acc);
+        const need = Math.max(4, wander);
+        const kmh = d / dt * 3.6;
+        if (d >= need && kmh >= 2 && kmh < 60) v = kmh;
+      }
+    }
+    const since = lbSpeedLast.t ? Math.max(1, (t - lbSpeedLast.t) / 1000) : 60;
+    if (!lbSpeedReset) v = Math.min(v, lbSpeedLast.v + LB_ACCEL_KMH_S * since);   // (after a freeze the 0s were false - take the phone's speed)
+    lbSpeedLast = { v, t };
+    return Math.round(v);
+  }
   // Distance (metres) from the truck to the next/current bin address, kept
   // in sync with the floating 📍 badge so the new meta line above the
   // speed digits (#hudSpeedMeta / #mapSpeedMeta) can show the same number
@@ -7375,6 +7506,7 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
   let mapRotateGestureActive = false;
   let mapRotateGestureStartAngle = 0;
   let mapRotateGestureStartRotation = 0;
+  let mapRotateGestureTurning = false;   // past the dead zone (see touchmove)
   function twoTouchAngleDeg(touches) {
     const dx = touches[1].clientX - touches[0].clientX;
     const dy = touches[1].clientY - touches[0].clientY;
@@ -7394,6 +7526,7 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
       // gesture, not Leaflet's own listener on this same element.
       ev.preventDefault();
       mapRotateGestureActive = true;
+      mapRotateGestureTurning = false;
       mapRotateGestureStartAngle = twoTouchAngleDeg(ev.touches);
       // Twisting while Track-Up/Follow are live pauses them (rather than
       // switching them off) so the map can be spun to look around; start
@@ -7407,6 +7540,15 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
       if (!mapRotateGestureActive || ev.touches.length !== 2) return;
       ev.preventDefault();
       const angleNow = twoTouchAngleDeg(ev.touches);
+      // A pinch-zoom always twists the fingers a little, and that used to leave the map turned a few
+      // degrees with Track-Up off - and Leaflet scrolls a turned map at an angle, so it slid off
+      // sideways as if Track-Up were still on. Only a deliberate twist (20°+) turns the map now,
+      // starting from that point so it doesn't jump.
+      if (!mapRotateGestureTurning) {
+        if (Math.abs((angleNow - mapRotateGestureStartAngle + 540) % 360 - 180) < 20) return;
+        mapRotateGestureTurning = true;
+        mapRotateGestureStartAngle = angleNow;
+      }
       const deltaDeg = angleNow - mapRotateGestureStartAngle;
       manualMapRotationDeg = ((mapRotateGestureStartRotation + deltaDeg) % 360 + 360) % 360;
       bumpMapManualOverrideIdleTimer();
@@ -9067,6 +9209,7 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
 
   function onGpsPositionError(err) {
     console.warn("GPS Error:", err);
+    lbGpsLogAdd({ k: 'err', code: err && err.code, msg: String(err && err.message || '').slice(0, 60) });
     updateGpsBadgeUI(false, "⚠️ Tap GPS");
 
     // A watch that errors (timeout, kCLErrorLocationUnknown, etc.) can
@@ -9132,6 +9275,7 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
     if (gpsWatchId !== null) {
       navigator.geolocation.clearWatch(gpsWatchId);
     }
+    lbGpsLogAdd({ k: 'restart' });
 
     acquireGpsWakeLock();
 
@@ -11720,8 +11864,39 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
     return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
   }
 
+  // Every bin emptied (or missed) today, whatever run was selected at the time - 'runProgressDay'. The
+  // per-selection record below only ever held ONE selection, so picking another run (or, on a shift,
+  // adding the run being driven through) threw away every flip done so far today. Now a run coming
+  // back into the selection gets its bins back from here.
+  let runProgressDay = null;
+  async function dayProgress() {
+    if (!runProgressDay || runProgressDay.day !== todayKey()) {
+      let d = null; try { d = await loadFromDB('runProgressDay'); } catch (e) {}
+      runProgressDay = (d && d.day === todayKey()) ? { day: d.day, serviced: new Set(d.serviced || []), missed: new Set(d.missed || []) }
+        : { day: todayKey(), serviced: new Set(), missed: new Set() };
+    }
+    return runProgressDay;
+  }
+  // The bin serials on the selected run(s) - same rule as the run's bin total.
+  function serialsOnSelectedRuns() {
+    const out = new Set(), streams = visibleStreams();
+    const recs = (typeof siteRecords !== 'undefined' && Array.isArray(siteRecords)) ? siteRecords : [];
+    recs.forEach(site => streams.forEach(sk => {
+      if (!streamMatchesSelectedRun(site, sk)) return;
+      const src = activeFilterDataSource === 'council' ? site.councilStreams : site.soloStreams;
+      ((src && src[sk]) || []).forEach(b => { const x = String((b && b.serial) || '').trim().toUpperCase(); if (x) out.add(x); });
+    }));
+    return out;
+  }
+
   async function saveRunProgress() {
     if (!selectedRunsSet || selectedRunsSet.size === 0) return;
+    try {
+      const dp = await dayProgress();
+      servicedBinSerials.forEach(x => { dp.serviced.add(x); dp.missed.delete(x); });
+      missedBinSerials.forEach(x => { if (!dp.serviced.has(x)) dp.missed.add(x); });
+      await saveToDB('runProgressDay', { day: dp.day, serviced: Array.from(dp.serviced), missed: Array.from(dp.missed) });
+    } catch (e) {}
     await saveToDB('runProgressState', {
       signature: runProgressSignature(),
       day: todayKey(),
@@ -11772,9 +11947,17 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
       servicedBinSerials = new Set(stored.serviced || []);
       missedBinSerials = new Set(stored.missed || []);
     } else {
-      // A different run just got filtered, or it's a new day: start fresh.
-      servicedBinSerials = new Set();
-      missedBinSerials = new Set();
+      // A different run just got filtered, or it's a new day: start from what's already been done
+      // today on the run(s) now selected (nothing, on a new day).
+      const dp = await dayProgress();
+      if (dp.serviced.size || dp.missed.size) {
+        const mine = serialsOnSelectedRuns();
+        servicedBinSerials = new Set(Array.from(dp.serviced).filter(x => mine.has(x)));
+        missedBinSerials = new Set(Array.from(dp.missed).filter(x => mine.has(x) && !servicedBinSerials.has(x)));
+      } else {
+        servicedBinSerials = new Set();
+        missedBinSerials = new Set();
+      }
       await saveRunProgress();
     }
     runProgressSyncedKey = syncKey;
@@ -15663,6 +15846,14 @@ window.addEventListener('DOMContentLoaded', async () => {
     hasAutoCenteredTruck = false;
     mapManualOverrideActive = false;
     clearTimeout(mapManualOverrideIdleTimer);
+    // Track-Up only means anything while the map follows you (see cycleMapFollowMode). Code that turned
+    // follow off on its own (jumping the map to a street or house, the choose-on-map picker) left Track-Up
+    // on underneath: the button said "map stays put" while the map kept turning with the truck, and
+    // scrolling a turned map slides it off at an angle. So turning follow off turns Track-Up off too.
+    if (!isTruckFollowEnabled && isTrackUpEnabled) {
+      isTrackUpEnabled = false;
+      manualMapRotationDeg = 0;
+    }
 
     const btn = document.getElementById('btnTruckFollowTarget');
     if (btn) {
@@ -15788,7 +15979,9 @@ window.addEventListener('DOMContentLoaded', async () => {
   // page or filtered on the Map page (see applyUnifiedModal), since that's
   // the point the driver is about to start following that run.
   function enableTrackUpOrientation() {
-    if (isTrackUpEnabled) return;
+    // (not while the map isn't following you - a run picked while looking round the map turned it to the
+    // truck's heading with nothing following, the "off but still turning" state)
+    if (isTrackUpEnabled || !isTruckFollowEnabled) return;
     isTrackUpEnabled = true;
     const btn = document.getElementById('btnTrackUpOrientation');
     if (btn) {
@@ -17065,12 +17258,20 @@ window.addEventListener('DOMContentLoaded', async () => {
     // direction of travel (not a fixed compass side) - same +/-70deg
     // left/right cone as the bin-passing check further down, with a
     // dead-ahead/dead-behind gap that counts as neither.
+    //
+    // Measured as how far the house is off the truck's line, in metres, not by the angle to it: a house
+    // 40 m up the road on the left kerb is only a few degrees off dead ahead, so the old +/-70deg cone
+    // called it "neither" and the pick skipped the next house on your side for one round the corner.
+    // More than 2 m off the line is a side; well behind the truck (25 m+) doesn't count - it's been passed.
     const sideOfSite = (site) => {
       if (!userCurrentLocation || !site || !site.lat || !site.lng || Number(site.lat) === 0) return null;
       const bearing = getBearing(userCurrentLocation.lat, userCurrentLocation.lng, Number(site.lat), Number(site.lng));
-      const relAngle = (bearing - (lastValidHeading || 0) + 360) % 360;
-      if (relAngle >= 200 && relAngle <= 340) return 'left';
-      if (relAngle >= 20 && relAngle <= 160) return 'right';
+      const rel = ((bearing - (lastValidHeading || 0) + 360) % 360) * Math.PI / 180;
+      const d = getDistanceMeters(userCurrentLocation.lat, userCurrentLocation.lng, Number(site.lat), Number(site.lng));
+      const across = d * Math.sin(rel), along = d * Math.cos(rel);   // + = right of the line / ahead
+      if (along < -25) return null;
+      if (across <= -2) return 'left';
+      if (across >= 2) return 'right';
       return null;
     };
     // Collection points and drive-in/reverse-in streets are the only cases
@@ -17097,39 +17298,47 @@ window.addEventListener('DOMContentLoaded', async () => {
         if (prev === undefined || d < prev) binDistBySite.set(k, d);
       });
     }
-    // A bin this close is the one being worked: its house wins outright, whichever kerb it's on.
+    // Which kerb the next bin is on: the side being collected (Edit & settings > Which side to collect,
+    // Left by default) in the direction of travel. Both kerbs only where both get worked in one pass -
+    // reverse-in / drive-out and drive-in / reverse-out streets and collection points (isBothSidesSite)
+    // - or with "Both Sides" picked. It used to take any bin within 10 m "whichever kerb it's on" and
+    // then stick to whichever kerb it last picked: across a narrow street, with GPS a few metres out,
+    // the far kerb's bin was often the nearer one, and once it had picked that side it stayed there
+    // (Harridge St heading west showed 26 - the north side - instead of the odd numbers on the left).
+    // Nothing on the right kerb within range now means no next bin, not a jump across the road.
+    const wantSide = (travelMode === 'left' || travelMode === 'right') ? travelMode : null;
+    const onWantedSide = (site) => !wantSide || isBothSidesSite(site) || sideOfSite(site) === wantSide;
+    // A bin this close is the one being worked: its house wins outright, if it's on the right kerb.
     const BIN_AT_TRUCK_M = 10;
     let nearestBinSite = null, nearestBinDist = Infinity;
     if (userCurrentLocation) {
       records.forEach(site => {
         const bd = binDistBySite.get(String(site.propId || site.siteId || ''));
-        if (bd !== undefined && bd < nearestBinDist) { nearestBinDist = bd; nearestBinSite = site; }
+        // (and its house nearby too: a bin pinned in the wrong place - a Mount Martha house's bin sitting
+        // in Rosebud - isn't "the bin at the truck")
+        if (bd !== undefined && bd < nearestBinDist && onWantedSide(site) && site.lat && Number(site.lat) !== 0
+          && getDistanceMeters(userCurrentLocation.lat, userCurrentLocation.lng, Number(site.lat), Number(site.lng)) <= 80) { nearestBinDist = bd; nearestBinSite = site; }
         if (site.lat && site.lng && Number(site.lat) !== 0) {
           let d = getDistanceMeters(userCurrentLocation.lat, userCurrentLocation.lng, Number(site.lat), Number(site.lng));
           if (bd !== undefined && bd < d) d = bd;
           if (d < nearestDistOverall) { nearestDistOverall = d; nearestSiteOverall = site; }
-          if (lastSideOfTravel && d < nearestSameSideDist && !isBothSidesSite(site) && sideOfSite(site) === lastSideOfTravel) {
-            nearestSameSideDist = d; nearestSameSideSite = site;
-          }
+          // with the run's bins on the map, only houses that have one count (it's the next *bin*)
+          if (d < nearestSameSideDist && (bd !== undefined || !binDistBySite.size) && onWantedSide(site)) { nearestSameSideDist = d; nearestSameSideSite = site; }
         }
       });
     }
-    // Stick to the same kerb the driver was just working - only falls
-    // back to the plain "nearest overall" pick (which can jump across the
-    // road) once there's nothing left on that side within range, e.g. the
-    // street's ended and it's time to move on.
-    const currentSite = (nearestBinSite && nearestBinDist <= BIN_AT_TRUCK_M) ? nearestBinSite
-      : (nearestSameSideSite && nearestSameSideDist <= 300)
-      ? nearestSameSideSite
-      : (nearestDistOverall <= 300 ? nearestSiteOverall : null);
-
-    // Remember which kerb this pick is on for next time. A collection
-    // point / drive-in / reverse-in pick doesn't set a side (both kerbs
-    // are fair game there), so it clears the pin rather than locking the
-    // next pick to whichever side it happened to be nearest on.
-    if (currentSite) {
-      lastSideOfTravel = isBothSidesSite(currentSite) ? null : (sideOfSite(currentSite) || lastSideOfTravel);
-    }
+    // In the order the truck gets to them - same street ahead on your side, else the next street off to
+    // your side, else the next turn (lbNextBin, in lb-street-stats, which knows the run's streets and
+    // each house's kerb). The nearest-on-your-side pick below is only the fallback for when that
+    // isn't available (no run indexed yet).
+    let nb;
+    try { if (typeof window.lbNextBin === 'function' && userCurrentLocation) nb = window.lbNextBin(userCurrentLocation, lastValidHeading || 0, wantSide === 'left' ? 'L' : wantSide === 'right' ? 'R' : null, isBothSidesSite); } catch (e) { nb = undefined; }
+    // (lbNextBin covers the bin beside the truck too, and judges its kerb by the street's odd/even sides,
+    // which a few metres of GPS error can't flip - so when it has an answer, it decides.)
+    const currentSite = nb !== undefined ? nb
+      : (nearestBinSite && nearestBinDist <= BIN_AT_TRUCK_M) ? nearestBinSite
+      : (nearestSameSideSite && nearestSameSideDist <= 300) ? nearestSameSideSite : null;
+    if (currentSite) lastSideOfTravel = isBothSidesSite(currentSite) ? null : (sideOfSite(currentSite) || lastSideOfTravel);
     const mapLiveStreet = q('mapLiveStreet');
     if (mapLiveStreet) {
       const propStreetName = currentSite ? (currentSite.baseStreetLine || currentSite.addressText?.split(',')[0] || '').trim() : 'Scanning Street...';
@@ -17484,8 +17693,17 @@ window.addEventListener('DOMContentLoaded', async () => {
   
   /* GPS Position Watcher */
   window.onGpsPositionSuccess = function(pos) {
+    // A fix taken BEFORE the last one we used, arriving late - the one-off getCurrentPosition every GPS
+    // restart makes (maximumAge 30 s) can hand back a cached position from half a minute ago - would snap
+    // the truck back to where it was. Ignore it.
+    const fixT = Number(pos.timestamp) || Date.now();
+    // (only a fix up to a minute older - anything odder is the phone's clock, and must not block every fix)
+    if (lbLastFixT && fixT < lbLastFixT && lbLastFixT - fixT < 60000) { lbGpsLogAdd({ k: 'old', t: fixT }); return; }
+    // the same fix handed over twice (the watch and a getCurrentPosition both returning it) adds nothing
+    if (fixT === lbLastFixT && userCurrentLocation && userCurrentLocation.lat === pos.coords.latitude && userCurrentLocation.lng === pos.coords.longitude) return;
+    lbLastFixT = fixT;
     const accuracy = Math.round(pos.coords.accuracy);
-    const speedKmh = pos.coords.speed !== null && !isNaN(pos.coords.speed) ? Math.round(pos.coords.speed * 3.6) : 0;
+    const speedKmh = lbSpeedFromFix(pos);
     window.lbSpeedKmh = speedKmh;   // read by the property-boundary layer, which holds off downloading while driving fast
     
     currentMapSpeedKmh = speedKmh;
@@ -17501,23 +17719,107 @@ window.addEventListener('DOMContentLoaded', async () => {
     recordSnailTrailPoint(userCurrentLocation.lat, userCurrentLocation.lng);
 
     // --- LOCKED HEADING ENGINE (Prevents 180° flips & snaps) ---
-    if (speedKmh >= 4) {
-      if (pos.coords.heading !== null && !isNaN(pos.coords.heading) && pos.coords.heading >= 0) {
-        lastValidHeading = Math.round(pos.coords.heading);
-      } else if (lastGpsCoords.lat !== 0) {
-        const deltaDist = getDistanceMeters(lastGpsCoords.lat, lastGpsCoords.lng, userCurrentLocation.lat, userCurrentLocation.lng);
-        if (deltaDist >= 4.0) {
-          const calcHeading = getBearing(lastGpsCoords.lat, lastGpsCoords.lng, userCurrentLocation.lat, userCurrentLocation.lng);
-          if (!isNaN(calcHeading)) {
-            const diff = Math.abs((calcHeading - lastValidHeading + 180) % 360 - 180);
-            if (diff < 140 || lastValidHeading === 0) {
-              lastValidHeading = Math.round(calcHeading);
+    // lastValidHeading is the way the TRUCK FACES, not the way it's moving.
+    // What the phone's heading means differs by phone - and from one reverse to the next on the same phone. The 30 Sep GPS log (a six-point turn at the bottom of
+    // Hedges Ct, two reverses) showed the driver's Android gives the way the phone is POINTING - its heading
+    // never turned round while reversing, the truck just moved the other way - which is why, before any of
+    // the reverse handling, the truck icon already faced forward while reversing. Overruling it with the
+    // direction the truck was moving is what made reversing worse. So when the phone gives a heading that
+    // carries on from the way the truck faced, it is the facing, and "reversing" (lbReversing, shown as R in
+    // the GPS log) just means the truck is moving the other way from it.
+    // Other phones give the direction of MOVEMENT, which turns round 180° when reversing: a heading that
+    // jumps more than 100° from the facing is that, and the facing stays put (following a reverse round a
+    // corner) until the phone's heading carries on from the facing again. Phones with no heading at all
+    // (iPhones at walking pace) go by the metres driven, with forwards/reverse decided as the truck moves off
+    // from a stop - it can only change gear standing still - and held until it stops again.
+    // Fixes that leapt further than the truck could have driven are ignored (lbLastFixJumped), and a truck
+    // "reversing" at 25 km/h+ for 3 fixes, or for over 3 minutes of moving, was really going forwards.
+    if (!lbLastFixJumped) {
+      const R = lbReverseState;
+      if (speedKmh < 1.5) { if (R.init) R.stopped = true; if (lbFrozenN >= 5) R.froze = true; }
+      else if (speedKmh >= 3) {
+        const native = (pos.coords.heading !== null && !isNaN(pos.coords.heading) && pos.coords.heading >= 0) ? pos.coords.heading : null;
+        const off = (a, b) => Math.abs((a - b + 540) % 360 - 180);
+        const now = Date.now(), gap = R.lastT ? now - R.lastT : Infinity, dtMs = Math.min(5000, gap);
+        R.lastT = now;
+        const facing = R.init ? lastValidHeading : null;
+        let next = facing, motion = native;
+        if (native !== null) {
+          const moved = lbMovedBearing(3);
+          const afterStop = R.stopped;
+          // How far the heading may swing from the facing and still be the facing: a truck turns under 25° a
+          // second, so 100° between fixes is the heading turning round (reversing, on a phone that gives the
+          // way it moves) - except after a stop, when the GPS often freezes while the truck manoeuvres (30 Sep:
+          // 15-40 s frozen in Marcia Cl driveways, the truck swung round ~100° meanwhile, and calling that
+          // reversing kept it "reversing" for 60 m up Magnolia Way). After a stop only a near-about-turn (150°+)
+          // is reversing (1 Oct, Augusta St: moving off backwards from a stop, the heading jumped 172° round to
+          // the way the truck was going).
+          // After a stop the truck faces where it did when it stopped - a truck can't move off forwards more than
+          // 90° from the way it faces, so more than that is reversing (1 Oct, Watson Rd: reversing round into a
+          // side street, the phone's heading moved off 123° from the truck, which the old 150° rule took as
+          // forwards). Only when the GPS froze during the stop (lbFrozenN) might the truck have turned unseen,
+          // so then it takes a near-about-turn (Marcia Cl, 30 Sep: ~100° swung round while frozen).
+          const swing = off(native, facing === null ? native : facing), stopLimit = R.froze ? 150 : 90;
+          // first fix, back after a long gap, or the phone catching up after the GPS froze (lbSpeedReset): the
+          // truck has been somewhere unseen - 1 Oct, Augusta St: frozen 24 s while it went 37 m and turned
+          // round, and the old facing made it "reverse" off at 22 km/h - so the phone's heading starts afresh
+          if (facing === null || lbSpeedReset || (gap > 20000 && speedKmh >= 10)) { next = native; R.on = moved !== null && off(moved, native) > 120; }
+          else if (swing <= (afterStop ? stopLimit : 100)) { next = native; R.on = moved !== null && off(moved, native) > 120; }
+          else {
+            R.on = true;
+            const back = (native + 180) % 360;
+            if (off(back, facing) <= 60) next = back;
+          }
+          R.stopped = false; R.stopPos = null; R.froze = false;
+        } else {
+          const moved = lbMovedBearing();
+          motion = moved;
+          if (motion === null && lastGpsCoords.lat !== 0) {
+            const deltaDist = getDistanceMeters(lastGpsCoords.lat, lastGpsCoords.lng, userCurrentLocation.lat, userCurrentLocation.lng);
+            if (deltaDist >= 4.0) {
+              const calcHeading = getBearing(lastGpsCoords.lat, lastGpsCoords.lng, userCurrentLocation.lat, userCurrentLocation.lng);
+              if (!isNaN(calcHeading)) motion = calcHeading;
+            }
+          }
+          if (motion !== null) {
+            if (facing === null) { R.on = false; next = motion; }
+            else {
+              if (R.stopped) { R.stopped = false; R.stopFacing = facing; R.stopPos = { lat: userCurrentLocation.lat, lng: userCurrentLocation.lng }; R.resumeN = 0; }
+              const fromStop = R.stopPos ? getDistanceMeters(R.stopPos.lat, R.stopPos.lng, userCurrentLocation.lat, userCurrentLocation.lng) : Infinity;
+              if (R.stopPos && R.resumeN < 8 && fromStop < 12) {
+                // just moved off: forwards or backwards against the way it faced when it stopped. The first fix
+                // decides; the next few metres only overturn that when plainly the other way, two fixes running
+                // (a tight turn can be 90°+ round within 12 m of moving off, which isn't reversing).
+                R.resumeN++;
+                const o = off(motion, R.stopFacing);
+                if (R.resumeN === 1) { R.on = o > 90; R.flipN = 0; }
+                else if ((R.on && o < 30) || (!R.on && o > 150)) { if (++R.flipN >= 2) { R.on = !R.on; R.flipN = 0; } }
+                else R.flipN = 0;
+                next = R.on ? (motion + 180) % 360 : motion;
+              } else {
+                R.stopPos = null;
+                const want = R.on ? (motion + 180) % 360 : motion;
+                if (off(want, facing) <= 100) next = want;
+              }
             }
           }
         }
+        if (motion !== null) {
+          // (trucks do reverse at 15-17 km/h, and for over a minute up a long street - 1 Oct, Watson Rd: the old
+          // 14 km/h / 60 s limits turned the truck round mid-reverse)
+          R.fastN = speedKmh >= 25 ? R.fastN + 1 : 0;
+          R.revMs = R.on ? R.revMs + dtMs : 0;
+          if (R.on && (R.fastN >= 3 || R.revMs > 180000)) { R.on = false; R.revMs = 0; R.stopPos = null; next = motion; }
+          if (next !== null) { lastValidHeading = Math.round(next) % 360; R.init = true; }
+        }
       }
+      if (window.lbReversing !== R.on) { window.lbReversing = R.on; document.body.classList.toggle('lb-reversing', R.on); }
     }
     // If stopped or < 4 km/h, lastValidHeading remains locked to your last driving direction
+    lbGpsLogAdd({ k: 'fix', t: fixT, lat: +pos.coords.latitude.toFixed(6), lng: +pos.coords.longitude.toFixed(6), acc: accuracy,
+      ps: pos.coords.speed == null ? null : Math.round(pos.coords.speed * 36) / 10, ph: pos.coords.heading == null ? null : Math.round(pos.coords.heading),
+      v: speedKmh, j: lbLastFixJumped ? 1 : 0, f: lastValidHeading, r: lbReverseState.on ? 1 : 0 });
+    if (lbFrozenN >= 5) lbPokeFrozenGps(); else lbPokeRestartAt = 0;
 
     updateGpsBadgeUI(true, `🟢 ±${accuracy}m`);
 
@@ -17591,7 +17893,8 @@ window.addEventListener('DOMContentLoaded', async () => {
     // side selector on "Left side" (setHudSide) and the right kerb's bins
     // will never be recoloured or removed, regardless of how close the
     // truck gets to them.
-    activeMapCircleMarkers.forEach((markerObj, markerKey) => {
+    // (not from a fix that leapt further than the truck could have driven - the truck was never there)
+    if (!lbLastFixJumped) activeMapCircleMarkers.forEach((markerObj, markerKey) => {
       const binId = markerObj.serial || markerKey;
       if (servicedBinSerials.has(binId)) return;
 
@@ -23935,6 +24238,39 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     const P = e && e.p && store.parcels[e.p];
     return P ? toLatLngs(P.o, null) : null;
   }
+  // Which houses are on the lot under a tapped point (the map's "tap a property boundary" card). Every house
+  // counts, not just the run's - a tap is how you look up a place you're not collecting today. Returns
+  // { sites, ring } (ring = [[lat,lng],...] to highlight) or null. A lot nobody's pin was matched to (a
+  // neighbour, a park) falls back to the nearest house pin within 15 m of the tap.
+  function sitesAt(lat, lng) {
+    lat = Number(lat); lng = Number(lng);
+    if (!isFinite(lat) || !isFinite(lng)) return null;
+    sitesIndexed();
+    for (let i = 0; i < handDrawnSites.length; i++) {
+      const s = handDrawnSites[i], f = [];
+      s.boundary.forEach(p => f.push(Number(p[1]), Number(p[0])));
+      if (ringContains(f, lng, lat)) return { sites: [s], ring: s.boundary.map(p => [Number(p[0]), Number(p[1])]) };
+    }
+    if (!parcelIndexed) buildParcelIndex();
+    const inLot = P => P && P.b && lng >= P.b[0] && lng <= P.b[2] && lat >= P.b[1] && lat <= P.b[3]
+      && ringContains(P.o, lng, lat) && !(P.h && P.h.some(h => ringContains(h, lng, lat)));
+    let pid = null;
+    (parcelCells.get(cellKey(lng, lat)) || []).concat(parcelBig).forEach(id => {
+      const P = store.parcels[id];
+      if (inLot(P) && (!pid || (P.a || Infinity) < (store.parcels[pid].a || Infinity))) pid = id;
+    });
+    const pad = 0.0005, near = sitesInView({ w: lng - pad, e: lng + pad, s: lat - pad, n: lat + pad });
+    if (pid) {
+      const on = near.filter(s => { const e = store.sites[siteKey(s)]; return e && e.p === pid && !(Array.isArray(s.boundary) && s.boundary.length >= 3); });
+      if (on.length) return { sites: on, ring: toLatLngs(store.parcels[pid].o, null) };
+    }
+    // the lot itself, for the outline, from the loaded tiles if it isn't one of the stored (matched) lots
+    let ring = pid ? toLatLngs(store.parcels[pid].o, null) : null;
+    if (!ring) tiles.forEach(t => { if (!ring) t.parcels.forEach(P => { if (ring || P.road) return; P.parts.forEach(part => { if (!ring && partContains(part, lng, lat)) ring = toLatLngs(part.o, null); }); }); });
+    let best = null, bestD = 15;
+    near.forEach(s => { const pt = sitePoint(s); if (!pt) return; const d = metresBetween(lat, lng, pt.lat, pt.lng); if (d < bestD) { bestD = d; best = s; } });
+    return best ? { sites: [best], ring } : (ring ? { sites: [], ring } : null);
+  }
   async function matchSite(site) {
     await ensureLoaded();
     const pt = sitePoint(site);
@@ -24713,6 +25049,8 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     matchSite: matchSite,
     infoFor: infoFor,
     boundaryFor: boundaryFor,
+    sitesAt: sitesAt,
+    isOn: isOn,
     matchAllUI: matchAllUI,
     matchViewUI: matchViewUI,
     clearAllUI: clearAllUI,
@@ -24855,8 +25193,8 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
         that appears when the truck is on a street the run works.
         One block hard against the left edge (left kerb) and one against
         the right edge (right kerb), each showing:
-           house icon  = houses on THIS run on that side of the street
-           bin icon    = bins those houses have on this run
+           house icon  = houses on THIS run on that side of the street still to do
+           bin icon    = bins those houses have on this run not yet emptied (both count down)
            crossed bin = houses with no bin allocated
 
         "No bin" means: a property on this street with no bin recorded
@@ -24981,6 +25319,18 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     });
     return total;
   }
+  // The serials of those same bins (upper-cased, as the map and the flip tracking use them).
+  function serialsOnRun(site) {
+    const out = [];
+    const streams = (typeof visibleStreams === 'function') ? visibleStreams() : ['Garbage', 'Recycling', 'FOGO'];
+    const ds = (typeof activeFilterDataSource !== 'undefined') ? activeFilterDataSource : 'all';
+    streams.forEach(streamKey => {
+      if (typeof streamMatchesSelectedRun === 'function' && !streamMatchesSelectedRun(site, streamKey)) return;
+      const source = ds === 'council' ? site.councilStreams : site.soloStreams;
+      ((source && source[streamKey]) || []).forEach(b => out.push(String((b && b.serial) || '').trim().toUpperCase()));
+    });
+    return out;
+  }
   // Any bin at all, any stream, in whichever data source is being used.
   function anyBins(site) {
     const ds = (typeof activeFilterDataSource !== 'undefined') ? activeFilterDataSource : 'all';
@@ -25028,7 +25378,7 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
       if (!pos) return;
       const sid = streetIdOf(site);
       if (!sid) return;
-      const it = { site, pos, sid: sid.id, num: houseNo(site), onRun: true, bins: binsOnRun(site) };
+      const it = { site, pos, sid: sid.id, num: houseNo(site), onRun: true, bins: binsOnRun(site), serials: serialsOnRun(site) };
       it.parity = it.num === null ? null : (it.num % 2 === 0 ? 'even' : 'odd');
       it.none = it.bins === 0;
       items.push(it);
@@ -25120,15 +25470,177 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     return state.oddSide ? 'parity' : 'geometry';
   }
 
+  // Houses and bins STILL TO DO on each side: a bin comes off as it's emptied (servicedBinSerials), and a
+  // house when it has no bins left - so the numbers count down as the truck works the street. (They
+  // used to be the street's totals and never moved.) A bin with no serial can't be ticked off, so it
+  // stays counted.
   function tally(items) {
     const out = { L: { houses: 0, bins: 0, none: 0 }, R: { houses: 0, bins: 0, none: 0 } };
+    const done = (typeof servicedBinSerials !== 'undefined' && servicedBinSerials) ? servicedBinSerials : null;
     items.forEach(it => {
       const s = out[it.side];
       if (!s) return;
-      if (it.onRun) { s.houses++; s.bins += it.bins; }
+      if (it.onRun) {
+        let left = it.bins;
+        if (done && it.serials && it.serials.length) left = it.serials.filter(x => !x || !done.has(x)).length;
+        if (left > 0) { s.houses++; s.bins += left; }
+      }
       if (it.none) s.none++;
     });
     return out;
+  }
+
+
+  /* ---------- the truck on the road, not where the GPS dot is ----------
+     Which kerb a house is on is worked out from where the truck is. GPS is often 5-10 m out - enough to put
+     the dot in the front yards on one side, and then that side's houses read as the OTHER side (and where
+     only one side has houses nearby, the odd/even vote can't correct it). So, when the run's streets are
+     known (data/run-routes.json - the OpenStreetMap streets each run drives, as the run maps use), the
+     truck is put on the nearest point of the street it's on, within 25 m, for the side test. */
+  let routeData = null, routeLoading = false;
+  function loadRoutes() {
+    if (routeData || routeLoading) return;
+    routeLoading = true;
+    fetch('data/run-routes.json').then(r => r.ok ? r.json() : null).then(d => { routeData = (d && d.runs) || {}; }).catch(() => { routeData = {}; });
+  }
+  function routeKeys() {
+    const st = (typeof activeFilterStream !== 'undefined') ? activeFilterStream : '';
+    if (!/^(Garbage|Recycling|FOGO)$/.test(st)) return [];
+    let day = String((typeof activeFilterDay !== 'undefined' && activeFilterDay) || '');
+    day = day.charAt(0).toUpperCase() + day.slice(1).toLowerCase();
+    const wk = String((typeof activeFilterWeek !== 'undefined' && activeFilterWeek) || '').toUpperCase();
+    const out = [];
+    let runs = []; try { runs = Array.from(selectedMapRuns()); } catch (e) {}
+    runs.forEach(r => {
+      const R = String(r).toUpperCase();
+      if (st === 'Garbage') out.push('Garbage#' + day + '#' + R);
+      else { out.push(st + '#' + day + '#' + wk + '#' + R); out.push(st + '#' + day + '##' + R); }
+    });
+    return out;
+  }
+  function onRoad(truck, streetName) {
+    if (!truck) return truck;
+    if (!routeData) { loadRoutes(); return truck; }
+    let best = null, bd = 25;
+    routeKeys().forEach(k => {
+      const r = routeData[k]; if (!r || !Array.isArray(r.lines)) return;
+      r.lines.forEach(L => {
+        if (streetName && normStreet(L.n) !== streetName) return;
+        const c = L.c || [];
+        for (let i = 1; i < c.length; i++) {
+          const a = local({ lat: c[i - 1][0], lng: c[i - 1][1] }, truck), b = local({ lat: c[i][0], lng: c[i][1] }, truck);
+          const dx = b.x - a.x, dy = b.y - a.y, L2 = dx * dx + dy * dy;
+          const t = L2 ? Math.max(0, Math.min(1, -(a.x * dx + a.y * dy) / L2)) : 0;
+          const px = a.x + t * dx, py = a.y + t * dy, d = Math.hypot(px, py);
+          if (d < bd) { bd = d; best = { x: px, y: py }; }
+        }
+      });
+    });
+    if (!best) return truck;
+    return { lat: truck.lat + best.y / M_LAT, lng: truck.lng + best.x / (M_LNG * Math.cos(truck.lat * Math.PI / 180)) };
+  }
+
+  /* ---------- the next bin (the Map's next-bin box) ----------
+     In the order the truck will get to it, not "nearest in a straight line" (which picked a house in the
+     next street over - Ashden Square from Besgrove St beside the Olympic reserve - and, from a house pin in
+     the wrong place, a Dunns Rd, Mount Martha house in Rosebud):
+       1. the street you're on: the next house with a bin still to do on your side (the side being collected,
+          by the same odd/even-aware sides as the strip) - the one beside you or the first one ahead;
+       2. otherwise the next street off to your side (left) ahead - its house nearest you, the first you'd
+          reach turning in;
+       3. otherwise the next street ahead either way (the next turn).
+     Houses flagged as in the wrong place ("locations look wrong") are left out. Only houses on the run with
+     a bin not yet emptied count. Returns undefined when the run isn't indexed (the caller falls back),
+     null when there's nothing ahead within reach. both(site) = a house where both kerbs are worked. */
+  // (8 m behind still counts - the bin being emptied sits about there, at the arm, behind the GPS in the cab)
+  const NB_BEHIND_M = 8, NB_SAME_MAX = 1000, NB_TURN_MAX = 450, NB_AHEAD_MIN = 5;
+  // the house you're at: the bin arm sits NB_ARM_M behind the GPS; a house with no lot is NB_AT_M either side
+  // of its pin; a lot only counts if it comes within NB_LOT_ROAD_M of the street line
+  const NB_ARM_M = 4, NB_AT_M = 8, NB_LOT_ROAD_M = 30;
+  function lotOf(site) {
+    try { const r = window.lbParcels && window.lbParcels.boundaryFor ? window.lbParcels.boundaryFor(site) : null; return r && r.length >= 3 ? r : null; } catch (e) { return null; }
+  }
+  function strayIds() {
+    if (run.strays) return run.strays;
+    const ids = new Set();
+    try { if (typeof window.lbStraySites === 'function') window.lbStraySites(run.items.map(it => it.site)).forEach((v, site) => ids.add(siteIdOf(site))); } catch (e) {}
+    return (run.strays = ids);
+  }
+  function leftToDo(it) {
+    if (!it.onRun || !it.bins) return 0;
+    const done = (typeof servicedBinSerials !== 'undefined' && servicedBinSerials) ? servicedBinSerials : null;
+    if (!done || !it.serials || !it.serials.length) return it.bins;
+    return it.serials.filter(x => !x || !done.has(x)).length;
+  }
+  function nextBin(truck, heading, want, both) {
+    if (!run || !run.items.length || !truck) return undefined;
+    const strays = strayIds();
+    const id = pickStreet(truck);
+    if (id) { const st0 = run.streets.get(id); truck = onRoad(truck, st0 && st0.name); }
+    const hr = heading * Math.PI / 180, hx = Math.sin(hr), hy = Math.cos(hr);
+    const geo = it => { const v = local(it.pos, truck); it._along = hx * v.x + hy * v.y; it._left = hx * v.y - hy * v.x; it._d = Math.hypot(v.x, v.y); return it; };
+    const ok = it => it.onRun && leftToDo(it) > 0 && !strays.has(siteIdOf(it.site));
+    const wantKey = want === 'L' || want === 'R' ? want : null;
+
+    // 1. this street
+    if (id) {
+      const entry = getEntry(id);
+      classify(entry, truck, heading);
+      // 0. the house you're at right now. The box is for the bin you're emptying - its number is what you
+      // need while you're there - so a house stays up while its frontage is beside the bin arm (a few metres
+      // behind the GPS in the cab), even after its bins are flipped, and the box only moves on once you're
+      // past it. (It used to jump to the next house the moment this one's bins were done, or while you were
+      // still level with it.) The frontage is the lot's property boundary along the street; a house with
+      // no lot uses its pin +/- NB_AT_M.
+      const armAt = -NB_ARM_M;
+      let here = null, hereD = Infinity;
+      entry.items.forEach(it => {
+        if (!it.onRun || !it.bins || strays.has(siteIdOf(it.site))) return;
+        geo(it);
+        if (wantKey && it.side !== wantKey && !(both && both(it.site))) return;
+        let lo = it._along - NB_AT_M, hi = it._along + NB_AT_M, mid = it._along;
+        const ring = lotOf(it.site);
+        if (ring) {
+          let a0 = Infinity, a1 = -Infinity, near = Infinity;
+          ring.forEach(p => { const v = local({ lat: p[0], lng: p[1] }, truck); const a = hx * v.x + hy * v.y; a0 = Math.min(a0, a); a1 = Math.max(a1, a); near = Math.min(near, Math.abs(hx * v.y - hy * v.x)); });
+          if (near > NB_LOT_ROAD_M) return;          // a lot that doesn't reach this street
+          lo = a0 - 1; hi = a1 + 1; mid = (a0 + a1) / 2;
+        }
+        if (armAt < lo || armAt > hi) return;
+        const d = Math.abs(mid - armAt);
+        if (d < hereD) { hereD = d; here = it; }
+      });
+      if (here) return here.site;
+      let best = null;
+      entry.items.forEach(it => {
+        if (!ok(it)) return;
+        geo(it);
+        if (it._along < -NB_BEHIND_M || it._along > NB_SAME_MAX) return;
+        if (wantKey && it.side !== wantKey && !(both && both(it.site))) return;
+        if (!best || it._along < best._along) best = it;
+      });
+      if (best) return best.site;
+    }
+
+    // 2 and 3. the next street off to your side ahead, else the next street ahead either way
+    const streets = [];
+    run.streets.forEach(st => {
+      if (st.id === id) return;
+      let entryIt = null, near = null;
+      st.items.forEach(it => {
+        if (!ok(it)) return;
+        geo(it);
+        if (it._d > NB_TURN_MAX) return;
+        if (it._along > NB_AHEAD_MIN && (!entryIt || it._along < entryIt._along)) entryIt = it;
+        if (!near || it._d < near._d) near = it;
+      });
+      if (entryIt && near) streets.push({ st, entry: entryIt, near });
+    });
+    if (!streets.length) return null;
+    const onSide = wantKey ? streets.filter(x => (x.entry._left > 0) === (wantKey === 'L')) : streets;
+    const pool = onSide.length ? onSide : streets;
+    pool.sort((a, b) => a.entry._along - b.entry._along);
+    return pool[0].near.site;
   }
 
   /* ---------- which street is the truck on ---------- */
@@ -25228,10 +25740,11 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
       if (lastCalc && lastCalc.id === id
           && distM(truck, lastCalc.pos) < MOVE_RECALC_M
           && angDiff(heading, lastCalc.heading) < TURN_RECALC_DEG) {
-        drawStrip(lastCalc.tally);
+        drawStrip(tally(entry.items));   // sides unchanged, but bins may have been emptied since
         return;
       }
-      classify(entry, truck, heading);
+      const stn = run.streets.get(id);
+      classify(entry, onRoad(truck, stn && stn.name), heading);
       const t = tally(entry.items);
       lastCalc = { id, pos: { lat: truck.lat, lng: truck.lng }, heading, tally: t };
       drawStrip(t);
@@ -25252,6 +25765,7 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
 
   setInterval(tick, TICK_MS);
 
+  window.lbNextBin = nextBin;
   window.lbStreetStats = {
     refresh: tick,
     _t: { normStreet, houseNo, parseLineNo, classify, tally, pickStreet, setSites, getEntry, angDiff, local,
@@ -25463,6 +25977,34 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     S.breaks.push({ s, e });
     lastWarn = null; save(); return true;
   }
+  // A break taken earlier in the shift, put in after the fact (the "had a break already?" sheet: a long stop,
+  // or times typed in). Unlike addBreak it can go before breaks already logged - addBreak only ever adds
+  // after the last one, which is why a break typed in once a later one was logged wasn't taken. Clipped to
+  // the shift and to now; refused if it overlaps a logged break.
+  function insertBreak(s, e) {
+    if (S.start == null) return false;
+    s = Math.max(s, S.start); e = Math.min(e, Date.now());
+    if (!(e - s >= MIN)) return false;
+    const clash = S.breaks.some(b => s < (b.e == null ? Date.now() : b.e) && e > b.s);
+    if (clash) return false;
+    S.breaks.push({ s, e });
+    S.breaks.sort((x, y) => x.s - y.s);
+    lastWarn = null; save(); return true;
+  }
+  // A break typed in that hasn't finished yet (its To time is still to come): it runs now, from its start, and
+  // ends itself at the To time (endPlanned, every second) unless ended sooner.
+  function startBreakUntil(s, e) {
+    if (S.start == null || onBreak()) return false;
+    s = Math.min(earliest(s), Date.now());
+    if (!(e > s)) return false;
+    S.breaks.push({ s, e: null, plan: e });
+    lastWarn = null; save(); return true;
+  }
+  function endPlanned(now) {
+    const b = S.breaks[S.breaks.length - 1];
+    if (!b || b.e != null || !b.plan || now < b.plan) return false;
+    b.e = b.plan; delete b.plan; lastWarn = null; save(); return true;
+  }
   function startBreakAt(t) {
     if (S.start == null || onBreak()) return false;
     S.breaks.push({ s: Math.min(earliest(t), Date.now()), e: null });
@@ -25472,7 +26014,7 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     const now = Date.now();
     if (!onBreak()) return;
     const b = S.breaks[S.breaks.length - 1];
-    b.e = now;
+    b.e = now; delete b.plan;
     // A 7 h stop ends the shift: whatever comes next is a fresh 24 h period.
     if (b.e - b.s >= MAJOR_REST) newShift(now);
     lastWarn = null; save();
@@ -25480,8 +26022,29 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
   // GO on the Drive wizard. The first run of the day starts the clock; a later run the same shift carries
   // on where it was (time between runs is work unless a break was logged). A gap of 7 h+ since the app was
   // last looking, or a shift older than 24 h, is a new shift.
+  // A clock started before 3:30 this morning is yesterday's. lastSeen can't be trusted to show the overnight
+  // rest: it's bumped every 30 s while the app is open, even in the background - so a phone left with the app
+  // open overnight never showed the 7 h gap, the next morning's GO carried on yesterday's clock, and the
+  // 12 h limit made the break "overdue" all morning, whatever breaks were put in (1 Oct).
+  function dayCut(now) {
+    const d = new Date(now), cut = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 3, 30, 0, 0).getTime();
+    return now >= cut ? cut : cut - DAY;
+  }
+  function staleDay(now) {
+    if (S.start == null || S.start >= dayCut(now)) return false;
+    const cut = dayCut(now);   // (breaks put in for today are kept, for the shift to pick up)
+    S = { start: null, lastSeen: 0, breaks: S.breaks.filter(b => (b.e == null ? now : b.e) > cut) }; lastWarn = null; save(); return true;
+  }
+  // The running shift says when work began: the clock never starts more than 3 h before it (room for "I started
+  // earlier"), and breaks from before it are dropped.
+  function resetStart(t) {
+    S.start = t; S.lastSeen = Date.now();
+    S.breaks = S.breaks.filter(b => b.e == null || b.e > t).map(b => ({ s: Math.max(b.s, t), e: b.e }));
+    lastWarn = null; save();
+  }
   function onGo() {
     const now = Date.now();
+    staleDay(now);
     if (S.start == null || (now - (S.lastSeen || S.start)) >= MAJOR_REST || (now - S.start) >= DAY) newShift(now);
     else if (onBreak()) endBreak();
     S.lastSeen = now; save();
@@ -25543,6 +26106,7 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
       <button type="button" class="lb-layer-btn" data-lbbreak="start" data-show="working"><span class="lb-ico">☕</span><span class="lb-label">Start break</span></button>
       <button type="button" class="lb-layer-btn" data-lbbreak="end" data-show="break"><span class="lb-ico">▶️</span><span class="lb-label">End break</span></button>
       <button type="button" class="lb-layer-btn" data-lbbreak="early" data-show="working break"><span class="lb-ico">⏪</span><span class="lb-label">I started earlier…</span></button>
+      <button type="button" class="lb-layer-btn" data-lbbreak="past" data-show="working break"><span class="lb-ico">☕</span><span class="lb-label">Add a break I took…</span></button>
       <button type="button" class="lb-layer-btn danger" data-lbbreak="newshift" data-show="working break"><img class="icon-img" src="minus.png" alt=""><span class="lb-label">New shift</span></button>
       <div class="lb-bc-note">NHVR Standard Hours, solo driver. A guide only - not a work diary.</div>`;
   }
@@ -25648,6 +26212,7 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     if (act === 'begin') newShift(Date.now());
     else if (act === 'start') startBreak();
     else if (act === 'end') endBreak();
+    else if (act === 'past') { if (window.lbPastBreak) window.lbPastBreak.open(true); }
     else if (act === 'early') {
       const raw = (typeof window.customPrompt === 'function')
         ? await window.customPrompt('How many minutes had you already been working before you pressed GO? (0 = none)', '0')
@@ -25723,6 +26288,8 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
   setInterval(function () {
     try {
       const now = Date.now();
+      if (staleDay(now)) saveAt = 0;
+      endPlanned(now);
       if (S.start != null && now - saveAt > 30000) { S.lastSeen = now; save(); saveAt = now; }
       paint();
     } catch (e) { console.warn('Break clock:', e); }
@@ -25733,6 +26300,22 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     sectionHtml, paint,
     startBreak, endBreak, newShift, onGo,
     addBreak(s, e) { const ok = addBreak(s, e); paint(); return ok; },
+    insertBreak(s, e) { const ok = insertBreak(s, e); paint(); return ok; },
+    resetStart(t) { resetStart(t); paint(); },
+    startBreakUntil(s, e) { const ok = startBreakUntil(s, e); paint(); return ok; },
+    // Which limit is passed right now and by how much - for saying WHY it's still overdue after a break is
+    // put in (one 15 min break clears the 5¼ h limit, but past 7½ h the 8 h one wants 30 min): { title,
+    // needMin, haveMin, winH, breakMin } or null when nothing is overdue.
+    shortfall() {
+      const now = Date.now(); if (S.start == null) return null;
+      const a = analyze(S, now); if (!a.overdue) return null;
+      const r = a.rule;
+      if (r.id === 'D') return { title: r.title, id: 'D' };
+      const blocks = blocksOf(S, now);
+      let have = 0; for (let i = 0; i < blocks.length; i++) have += clip(blocks[i], now, r.win);
+      return { title: r.title, id: r.id, needMin: Math.round(r.need / MIN), haveMin: Math.floor(have / MIN), winH: r.win / HR, breakMin: a.breakMin };
+    },
+    view() { return view(Date.now()); },
     startBreakAt(t) { const ok = startBreakAt(t); paint(); return ok; },
     get state() { return JSON.parse(JSON.stringify(S)); },
     _t: { analyze, view, blocksOf, ruleOk, allOk, workAt, RULES, setState: s => { S = s; }, MIN, HR }
@@ -26530,8 +27113,39 @@ body.ux2 .ux-gta-fuel{display:flex;align-items:center;justify-content:space-betw
 body.ux2 .ux-gta-price{display:inline-flex;align-items:center;gap:4px;font-weight:700;color:var(--ux-text)}
 body.ux2 .ux-gta-price input{width:76px;min-height:38px;padding:0 8px;font-size:16px;font-weight:700;text-align:right;background:var(--ux-s2);color:var(--ux-text);border:1px solid var(--ux-line-2);border-radius:var(--ux-rad)}
 #uxGtaHealth .uxgh-cash.neg{color:#e05252}
-#uxGtaHealth .uxgh-fuel{font:800 11px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;color:#ff6b6b;text-shadow:0 1px 0 #000, 0 0 3px #000;opacity:0;transition:opacity .3s;height:0;overflow:visible;margin-top:-1px}
-#uxGtaHealth .uxgh-fuel.on{opacity:1}
+/* End of shift: money made and lost, and why (GTA game mode) */
+#uxShiftSummary{position:fixed;inset:0;z-index:30500;display:flex;align-items:center;justify-content:center;padding:16px;background:rgba(0,0,0,.6)}
+#uxShiftSummary .uxss-box{width:100%;max-width:420px;max-height:88vh;overflow:auto;background:rgba(10,10,10,.95);color:#fff;border-top:4px solid #f0c850;border-radius:var(--ux-rad, 4px);padding:16px 18px 14px;box-shadow:0 12px 40px rgba(0,0,0,.6)}
+#uxShiftSummary .uxss-h{font-family:"Pricedown", "Pricedown Bl", "Anton", Impact, "Arial Black", sans-serif;font-size:34px;line-height:1.1;color:#f0c850;text-transform:uppercase;letter-spacing:.03em;text-shadow:2px 0 0 #000, -2px 0 0 #000, 0 2px 0 #000, 0 -2px 0 #000;margin-bottom:6px}
+#uxShiftSummary .uxss-sec{margin:12px 0 4px;font-size:11px;font-weight:800;letter-spacing:.12em;text-transform:uppercase;color:#9a9a9a}
+#uxShiftSummary .uxss-r{display:flex;justify-content:space-between;align-items:baseline;gap:12px;padding:6px 0;border-bottom:1px solid rgba(255,255,255,.08)}
+#uxShiftSummary .uxss-r span{display:flex;flex-direction:column;gap:2px;min-width:0}
+#uxShiftSummary .uxss-r b{font-size:15px}
+#uxShiftSummary .uxss-r i{font-style:normal;font-size:12.5px;color:#b5b5b5}
+#uxShiftSummary .uxss-r em{font-style:normal;font-family:"Pricedown", "Pricedown Bl", "Anton", Impact, "Arial Black", sans-serif;font-size:22px;color:#72cc72;white-space:nowrap}
+#uxShiftSummary .uxss-r.neg em{color:#e05252}
+#uxShiftSummary .uxss-none{padding:6px 0;font-size:13px;color:#b5b5b5}
+#uxShiftSummary .uxss-net, #uxShiftSummary .uxss-tot{display:flex;justify-content:space-between;align-items:baseline;margin-top:12px;font-size:14px;font-weight:700;text-transform:uppercase;letter-spacing:.06em}
+#uxShiftSummary .uxss-net b, #uxShiftSummary .uxss-tot b{font-family:"Pricedown", "Pricedown Bl", "Anton", Impact, "Arial Black", sans-serif;font-weight:400;font-size:30px;color:#72cc72;letter-spacing:.02em}
+#uxShiftSummary .uxss-net.neg b{color:#e05252}
+#uxShiftSummary .uxss-tot{margin-top:2px;color:#c9c9c9}
+#uxShiftSummary .uxss-tot b{font-size:22px;color:#fff}
+#uxShiftSummary .uxss-ok{display:block;width:100%;min-height:48px;margin-top:14px;border:0;border-radius:var(--ux-rad, 4px);background:#fff;color:#000;font-size:16px;font-weight:800;cursor:pointer}
+/* Wanted stars and money coming off (diesel, fines): a stack just under the top bar, top right */
+#uxGtaStack{position:fixed;right:10px;top:90px;z-index:29000;display:flex;flex-direction:column;align-items:flex-end;gap:2px;pointer-events:none}
+body:not(.ux-gta-game) #uxGtaStack{display:none}
+#uxGtaStack .uxgs-stars{display:flex;gap:1px}
+#uxGtaStack .uxgs-stars i{font-style:normal;font-size:27px;line-height:1;color:rgba(255,255,255,.22);text-shadow:1.5px 0 0 #000, -1.5px 0 0 #000, 0 1.5px 0 #000, 0 -1.5px 0 #000}
+#uxGtaStack .uxgs-stars i.on{color:#fff}
+#uxGtaStack .uxgs-stars.flash i.on{animation:uxgsFlash .9s steps(2, jump-none) infinite}
+@keyframes uxgsFlash{50%{color:rgba(255,255,255,.25)}}
+#uxGtaStack .uxgs-ticks{display:flex;flex-direction:column;align-items:flex-end;gap:1px}
+#uxGtaStack .uxgs-t{display:flex;align-items:baseline;gap:6px;animation:uxgsIn .2s ease-out}
+#uxGtaStack .uxgs-t b{font-family:"Pricedown", "Pricedown Bl", "Anton", Impact, "Arial Black", sans-serif;font-weight:400;font-size:26px;line-height:1.05;letter-spacing:.02em;color:#e05252;text-shadow:2px 0 0 #000, -2px 0 0 #000, 0 2px 0 #000, 0 -2px 0 #000, 1.5px 1.5px 0 #000, -1.5px -1.5px 0 #000}
+#uxGtaStack .uxgs-t span{order:-1;font:800 11px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;letter-spacing:.08em;text-transform:uppercase;color:#fff;text-shadow:0 1px 0 #000, 0 0 3px #000}
+#uxGtaStack .uxgs-fine b{font-size:32px}
+@keyframes uxgsIn{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:none}}
+body.ux-gta-wasted #mainLeafletMap{filter:grayscale(1) brightness(.8);transition:filter .6s}
 html:not([data-ux-skin="gta"]) body.ux2 .ux-gta-card{display:none !important}
 body.ux2:not(.ux-gta-game) .ux-gta-card [data-sw="gtasnd"]{opacity:.45;pointer-events:none}
 /* "Mission passed" splash when the skin is picked - see gtaSplash() in the Customize script */
@@ -26616,6 +27230,18 @@ body.ux2 .ux-skin-pv i:nth-child(2){top:20px;right:22px}
 body.ux2 .ux-skin-pv b{position:absolute;left:10px;bottom:5px;width:40%;height:3px;border-radius:2px;background:var(--p-t)}
 body.ux2 .ux-skin-pv em{position:absolute;right:6px;top:20px;width:10px;height:10px;border-radius:calc(var(--ux-rad) / 2);background:var(--ui-accent)}
 @media (max-width: 360px){body.ux2 .ux-skins{grid-template-columns:repeat(2, minmax(0, 1fr))}}
+/* "Driving through run 221 - tap to switch" chip, centred under the top bar */
+#uxRunHereChip{position:fixed;left:50%;transform:translateX(-50%);z-index:1200;display:inline-flex;align-items:center;gap:8px;min-height:40px;padding:0 14px;border:0;border-left:4px solid var(--rh-c, #facc15);border-radius:var(--ux-rad, 4px);background:var(--ux-glass-solid, #0e131a);color:var(--ux-text, #fff);box-shadow:0 4px 16px rgba(0,0,0,.45);font-size:14px;cursor:pointer;white-space:nowrap}
+#uxRunHereChip .icon-img{width:18px;height:18px}
+#uxRunHereChip b{font-size:16px;font-weight:800}
+#uxRunHereChip span{font-size:12px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--ux-text-2, #adb9c8)}
+#uxRunHereChip.s-garbage{--rh-c:#dc2626}
+#uxRunHereChip.s-recycling, #uxRunHereChip.s-summerrecycling{--rh-c:#facc15}
+#uxRunHereChip.s-fogo{--rh-c:#16a34a}
+body:not(.lb-map-screen) #uxRunHereChip, body.ux-picking #uxRunHereChip{display:none !important}
+/* Nerd mode's GPS row under the street name: only as wide as its text (like the street row above it),
+   not the full width, so the speed number at the right can sit beside it */
+html body.ux2 #uxCardStack #uxNerdStrip{width:fit-content !important;max-width:calc(100% - 120px) !important}
 /* The break clock on the Shift screen (moved from Layers): the countdown box and "I started earlier";
    its start/end break, start clock and new shift rows are the Shift screen's own buttons already. */
 #uxShift .uxs-bclock{margin:10px 0 4px}
@@ -28325,10 +28951,9 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   function restoreMapModes(s){
     // Put GPS-follow / Track-Up back the way the driver had them.
     try {
-      var fb = document.getElementById('btnTruckFollowTarget');
-      if (s.wasFollow && fb && !fb.classList.contains('active') && window.toggleTruckFollow) window.toggleTruckFollow();
-      var tb = document.getElementById('btnTrackUpOrientation');
-      if (s.wasTrackUp && tb && !tb.classList.contains('active') && window.toggleTrackUpOrientation) window.toggleTrackUpOrientation();
+      if (s.wasFollow && !isTruckFollowEnabled && window.toggleTruckFollow) window.toggleTruckFollow();
+      if (s.wasTrackUp && !window.isTrackUpEnabled && window.toggleTrackUpOrientation) window.toggleTrackUpOrientation();
+      if (typeof window.updateMapFollowModeButton === 'function') window.updateMapFollowModeButton();
     } catch (e) {}
   }
 
@@ -28381,11 +29006,13 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     if (typeof window.uxClosePanels === 'function') window.uxClosePanels();
 
     // 3. the map must stay where the driver puts it
-    st.wasFollow = !!(document.getElementById('btnTruckFollowTarget') || {classList:{contains:function(){return false;}}}).classList.contains('active');
-    st.wasTrackUp = !!(document.getElementById('btnTrackUpOrientation') || {classList:{contains:function(){return false;}}}).classList.contains('active');
+    // (read from the app's own flags - the separate Track-Up button this used to read is gone, so Track-Up
+    // was never switched off for the pick, or put back after)
+    st.wasFollow = typeof isTruckFollowEnabled !== 'undefined' && !!isTruckFollowEnabled;
+    st.wasTrackUp = !!window.isTrackUpEnabled;
     try {
-      if (st.wasFollow && window.toggleTruckFollow) window.toggleTruckFollow();
       if (st.wasTrackUp && window.toggleTrackUpOrientation) window.toggleTrackUpOrientation();
+      if (st.wasFollow && window.toggleTruckFollow) window.toggleTruckFollow();
     } catch (e) {}
 
     // 4. pin
@@ -28880,7 +29507,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
           '<div class="ux-cz-sec">Look</div>' +
           '<div class="ux-cz-field"><div class="ux-cz-fl">Theme</div>' + seg('theme', [['dark', 'Dark', 'moon'], ['light', 'Light', 'sun']]) + '</div>' +
           '<div class="ux-cz-field ux-cz-col"><div class="ux-cz-fl">Skin</div>' + skinPicker() + '</div>' +
-          '<div class="ux-nerd-card ux-gta-card">' + sw('gtafx', 'Game mode', 'Health bar instead of the shift timer (empties as your break comes up, fills back up on your break), pop-ups every 100 bins and when a run is done, cash, and pickups on the map to drive through. Diesel for what you drive comes off your cash.') + sw('gtasnd', 'Game sounds', 'Short sounds with the pop-ups and pickups.') +
+          '<div class="ux-nerd-card ux-gta-card">' + sw('gtafx', 'Game mode', 'Health bar instead of the shift timer (empties as your break comes up, fills back up on your break), pop-ups every 100 bins and when a run is done, cash, and pickups on the map to drive through. Diesel and speeding fines come off your cash, and you get wanted stars for speeding and for driving past bins.') + sw('gtasnd', 'Game sounds', 'Short sounds with the pop-ups and pickups.') +
             '<label class="ux-gta-fuel"><span class="ux-sw-l">Diesel price</span><span class="ux-gta-price">$<input id="uxGtaPrice" type="number" inputmode="decimal" step="0.01" min="0.5" max="6" aria-label="Diesel price in dollars per litre">/L</span></label>' +
             '<div class="ux-sw-s" id="uxGtaFuelInfo">Diesel for the km you drive on a shift comes off your cash.</div>' +
           '</div>' +
@@ -28896,6 +29523,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
           '<div class="ux-cz-field"><div class="ux-cz-fl">Layers button</div>' + seg('qside', [['menu', 'With menu'], ['zoom', 'With zoom']]) + '</div>' +
           '<div class="ux-cz-sec">Detail</div>' +
           '<div class="ux-nerd-card">' + sw('nerd', 'Nerd mode', 'Shows the extra numbers: side counts, zoom, heading, distances, bin counts, collection dates and a live GPS strip on the map.') + '</div>' +
+          '<div class="ux-cz-field"><div class="ux-cz-fl">GPS log (last 15 min)</div><button type="button" class="btn-cancel" onclick="window.lbSendGpsLog && window.lbSendGpsLog()">Send GPS log</button></div>' +
           '<div class="ux-cz-sec">Choose what shows</div>' +
           '<div class="ux-cz-hint">These switches override Nerd mode for that one item.</div>' +
           groups +
@@ -29027,6 +29655,13 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var loc = (typeof userCurrentLocation !== 'undefined') ? userCurrentLocation : null;
     if (loc) parts.push(loc.lat.toFixed(5) + ', ' + loc.lng.toFixed(5));
     else parts.push('no GPS fix');
+    // how long since the phone last gave a position, and the speed it said (the app's number is the big one) -
+    // enough to see out on the road whether the GPS stalls, e.g. while reversing
+    var dg = window.lbGpsDiag;
+    if (dg && dg.at) {
+      var ago = Math.round((Date.now() - dg.at) / 1000);
+      parts.push((ago > 2 ? 'last fix ' + ago + 's ago' : 'fix now') + ' · phone ' + (dg.ps == null ? '–' : Math.round(dg.ps)) + ' km/h' + (window.lbReversing ? ' · R' : ''));
+    }
     try { if (typeof leafletMap !== 'undefined' && leafletMap && leafletMap.getZoom) parts.push('z' + leafletMap.getZoom()); } catch (e) {}
     el.textContent = parts.join('  ·  ');
     // sit just above whatever is at the bottom of the map (address card or context bar)
@@ -30405,6 +31040,11 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     if (SH && shiftOverNight(SH)) { finishShift({ note: 'Not ended in the app: closed ' + (isStreet(SH.stream) ? 'at 3 am' : 'at midnight') }); toast('Yesterday’s shift was closed. It’s in Past shifts.'); }
     try { escalate(); } catch (e) {}
     if (!SH) return;
+    // the break clock runs from this shift's start (see resetStart in the break clock)
+    try {
+      var cs2 = clockState();
+      if (window.lbBreakClock && window.lbBreakClock.resetStart && (!cs2 || cs2.start == null || cs2.start < SH.start - 3 * 3600000)) window.lbBreakClock.resetStart(SH.start);
+    } catch (e) {}
     var ch = false, brk = onBreak();
     var loc = here();
     if (loc) {
@@ -30536,7 +31176,11 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   }
   function newDefect(item){ defDraft = { item: item || '', sev: 'ok', note: '', media: [] }; }
 
-  function field(id, label, val, type, ph){ return '<label class="drv-f"><span>' + esc(label) + '</span><input id="' + id + '" type="' + (type || 'text') + '" ' + (type === 'number' ? 'inputmode="decimal" step="any"' : 'autocomplete="off"') + ' value="' + esc(val == null ? '' : val) + '" placeholder="' + esc(ph || '') + '"></label>'; }
+  // Number fields are text inputs with the number keypad, not type="number": every keystroke repaints the
+  // sheet and puts the cursor back where it was, and a number input won't say where its cursor is
+  // (selectionStart is null) - so typing the start km / hours sent the cursor back to the start after
+  // every digit.
+  function field(id, label, val, type, ph){ return '<label class="drv-f"><span>' + esc(label) + '</span><input id="' + id + '" type="text" ' + (type === 'number' ? 'inputmode="decimal" ' : '') + 'autocomplete="off" value="' + esc(val == null ? '' : val) + '" placeholder="' + esc(ph || '') + '"></label>'; }
   function checksHtml(ch){
     var n = Object.keys(ch).length;
     return '<div class="drv-sect"><span>Pre-start check</span><em>' + n + ' of ' + CHECKS.length + '</em>' + (n < CHECKS.length ? '<button type="button" class="drv-link" data-a="allok">Everything else OK</button>' : '') + '</div>' +
@@ -32024,6 +32668,10 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
         stats.forEach(function(e){ grp.appendChild(e); });
       }
     }
+    // the GPS accuracy rides at the end of the numbers row: left in the box on its own it wrapped onto
+    // a header row of its own whenever the numbers filled the width
+    var gpe = $('uxmsGps'), sg = $('uxMsStats');
+    if (gpe && sg && gpe.parentNode !== sg) sg.appendChild(gpe);
     return box;
   }
   // beside the name when they fit, on a line of their own when they do not
@@ -32051,6 +32699,11 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var t = badge ? clean(badge.textContent) : '';
     put('uxmsGps', /±/.test(t) ? t.replace(/\s+/g, '') : '');
     var gp = $('uxmsGps'); if (gp) gp.classList.toggle('searching', !!(badge && badge.classList.contains('searching')));
+    // With Nerd mode's GPS strip on the map it's said there already.
+    if (gp) {
+      var strip = $('uxNerdStrip'), dup = !!(strip && strip.offsetParent !== null && getComputedStyle(strip).display !== 'none');
+      if (dup) gp.style.setProperty('display', 'none', 'important'); else gp.style.removeProperty('display');   // (the row's items are display:flex !important)
+    }
   }
   setInterval(function(){ if (document.body.getAttribute('data-ux-screen') === 'map' && !document.hidden) tick(); }, 900);
   var prevInfo = window.updateMapHeaderInfo;
@@ -33268,6 +33921,9 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
      The average is worked out from earlier days' run sheet fuel entries (see fuelRate), or 55 L/100km
      until there are any. The price is set in Customize (default $2.70/L, Melbourne late Sep 2026).
    - Big "mission passed" style messages every 100 bins in a day and when a run's bins are all done.
+   - Wanted level (5 stars) for speeding and for driving past bins without emptying them, and a
+     speeding fine off the cash when a speeding stretch ends (see "Wanted level" below). Money coming
+     off (diesel, fines) shows in red under the top bar, under the stars.
    - Pickups: every few minutes of driving one appears on the map by a house still to do on the
      run; driving past it (within ~35 m) collects it - cash, body armour, hidden packages (100 to
      find) or some random junk. Nothing to tap, so there's nothing to do while the truck's moving.
@@ -33290,7 +33946,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     return {
       day: o.day || '', bins: Array.isArray(o.bins) ? o.bins : [], cash: +o.cash || 0, armour: +o.armour || 0, pk: +o.pk || 0,
       found: (o.found && typeof o.found === 'object') ? o.found : {}, done: (o.done && typeof o.done === 'object') ? o.done : {},
-      wasted: o.wasted || 0, healed: o.healed || 0,
+      wasted: o.wasted || 0, healed: o.healed || 0, led: (o.led && typeof o.led === 'object') ? o.led : null,
       price: (+o.price > 0.5 && +o.price < 6) ? +o.price : 2.70,
       fuelShift: o.fuelShift || '', fuelKm: +o.fuelKm || 0, fuelL: +o.fuelL || 0, fuelCost: +o.fuelCost || 0
     };
@@ -33342,6 +33998,9 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       stab(c, t + 0.44, [329.6, 415.3, 493.9, 659.3], 1.1, 0.075);
       tone(c, 82.4, t + 0.44, 1.1, 'triangle', 0.25); noise(c, t + 0.44, 0.25, 0.25, 1500);
     },
+    // wanted: a short two-tone siren; fine: a flat "nope"
+    wanted: function(c, t){ for (var i = 0; i < 4; i++) tone(c, i % 2 ? 988 : 740, t + i * 0.13, 0.13, 'square', 0.07); },
+    fine: function(c, t){ tone(c, 392, t, 0.14, 'square', 0.1); tone(c, 262, t + 0.13, 0.32, 'square', 0.1); },
     wasted: function(c, t){ noise(c, t, 0.35, 0.5, 180); tone(c, 196, t, 1.5, 'sawtooth', 0.14, 46, 900); tone(c, 98, t + 0.05, 1.5, 'sine', 0.2, 30); }
   };
   function play(name){
@@ -33351,14 +34010,15 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   }
 
   // ---- big messages and the feed ----------------------------------------------------------
-  function big(title, sub, kind, sound){
+  function big(title, sub, kind, sound, ms){
     var old = $('uxGtaSplash'); if (old) old.remove();
-    var el = document.createElement('div');
+    var el = document.createElement('div'), dur = ms || 3200;
     el.id = 'uxGtaSplash'; el.className = 'k-' + (kind || 'gold'); el.setAttribute('aria-hidden', 'true');
     el.innerHTML = '<b></b><span></span>';
     el.firstChild.textContent = title; el.lastChild.textContent = sub || '';
+    el.style.animationDuration = dur + 'ms';
     document.body.appendChild(el);
-    setTimeout(function(){ if (el.parentNode) el.remove(); }, 3400);
+    setTimeout(function(){ if (el.parentNode) el.remove(); }, dur + 200);
     if (sound) play(sound);
   }
   window.uxGtaBig = big;
@@ -33378,12 +34038,31 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     it.innerHTML = '<span class="uxgp uxgp-' + (kind === 'heart' ? 'cash' : kind) + '">' + (ICON[kind] || '') + '</span><span>' + html + '</span>';
     host.appendChild(it);
     while (host.children.length > 3) host.removeChild(host.firstChild);
+    // start below the top bar, and below the stars / money stack when that's showing, so they don't overlap
+    try {
+      var top = headerBottom() + 8, gs = $('uxGtaStack');
+      if (gs && document.body.classList.contains('ux-gta-game')) { var r = gs.getBoundingClientRect(); if (r.height > 4) top = Math.max(top, Math.round(r.bottom) + 8); }
+      host.style.top = top + 'px';
+    } catch (e) {}
     setTimeout(function(){ if (it.parentNode) it.remove(); }, 4600);
   }
   function esc(s){ return String(s).replace(/[&<>"]/g, function(c){ return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
 
   var cashFlash = 0;
-  function addCash(n){ S.cash += n; cashFlash = Date.now(); }
+  // The shift's money, by reason, for the summary at End shift (see shiftSummary). Kept in S.led, for
+  // the shift that's running; a new shift starts a new one.
+  function led(){
+    var sh = null; try { sh = window.uxShiftState ? window.uxShiftState() : null; } catch (e) {}
+    if (!sh || !sh.id) return null;
+    if (!S.led || S.led.shift !== sh.id) S.led = { shift: sh.id, start: sh.start, cash0: S.cash, bins: 0, binsN: 0, bonus: 0, bonusN: 0, pick: 0, pickN: 0, diesel: 0, km: 0, litres: 0, fines: 0, fineList: [], shown: false };
+    return S.led;
+  }
+  // why: 'bins' (n = how many), 'bonus' (milestones, runs done), 'pick' (pickups)
+  function addCash(n, why, count){
+    S.cash += n; cashFlash = Date.now();
+    var L = led(); if (!L || !why) return;
+    L[why] = (L[why] || 0) + n; L[why + 'N'] = (L[why + 'N'] || 0) + (count || 1);
+  }
 
   // ---- health = the break clock -----------------------------------------------------------
   var needCache = {};
@@ -33435,7 +34114,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     if (!h || h.parentNode !== t) {
       if (h) h.remove();
       h = document.createElement('span'); h.id = 'uxGtaHealth';
-      h.innerHTML = '<span class="uxgh-bar hp"><i></i></span><span class="uxgh-bar ar"><i></i></span><b class="uxgh-cash">$0</b><span class="uxgh-fuel"></span>';
+      h.innerHTML = '<span class="uxgh-bar hp"><i></i></span><span class="uxgh-bar ar"><i></i></span><b class="uxgh-cash">$0</b>';
       t.appendChild(h);
     }
     return h;
@@ -33451,8 +34130,6 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     if (c.textContent !== txt) c.textContent = txt;
     c.classList.toggle('up', Date.now() - cashFlash < 900);
     c.classList.toggle('neg', S.cash < 0);
-    var fu = el.querySelector('.uxgh-fuel'), fOn = Date.now() - fuelFlash < 2500;
-    if (fu) { fu.classList.toggle('on', fOn); if (fOn) fu.textContent = 'Diesel -' + money2(fuelFlashAmt); }
     var tip = !H || H.mode === 'idle' ? 'Health: full (no shift on)'
       : H.mode === 'break' ? 'Health ' + pct + '% - on break' + (H.full ? ', break done' : ', full in ' + hm(H.left))
       : H.overdue ? 'Health empty - break overdue' : 'Health ' + pct + '% - break due in ' + hm(H.left);
@@ -33503,16 +34180,16 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     drop(p);
     if (p.k === 'cash') {
       var amt = [100, 250, 250, 500, 500, 1000][Math.floor(Math.random() * 6)];
-      addCash(amt); feed('cash', 'Cash <em>+' + money(amt) + '</em>'); play('cash');
+      addCash(amt, 'pick'); feed('cash', 'Cash <em>+' + money(amt) + '</em>'); play('cash');
     } else if (p.k === 'armour') {
       S.armour = Math.min(100, S.armour + 25); feed('armour', 'Body armour <em>+25</em>', '#3d8fd6'); play('armour');
     } else if (p.k === 'pkg') {
-      S.pk = Math.min(100, S.pk + 1); addCash(100);
+      S.pk = Math.min(100, S.pk + 1); addCash(100, 'pick');
       feed('pkg', 'Hidden package <em>' + S.pk + ' of 100</em>', '#f0c850');
       if (S.pk % 10 === 0) big('Hidden packages', S.pk + ' of 100 found', 'gold', 'mission'); else play('pickup');
     } else {
       var name = JUNK[Math.floor(Math.random() * JUNK.length)], val = 20 + Math.floor(Math.random() * 29) * 10;
-      S.found[name] = (S.found[name] || 0) + 1; addCash(val);
+      S.found[name] = (S.found[name] || 0) + 1; addCash(val, 'pick');
       feed('item', 'Found: ' + esc(name) + ' <em>+' + money(val) + '</em>', '#c77dff'); play('pickup');
     }
     save();
@@ -33533,15 +34210,15 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     // storage after the first look) - nobody empties 30 bins in two seconds.
     if (!primed || added > 30) { primed = true; if (runKey) S.done[runKey] = 1; if (added) save(); return; }
     if (added) {
-      addCash(added * 10);
+      addCash(added * 10, 'bins', added);
       var after = S.bins.length;
       if (Math.floor(after / 100) > Math.floor(before / 100)) {
-        addCash(1000);
+        addCash(1000, 'bonus');
         big(Math.floor(after / 100) * 100 + ' bins', 'Respect +  ' + money(1000), 'gold', 'mission');
       }
     }
     if (runKey && !S.done[runKey]) {
-      S.done[runKey] = 1; addCash(2500);
+      S.done[runKey] = 1; addCash(2500, 'bonus');
       setTimeout(function(){ big('Mission passed', HT.run + '  ' + money(2500), 'gold', 'mission'); }, added && Math.floor(S.bins.length / 100) > Math.floor(before / 100) ? 3600 : 0);
     }
     if (added || runKey) save();
@@ -33609,7 +34286,6 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     rateMemo = { key: key, at: Date.now(), r: res };
     return res;
   }
-  var fuelFlash = 0, fuelFlashAmt = 0;
   // Charges the km driven since the last look. The shift's own GPS distance is used (it already leaves
   // out breaks and GPS jumps). A shift first seen part way through (game mode switched on mid-shift)
   // starts from where it is, rather than billing everything already driven in one hit.
@@ -33623,7 +34299,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     if (dk < 0.25) return;
     var rate = fuelRate(sh.truck).r, litres = dk * rate / 100, cost = litres * S.price, before = S.fuelCost;
     S.fuelKm = km; S.fuelL += litres; S.fuelCost += cost; S.cash -= cost;
-    fuelFlash = Date.now(); fuelFlashAmt = cost;
+    var Lg = led(); if (Lg) { Lg.diesel += cost; Lg.km += dk; Lg.litres += litres; Lg.rate = rate; Lg.price = S.price; }
+    ticker('fuel', cost, 'Diesel');
     if (Math.floor(S.fuelCost / 100) > Math.floor(before / 100)) {
       feed('cash', 'Diesel this shift <em style="color:#ff6b6b">-' + money(S.fuelCost) + '</em> · ' + Math.round(S.fuelL) + ' L', '#e05252');
     }
@@ -33651,21 +34328,187 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   var prevOpenCz = window.uxOpenCustomize;
   if (typeof prevOpenCz === 'function') window.uxOpenCustomize = function(){ var r = prevOpenCz.apply(this, arguments); try { paintFuelInfo(); } catch (e) {} return r; };
 
+  // ---- money coming off + wanted level: a stack under the top bar, top right ----------------------
+  // Like the game's HUD: stars under the cash, and each amount taken off shown in red for a few
+  // seconds. It sits just below whichever top bar is showing (worked out each tick - the map's is
+  // taller than the other screens'), where nothing covers it.
+  // On the map: the bottom of the top bar and of the full-width left/right counts strip under it (not
+  // the whole header panel - its warning pills hang down on the left and would push the stack down
+  // onto the button column on the right).
+  function headerBottom(){
+    var ids = document.body.getAttribute('data-ux-screen') === 'map' ? ['mapNormalTopBar', 'mapContextBar', 'mapSettingsBar', 'lbStreetSides'] : null, b = 0;
+    if (ids) ids.forEach(function(id){ var e = $(id); if (!e || getComputedStyle(e).display === 'none') return; var r = e.getBoundingClientRect(); if (r.height > 0 && r.bottom > b && r.bottom < 300) b = r.bottom; });
+    else { var ah = document.querySelector('.app-header'), r = ah && ah.getBoundingClientRect(); if (r && r.height > 0 && r.bottom < 300) b = r.bottom; }
+    return b ? Math.round(b) : 90;
+  }
+  function stackEl(){
+    var s = $('uxGtaStack');
+    if (!s) {
+      s = document.createElement('div'); s.id = 'uxGtaStack';
+      s.innerHTML = '<div class="uxgs-stars" id="uxGtaStars" aria-label="Wanted level"></div><div class="uxgs-ticks" id="uxGtaTicks" aria-live="polite"></div>';
+      document.body.appendChild(s);
+    }
+    var top = headerBottom() + 4;
+    s.style.top = top + 'px';
+    // The stars go at the right edge in the gap above the map's button column (zoom, fullscreen,
+    // locate); if the column starts too high for that, the whole stack moves left of it. The money
+    // lines under the stars always keep left of the column - they used to sit on the + button.
+    var right = 10, ticksPad = 0, col = document.body.getAttribute('data-ux-screen') === 'map' ? $('mapFixedSideControls') : null;
+    if (col && col.offsetParent !== null) {
+      var cr = col.getBoundingClientRect();
+      if (cr.width && cr.left > window.innerWidth / 2 && cr.bottom > top) {
+        var clear = Math.round(window.innerWidth - cr.left + 8);
+        if (cr.top < top + 30) right = clear;          // no room above the column for the stars
+        else if (cr.top < top + 150) ticksPad = clear - right;   // stars above it, money lines beside it (when they'd reach it)
+      }
+    }
+    s.style.right = right + 'px';
+    var tk = $('uxGtaTicks'); if (tk) tk.style.marginRight = ticksPad + 'px';
+    return s;
+  }
+  var fuelLine = null;
+  // kind 'fuel' lines add up while one is showing (diesel comes off every few hundred metres)
+  function ticker(kind, amt, label, ms){
+    stackEl(); var host = $('uxGtaTicks'); if (!host) return;
+    if (kind === 'fuel' && fuelLine && fuelLine.parentNode) {
+      fuelLine._amt += amt; fuelLine.firstChild.textContent = '-' + money2(fuelLine._amt);
+      clearTimeout(fuelLine._t); fuelLine._t = setTimeout(function(){ drop(fuelLine); }, ms || 3500);
+      return;
+    }
+    var el = document.createElement('div'); el.className = 'uxgs-t uxgs-' + kind; el._amt = amt;
+    el.innerHTML = '<b></b><span></span>';
+    el.firstChild.textContent = '-' + (kind === 'fuel' ? money2(amt) : money(amt));
+    el.lastChild.textContent = label;
+    host.appendChild(el);
+    while (host.children.length > 3) host.removeChild(host.firstChild);
+    function drop(x){ if (x && x.parentNode) x.remove(); if (x === fuelLine) fuelLine = null; }
+    el._t = setTimeout(function(){ drop(el); }, ms || 3500);
+    if (kind === 'fuel') fuelLine = el;
+  }
+
+  // Wanted level (0-5 stars). Stars come from:
+  //   - speeding: over the posted limit (the map's speed sign, from OpenStreetMap) by 3+ km/h for 3 s:
+  //     1 star, 10+ km/h 2, 25+ 3, 35+ 4, 45+ 5 - while it's happening;
+  //   - driving past bins without emptying them: every 10 more bins the app marks missed, one star.
+  // They go again one a minute once there's nothing new, flashing like the game's while they fade.
+  // A speeding stretch ends after 8 s back under the limit, and then comes the fine, by the worst
+  // point of it - about the Victorian amounts (2026: $227 under 10 km/h over ... $2,171 45+ over;
+  // the middle bands are approximate). No limit known = no stars and no fine.
+  var W = { L: 0, last: 0, since: 0, ep: null, under: 0, missSeen: -1, missAcc: 0, t0: 0 };
+  function limitNow(){
+    var sg = document.getElementById('mapSpeedLimitSign');
+    if (!sg || sg.classList.contains('speed-sign-hidden')) return 0;
+    var n = parseInt(sg.textContent, 10); return (n >= 10 && n <= 130) ? n : 0;
+  }
+  function starsFor(over){ return over >= 45 ? 5 : over >= 35 ? 4 : over >= 25 ? 3 : over >= 10 ? 2 : over >= 3 ? 1 : 0; }
+  function fineFor(over){ return over >= 45 ? 2171 : over >= 35 ? 925 : over >= 25 ? 650 : over >= 10 ? 400 : 227; }
+  function raise(n){ n = Math.min(5, n); if (n > W.L) { W.L = n; play('wanted'); } W.last = Date.now(); }
+  function wantedTick(){
+    var now = Date.now(), sp = +g('currentMapSpeedKmh') || 0, lim = limitNow();
+    var over = (lim && here()) ? sp - lim : -99;
+    if (over >= 3) {
+      if (!W.since) W.since = now;
+      W.under = 0;
+      if (now - W.since >= 3000) {
+        if (!W.ep) W.ep = { max: over, lim: lim };
+        if (over > W.ep.max) { W.ep.max = over; W.ep.lim = lim; }
+        raise(starsFor(over));
+      }
+    } else {
+      W.since = 0;
+      if (W.ep) {
+        if (!W.under) W.under = now;
+        if (now - W.under >= 8000) {
+          var ep = W.ep, f = fineFor(ep.max); W.ep = null; W.under = 0;
+          S.cash -= f; S.fines = (S.fines || 0) + f;
+          var Lf = led(); if (Lf) { Lf.fines += f; Lf.fineList.push({ t: Date.now(), over: Math.round(ep.max), lim: ep.lim, amt: f }); }
+          save();
+          ticker('fine', f, 'Speeding fine', 6000);
+          feed('cash', 'Speeding fine <em style="color:#ff6b6b">-' + money(f) + '</em> · ' + Math.round(ep.max) + ' km/h over in a ' + ep.lim, '#e05252');
+          play('fine');
+        }
+      }
+    }
+    // bins driven past: missedBinSerials only grows while a run is worked, so a drop is a new run and
+    // a big jump is the run's progress being restored - neither is new driving
+    var ms = g('missedBinSerials'), n = (ms && ms.size != null) ? ms.size : 0;
+    if (!W.t0) W.t0 = now;
+    // (the run's progress comes back from the phone's storage a bit after the app opens, sometimes in
+    // pieces - the first minute only sets the starting point)
+    if (W.missSeen < 0 || n < W.missSeen || n - W.missSeen > 30 || now - W.t0 < 60000) W.missSeen = n;
+    else if (n > W.missSeen) {
+      W.missAcc += n - W.missSeen; W.missSeen = n;
+      while (W.missAcc >= 10) { W.missAcc -= 10; raise(W.L + 1); feed('item', '10 bins driven past <em style="color:#ff6b6b">wanted +1</em>', '#e05252'); }
+    }
+    if (W.L > 0 && !W.ep && now - W.last >= 60000) { W.L--; W.last = now; }
+    paintStars(!!W.ep);
+  }
+  function paintStars(chasing){
+    var s = stackEl(), st = $('uxGtaStars'); if (!st) return;
+    var html = ''; for (var i = 1; i <= 5; i++) html += '<i class="' + (i <= W.L ? 'on' : '') + '">\u2605</i>';
+    if (st.innerHTML !== html) st.innerHTML = html;
+    st.style.display = W.L > 0 ? '' : 'none';
+    st.classList.toggle('flash', W.L > 0 && !chasing);
+    st.setAttribute('aria-label', 'Wanted level ' + W.L + ' of 5');
+  }
+
+  // ---- End of shift: what you made and lost, and why ----------------------------------------------
+  // Shows once the shift has been ended (after the End shift sheet - fuel, km and so on - is done):
+  // the shift that was running is gone and its ledger hasn't been shown yet.
+  var lastShiftId = null;
+  function hm2(t){ try { return new Date(t).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }); } catch (e) { return ''; } }
+  function shiftSummary(L){
+    var row = function(label, sub, amt, neg){ return '<div class="uxss-r' + (neg ? ' neg' : '') + '"><span><b>' + esc(label) + '</b>' + (sub ? '<i>' + esc(sub) + '</i>' : '') + '</span><em>' + (neg ? '-' : '+') + (neg ? money2(amt) : money(amt)) + '</em></div>'; };
+    var made = L.bins + L.bonus + L.pick, lost = L.diesel + L.fines, net = made - lost;
+    var h = '<div class="uxss-box" role="dialog" aria-label="Shift summary"><div class="uxss-h">Shift complete</div>' +
+      '<div class="uxss-sec">Made</div>' +
+      row('Bins emptied', L.binsN + ' \u00d7 $10', L.bins) +
+      (L.bonusN ? row('Milestones and runs done', L.bonusN + (L.bonusN === 1 ? ' bonus' : ' bonuses'), L.bonus) : '') +
+      (L.pickN ? row('Pickups', L.pickN + ' picked up on the way', L.pick) : '') +
+      '<div class="uxss-sec">Lost</div>' +
+      row('Diesel', L.km.toFixed(1) + ' km \u00b7 ' + L.litres.toFixed(1) + ' L' + (L.rate ? ' at ' + L.rate.toFixed(1) + ' L/100km' : '') + (L.price ? ', $' + L.price.toFixed(2) + '/L' : ''), L.diesel, true) +
+      (L.fineList.length ? L.fineList.map(function(f){ return row('Speeding fine', f.over + ' km/h over in a ' + f.lim + ' at ' + hm2(f.t), f.amt, true); }).join('') : '<div class="uxss-none">No speeding fines. Nice.</div>') +
+      '<div class="uxss-net' + (net < 0 ? ' neg' : '') + '"><span>This shift</span><b>' + (net < 0 ? '-' : '+') + money(Math.abs(net)) + '</b></div>' +
+      '<div class="uxss-tot"><span>Cash now</span><b>' + money(S.cash) + '</b></div>' +
+      '<button type="button" class="uxss-ok">Done</button></div>';
+    var el = document.createElement('div'); el.id = 'uxShiftSummary'; el.innerHTML = h;
+    el.addEventListener('click', function(ev){ if (ev.target === el || (ev.target.closest && ev.target.closest('.uxss-ok'))) el.remove(); });
+    var old = $('uxShiftSummary'); if (old) old.remove();
+    document.body.appendChild(el);
+    play(net >= 0 ? 'mission' : 'fine');
+  }
+  function shiftEndTick(){
+    var sh = null; try { sh = window.uxShiftState ? window.uxShiftState() : null; } catch (e) {}
+    if (sh && sh.id) { lastShiftId = sh.id; led(); return; }
+    if (lastShiftId && S.led && S.led.shift === lastShiftId && !S.led.shown) {
+      // wait for the End shift sheet (fuel, km, hours) to be put away first
+      var open = document.querySelector('#uxShift.open, #uxRs.open');
+      if (open) return;
+      S.led.shown = true; save(); shiftSummary(S.led);
+    }
+    lastShiftId = null;
+  }
+
   // ---- the loop ----------------------------------------------------------------------------
   var wasOn = false, lastPickCheck = 0;
   function tick(){
     var on = !!opts().game;
-    if (!on) { if (wasOn) { clearPickups(); primed = false; } wasOn = false; return; }
+    if (!on) { if (wasOn) { clearPickups(); primed = false; var gs = $('uxGtaStack'); if (gs) gs.remove(); W.L = 0; W.ep = null; W.missSeen = -1; W.t0 = 0; } wasOn = false; return; }
     wasOn = true;
     rollDay();
     var H = null; try { H = health(); } catch (e) {}
     paintHud(H);
     if (H && H.mode === 'work' && H.overdue && S.wasted !== H.key) {
-      S.wasted = H.key; save(); big('Wasted', 'Break overdue - take your break', 'red', 'wasted');
+      // Wasted hangs about (8 s, the map drained of colour meanwhile, like the game) - it's the one that
+      // matters: the break is overdue.
+      S.wasted = H.key; save(); big('Wasted', 'Break overdue - take your break', 'red', 'wasted', 8000);
+      document.body.classList.add('ux-gta-wasted'); setTimeout(function(){ document.body.classList.remove('ux-gta-wasted'); }, 8000);
     }
     if (H && H.mode === 'break' && H.full && S.healed !== H.key) {
       S.healed = H.key; save(); feed('heart', 'Health restored - <em>break done</em>', '#5fc15f'); play('heal');
     }
+    try { wantedTick(); } catch (e) {}
+    try { shiftEndTick(); } catch (e) {}
     var now = Date.now();
     if (now - lastPickCheck < 2000) return;
     lastPickCheck = now;
@@ -33680,7 +34523,161 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     if (pos && live.length < 3 && now - lastSpawn > nextGap) spawn(pos);
   }
   setInterval(function(){ try { tick(); } catch (e) { console.warn('GTA mode:', e); } }, 1000);
-  window.uxGta = { stats: function(){ return JSON.parse(JSON.stringify(S)); }, big: big, feed: feed, play: play, _t: { spawn: spawn, live: function(){ return live; }, health: health, fuelRate: fuelRate, fuelInfo: fuelInfo, resetRate: function(){ rateMemo = null; } } };
+  window.uxGta = { stats: function(){ return JSON.parse(JSON.stringify(S)); }, big: big, feed: feed, play: play, _t: { wanted: function(){ return JSON.parse(JSON.stringify(W)); }, ticker: ticker, spawn: spawn, live: function(){ return live; }, health: health, fuelRate: fuelRate, fuelInfo: fuelInfo, resetRate: function(){ rateMemo = null; } } };
+})();
+
+/* =====================================================================
+   Off your run, driving through another one on the same stream: a chip at the top says which run
+   it is (the stream's logo and "221 - tap to switch"), and a tap puts that run on the map (on a shift the
+   shift's own run stays on too - see "the shift's run stays put"). Flipped bins aren't lost by
+   switching: every bin emptied today is kept (runProgressDay) and comes back with its run.
+
+   "Off your run" = no house on the selected run within 40 m; "another run" = the nearest house
+   within 45 m on the same stream, day and week whose run isn't selected. It has to say the same
+   run two looks running (2 s apart) before the chip shows, so it doesn't flicker at run edges.
+
+   Also: bins on the truck now - the run sheet's count since the last tip (a tip starts it again) -
+   as a truck number in the map's numbers row, whenever a shift is on.
+   ===================================================================== */
+(function(){
+  'use strict';
+  var GF = {};
+  function g(n){ try { return (GF[n] || (GF[n] = new Function('return typeof ' + n + ' === "undefined" ? undefined : ' + n)))(); } catch (e) { return undefined; } }
+  function $(id){ return document.getElementById(id); }
+  var FIELD = { Garbage: 'garRun', Recycling: 'recRun', SummerRecycling: 'summerRun', FOGO: 'fogRun' };
+  var LABEL = { Garbage: 'Garbage', Recycling: 'Recycling', SummerRecycling: 'Summer recycling', FOGO: 'FOGO' };
+  var ICO = { Garbage: 'garbage.png', Recycling: 'recycle.png', SummerRecycling: 'summer.png', FOGO: 'fogo.png' };
+  function d3(x){ return String(x || '').trim().slice(0, 3).toLowerCase(); }
+  function metres(a, b){ var kx = 111320 * Math.cos(a.lat * Math.PI / 180); return Math.hypot((b.lng - a.lng) * kx, (b.lat - a.lat) * 110540); }
+
+  function runHere(){
+    var st = g('activeFilterStream'), f = FIELD[st], sel = g('selectedRunsSet'), pos = g('userCurrentLocation');
+    if (!f || !sel || !sel.size || !pos || !isFinite(pos.lat)) return null;
+    var match = g('streamMatchesSelectedRun'), vs = g('visibleStreams');
+    if (typeof match !== 'function') return null;
+    // (the same fields the app's getSiteRuns reads - that one isn't reachable from here)
+    var gsr = function(site){ var x = site.soloSchedule || site; return { day: x.day || site['Solo Collection Day'], week: String(x.weekLetter || site['Solo Week Cycle'] || '').trim().toUpperCase(), garRun: x.garRun, recRun: x.recRun, summerRun: x.recSummerRun || x.summerRun, fogRun: x.fogRun }; };
+    var sk = (typeof vs === 'function' ? vs() : [st])[0];
+    var recs = g('siteRecords') || [], day = d3(g('activeFilterDay')), week = String(g('activeFilterWeek') || '').trim().toUpperCase();
+    var dLat = 45 / 110540, dLng = 45 / (111320 * Math.cos(pos.lat * Math.PI / 180));
+    var best = null, bd = Infinity;
+    for (var i = 0; i < recs.length; i++) {
+      var site = recs[i], la = +site.lat, ln = +site.lng;
+      if (!la || Math.abs(la - pos.lat) > dLat || Math.abs(ln - pos.lng) > dLng) continue;
+      var d = metres(pos, { lat: la, lng: ln }); if (d > 45) continue;
+      if (match(site, sk)) { if (d <= 40) return null; continue; }          // still on the selected run
+      var it = gsr(site), run = String(it[f] || '').trim(); if (!run) continue;
+      if (day && it.day && d3(it.day) !== day) continue;
+      if (week && st !== 'Garbage' && st !== 'SummerRecycling' && it.week && it.week !== week) continue;
+      if (sel.has(run.toLowerCase())) continue;
+      if (d < bd) { bd = d; best = run; }
+    }
+    return best;
+  }
+
+  var chip = null, seen = null, shown = null;
+  function place(){
+    var b = 0;
+    ['mapNormalTopBar', 'lbStreetSides'].forEach(function(id){ var e = $(id); if (!e || getComputedStyle(e).display === 'none') return; var r = e.getBoundingClientRect(); if (r.height && r.bottom > b && r.bottom < 300) b = r.bottom; });
+    chip.style.top = Math.round((b || 80) + 6) + 'px';
+  }
+  function show(run){
+    var st = g('activeFilterStream');
+    if (!chip) {
+      chip = document.createElement('button'); chip.type = 'button'; chip.id = 'uxRunHereChip';
+      chip.addEventListener('click', function(){
+        var r = chip._run, s = g('activeFilterStream'); if (!r) return;
+        var fn = window.selectRunOnDrive;
+        if (typeof fn === 'function') fn(r, s === 'SummerRecycling' ? 'Recycling' : s, g('activeFilterDay'), g('activeFilterWeek'), s === 'SummerRecycling');
+        try { if (typeof window.renderMapData === 'function') window.renderMapData(); } catch (e) {}
+        chip.style.display = 'none'; shown = null; seen = null;
+      });
+      document.body.appendChild(chip);
+    }
+    chip._run = run;
+    if (shown !== run) {
+      chip.className = 'ux-run-here s-' + String(st || '').toLowerCase();
+      chip.innerHTML = '<img class="icon-img" src="' + (ICO[st] || 'recycle.png') + '" alt=""><b></b><span>Tap to switch</span>';
+      // just the stream's logo and the run number (the stream's name is only for screen readers)
+      chip.querySelector('b').textContent = run;
+      chip.setAttribute('aria-label', (LABEL[st] || st) + ' run ' + run + ', tap to switch to it');
+      shown = run;
+    }
+    place();
+    chip.style.display = '';
+  }
+  function hide(){ if (chip) chip.style.display = 'none'; shown = null; }
+
+  function truckCount(){
+    var grp = $('uxMsStats'), sh = null; try { sh = window.uxShiftState ? window.uxShiftState() : null; } catch (e) {}
+    var el = $('uxmsTruck');
+    var R = null; try { R = sh && window.lbRunSheet && window.lbRunSheet._t ? window.lbRunSheet._t.get(sh.id) : null; } catch (e) {}
+    var n = R && R.cur && typeof R.cur.n === 'number' ? R.cur.n : null;
+    if (!grp || n === null) { if (el) el.style.setProperty('display', 'none', 'important'); return; }
+    if (!el) {
+      el = document.createElement('span'); el.id = 'uxmsTruck'; el.className = 'map-run-stat uxms-truck';
+      el.title = 'Bins on the truck now (since the last tip)';
+      el.innerHTML = '<svg class="lb-street-ico" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M2 7h11v9H2zM13 10h4l3 3v3h-7z"/><circle cx="6" cy="17.5" r="1.8"/><circle cx="16.5" cy="17.5" r="1.8"/></svg><b></b>';
+      var gp = $('uxmsGps'); if (gp && gp.parentNode === grp) grp.insertBefore(el, gp); else grp.appendChild(el);
+    }
+    el.style.removeProperty('display');
+    var b = el.querySelector('b'); if (b.textContent !== String(n)) b.textContent = String(n);
+  }
+
+  function tick(){
+    if (document.hidden || document.body.getAttribute('data-ux-screen') !== 'map') { hide(); return; }
+    try { truckCount(); } catch (e) {}
+    var r = null; try { r = runHere(); } catch (e) {}
+    if (r && r === seen) show(r); else if (!r) hide();
+    seen = r;
+  }
+  setInterval(tick, 2000);
+  window.uxRunHere = { tick: tick, runHere: runHere };
+})();
+
+/* =====================================================================
+   Keep the big speed number clear of the map's button column.
+   The speed sits at the bottom right, over the street strip; the column (zoom, zoom level, fullscreen,
+   locate) comes down the right edge, and on a tall column (a foldable, landscape, the zoom level box
+   showing) its bottom buttons ran into the digits. So the number sits evenly spaced between the
+   bottom of the column and the next-bin bar below, a little smaller if the gap is tight (moving left
+   of the column only if it would get too small). The GPS row under the street name is only as wide as
+   its text, so the number can come down beside it.
+   ===================================================================== */
+(function(){
+  'use strict';
+  function check(){
+    if (document.body.getAttribute('data-ux-screen') !== 'map' || document.hidden) return;
+    var sp = document.getElementById('mapLiveSpeed'), col = document.getElementById('mapFixedSideControls');
+    var strip = document.getElementById('uxStreetStrip'), stack = document.getElementById('uxCardStack');
+    if (!sp) return;
+    sp.style.transform = '';
+    var a = sp.getBoundingClientRect(); if (!a.width || !a.height) return;
+    // the space it has: from the bottom of the button column (or the top of the street row, if the
+    // column isn't above it) down to the next-bin bar
+    var top = strip ? strip.getBoundingClientRect().top : a.top, bottom = a.bottom;
+    var bar = stack ? stack.querySelector('.map-telemetry-banner') : null;
+    if (bar) { var br = bar.getBoundingClientRect(); if (br.height && br.top > a.top) bottom = br.top; }
+    if (col && col.offsetParent !== null) {
+      var c = col.getBoundingClientRect();
+      if (c.width && a.right > c.left && a.left < c.right && c.bottom > top && c.bottom < bottom) top = c.bottom;
+    }
+    var room = bottom - top - 8, t = '';
+    if (room > 20) {
+      // evenly spaced between the button above and the bar below; a little smaller if it doesn't fit
+      var sc = Math.min(1, room / a.height);
+      if (sc >= 0.6) {
+        var dy = Math.round((top + bottom) / 2 - (a.top + a.bottom) / 2);
+        t = 'translateY(' + dy + 'px)' + (sc < 1 ? ' scale(' + sc.toFixed(3) + ')' : '');
+      } else if (col) {
+        var c2 = col.getBoundingClientRect(); t = 'translateX(-' + Math.ceil(a.right - c2.left + 8) + 'px)';
+      }
+    }
+    sp.style.transformOrigin = '100% 50%';
+    sp.style.transform = t;
+  }
+  setInterval(check, 1000);
+  window.addEventListener('resize', function(){ setTimeout(check, 50); });
 })();
 
 /* =====================================================================
@@ -33746,6 +34743,322 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
 })();
 
 
+
+/* ========== Break overdue: had a break already? ==========
+   The break clock only knows about breaks pressed on the Shift screen (or taken from the "Having a rest?"
+   pop-up), so a break taken without pressing anything left it shouting BREAK OVERDUE with no way to say
+   "I had it" - and typing one in after the fact wasn't accepted. The app does know where the truck stood
+   still: every stop is logged (lbStops). So when a break is overdue and this shift has stops of 15 min or
+   more that aren't breaks already (not at a tip - waiting there is work), this asks whether one of them was
+   the break: one tap puts it into the break clock. Times can be typed in too. Also opened any time from the
+   Shift screen's "Add a break I took…". */
+(function(){
+  var MIN = 60000, LONG = 15 * MIN, el = null, waved = {}, msgTimer = 0;
+  function esc(v){ return String(v == null ? '' : v).replace(/[&<>"']/g, function(c){ return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+  function hhmm(t){ try { return new Date(t).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }); } catch (e) { return ''; } }
+  function hm(ms){ var m = Math.round(ms / MIN); return m >= 60 ? Math.floor(m / 60) + ' h ' + (m % 60) + ' min' : m + ' min'; }
+  function metres(a, b){ var kx = 111320 * Math.cos(a.lat * Math.PI / 180); return Math.hypot((b.lng - a.lng) * kx, (b.lat - a.lat) * 110540); }
+  function BC(){ return window.lbBreakClock; }
+  function whereIs(rec){
+    var K = window.lbKnownPlaces, p = { lat: +rec.lat, lng: +rec.lng };
+    try { var d = K && K.depot(); if (d && metres(p, d) < 300) return 'the depot'; } catch (e) {}
+    if (rec.street) return rec.street;
+    var recs = (typeof siteRecords !== 'undefined' && siteRecords) || [], best = null, bd = 150;
+    for (var i = 0; i < recs.length; i++) {
+      var la = +recs[i].lat, ln = +recs[i].lng; if (!la || Math.abs(la - p.lat) > 0.0015 || Math.abs(ln - p.lng) > 0.002) continue;
+      var dd = metres(p, { lat: la, lng: ln }); if (dd < bd) { bd = dd; best = recs[i]; }
+    }
+    return best ? String(best.baseStreetLine || best.addressText || '').split(',')[0].replace(/^[\d\s\/A-Za-z-]*?\d+[A-Za-z]?\s+/, '') : '';
+  }
+  function atTip(rec){
+    var K = window.lbKnownPlaces, p = { lat: +rec.lat, lng: +rec.lng };
+    try { return !!(K && K.tips().some(function(t){ return t && isFinite(t.lat) && t.lat != null && metres(p, t) < 300; })); } catch (e) { return false; }
+  }
+  // this shift's stops of 15 min+ that aren't breaks already, newest first
+  function candidates(){
+    var bc = BC(), st = bc && bc.state; if (!st || st.start == null) return [];
+    var sh = window.uxShiftState ? window.uxShiftState() : null;
+    var list = (window.lbStops && sh) ? window.lbStops.list(sh.id) : [];
+    var cur = window.lbStops && window.lbStops.current ? window.lbStops.current() : null;
+    if (cur && Date.now() - cur.t0 >= LONG) list = list.concat([{ t0: cur.t0, dur: Math.round((Date.now() - cur.t0) / 1000), lat: cur.lat, lng: cur.lng, now: true }]);
+    var now = Date.now();
+    return list.filter(function(r){
+      var s = r.t0, e = r.t0 + r.dur * 1000;
+      if (e - s < LONG || e <= st.start || s > now) return false;
+      if ((st.breaks || []).some(function(b){ return s < (b.e == null ? now : b.e) && e > b.s; })) return false;
+      return !atTip(r);
+    }).sort(function(a, b){ return b.t0 - a.t0; }).slice(0, 4);
+  }
+  function build(){
+    if (el) return el;
+    el = document.createElement('div'); el.id = 'lbPastBreak';
+    el.addEventListener('click', function(ev){
+      if (ev.target === el) { close(); return; }
+      var b = ev.target.closest ? ev.target.closest('button') : null; if (!b) return;
+      var a = b.getAttribute('data-a');
+      if (a === 'close') { var v = BC() && BC().view(); if (v && v.a) waved[Math.round(v.a.at / MIN)] = Date.now(); close(); }
+      else if (a === 'stop') add(+b.getAttribute('data-s'), +b.getAttribute('data-e'));
+      else if (a === 'times') {
+        var f = el.querySelector('#lbpbFrom').value, t = el.querySelector('#lbpbTo').value;
+        if (!f || !t) { msg('Put in both times.'); return; }
+        // From: today, or yesterday if that time hasn't come yet; To: on the From's day, or the next if earlier
+        var s = toTime(f), pt = t.split(':'), d = new Date(s); d.setHours(+pt[0], +pt[1], 0, 0);
+        var e = d.getTime(); if (e <= s) e += 24 * 60 * MIN;
+        add(s, e);
+      }
+    });
+    document.body.appendChild(el);
+    return el;
+  }
+  function toTime(v){
+    var p = v.split(':'), d = new Date(); d.setHours(+p[0], +p[1], 0, 0);
+    var t = d.getTime(); if (t > Date.now() + 60000) t -= 24 * 60 * MIN;   // a time later than now was yesterday
+    return t;
+  }
+  function msg(t){ var m = el && el.querySelector('.lbpb-msg'); if (m) m.textContent = t; }
+  function add(s, e){
+    var bc = BC(); if (!bc || !bc.insertBreak) return;
+    var now = Date.now(), st = bc.state;
+    // A To time still to come is a break going on now (1 Oct: 10:46-11:18 typed in before 11:18 was cut short
+    // at "now", left under 15 min, so it didn't count and the break stayed overdue). It runs from the From
+    // time and ends itself at the To time.
+    if (e > now + MIN) {
+      if (s > now) { msg('That break hasn’t started yet - put it in once it has, or press Start break on the Shift screen.'); return; }
+      if (!bc.startBreakUntil || !bc.startBreakUntil(s, e)) { msg('Couldn’t start that break: one may already be running, or it starts before the shift.'); return; }
+      var b0 = bc.state.breaks[bc.state.breaks.length - 1];
+      render('On a break since ' + hhmm(b0.s) + ', until ' + hhmm(e) + '. It counts as rest once it’s 15 min; press Back to work on the Shift screen to end it sooner.');
+      clearTimeout(msgTimer); msgTimer = setTimeout(close, 4000);
+      return;
+    }
+    if (!bc.insertBreak(s, e)) { msg('Couldn’t add ' + hhmm(s) + '–' + hhmm(e) + ': it has to be during this shift and not overlap a break already in.'); return; }
+    // say what was actually saved (clipped to the shift start)
+    s = Math.max(s, st && st.start != null ? st.start : s); e = Math.min(e, now);
+    var v = bc.view(), short = e - s < LONG;
+    var line = 'Break ' + hhmm(s) + '–' + hhmm(e) + ' added.' + (short ? ' Under 15 min doesn’t count as rest.' : '');
+    if (v.mode === 'working' && v.remaining <= 0) {
+      var sf = bc.shortfall && bc.shortfall();
+      render(line + ' ' + (sf && sf.id === 'D' ? 'Still overdue: the 12 h work limit is reached - that’s the end of the shift.'
+        : sf ? 'Still overdue on the ' + sf.title + ': it needs ' + sf.needMin + ' min of breaks (15 min+ each) in the last ' + sf.winH + ' h, and there ' + (sf.haveMin === 1 ? 'is ' : 'are ') + sf.haveMin + '. Take at least ' + (sf.breakMin || 15) + ' min more.'
+        : 'Still overdue: take at least ' + (v.a.breakMin || 15) + ' min.'));
+      return;
+    }
+    render(line + (v.mode === 'working' ? ' Next break due in ' + hm(v.remaining) + '.' : ''));
+    clearTimeout(msgTimer); msgTimer = setTimeout(close, 2500);
+  }
+  function render(note){
+    var e = build(), c = candidates(), v = BC() && BC().view(), over = v && v.mode === 'working' && v.remaining <= 0;
+    e.innerHTML = '<div class="lbpb-card">' +
+      '<div class="lbpb-t">' + (over ? 'Break overdue - had one already?' : 'Add a break you took') + '</div>' +
+      (c.length ? '<div class="lbpb-s">You stopped here this shift:</div>' + c.map(function(r){
+          var s = r.t0, en = r.t0 + r.dur * 1000, w = whereIs(r);
+          return '<div class="lbpb-li"><div><b>' + esc(hhmm(s)) + '–' + (r.now ? 'now' : esc(hhmm(en))) + '</b> · ' + esc(hm(en - s)) + (w ? '<span>' + esc(w) + '</span>' : '') + '</div>' +
+            '<button type="button" class="go" data-a="stop" data-s="' + s + '" data-e="' + en + '">That was my break</button></div>';
+        }).join('') : '<div class="lbpb-s">No stops of 15 min or more this shift. Put the times in:</div>') +
+      '<div class="lbpb-times"><label>From<input id="lbpbFrom" type="time"></label><label>To<input id="lbpbTo" type="time"></label><button type="button" data-a="times">Add</button></div>' +
+      '<div class="lbpb-msg">' + esc(note || '') + '</div>' +
+      '<div class="lbpb-b"><button type="button" data-a="close">' + (over ? 'Not now' : 'Close') + '</button></div></div>';
+    e.classList.add('on');
+  }
+  function open(fromButton){ render(''); }
+  function close(){ if (el) el.classList.remove('on'); clearTimeout(msgTimer); }
+  function isOpen(){ return !!(el && el.classList.contains('on')); }
+  // overdue + a stop that could have been the break: ask (once per overdue spell; again 20 min after "Not now")
+  setInterval(function(){
+    try {
+      var bc = BC(); if (!bc || !bc.view || isOpen()) return;
+      var v = bc.view(); if (v.mode !== 'working' || v.remaining > 0 || !v.a) return;
+      var k = Math.round(v.a.at / MIN); if (waved[k] && Date.now() - waved[k] < 20 * MIN) return;
+      if (!candidates().length) return;
+      waved[k] = Date.now(); render('');
+    } catch (e) {}
+  }, 5000);
+  var css = document.createElement('style');
+  css.textContent = '#lbPastBreak{position:fixed;inset:0;z-index:100050;display:none;align-items:flex-end;justify-content:center;background:rgba(0,0,0,.45)}' +
+    '#lbPastBreak.on{display:flex}' +
+    '#lbPastBreak .lbpb-card{width:100%;max-width:520px;max-height:82vh;overflow-y:auto;background:var(--ux-bg,#14171c);color:var(--ux-text,#f3f4f6);border-top:3px solid #ef4444;border-radius:var(--ux-rad,6px) var(--ux-rad,6px) 0 0;padding:14px 16px calc(14px + env(safe-area-inset-bottom));box-sizing:border-box}' +
+    '#lbPastBreak .lbpb-t{font-size:18px;font-weight:800;margin-bottom:6px}' +
+    '#lbPastBreak .lbpb-s{font-size:13px;opacity:.8;margin:6px 0}' +
+    '#lbPastBreak .lbpb-li{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 0;border-bottom:1px solid var(--ux-line-2,rgba(255,255,255,.12))}' +
+    '#lbPastBreak .lbpb-li span{display:block;font-size:12px;opacity:.75}' +
+    '#lbPastBreak button{min-height:40px;padding:0 12px;border-radius:var(--ux-rad,6px);border:1px solid var(--ux-line-2,rgba(255,255,255,.2));background:transparent;color:inherit;font-weight:700;font-size:14px;flex:0 0 auto}' +
+    '#lbPastBreak button.go{background:#16a34a;border-color:#16a34a;color:#fff}' +
+    '#lbPastBreak .lbpb-times{display:flex;align-items:flex-end;gap:8px;margin-top:10px;flex-wrap:wrap}' +
+    '#lbPastBreak .lbpb-times label{display:flex;flex-direction:column;font-size:12px;opacity:.9;gap:3px}' +
+    '#lbPastBreak .lbpb-times input{min-height:38px;font-size:16px;background:var(--ux-s2,#0f1216);color:inherit;border:1px solid var(--ux-line-2,rgba(255,255,255,.2));border-radius:var(--ux-rad,6px);padding:0 6px}' +
+    '#lbPastBreak .lbpb-msg{min-height:18px;font-size:13px;margin:10px 0 4px;color:#fbbf24}' +
+    '#lbPastBreak .lbpb-b{display:flex;justify-content:flex-end}';
+  document.head.appendChild(css);
+  window.lbPastBreak = { open: open, close: close, candidates: candidates };
+})();
+
+/* ========== Remember Track-Up across a reload ==========
+   The follow button's mode (map stays put / follows you / follows you and turns with you) was never saved,
+   so a refresh always came back as "follows you, north up" and Track-Up had to be turned on again. The
+   choice made with the button is kept now and Track-Up comes back after a reload. "Map stays put" comes
+   back as following, as a fresh start always has - opening the map on a truck that's driving off
+   without you isn't what anyone wants. Only the button saves it: editing modes that switch following off
+   for a moment don't change what comes back. */
+(function(){
+  var KEY = 'lukezBunzMapMode';
+  function save(){
+    try {
+      var f = typeof isTruckFollowEnabled !== 'undefined' && !!isTruckFollowEnabled;
+      localStorage.setItem(KEY, !f ? 'free' : (window.isTrackUpEnabled ? 'trackup' : 'follow'));
+    } catch (e) {}
+  }
+  var prevCycle = window.cycleMapFollowMode;
+  if (typeof prevCycle === 'function') window.cycleMapFollowMode = function(){ var out = prevCycle.apply(this, arguments); save(); return out; };
+  var restored = false;
+  function restore(){
+    if (restored || typeof leafletMap === 'undefined' || !leafletMap) return;
+    restored = true;
+    setTimeout(function(){
+      try {
+        if (localStorage.getItem(KEY) !== 'trackup') return;
+        if (typeof isTruckFollowEnabled === 'undefined' || !isTruckFollowEnabled || window.isTrackUpEnabled) return;
+        if (typeof window.toggleTrackUpOrientation === 'function') window.toggleTrackUpOrientation();
+      } catch (e) {}
+    }, 1500);
+  }
+  var prevInit = window.initLeafletMap;
+  if (typeof prevInit === 'function') window.initLeafletMap = function(){ var out = prevInit.apply(this, arguments); try { restore(); } catch (e) {} return out; };
+  restore();
+})();
+
+/* ========== Send GPS log ==========
+   Customize > Send GPS log: the last 15 minutes of GPS fixes (see lbGpsLog in the main script) as a small CSV,
+   through the phone's share sheet (email it, drop it in a chat) or, where sharing isn't available, copied. */
+(function(){
+  function hms(ms){ var d = new Date(ms); return d.toTimeString().slice(0, 8) + '.' + String(Math.floor(d.getMilliseconds() / 100)); }
+  function csv(){
+    var rows = ['arrived,kind,fix_time,lat,lng,acc_m,phone_kmh,phone_heading,app_kmh,jump,facing,reversing,note'];
+    (window.lbGpsLog || []).forEach(function(e){
+      rows.push([hms(e.at), e.k, e.t ? hms(e.t) : '', e.lat == null ? '' : e.lat, e.lng == null ? '' : e.lng, e.acc == null ? '' : e.acc,
+        e.ps == null ? '' : e.ps, e.ph == null ? '' : e.ph, e.v == null ? '' : e.v, e.j || '', e.f == null ? '' : e.f, e.r || '',
+        e.k === 'err' ? ('code ' + e.code + ' ' + (e.msg || '')).replace(/,/g, ' ') : ''].join(','));
+    });
+    rows.push('# ' + navigator.userAgent.replace(/,/g, ' '));
+    return rows.join('\n');
+  }
+  window.lbSendGpsLog = async function(){
+    var text = csv(), n = (window.lbGpsLog || []).length;
+    if (!n) { customAlert('No GPS readings recorded yet - drive with the app open, then try again.'); return; }
+    var name = 'gps-log-' + new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-') + '.csv';
+    try {
+      var file = new File([text], name, { type: 'text/csv' });
+      if (navigator.canShare && navigator.canShare({ files: [file] })) { await navigator.share({ files: [file], title: 'Lukez Bunz GPS log' }); return; }
+      if (navigator.share) { await navigator.share({ title: 'Lukez Bunz GPS log', text: text }); return; }
+    } catch (e) { if (e && e.name === 'AbortError') return; }
+    try { await navigator.clipboard.writeText(text); customAlert('GPS log copied (' + n + ' readings) - paste it into a message.'); }
+    catch (e) { customAlert("Couldn't share or copy the GPS log on this phone."); }
+  };
+})();
+
+/* ========== Tap a property boundary: the bins at that address ==========
+   With Property boundaries on, tapping inside a lot shows what's collected there - every stream, bin number,
+   size and run, whatever run it's on (the next-bin box only ever shows the run you're driving). Taps meant for
+   something else are left alone: a bin's own popup wins, and drawing, picking a spot on the map or selecting
+   houses all use the tap themselves. */
+(function(){
+  var STREAMS = [
+    { k: 'Garbage',   run: 'garRun', icon: 'garbage.png', col: '#dc2626', week: false },
+    { k: 'Recycling', run: 'recRun', icon: 'recycle.png', col: '#eab308', week: true },
+    { k: 'FOGO',      run: 'fogRun', icon: 'fogo.png',    col: '#16a34a', week: true }
+  ];
+  var MAX_SITES = 8;
+  var lastPopupAt = 0, ours = null, outline = null, bound = null;
+  function h(v){ return String(v == null ? '' : v).replace(/[&<>"']/g, function(c){ return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+  function busy(){
+    try {
+      if (document.body.classList.contains('ux-picking')) return true;
+      var cb = document.getElementById('mapContextBar');
+      if (cb && cb.style.display && cb.style.display !== 'none') return true;
+      if (typeof collectionPointMode !== 'undefined' && collectionPointMode) return true;
+      if (typeof geofenceDrawActive !== 'undefined' && geofenceDrawActive) return true;
+      if (typeof collectionSelectionActive !== 'undefined' && collectionSelectionActive) return true;
+    } catch (e) {}
+    return false;
+  }
+  function binsOf(site){
+    var council = typeof activeFilterDataSource !== 'undefined' && activeFilterDataSource === 'council';
+    return (council ? site.councilStreams : site.soloStreams) || {};
+  }
+  function siteHTML(site){
+    var sch = site.soloSchedule || {}, all = binsOf(site), wk = String(sch.weekLetter || '').trim().toUpperCase();
+    var done = (typeof servicedBinSerials !== 'undefined' && servicedBinSerials) ? servicedBinSerials : null;
+    var addr = String(site.addressText || site.baseStreetLine || 'Address unknown').split(',')[0].trim();
+    var sub = String(site.suburbLine || '').trim();
+    var rows = '';
+    STREAMS.forEach(function(st){
+      var bins = all[st.k] || [], run = String(sch[st.run] || '').trim();
+      if (!bins.length && !run) return;
+      var runTxt = run ? 'Run ' + h(run) + (st.week && wk ? ' ' + h(wk) : '') : 'No run';
+      var list = bins.length ? bins.map(function(b){
+        var ok = done && b.serial && done.has(b.serial);
+        return '<div class="ux-lot-bin"><b>' + h(b.serial || 'No number') + '</b>' + (b.size ? ' <span>' + h(b.size) + '</span>' : '') + (ok ? ' <i>✓ emptied</i>' : '') + '</div>';
+      }).join('') : '<div class="ux-lot-bin"><span>No bin listed</span></div>';
+      rows += '<div class="ux-lot-row" style="border-left-color:' + st.col + '"><img class="icon-img" src="' + st.icon + '" alt=""><div class="ux-lot-run">' + runTxt + '</div><div class="ux-lot-bins">' + list + '</div></div>';
+    });
+    if (String(sch.recSummerRun || '').trim()) rows += '<div class="ux-lot-row" style="border-left-color:#f59e0b">☀️<div class="ux-lot-run">Summer run ' + h(sch.recSummerRun) + '</div><div class="ux-lot-bins"></div></div>';
+    if (!rows) rows = '<div class="map-popup-meta">No bins listed at this address.</div>';
+    var id = String(site.propId || site.siteId || '');
+    var notes = String(site.runFlags || '').trim();
+    return '<div class="ux-lot-site">'
+      + '<div class="map-popup-title">' + h(addr) + '</div>'
+      + '<div class="map-popup-meta">' + h([sub, sch.day].filter(Boolean).join(' · ')) + '</div>'
+      + (notes ? '<div class="map-popup-meta">🚩 ' + h(notes) + '</div>' : '')
+      + rows
+      + (id && typeof openPropertyInspectModal === 'function' ? '<div class="map-popup-actions"><button type="button" class="map-popup-btn" onclick="openPropertyInspectModal(\'' + id.replace(/[^\w.-]/g, '') + '\')">Property</button></div>' : '')
+      + '</div>';
+  }
+  function clear(){ if (outline) { try { outline.remove(); } catch (e) {} outline = null; } }
+  function show(latlng){
+    var r = null;
+    try { r = window.lbParcels.sitesAt(latlng.lat, latlng.lng); } catch (e) { r = null; }
+    if (!r || (!r.sites.length && !r.ring)) return;
+    clear();
+    if (r.ring) { try { outline = L.polygon(r.ring, { interactive: false, color: '#f97316', weight: 3, fillColor: '#f97316', fillOpacity: 0.15 }).addTo(leafletMap); } catch (e) {} }
+    var sites = r.sites.slice(0, MAX_SITES);
+    var html = '<div class="map-popup ux-lot-pop">'
+      + (r.sites.length > 1 ? '<div class="map-popup-meta">' + r.sites.length + ' addresses on this lot' + (r.sites.length > MAX_SITES ? ' (first ' + MAX_SITES + ')' : '') + '</div>' : '')
+      + (sites.length ? sites.map(siteHTML).join('') : '<div class="map-popup-title">No address on this lot</div><div class="map-popup-meta">Nobody\'s bins are listed here.</div>')
+      + '</div>';
+    ours = L.popup({ maxWidth: 290, autoPanPadding: [20, 90], className: 'ux-lot-popup' }).setLatLng(latlng).setContent(html);
+    ours.on('remove', function(){ clear(); ours = null; });
+    ours.openOn(leafletMap);
+  }
+  function onTap(ev){
+    try {
+      if (!ev || !ev.latlng || !window.lbParcels || !window.lbParcels.sitesAt) return;
+      if (!window.lbParcels.isOn() || !(window.lbParcels._t.lastDraw() > 0)) return;   // boundaries switched off or zoomed out past them
+      if (busy() || Date.now() - lastPopupAt < 400) return;
+      var at = ev.latlng;
+      // a bin's own popup opens from the same tap (its click bubbles up to the map) - give it a moment, and leave it be
+      setTimeout(function(){ if (Date.now() - lastPopupAt >= 400 && !busy()) show(at); }, 60);
+    } catch (e) {}
+  }
+  function bind(){
+    if (typeof leafletMap === 'undefined' || !leafletMap || bound === leafletMap) return;
+    bound = leafletMap;
+    leafletMap.on('popupopen', function(ev){ if (!ours || ev.popup !== ours) lastPopupAt = Date.now(); });
+    leafletMap.on('click', onTap);
+  }
+  var prevInit = window.initLeafletMap;
+  if (typeof prevInit === 'function') window.initLeafletMap = function(){ var out = prevInit.apply(this, arguments); try { bind(); } catch (e) {} return out; };
+  bind();
+  var prevTab = window.lbNotifyTabChanged;
+  window.lbNotifyTabChanged = function(tab){ var out = typeof prevTab === 'function' ? prevTab.apply(this, arguments) : undefined; try { bind(); } catch (e) {} return out; };
+  var css = document.createElement('style');
+  css.textContent = '.ux-lot-pop{max-height:52vh;overflow-y:auto;min-width:210px}'
+    + '.ux-lot-site+.ux-lot-site{border-top:1px solid rgba(100,116,139,.35);margin-top:10px;padding-top:8px}'
+    + '.ux-lot-row{display:grid;grid-template-columns:22px auto 1fr;align-items:center;gap:6px;border-left:4px solid;padding:4px 0 4px 6px;margin-top:6px;font-size:13px}'
+    + '.ux-lot-row .icon-img{width:20px;height:20px}'
+    + '.ux-lot-run{font-weight:700;white-space:nowrap}'
+    + '.ux-lot-bins{text-align:right;font-size:12.5px}'
+    + '.ux-lot-bin b{font-weight:800;letter-spacing:.2px}'
+    + '.ux-lot-bin span{opacity:.7}.ux-lot-bin i{font-style:normal;color:#16a34a;font-weight:700}';
+  document.head.appendChild(css);
+})();
 </script>
 
 <!-- =====================================================================
