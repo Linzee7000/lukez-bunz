@@ -26259,6 +26259,18 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     startBreak, endBreak, newShift, onGo,
     addBreak(s, e) { const ok = addBreak(s, e); paint(); return ok; },
     insertBreak(s, e) { const ok = insertBreak(s, e); paint(); return ok; },
+    // Which limit is passed right now and by how much - for saying WHY it's still overdue after a break is
+    // put in (one 15 min break clears the 5¼ h limit, but past 7½ h the 8 h one wants 30 min): { title,
+    // needMin, haveMin, winH, breakMin } or null when nothing is overdue.
+    shortfall() {
+      const now = Date.now(); if (S.start == null) return null;
+      const a = analyze(S, now); if (!a.overdue) return null;
+      const r = a.rule;
+      if (r.id === 'D') return { title: r.title, id: 'D' };
+      const blocks = blocksOf(S, now);
+      let have = 0; for (let i = 0; i < blocks.length; i++) have += clip(blocks[i], now, r.win);
+      return { title: r.title, id: r.id, needMin: Math.round(r.need / MIN), haveMin: Math.floor(have / MIN), winH: r.win / HR, breakMin: a.breakMin };
+    },
     view() { return view(Date.now()); },
     startBreakAt(t) { const ok = startBreakAt(t); paint(); return ok; },
     get state() { return JSON.parse(JSON.stringify(S)); },
@@ -34717,7 +34729,13 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     if (!bc.insertBreak(s, e)) { msg('Couldn’t add ' + hhmm(s) + '–' + hhmm(e) + ': it has to be during this shift, before now, and not overlap a break already in.'); return; }
     var v = bc.view(), short = e - s < LONG;
     var line = 'Break ' + hhmm(s) + '–' + hhmm(e) + ' added.' + (short ? ' Under 15 min doesn’t count as rest.' : '');
-    if (v.mode === 'working' && v.remaining <= 0) { render(line + ' Still overdue: take at least ' + (v.a.breakMin || 15) + ' min.'); return; }
+    if (v.mode === 'working' && v.remaining <= 0) {
+      var sf = bc.shortfall && bc.shortfall();
+      render(line + ' ' + (sf && sf.id === 'D' ? 'Still overdue: the 12 h work limit is reached - that’s the end of the shift.'
+        : sf ? 'Still overdue on the ' + sf.title + ': it needs ' + sf.needMin + ' min of breaks (15 min+ each) in the last ' + sf.winH + ' h, and there ' + (sf.haveMin === 1 ? 'is ' : 'are ') + sf.haveMin + '. Take at least ' + (sf.breakMin || 15) + ' min more.'
+        : 'Still overdue: take at least ' + (v.a.breakMin || 15) + ' min.'));
+      return;
+    }
     render(line + (v.mode === 'working' ? ' Next break due in ' + hm(v.remaining) + '.' : ''));
     clearTimeout(msgTimer); msgTimer = setTimeout(close, 2500);
   }
