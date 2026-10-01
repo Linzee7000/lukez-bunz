@@ -5479,7 +5479,10 @@ const STREET_LITTER_SERVICE_LEVELS = {"seasons":[{"key":"tourist1","label":"Tour
   function applyUiAccentBase() {
     const v = uiAccentBase || UI_ACCENT_DEFAULT;
     document.documentElement.style.setProperty('--ui-accent-base', v);
-    document.documentElement.style.setProperty('--ui-accent-fg-base', lightenHex(v, 0.5));
+    // Default (unpicked) accent: a lightened version of the sunburnt-orange base read as a
+    // dull, muddy tan on the dark chrome - not the bright orange this is meant to look like.
+    // Match --ux-neutral's own handling of this same default case below.
+    document.documentElement.style.setProperty('--ui-accent-fg-base', v === UI_ACCENT_DEFAULT ? '#f4791f' : lightenHex(v, 0.5));
     // --brand-dark is the same dark green used by the older chrome (the
     // stream-none search card, header). Keeping them in step means one
     // picker changes the whole no-stream look rather than half of it.
@@ -20934,7 +20937,7 @@ window.addEventListener('DOMContentLoaded', async () => {
      already-tuned --bright-* colour when a stream is active (those are
      proven to pop on black), and a JS-lightened version of the picked
      accent (--ui-accent-fg-base, set by applyUiAccentBase) otherwise. */
-  --ui-accent-fg-base: #25a80e;
+  --ui-accent-fg-base: #f4791f;
   --ui-accent-fg: var(--ui-accent-fg-base);
   --welcome-ink-dim: #cdd6e0;
   --welcome-ink-faint: #7d8794;
@@ -30870,6 +30873,73 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       recent: (function(){ var t = Date.now() - 30 * 60000, c = (SH.binTs || []).filter(function(x){ return x > t; }).length; return w >= 30 * 60000 ? c * 2 : null; })() };
   }
 
+  /* ---- per-run legs within a shift ----------------------------------------------------
+     SH.run can change mid-shift (see crsave), and until now switching just overwrote it -
+     a shift covering two runs only ever showed one combined bins/km/bins-per-hour for its
+     whole length, with no record of where one run's stats ended and the next's began.
+     SH.legs is every run leg closed so far (by a run change or by finishing the shift);
+     SH.leg is the one still open. Each leg baselines its own distance/bin counts off
+     SH.dist/SH.bins (which keep accumulating shift-wide exactly as before, for the
+     existing CSV/history columns) and adds three things: a rate that only starts once the
+     truck is actually inside the run's own boundary and has collected a bin there; a rate
+     that pauses while stopped over a minute in one spot; and the leg's first/last pickup
+     (time, location, a live km estimate) - the last one re-finalised every time the truck
+     is seen leaving the boundary, so it only "sticks" once the truck genuinely doesn't stop
+     in the run again before the leg closes. */
+  function newLeg(stream, run, day, week){
+    return { stream: stream || '', run: run || '', day: day || '', week: week || '', start: Date.now(), end: null,
+      dist0: (SH && SH.dist) || 0, bins0: (SH && SH.bins) || 0, distEnd: null, binsEnd: null,
+      rateStart: null, pausedMs: 0, pauseSince: null, lastInside: false,
+      lastStopInBoundary: null, lastPickup: null, truckBinCount: null };
+  }
+  // boundaryKeyFor/customRunBorders/pointInPolygonLatLng all live as plain globals in the
+  // file's main (unwrapped) script block - g() is this module's usual way of reaching them,
+  // same as it already reaches siteRecords, getDistanceMeters, and the rest.
+  function legBoundaryPts(leg){
+    if (!leg || !leg.run) return null;
+    var bkf = g('boundaryKeyFor'); if (typeof bkf !== 'function') return null;
+    var streamForBoundary = leg.stream === 'SummerRecycling' ? 'Recycling' : leg.stream;
+    var key = bkf(leg.run, streamForBoundary, leg.day, leg.week);
+    var borders = g('customRunBorders'), pts = borders && borders[key];
+    return (pts && pts.length >= 3) ? pts : null;
+  }
+  // No saved boundary drawn for this run yet: treated as "no restriction" (never blocks the
+  // rate or the pickup tracking just because nobody's drawn one), not as "never inside".
+  function insideLegBoundary(leg, loc){
+    if (!loc) return false;
+    var pts = legBoundaryPts(leg); if (!pts) return true;
+    var pip = g('pointInPolygonLatLng'); if (typeof pip !== 'function') return true;
+    try { return pip(loc.lat, loc.lng, pts); } catch (e) { return true; }
+  }
+  function legLiveKm(){ return +(((SH && SH.startKm) || 0) + ((SH && SH.dist) || 0) / 1000).toFixed(2); }
+  // A leg's own bins/km, valid whether it's still open (diffed against the shift's live
+  // totals) or already closed (diffed against the totals captured when it was closed).
+  function legBinsKm(leg){
+    if (!leg) return { bins: 0, km: 0 };
+    var binsEnd = leg.end != null ? leg.binsEnd : ((SH && SH.bins) || 0);
+    var distEnd = leg.end != null ? leg.distEnd : ((SH && SH.dist) || 0);
+    return { bins: Math.max(0, (binsEnd || 0) - leg.bins0), km: Math.max(0, (distEnd || 0) - leg.dist0) / 1000 };
+  }
+  function legRates(){
+    var leg = SH && SH.leg; if (!leg) return null;
+    var bk = legBinsKm(leg);
+    if (!leg.rateStart) return { started: false, km: bk.km, bins: bk.bins, perKm: null, perHr: null };
+    var now = Date.now(), elapsed = Math.max(0, now - leg.rateStart.t - (leg.pausedMs || 0));
+    // same guard rails as the whole-shift rates(): too little km/time yet is noise, not a rate.
+    return { started: true, since: leg.rateStart.t, km: bk.km, bins: bk.bins,
+      perKm: bk.km >= 0.3 ? bk.bins / bk.km : null,
+      perHr: elapsed >= 5 * 60000 ? bk.bins / (elapsed / 3600000) : null };
+  }
+  // Closes a leg (run change or shift finish): snapshots the shift-wide totals it should be
+  // diffed against from now on, and records the truck's own onboard bin count for it, if given.
+  function closeLeg(leg, truckBinCountStr){
+    if (!leg || !SH) return;
+    leg.end = Date.now(); leg.distEnd = SH.dist || 0; leg.binsEnd = SH.bins || 0;
+    var n = num(truckBinCountStr);
+    leg.truckBinCount = (n != null && isFinite(n) && n >= 0) ? n : null;
+    SH.legs = SH.legs || []; SH.legs.push(leg);
+  }
+
   /* ---- the shift's own run: stream picked at the start; day and week are today's, so only the run number is asked ---- */
   var SHIFT_STREAMS = [['Garbage', 'Garbage'], ['Recycling', 'Recycling'], ['FOGO', 'FOGO'], ['SummerRecycling', 'Summer recycling'], ['StreetGarbage', 'Street litter'], ['StreetRecycling', 'Street recycling']];
   // Same icon + colour classes the Drive wizard uses for these streams (see driveStreams()
@@ -30946,7 +31016,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     // a fresh trail for the shift: whatever was driven before it started isn't part of it
     try { var clr = g('clearSnailTrail'); if (typeof clr === 'function') clr(); } catch (e) {}
     SH = { id: 's_' + uid(), start: now, stream: o.stream || '', run: o.run || '', day: o.run ? todayDay() : '', week: o.run ? todayWeek(o.stream) : '', driver: o.driver || '', truck: o.truck || '', rego: o.rego || '', startKm: o.km, startHrs: o.hrs, startPhoto: o.photo || null,
-      prestart: o.prestart || null, defects: [], dist: 0, bins: 0, binTs: [], auto: !!o.auto, synced: false };
+      prestart: o.prestart || null, defects: [], dist: 0, bins: 0, binTs: [], auto: !!o.auto, synced: false, legs: [], leg: null };
+    SH.leg = SH.run ? newLeg(SH.stream, SH.run, SH.day, SH.week) : null;
     if (o.auto && s && s.start) SH.start = s.start;
     saveSh();
     try {
@@ -31103,6 +31174,11 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     if (SH && shiftOverNight(SH)) { finishShift({ note: 'Not ended in the app: closed ' + (isStreet(SH.stream) ? 'at 3 am' : 'at midnight') }); toast('Yesterday’s shift was closed. It’s in Past shifts.'); }
     try { escalate(); } catch (e) {}
     if (!SH) return;
+    // shifts already under way when this per-run-leg tracking shipped (or an old-shape
+    // record still in localStorage) won't have a leg yet - give them one rather than
+    // leaving legRates()/the leg-gated display with nothing to read.
+    if (!SH.legs) SH.legs = [];
+    if (!SH.leg && SH.run) SH.leg = newLeg(SH.stream, SH.run, SH.day, SH.week);
     // the break clock runs from this shift's start (see resetStart in the break clock)
     try {
       var cs2 = clockState();
@@ -31135,6 +31211,37 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
         if (inc <= 25) { SH.bins = (SH.bins || 0) + inc; var now = Date.now(); SH.binTs = (SH.binTs || []); for (var i = 0; i < inc; i++) SH.binTs.push(now); if (SH.binTs.length > 4000) SH.binTs = SH.binTs.slice(-4000); ch = true; }
       }
     }
+    if (SH.leg && loc) {
+      var leg = SH.leg, insideNow = insideLegBoundary(leg, loc), nowT = Date.now();
+      // 1) the leg's rate doesn't start until the truck is inside the run's own boundary AND
+      //    has actually collected a bin while inside it - SH.binTs already has the exact
+      //    moment each bin was ticked off, so the leg's first-pickup time isn't just
+      //    "whenever this 2-second tick happened to notice it."
+      if (!leg.rateStart && insideNow && (SH.bins || 0) > leg.bins0) {
+        var firstTs = (SH.binTs && SH.binTs[leg.bins0]) || nowT;
+        leg.rateStart = { t: firstTs, lat: loc.lat, lng: loc.lng, km: legLiveKm() };
+        ch = true;
+      }
+      // 2) a stop over a minute pauses the "bins per hour" clock until the truck moves again -
+      //    tracked as accumulated paused time using real elapsed ticks (not a flat 2s guess),
+      //    so it stays right even if a tick lands late or the tab was briefly backgrounded.
+      var curStop = (function(){ try { return window.lbStops && window.lbStops.current(); } catch (e) { return null; } })();
+      if (curStop && (nowT - curStop.t0) > 60000) {
+        if (leg.pauseSince == null) leg.pauseSince = Math.max(curStop.t0 + 60000, nowT - 2500);
+        leg.pausedMs = (leg.pausedMs || 0) + Math.max(0, nowT - leg.pauseSince);
+        leg.pauseSince = nowT; ch = true;
+      } else if (leg.pauseSince != null) { leg.pauseSince = null; ch = true; }
+      // 3) a stop while inside the boundary is this leg's current "last pickup" candidate;
+      //    every time the truck is then seen leaving the boundary, whatever that candidate
+      //    currently is becomes the leg's actual last pickup - so it only sticks once the
+      //    truck really doesn't stop in the run again before leaving it.
+      if (insideNow && curStop) {
+        leg.lastStopInBoundary = { t: nowT, lat: curStop.lat, lng: curStop.lng, km: legLiveKm() };
+        ch = true;
+      }
+      if (leg.lastInside && !insideNow && leg.lastStopInBoundary) { leg.lastPickup = leg.lastStopInBoundary; ch = true; }
+      if (leg.lastInside !== insideNow) { leg.lastInside = insideNow; ch = true; }
+    }
     if (ch) saveSh();
   }
   // a dash warning nobody has answered goes on to the mechanic
@@ -31150,13 +31257,17 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   }
   function dismissedAuto(start){ return +localStorage.getItem('lbShiftNoAuto') === start; }
 
-  /* ---- header: bins / km and bins / h ---- */
+  /* ---- header: bins / km and bins / h ----
+     Scoped to the current run leg, not the whole shift: stays blank until the truck is
+     inside the run's own boundary and has picked up a bin there (see legRates()), and
+     pauses while stopped over a minute - this is the badge the driver actually watches
+     while driving, so it's the one that needs to match "don't start it until...". */
   function paintRate(){
     var grp = $('uxMsStats'); if (!grp) return;
     var el = $('uxRateStat');
-    if (!el) { el = document.createElement('span'); el.id = 'uxRateStat'; el.className = 'map-run-stat'; el.title = 'Bins per km and per hour this shift'; grp.appendChild(el); }
-    var r = rates(), txt = '';
-    if (r && (r.perKm != null || r.perHr != null)) {
+    if (!el) { el = document.createElement('span'); el.id = 'uxRateStat'; el.className = 'map-run-stat'; el.title = 'Bins per km and per hour this run'; grp.appendChild(el); }
+    var r = legRates(), txt = '';
+    if (r && r.started && (r.perKm != null || r.perHr != null)) {
       txt = (r.perKm != null ? '<b>' + (r.perKm >= 100 ? Math.round(r.perKm) : r.perKm.toFixed(1)) + '</b><small>/km</small>' : '') +
         (r.perHr != null ? '<b>' + Math.round(r.perHr) + '</b><small>/h</small>' : '');
     }
@@ -31314,11 +31425,12 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
         (dd.media.length ? '' : '<div class="drv-hint">A photo is needed.</div>');
     } else if (view === 'end') {
       title = 'End shift';
-      var e = endDraft || (endDraft = { km: '', hrs: '', photo: null, note: '' }), r = rates();
+      var e = endDraft || (endDraft = { km: '', hrs: '', photo: null, note: '', truckBinCount: '' }), r = rates();
       h = summaryHtml({ worked: r.worked, gpsKm: r.km, bins: r.bins, perKm: r.perKm, perHr: r.perHr, start: SH.start }) +
         (function(){ var c = runCheck(), l = c ? runCheckLine(c) : ''; return l ? '<div class="drv-stopbox">' + I.warn + '<span><b>Run ' + esc(c.run.run) + ':</b> ' + esc(l) + '.</span><button type="button" class="drv-link" data-a="runcheck">See</button></div>' : ''; })() +
         (function(){ var m = window.lbRunSheet ? window.lbRunSheet.missing(SH.id) : []; return m.length ? '<div class="drv-warnbox">' + I.warn + '<span>Run sheet still needs: ' + esc(m.join(' · ')) + '</span><button type="button" class="drv-link" data-a="rs:main">Fill in</button></div>' : ''; })() +
         '<div class="drv-sect"><span>Truck at the end</span></div>' + readingsHtml(e, 'uxsE') +
+        (SH.leg && SH.leg.run ? field('uxsETruckCount', 'Bins counted by the truck on Run ' + esc(SH.leg.run) + ' (optional)', e.truckBinCount, 'number', 'from the truck’s own counter') : '') +
         field('uxsENote', 'Note (optional)', e.note, 'text', 'anything operations should know') +
         '<div class="drv-foot"><button type="button" class="drv-btn" data-a="back">Back</button><button type="button" class="drv-btn drv-go drv-bad" data-a="finish">Finish shift</button></div>';
     } else if (view === 'done') {
@@ -31330,10 +31442,14 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       h = runCheckHtml(SH ? runCheck() : null) + '<div class="drv-foot"><button type="button" class="drv-btn" data-a="back">Back</button></div>';
     } else if (view === 'changerun') {
       title = 'Change run';
-      var cr = crDraft || (crDraft = { stream: SH ? SH.stream : '', run: SH ? SH.run : '' });
+      var cr = crDraft || (crDraft = { stream: SH ? SH.stream : '', run: SH ? SH.run : '', truckBinCount: '' });
       var crOk = !!cr.run || (!!cr.stream && !todaysRuns(cr.stream).length);
+      var curLeg = SH && SH.leg && SH.leg.run ? SH.leg : null, curLegBk = curLeg ? legBinsKm(curLeg) : null;
       h = '<div class="drv-sect"><span>Your run · ' + esc(todayDay()) + (cr.stream && todayWeek(cr.stream) ? ' · Week ' + todayWeek(cr.stream) : '') + '</span></div>' +
         runPickerHtml(cr, 'csstream', 'csrun') +
+        (curLeg ? ('<div class="drv-sect"><span>Leaving Run ' + esc(curLeg.run) + '</span></div>' +
+          '<div class="drv-hint">The app counted ' + curLegBk.bins + ' bin' + (curLegBk.bins === 1 ? '' : 's') + ' on Run ' + esc(curLeg.run) + ' so far.</div>' +
+          field('uxsCrTruckCount', 'Bins counted by the truck on Run ' + esc(curLeg.run) + ' (optional)', cr.truckBinCount, 'number', 'from the truck’s own counter')) : '') +
         '<div class="drv-foot"><button type="button" class="drv-btn" data-a="back">Cancel</button><button type="button" class="drv-btn drv-go" data-a="crsave"' + (crOk ? '' : ' disabled') + '>Save</button></div>';
     } else if (view === 'history') {
       title = 'Past shifts';
@@ -31361,12 +31477,21 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
         '<div class="drv-foot"><button type="button" class="drv-btn" data-a="history">' + I.list + 'Past shifts</button><button type="button" class="drv-btn drv-go" data-a="start"' + (ready ? '' : ' disabled') + '>Start shift</button></div>' +
         (ready ? '' : '<div class="drv-hint">' + esc(oosT && !isLead() ? 'This truck can’t be started.' : !runOk ? 'Pick your stream and run.' : !dr.driver.trim() ? 'Put your name in.' : ((dr.km === '' || dr.hrs === '') && !dr.photo) ? 'Put in the km and hours, or take a photo of the dash.' : 'Tick every pre-start item.') + '</div>') + roleHtml();
     } else {
-      var rr = rates(), br = onBreak(), dfs = defects().filter(function(x){ return x.shiftId === SH.id; }), iss = ((window.uxIssueLog && window.uxIssueLog()) || []).filter(function(i){ return i.ts >= SH.start; });
+      var rr = rates(), lr = legRates(), br = onBreak(), dfs = defects().filter(function(x){ return x.shiftId === SH.id; }), iss = ((window.uxIssueLog && window.uxIssueLog()) || []).filter(function(i){ return i.ts >= SH.start; });
       title = br ? 'On a break' : 'On shift';
+      // bins/km and bins/h are scoped to the CURRENT run leg (gated on being inside its
+      // boundary and having picked up a bin there, and paused on a stop over a minute) -
+      // see legRates(). "bins / h (last 30 min)" stays a whole-shift rolling figure.
+      var legHint = (SH.leg && SH.leg.run) ? (
+        !lr || !lr.started
+          ? '<div class="drv-hint">Bins / km and bins / h for Run ' + esc(SH.leg.run) + ' start once you’re inside its boundary and have picked up a bin.</div>'
+          : (SH.leg.pauseSince != null ? '<div class="drv-hint">Paused on Run ' + esc(SH.leg.run) + ' - stopped over a minute.</div>' : '')
+      ) : '';
       h = '<div class="drv-top">' + esc([SH.driver, SH.truck].filter(Boolean).join(' · ')) + ' · since ' + esc(clock(SH.start)) + '</div>' +
         '<div class="drv-note-top">' + esc((SHIFT_STREAMS.filter(function(x){ return x[0] === SH.stream; })[0] || [])[1] || SH.stream || 'No run picked') + (SH.run ? ' · Run ' + esc(SH.run) : '') + '<button type="button" class="drv-link" data-a="changerun">Change run</button></div>' +
         '<div class="drv-stats">' + stat(hm(rr.worked), 'worked') + stat(rr.km.toFixed(1), 'km') + stat(rr.bins, 'bins') +
-          stat(rr.perKm == null ? '–' : rr.perKm.toFixed(1), 'bins / km') + stat(rr.perHr == null ? '–' : Math.round(rr.perHr), 'bins / h') + stat(rr.recent == null ? '–' : rr.recent, 'bins / h (last 30 min)') + '</div>' +
+          stat((lr && lr.perKm != null) ? lr.perKm.toFixed(1) : '–', 'bins / km') + stat((lr && lr.perHr != null) ? Math.round(lr.perHr) : '–', 'bins / h') + stat(rr.recent == null ? '–' : rr.recent, 'bins / h (last 30 min)') + '</div>' +
+        legHint +
         '<div class="drv-big">' + (br ? '<button type="button" class="drv-btn drv-go" data-a="work">' + I.play + 'Back to work</button>' : '<button type="button" class="drv-btn drv-rest" data-a="rest">' + I.cup + 'Start break</button>') + '</div>' +
         // The break clock's countdown (NHVR hours) and "I started earlier" - it lived in Layers. Its own
         // start/end break and new shift buttons are hidden here: the buttons above and End shift do those.
@@ -31447,7 +31572,9 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       else if (id === 'uxsSKm') draft.km = t.value; else if (id === 'uxsSHrs') draft.hrs = t.value; else return;
       paintSoon();
     } else if (view === 'end' && endDraft) {
-      if (id === 'uxsEKm') endDraft.km = t.value; else if (id === 'uxsEHrs') endDraft.hrs = t.value; else if (id === 'uxsENote') endDraft.note = t.value;
+      if (id === 'uxsEKm') endDraft.km = t.value; else if (id === 'uxsEHrs') endDraft.hrs = t.value; else if (id === 'uxsENote') endDraft.note = t.value; else if (id === 'uxsETruckCount') endDraft.truckBinCount = t.value;
+    } else if (view === 'changerun' && crDraft) {
+      if (id === 'uxsCrTruckCount') crDraft.truckBinCount = t.value;
     } else if (view === 'brakes' && brakeDraft) {
       if (id === 'uxsBA') brakeDraft.a = t.value; else if (id === 'uxsBB') brakeDraft.b = t.value; else if (id === 'uxsBC') brakeDraft.c = t.value; else return;
       var ev2 = $('uxsBEval'); if (ev2) { ev2.innerHTML = evalHtml(brakeDraft); ev2.setAttribute('data-l', brakeLevel(brakeVals(brakeDraft))); }
@@ -31490,11 +31617,13 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     if (a === 'close') { closeSheet(); return; }
     if (a.indexOf('rs:') === 0) { closeSheet(); if (window.lbRunSheet) window.lbRunSheet.open(a.slice(3), b.getAttribute('data-id') || (SH && SH.id)); return; }
     if (a === 'back') { view = 'main'; defDraft = null; paint(); return; }
-    if (a === 'changerun') { crDraft = { stream: SH ? SH.stream : '', run: SH ? SH.run : '' }; view = 'changerun'; paint(); return; }
+    if (a === 'changerun') { crDraft = { stream: SH ? SH.stream : '', run: SH ? SH.run : '', truckBinCount: '' }; view = 'changerun'; paint(); return; }
     if (a === 'crsave') {
       if (!SH || !crDraft) { view = 'main'; paint(); return; }
+      if (SH.leg) closeLeg(SH.leg, crDraft.truckBinCount);
       SH.stream = crDraft.stream; SH.run = crDraft.run;
       SH.day = crDraft.run ? todayDay() : ''; SH.week = crDraft.run ? todayWeek(crDraft.stream) : '';
+      SH.leg = SH.run ? newLeg(SH.stream, SH.run, SH.day, SH.week) : null;
       saveSh();
       try { openShiftRun(); } catch (e) {}
       crDraft = null; view = 'main'; toast('Run changed'); paint(); return;
@@ -31606,7 +31735,12 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     if (a === 'role') { (isLead() ? Promise.resolve(toDriver()) : toLead()).then(function(){ paint(); }); return; }
   }
   var pendingFaults = [], pre = null;
-  function doFinish(){ var e = endDraft; lastRec = finishShift({ km: num(e.km), hrs: num(e.hrs), photo: e.photo, note: (e.note || '').trim() }); endDraft = null; view = 'done'; paint(); }
+  function doFinish(){
+    var e = endDraft;
+    if (SH && SH.leg) { closeLeg(SH.leg, e.truckBinCount); SH.leg = null; }
+    lastRec = finishShift({ km: num(e.km), hrs: num(e.hrs), photo: e.photo, note: (e.note || '').trim() });
+    endDraft = null; view = 'done'; paint();
+  }
   function paintPre(){
     var body = $('uxsBody'); $('uxsTitle').textContent = 'Pre-start check';
     var n = Object.keys(pre.checks).length, ok = n === CHECKS.length;
@@ -35552,11 +35686,34 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   /* =====================================================================
      the printable sheet, laid out like IMS-OPER-F-8007
      ===================================================================== */
+  // A leg's own bins/km: diffed against the shift's live totals while still open, or
+  // against the totals captured when it was closed (see closeLeg in ux2-script) once it
+  // isn't - works the same for the live shift and a finished one pulled from history.
+  function legBinsKm(lg, s){
+    if (!lg) return { bins: 0, km: 0 };
+    var binsEnd = lg.end != null ? lg.binsEnd : (s.bins || 0);
+    var distEnd = lg.end != null ? lg.distEnd : (s.dist || 0);
+    return { bins: Math.max(0, (binsEnd || 0) - (lg.bins0 || 0)), km: Math.max(0, (distEnd || 0) - (lg.dist0 || 0)) / 1000 };
+  }
+  // One line per run worked this shift - first/last pickup (time + a live km estimate) and
+  // the truck's own bin counter, where it was entered. Separate from the load table above,
+  // which is per tip-to-tip load rather than per run (a load can span more than one run).
+  function legLines(s){
+    var legs = (s.legs || []).slice(); if (s.leg && s.leg.run) legs = legs.concat([s.leg]);
+    return legs.filter(function(lg){ return lg && lg.run; }).map(function(lg){
+      var bk = legBinsKm(lg, s);
+      var fp = lg.rateStart ? (hhmm(lg.rateStart.t) + (lg.rateStart.km != null ? ' @ ' + lg.rateStart.km + ' km' : '')) : 'not started';
+      var lp = lg.lastPickup ? (hhmm(lg.lastPickup.t) + (lg.lastPickup.km != null ? ' @ ' + lg.lastPickup.km + ' km' : '')) : (lg.end ? 'none recorded' : 'in progress');
+      return 'Run ' + lg.run + ': first pickup ' + fp + ', last pickup ' + lp + ', ' + bk.bins + ' bin' + (bk.bins === 1 ? '' : 's') + ' (' + bk.km.toFixed(1) + ' km)' + (lg.truckBinCount != null ? ', truck counter ' + lg.truckBinCount : '');
+    });
+  }
   function sheetData(){
     var s = SHc.s, br = breaksOf(SHc);
     var loads = R.loads.slice();
     if (R.cur.n > 0) loads.push({ runNo: '', n: R.cur.n, first: R.cur.first, last: R.cur.last, site: '', arrT: null, arrW: '', depW: '', depT: null, docket: '', notTipped: true });
     var extra = [];
+    var legL = legLines(s);
+    if (legL.length) { extra.push('Runs this shift:'); legL.forEach(function(x){ extra.push('  ' + x); }); }
     R.fuel.forEach(function(x){ extra.push('Fuel: ' + x.litres + ' L at ' + hhmm(x.t) + (x.km ? ' (' + x.km + ' km)' : '')); });
     R.adblue.forEach(function(x){ extra.push('AdBlue: ' + x.litres + ' L at ' + hhmm(x.t) + (x.km ? ' (' + x.km + ' km)' : '')); });
     if (br.length > 3) extra.push('More breaks: ' + br.slice(3).map(function(b){ return hhmm(b.s) + '–' + hhmm(b.e); }).join(', '));
