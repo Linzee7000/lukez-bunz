@@ -5156,22 +5156,55 @@ const STREET_LITTER_SERVICE_LEVELS = {"seasons":[{"key":"tourist1","label":"Tour
     if (e.k === 'fix') window.lbGpsDiag = { at: e.at, ps: e.ps, acc: e.acc, age: Math.round((e.at - e.t) / 1000) };
   }
   setInterval(() => { try { localStorage.setItem('lbGpsLog', JSON.stringify(lbGpsLog)); } catch (e) {} }, 30000);
+  // While the position is frozen (lbFrozenN), ask the phone for a brand-new reading every 5 s, and restart the
+  // GPS watch every 30 s - an experiment to wake Android's GPS during a slow reverse; the GPS log records each
+  // try ('poke' / 'restart') so the next log shows whether it helps. A parked truck gets the same, harmlessly.
+  let lbPokeAt = 0, lbPokeRestartAt = 0;
+  function lbPokeFrozenGps() {
+    if (lbFrozenN < 5 || !navigator.geolocation) return;
+    const now = Date.now();
+    if (now - lbPokeAt < (lbFrozenN > 300 ? 30000 : 5000)) return;   // (5 min frozen: most likely really parked - try less often)
+    lbPokeAt = now;
+    lbGpsLogAdd({ k: 'poke' });
+    try {
+      navigator.geolocation.getCurrentPosition(p => { lbGpsLogAdd({ k: 'pokefix', t: Number(p.timestamp) || 0 }); onGpsPositionSuccess(p); }, () => {}, { enableHighAccuracy: true, maximumAge: 0, timeout: 8000 });
+    } catch (e) {}
+    if (!lbPokeRestartAt) lbPokeRestartAt = now;
+    else if (now - lbPokeRestartAt >= 30000) { lbPokeRestartAt = now; try { startLiveLocationWatcher(); } catch (e) {} }
+  }
   const lbSpeedFixes = [];
   let lbSpeedLast = { v: 0, t: 0 };
   let lbLastFixJumped = false;   // this fix leapt further than the truck could have driven (ignored for heading)
   window.lbGpsJumpAt = 0;
+  // Frozen GPS. The driver's Android stops reading the GPS when it decides the phone is standing still - and a
+  // slow, smooth reverse fools it: on the 1 Oct log the same position, speed 0, came back for 67 s, 73 s and
+  // 165 s while the truck reversed up three streets off Watson Rd, so the truck sat at the end of each street;
+  // then the position caught up in 30-60 m leaps once it drove off. lbFrozenN counts fixes in a row at exactly
+  // the same spot (a real fix always wobbles a little), and while it's frozen the phone is asked for a fresh
+  // reading (see lbPokeFrozenGps).
+  let lbFrozenN = 0, lbJumpCand = null, lbSpeedReset = false;
   function lbSpeedFromFix(pos) {
     const c = pos.coords, t = Number(pos.timestamp) || Date.now(), acc = Number(c.accuracy) || 30;
     const native = (c.speed !== null && c.speed !== undefined && !isNaN(c.speed) && c.speed >= 0) ? c.speed * 3.6 : null;
     const fixes = lbSpeedFixes;
     if (fixes.length && t < fixes[fixes.length - 1].t) fixes.length = 0;   // clock went backwards - start again
     const prev = fixes[fixes.length - 1];
+    const wasFrozen = lbFrozenN >= 3;
+    lbFrozenN = (prev && t > prev.t && prev.lat === c.latitude && prev.lng === c.longitude) ? lbFrozenN + 1 : 0;   // (a NEW fix at exactly the same spot)
     let jump = false;
+    lbSpeedReset = false;
     if (prev) {
       const step = getDistanceMeters(prev.lat, prev.lng, c.latitude, c.longitude), sdt = Math.max(0.5, (t - prev.t) / 1000);
       // further than the truck could have gone (its last speed plus a hard acceleration, and the GPS wander)
       const could = (Math.max(lbSpeedLast.v, native || 0, 10) / 3.6 + LB_ACCEL_KMH_S / 3.6 * sdt) * sdt + Math.max(prev.acc, acc) + 5;
       jump = step > could && sdt < 10;
+      // ...but not a leap out of a frozen stretch (the phone catching up with where the truck really is), nor
+      // one the next fix carries on from (a one-off glitch comes back; a correction stays)
+      const cand = lbJumpCand;
+      lbJumpCand = null;
+      const carriesOn = cand && getDistanceMeters(cand.lat, cand.lng, c.latitude, c.longitude) <= Math.max(15, (Math.max(native || 0, 10) / 3.6 + 3) * Math.max(1, (t - cand.t) / 1000) + acc);
+      if (jump && (wasFrozen || carriesOn)) { jump = false; fixes.length = 0; lbSpeedReset = true; }
+      else if (jump) lbJumpCand = { lat: c.latitude, lng: c.longitude, t };
     }
     lbLastFixJumped = jump;
     if (jump) { window.lbGpsJumpAt = t; }
@@ -5195,7 +5228,7 @@ const STREET_LITTER_SERVICE_LEVELS = {"seasons":[{"key":"tourist1","label":"Tour
       }
     }
     const since = lbSpeedLast.t ? Math.max(1, (t - lbSpeedLast.t) / 1000) : 60;
-    v = Math.min(v, lbSpeedLast.v + LB_ACCEL_KMH_S * since);
+    if (!lbSpeedReset) v = Math.min(v, lbSpeedLast.v + LB_ACCEL_KMH_S * since);   // (after a freeze the 0s were false - take the phone's speed)
     lbSpeedLast = { v, t };
     return Math.round(v);
   }
@@ -17666,6 +17699,8 @@ window.addEventListener('DOMContentLoaded', async () => {
     const fixT = Number(pos.timestamp) || Date.now();
     // (only a fix up to a minute older - anything odder is the phone's clock, and must not block every fix)
     if (lbLastFixT && fixT < lbLastFixT && lbLastFixT - fixT < 60000) { lbGpsLogAdd({ k: 'old', t: fixT }); return; }
+    // the same fix handed over twice (the watch and a getCurrentPosition both returning it) adds nothing
+    if (fixT === lbLastFixT && userCurrentLocation && userCurrentLocation.lat === pos.coords.latitude && userCurrentLocation.lng === pos.coords.longitude) return;
     lbLastFixT = fixT;
     const accuracy = Math.round(pos.coords.accuracy);
     const speedKmh = lbSpeedFromFix(pos);
@@ -17774,6 +17809,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     lbGpsLogAdd({ k: 'fix', t: fixT, lat: +pos.coords.latitude.toFixed(6), lng: +pos.coords.longitude.toFixed(6), acc: accuracy,
       ps: pos.coords.speed == null ? null : Math.round(pos.coords.speed * 36) / 10, ph: pos.coords.heading == null ? null : Math.round(pos.coords.heading),
       v: speedKmh, j: lbLastFixJumped ? 1 : 0, f: lastValidHeading, r: lbReverseState.on ? 1 : 0 });
+    if (lbFrozenN >= 5) lbPokeFrozenGps(); else lbPokeRestartAt = 0;
 
     updateGpsBadgeUI(true, `🟢 ±${accuracy}m`);
 
