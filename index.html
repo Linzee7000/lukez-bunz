@@ -13653,10 +13653,15 @@ window.addEventListener('DOMContentLoaded', async () => {
   // silently apply that same boundary to 219A on every other day too.
   // Scope the storage key to whichever stream/day/week filter was active at
   // the time, so each day's run gets its own saved boundary.
-  function boundaryKeyFor(runVal, streamHint) {
+  // dayHint/weekHint let a caller that already knows a specific site's own
+  // day/week (e.g. renderMapData building one key per run-group) look up
+  // the right boundary even when no day/week filter is active - every
+  // existing caller that omits them keeps reading the active filter, as
+  // before.
+  function boundaryKeyFor(runVal, streamHint, dayHint, weekHint) {
     const stream = clean(streamHint !== undefined ? streamHint : (activeFilterStream || ''));
-    const day = activeFilterDay ? dayKey(activeFilterDay) : '';
-    const week = clean(activeFilterWeek || '').toUpperCase();
+    const day = dayHint !== undefined ? dayKey(dayHint) : (activeFilterDay ? dayKey(activeFilterDay) : '');
+    const week = weekHint !== undefined ? clean(weekHint).toUpperCase() : clean(activeFilterWeek || '').toUpperCase();
     return [stream, day, week, mapKey(runVal)].filter(Boolean).join('#');
   }
   // Pulls the plain run number back out of a composite boundary key, for
@@ -18371,8 +18376,22 @@ window.addEventListener('DOMContentLoaded', async () => {
         if (!runVal) return;
         if (!isFocusedSite && selected.size && !selected.has(lower(runVal))) return;
 
-        const key = stream + '|' + lower(runVal);
-        if (!groups.has(key)) groups.set(key, { stream, run: runVal, sites: [] });
+        // The same run number can exist on more than one day (or, for
+        // Recycling/FOGO, in both weeks) - each a genuinely different
+        // physical area, same reasoning as boundaryKeyFor's own comment and
+        // the grouping lbStrayReport below already does. With no day/week
+        // filter active (activeFilterDay/Week both '', e.g. the map's
+        // "Select Run" overview with nothing picked), every site sharing
+        // that bare number used to land in one group here, so
+        // sitesForBoundaryHull built one hull spanning every day's area at
+        // once - reported as run boundaries sprawling across the whole
+        // peninsula instead of staying around each run's own bins. Scope
+        // the group to the site's own day/week so same-numbered runs on
+        // different days never merge.
+        const dayForKey = item.day || '';
+        const weekForKey = (stream === 'Recycling' || stream === 'FOGO') ? (item.week || '') : '';
+        const key = stream + '|' + dayForKey + '|' + weekForKey + '|' + lower(runVal);
+        if (!groups.has(key)) groups.set(key, { stream, run: runVal, day: dayForKey, week: weekForKey, sites: [] });
         groups.get(key).sites.push(site);
       });
     });
@@ -18388,7 +18407,7 @@ window.addEventListener('DOMContentLoaded', async () => {
 
     [...groups.values()].forEach((g, i) => {
       const runOutlineColor = mapColor(g.run, i);
-      const borderKey = boundaryKeyFor(g.run, g.stream);
+      const borderKey = boundaryKeyFor(g.run, g.stream, g.day, g.week);
       const customBorder = customRunBorders[borderKey];
       let pts = [];
 
