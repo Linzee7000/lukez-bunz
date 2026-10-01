@@ -5105,7 +5105,12 @@ const STREET_LITTER_SERVICE_LEVELS = {"seasons":[{"key":"tourist1","label":"Tour
   // on: reversing now; init: the facing has been set at least once; stopped: stood still since the last move;
   // stopFacing/stopPos: the facing and position when it moved off; resumeN: fixes since moving off;
   // revMs: moving time spent reversing; fastN: fixes in a row at 14 km/h+
-  const lbReverseState = { on: false, init: false, stopped: false, stopFacing: 0, stopPos: null, resumeN: 0, revMs: 0, fastN: 0, lastT: 0 };
+  const lbReverseState = { on: false, init: false, stopped: false, stopFacing: 0, stopPos: null, resumeN: 0, revMs: 0, fastN: 0, lastT: 0, factN: 0, travN: 0 };
+  // What this phone's GPS heading means, learnt from driving and kept: 'facing' = the way the phone points (it
+  // stays put when reversing - the driver's Android, 30 Sep logs), 'travel' = the way it's moving (turns
+  // round when reversing), '' = not known yet.
+  let lbHeadingKind = (() => { try { return localStorage.getItem('lbHeadingKind') || ''; } catch (e) { return ''; } })();
+  function lbSetHeadingKind(k) { if (lbHeadingKind === k) return; lbHeadingKind = k; try { localStorage.setItem('lbHeadingKind', k); } catch (e) {} }
   // The way the truck has actually gone over the last few metres: the bearing from the newest fix back to the
   // most recent one at least the GPS wander away (5 m or the accuracy, within 6 s). null until it has moved
   // that far, or when the fix is too rough to tell.
@@ -17706,9 +17711,27 @@ window.addEventListener('DOMContentLoaded', async () => {
         let next = facing, motion = native;
         if (native !== null) {
           const moved = lbMovedBearing(3);
+          const afterStop = R.stopped;
+          // learning the phone: moving the opposite way from its heading means it gives the way it points;
+          // its heading turning round with the metres driven agreeing means it gives the way it moves
+          R.factN = (moved !== null && off(moved, native) > 150) ? R.factN + 1 : 0;
+          if (R.factN >= 3) lbSetHeadingKind('facing');
+          // How far the heading may swing from the facing and still be the facing: a truck turns under 25° a
+          // second, so 100° between fixes is the heading turning round (reversing, on a phone that gives the
+          // way it moves) - except after a stop, when the GPS often freezes while the truck manoeuvres (30 Sep:
+          // 15-40 s frozen in Marcia Cl driveways, the truck swung round ~100° meanwhile, and calling that
+          // reversing kept it "reversing" for 60 m up Magnolia Way). After a stop only a near-about-turn (150°+)
+          // is reversing; a phone known to give the way it points is always believed.
+          const swing = off(native, facing === null ? native : facing);
           if (facing === null || (gap > 20000 && speedKmh >= 10)) { next = native; R.on = false; }   // first fix, or back after a long gap
-          else if (off(native, facing) <= 100) { next = native; R.on = moved !== null && off(moved, native) > 120; }
-          else { R.on = true; const back = (native + 180) % 360; if (off(back, facing) <= 60) next = back; }
+          else if (lbHeadingKind === 'facing' || swing <= (afterStop ? 150 : 100)) { next = native; R.on = moved !== null && off(moved, native) > 120; R.travN = 0; }
+          else {
+            R.on = true;
+            const back = (native + 180) % 360;
+            if (off(back, facing) <= 60) next = back;
+            R.travN = (moved !== null && off(moved, native) <= 45) ? R.travN + 1 : 0;
+            if (R.travN >= 3 && lbHeadingKind !== 'facing') lbSetHeadingKind('travel');
+          }
           R.stopped = false; R.stopPos = null;
         } else {
           const moved = lbMovedBearing();
