@@ -25972,6 +25972,20 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     S.breaks.push({ s, e });
     lastWarn = null; save(); return true;
   }
+  // A break taken earlier in the shift, put in after the fact (the "had a break already?" sheet: a long stop,
+  // or times typed in). Unlike addBreak it can go before breaks already logged - addBreak only ever adds
+  // after the last one, which is why a break typed in once a later one was logged wasn't taken. Clipped to
+  // the shift and to now; refused if it overlaps a logged break.
+  function insertBreak(s, e) {
+    if (S.start == null) return false;
+    s = Math.max(s, S.start); e = Math.min(e, Date.now());
+    if (!(e - s >= MIN)) return false;
+    const clash = S.breaks.some(b => s < (b.e == null ? Date.now() : b.e) && e > b.s);
+    if (clash) return false;
+    S.breaks.push({ s, e });
+    S.breaks.sort((x, y) => x.s - y.s);
+    lastWarn = null; save(); return true;
+  }
   function startBreakAt(t) {
     if (S.start == null || onBreak()) return false;
     S.breaks.push({ s: Math.min(earliest(t), Date.now()), e: null });
@@ -26052,6 +26066,7 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
       <button type="button" class="lb-layer-btn" data-lbbreak="start" data-show="working"><span class="lb-ico">☕</span><span class="lb-label">Start break</span></button>
       <button type="button" class="lb-layer-btn" data-lbbreak="end" data-show="break"><span class="lb-ico">▶️</span><span class="lb-label">End break</span></button>
       <button type="button" class="lb-layer-btn" data-lbbreak="early" data-show="working break"><span class="lb-ico">⏪</span><span class="lb-label">I started earlier…</span></button>
+      <button type="button" class="lb-layer-btn" data-lbbreak="past" data-show="working break"><span class="lb-ico">☕</span><span class="lb-label">Add a break I took…</span></button>
       <button type="button" class="lb-layer-btn danger" data-lbbreak="newshift" data-show="working break"><img class="icon-img" src="minus.png" alt=""><span class="lb-label">New shift</span></button>
       <div class="lb-bc-note">NHVR Standard Hours, solo driver. A guide only - not a work diary.</div>`;
   }
@@ -26157,6 +26172,7 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     if (act === 'begin') newShift(Date.now());
     else if (act === 'start') startBreak();
     else if (act === 'end') endBreak();
+    else if (act === 'past') { if (window.lbPastBreak) window.lbPastBreak.open(true); }
     else if (act === 'early') {
       const raw = (typeof window.customPrompt === 'function')
         ? await window.customPrompt('How many minutes had you already been working before you pressed GO? (0 = none)', '0')
@@ -26242,6 +26258,8 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     sectionHtml, paint,
     startBreak, endBreak, newShift, onGo,
     addBreak(s, e) { const ok = addBreak(s, e); paint(); return ok; },
+    insertBreak(s, e) { const ok = insertBreak(s, e); paint(); return ok; },
+    view() { return view(Date.now()); },
     startBreakAt(t) { const ok = startBreakAt(t); paint(); return ok; },
     get state() { return JSON.parse(JSON.stringify(S)); },
     _t: { analyze, view, blocksOf, ruleOk, allOk, workAt, RULES, setState: s => { S = s; }, MIN, HR }
@@ -31073,7 +31091,11 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   }
   function newDefect(item){ defDraft = { item: item || '', sev: 'ok', note: '', media: [] }; }
 
-  function field(id, label, val, type, ph){ return '<label class="drv-f"><span>' + esc(label) + '</span><input id="' + id + '" type="' + (type || 'text') + '" ' + (type === 'number' ? 'inputmode="decimal" step="any"' : 'autocomplete="off"') + ' value="' + esc(val == null ? '' : val) + '" placeholder="' + esc(ph || '') + '"></label>'; }
+  // Number fields are text inputs with the number keypad, not type="number": every keystroke repaints the
+  // sheet and puts the cursor back where it was, and a number input won't say where its cursor is
+  // (selectionStart is null) - so typing the start km / hours sent the cursor back to the start after
+  // every digit.
+  function field(id, label, val, type, ph){ return '<label class="drv-f"><span>' + esc(label) + '</span><input id="' + id + '" type="text" ' + (type === 'number' ? 'inputmode="decimal" ' : '') + 'autocomplete="off" value="' + esc(val == null ? '' : val) + '" placeholder="' + esc(ph || '') + '"></label>'; }
   function checksHtml(ch){
     var n = Object.keys(ch).length;
     return '<div class="drv-sect"><span>Pre-start check</span><em>' + n + ' of ' + CHECKS.length + '</em>' + (n < CHECKS.length ? '<button type="button" class="drv-link" data-a="allok">Everything else OK</button>' : '') + '</div>' +
@@ -34619,6 +34641,131 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
 })();
 
 
+
+/* ========== Break overdue: had a break already? ==========
+   The break clock only knows about breaks pressed on the Shift screen (or taken from the "Having a rest?"
+   pop-up), so a break taken without pressing anything left it shouting BREAK OVERDUE with no way to say
+   "I had it" - and typing one in after the fact wasn't accepted. The app does know where the truck stood
+   still: every stop is logged (lbStops). So when a break is overdue and this shift has stops of 15 min or
+   more that aren't breaks already (not at a tip - waiting there is work), this asks whether one of them was
+   the break: one tap puts it into the break clock. Times can be typed in too. Also opened any time from the
+   Shift screen's "Add a break I took…". */
+(function(){
+  var MIN = 60000, LONG = 15 * MIN, el = null, waved = {}, msgTimer = 0;
+  function esc(v){ return String(v == null ? '' : v).replace(/[&<>"']/g, function(c){ return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+  function hhmm(t){ try { return new Date(t).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }); } catch (e) { return ''; } }
+  function hm(ms){ var m = Math.round(ms / MIN); return m >= 60 ? Math.floor(m / 60) + ' h ' + (m % 60) + ' min' : m + ' min'; }
+  function metres(a, b){ var kx = 111320 * Math.cos(a.lat * Math.PI / 180); return Math.hypot((b.lng - a.lng) * kx, (b.lat - a.lat) * 110540); }
+  function BC(){ return window.lbBreakClock; }
+  function whereIs(rec){
+    var K = window.lbKnownPlaces, p = { lat: +rec.lat, lng: +rec.lng };
+    try { var d = K && K.depot(); if (d && metres(p, d) < 300) return 'the depot'; } catch (e) {}
+    if (rec.street) return rec.street;
+    var recs = (typeof siteRecords !== 'undefined' && siteRecords) || [], best = null, bd = 150;
+    for (var i = 0; i < recs.length; i++) {
+      var la = +recs[i].lat, ln = +recs[i].lng; if (!la || Math.abs(la - p.lat) > 0.0015 || Math.abs(ln - p.lng) > 0.002) continue;
+      var dd = metres(p, { lat: la, lng: ln }); if (dd < bd) { bd = dd; best = recs[i]; }
+    }
+    return best ? String(best.baseStreetLine || best.addressText || '').split(',')[0].replace(/^[\d\s\/A-Za-z-]*?\d+[A-Za-z]?\s+/, '') : '';
+  }
+  function atTip(rec){
+    var K = window.lbKnownPlaces, p = { lat: +rec.lat, lng: +rec.lng };
+    try { return !!(K && K.tips().some(function(t){ return t && isFinite(t.lat) && t.lat != null && metres(p, t) < 300; })); } catch (e) { return false; }
+  }
+  // this shift's stops of 15 min+ that aren't breaks already, newest first
+  function candidates(){
+    var bc = BC(), st = bc && bc.state; if (!st || st.start == null) return [];
+    var sh = window.uxShiftState ? window.uxShiftState() : null;
+    var list = (window.lbStops && sh) ? window.lbStops.list(sh.id) : [];
+    var cur = window.lbStops && window.lbStops.current ? window.lbStops.current() : null;
+    if (cur && Date.now() - cur.t0 >= LONG) list = list.concat([{ t0: cur.t0, dur: Math.round((Date.now() - cur.t0) / 1000), lat: cur.lat, lng: cur.lng, now: true }]);
+    var now = Date.now();
+    return list.filter(function(r){
+      var s = r.t0, e = r.t0 + r.dur * 1000;
+      if (e - s < LONG || e <= st.start || s > now) return false;
+      if ((st.breaks || []).some(function(b){ return s < (b.e == null ? now : b.e) && e > b.s; })) return false;
+      return !atTip(r);
+    }).sort(function(a, b){ return b.t0 - a.t0; }).slice(0, 4);
+  }
+  function build(){
+    if (el) return el;
+    el = document.createElement('div'); el.id = 'lbPastBreak';
+    el.addEventListener('click', function(ev){
+      if (ev.target === el) { close(); return; }
+      var b = ev.target.closest ? ev.target.closest('button') : null; if (!b) return;
+      var a = b.getAttribute('data-a');
+      if (a === 'close') { var v = BC() && BC().view(); if (v && v.a) waved[Math.round(v.a.at / MIN)] = Date.now(); close(); }
+      else if (a === 'stop') add(+b.getAttribute('data-s'), +b.getAttribute('data-e'));
+      else if (a === 'times') {
+        var f = el.querySelector('#lbpbFrom').value, t = el.querySelector('#lbpbTo').value;
+        if (!f || !t) { msg('Put in both times.'); return; }
+        var s = toTime(f), e = toTime(t); if (e <= s) e += 24 * 60 * MIN;
+        add(s, e);
+      }
+    });
+    document.body.appendChild(el);
+    return el;
+  }
+  function toTime(v){
+    var p = v.split(':'), d = new Date(); d.setHours(+p[0], +p[1], 0, 0);
+    var t = d.getTime(); if (t > Date.now() + 60000) t -= 24 * 60 * MIN;   // a time later than now was yesterday
+    return t;
+  }
+  function msg(t){ var m = el && el.querySelector('.lbpb-msg'); if (m) m.textContent = t; }
+  function add(s, e){
+    var bc = BC(); if (!bc || !bc.insertBreak) return;
+    if (!bc.insertBreak(s, e)) { msg('Couldn’t add ' + hhmm(s) + '–' + hhmm(e) + ': it has to be during this shift, before now, and not overlap a break already in.'); return; }
+    var v = bc.view(), short = e - s < LONG;
+    var line = 'Break ' + hhmm(s) + '–' + hhmm(e) + ' added.' + (short ? ' Under 15 min doesn’t count as rest.' : '');
+    if (v.mode === 'working' && v.remaining <= 0) { render(line + ' Still overdue: take at least ' + (v.a.breakMin || 15) + ' min.'); return; }
+    render(line + (v.mode === 'working' ? ' Next break due in ' + hm(v.remaining) + '.' : ''));
+    clearTimeout(msgTimer); msgTimer = setTimeout(close, 2500);
+  }
+  function render(note){
+    var e = build(), c = candidates(), v = BC() && BC().view(), over = v && v.mode === 'working' && v.remaining <= 0;
+    e.innerHTML = '<div class="lbpb-card">' +
+      '<div class="lbpb-t">' + (over ? 'Break overdue - had one already?' : 'Add a break you took') + '</div>' +
+      (c.length ? '<div class="lbpb-s">You stopped here this shift:</div>' + c.map(function(r){
+          var s = r.t0, en = r.t0 + r.dur * 1000, w = whereIs(r);
+          return '<div class="lbpb-li"><div><b>' + esc(hhmm(s)) + '–' + (r.now ? 'now' : esc(hhmm(en))) + '</b> · ' + esc(hm(en - s)) + (w ? '<span>' + esc(w) + '</span>' : '') + '</div>' +
+            '<button type="button" class="go" data-a="stop" data-s="' + s + '" data-e="' + en + '">That was my break</button></div>';
+        }).join('') : '<div class="lbpb-s">No stops of 15 min or more this shift. Put the times in:</div>') +
+      '<div class="lbpb-times"><label>From<input id="lbpbFrom" type="time"></label><label>To<input id="lbpbTo" type="time"></label><button type="button" data-a="times">Add</button></div>' +
+      '<div class="lbpb-msg">' + esc(note || '') + '</div>' +
+      '<div class="lbpb-b"><button type="button" data-a="close">' + (over ? 'Not now' : 'Close') + '</button></div></div>';
+    e.classList.add('on');
+  }
+  function open(fromButton){ render(''); }
+  function close(){ if (el) el.classList.remove('on'); clearTimeout(msgTimer); }
+  function isOpen(){ return !!(el && el.classList.contains('on')); }
+  // overdue + a stop that could have been the break: ask (once per overdue spell; again 20 min after "Not now")
+  setInterval(function(){
+    try {
+      var bc = BC(); if (!bc || !bc.view || isOpen()) return;
+      var v = bc.view(); if (v.mode !== 'working' || v.remaining > 0 || !v.a) return;
+      var k = Math.round(v.a.at / MIN); if (waved[k] && Date.now() - waved[k] < 20 * MIN) return;
+      if (!candidates().length) return;
+      waved[k] = Date.now(); render('');
+    } catch (e) {}
+  }, 5000);
+  var css = document.createElement('style');
+  css.textContent = '#lbPastBreak{position:fixed;inset:0;z-index:100050;display:none;align-items:flex-end;justify-content:center;background:rgba(0,0,0,.45)}' +
+    '#lbPastBreak.on{display:flex}' +
+    '#lbPastBreak .lbpb-card{width:100%;max-width:520px;max-height:82vh;overflow-y:auto;background:var(--ux-bg,#14171c);color:var(--ux-text,#f3f4f6);border-top:3px solid #ef4444;border-radius:var(--ux-rad,6px) var(--ux-rad,6px) 0 0;padding:14px 16px calc(14px + env(safe-area-inset-bottom));box-sizing:border-box}' +
+    '#lbPastBreak .lbpb-t{font-size:18px;font-weight:800;margin-bottom:6px}' +
+    '#lbPastBreak .lbpb-s{font-size:13px;opacity:.8;margin:6px 0}' +
+    '#lbPastBreak .lbpb-li{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 0;border-bottom:1px solid var(--ux-line-2,rgba(255,255,255,.12))}' +
+    '#lbPastBreak .lbpb-li span{display:block;font-size:12px;opacity:.75}' +
+    '#lbPastBreak button{min-height:40px;padding:0 12px;border-radius:var(--ux-rad,6px);border:1px solid var(--ux-line-2,rgba(255,255,255,.2));background:transparent;color:inherit;font-weight:700;font-size:14px;flex:0 0 auto}' +
+    '#lbPastBreak button.go{background:#16a34a;border-color:#16a34a;color:#fff}' +
+    '#lbPastBreak .lbpb-times{display:flex;align-items:flex-end;gap:8px;margin-top:10px;flex-wrap:wrap}' +
+    '#lbPastBreak .lbpb-times label{display:flex;flex-direction:column;font-size:12px;opacity:.9;gap:3px}' +
+    '#lbPastBreak .lbpb-times input{min-height:38px;font-size:16px;background:var(--ux-s2,#0f1216);color:inherit;border:1px solid var(--ux-line-2,rgba(255,255,255,.2));border-radius:var(--ux-rad,6px);padding:0 6px}' +
+    '#lbPastBreak .lbpb-msg{min-height:18px;font-size:13px;margin:10px 0 4px;color:#fbbf24}' +
+    '#lbPastBreak .lbpb-b{display:flex;justify-content:flex-end}';
+  document.head.appendChild(css);
+  window.lbPastBreak = { open: open, close: close, candidates: candidates };
+})();
 
 /* ========== Remember Track-Up across a reload ==========
    The follow button's mode (map stays put / follows you / follows you and turns with you) was never saved,
