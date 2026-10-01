@@ -25986,6 +25986,20 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     S.breaks.sort((x, y) => x.s - y.s);
     lastWarn = null; save(); return true;
   }
+  // A break typed in that hasn't finished yet (its To time is still to come): it runs now, from its start, and
+  // ends itself at the To time (endPlanned, every second) unless ended sooner.
+  function startBreakUntil(s, e) {
+    if (S.start == null || onBreak()) return false;
+    s = Math.min(earliest(s), Date.now());
+    if (!(e > s)) return false;
+    S.breaks.push({ s, e: null, plan: e });
+    lastWarn = null; save(); return true;
+  }
+  function endPlanned(now) {
+    const b = S.breaks[S.breaks.length - 1];
+    if (!b || b.e != null || !b.plan || now < b.plan) return false;
+    b.e = b.plan; delete b.plan; lastWarn = null; save(); return true;
+  }
   function startBreakAt(t) {
     if (S.start == null || onBreak()) return false;
     S.breaks.push({ s: Math.min(earliest(t), Date.now()), e: null });
@@ -25995,7 +26009,7 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     const now = Date.now();
     if (!onBreak()) return;
     const b = S.breaks[S.breaks.length - 1];
-    b.e = now;
+    b.e = now; delete b.plan;
     // A 7 h stop ends the shift: whatever comes next is a fresh 24 h period.
     if (b.e - b.s >= MAJOR_REST) newShift(now);
     lastWarn = null; save();
@@ -26270,6 +26284,7 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     try {
       const now = Date.now();
       if (staleDay(now)) saveAt = 0;
+      endPlanned(now);
       if (S.start != null && now - saveAt > 30000) { S.lastSeen = now; save(); saveAt = now; }
       paint();
     } catch (e) { console.warn('Break clock:', e); }
@@ -26282,6 +26297,7 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     addBreak(s, e) { const ok = addBreak(s, e); paint(); return ok; },
     insertBreak(s, e) { const ok = insertBreak(s, e); paint(); return ok; },
     resetStart(t) { resetStart(t); paint(); },
+    startBreakUntil(s, e) { const ok = startBreakUntil(s, e); paint(); return ok; },
     // Which limit is passed right now and by how much - for saying WHY it's still overdue after a break is
     // put in (one 15 min break clears the 5¼ h limit, but past 7½ h the 8 h one wants 30 min): { title,
     // needMin, haveMin, winH, breakMin } or null when nothing is overdue.
@@ -34739,7 +34755,9 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       else if (a === 'times') {
         var f = el.querySelector('#lbpbFrom').value, t = el.querySelector('#lbpbTo').value;
         if (!f || !t) { msg('Put in both times.'); return; }
-        var s = toTime(f), e = toTime(t); if (e <= s) e += 24 * 60 * MIN;
+        // From: today, or yesterday if that time hasn't come yet; To: on the From's day, or the next if earlier
+        var s = toTime(f), pt = t.split(':'), d = new Date(s); d.setHours(+pt[0], +pt[1], 0, 0);
+        var e = d.getTime(); if (e <= s) e += 24 * 60 * MIN;
         add(s, e);
       }
     });
@@ -34754,7 +34772,21 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   function msg(t){ var m = el && el.querySelector('.lbpb-msg'); if (m) m.textContent = t; }
   function add(s, e){
     var bc = BC(); if (!bc || !bc.insertBreak) return;
-    if (!bc.insertBreak(s, e)) { msg('Couldn’t add ' + hhmm(s) + '–' + hhmm(e) + ': it has to be during this shift, before now, and not overlap a break already in.'); return; }
+    var now = Date.now(), st = bc.state;
+    // A To time still to come is a break going on now (1 Oct: 10:46-11:18 typed in before 11:18 was cut short
+    // at "now", left under 15 min, so it didn't count and the break stayed overdue). It runs from the From
+    // time and ends itself at the To time.
+    if (e > now + MIN) {
+      if (s > now) { msg('That break hasn’t started yet - put it in once it has, or press Start break on the Shift screen.'); return; }
+      if (!bc.startBreakUntil || !bc.startBreakUntil(s, e)) { msg('Couldn’t start that break: one may already be running, or it starts before the shift.'); return; }
+      var b0 = bc.state.breaks[bc.state.breaks.length - 1];
+      render('On a break since ' + hhmm(b0.s) + ', until ' + hhmm(e) + '. It counts as rest once it’s 15 min; press Back to work on the Shift screen to end it sooner.');
+      clearTimeout(msgTimer); msgTimer = setTimeout(close, 4000);
+      return;
+    }
+    if (!bc.insertBreak(s, e)) { msg('Couldn’t add ' + hhmm(s) + '–' + hhmm(e) + ': it has to be during this shift and not overlap a break already in.'); return; }
+    // say what was actually saved (clipped to the shift start)
+    s = Math.max(s, st && st.start != null ? st.start : s); e = Math.min(e, now);
     var v = bc.view(), short = e - s < LONG;
     var line = 'Break ' + hhmm(s) + '–' + hhmm(e) + ' added.' + (short ? ' Under 15 min doesn’t count as rest.' : '');
     if (v.mode === 'working' && v.remaining <= 0) {
