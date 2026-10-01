@@ -22751,9 +22751,24 @@ body.stream-slr .lb-layers-head .icon-img { filter: brightness(0); }
     return (h ? h + ':' : '') + pad(m) + ':' + pad(s);
   }
 
+  // The timer is for the run being driven: switchTo (called by the side menu's shift sheet when the run on the
+  // map changes and the truck is driving it) parks the time so far against the run it was on and carries on
+  // that run's own time - going back to a run picks its time up again. Kept for the day (runs: key -> ms).
+  function todayKey() { const d = new Date(); return d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate(); }
   window.lbRunTimer = {
     start(label) {
-      timer = { running: true, startedAt: Date.now(), accrued: 0, label: label || '' };
+      timer = { running: true, startedAt: Date.now(), accrued: 0, label: label || '', key: '', runs: (timer.day === todayKey() && timer.runs) || {}, day: todayKey() };
+      saveTimer(); paintTimer();
+    },
+    switchTo(key, label) {
+      if (!key) return;
+      if (timer.day !== todayKey()) { timer.runs = {}; timer.day = todayKey(); }
+      timer.runs = timer.runs || {};
+      if (!timer.key) { timer.key = key; timer.label = label || timer.label; saveTimer(); paintTimer(); return; }   // (GO just started it on this run)
+      if (timer.key === key) { if (label && timer.label !== label) { timer.label = label; saveTimer(); } return; }
+      timer.runs[timer.key] = elapsedMs();
+      // (driving a new run means it's running, whatever the last one was doing)
+      timer = Object.assign(timer, { key: key, label: label || key, accrued: timer.runs[key] || 0, startedAt: Date.now(), running: true });
       saveTimer(); paintTimer();
     },
     pause() {
@@ -22773,14 +22788,14 @@ body.stream-slr .lb-layers-head .icon-img { filter: brightness(0); }
       timer = { running: false, startedAt: 0, accrued: 0, label: timer.label };
       saveTimer(); paintTimer();
     },
-    get state() { return { running: timer.running, ms: elapsedMs(), label: timer.label }; }
+    get state() { return { running: timer.running, ms: elapsedMs(), label: timer.label, key: timer.key || '' }; }
   };
 
   function timerHtml() {
     const running = timer.running;
-    const sub = timer.label ? esc(timer.label) : (running || timer.accrued ? 'Run timer' : 'Not started');
+    const sub = timer.label ? 'Time on ' + esc(timer.label) : (running || timer.accrued ? 'Run timer' : 'Not started - starts with GO, follows the run you drive');
     return `
-      <div class="lb-layers-sect">Run timer</div>
+      <div class="lb-layers-sect">Current run</div>
       <div class="lb-timer ${running ? 'running' : ''}">
         <div class="lb-timer-read" id="lbTimerRead">${fmt(elapsedMs())}</div>
         <div class="lb-timer-sub">${sub}</div>
@@ -34828,6 +34843,196 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
 })();
 
 
+
+/* ========== Side menu: screen buttons across the top, and the shift sheet while on shift ==========
+   Home / Map / Streets / Search are a row of buttons at the top of the side menu (they were the last
+   section, at the bottom). Once a shift is started, a live shift sheet sits under them: run, time on the
+   current run, worked / driving time, km, bins, bins per hour and per km, the load since the last tip,
+   breaks taken and the next one due, with Shift screen / break / run sheet buttons. The rest of the menu
+   follows. Also keeps the run timer on the run actually being driven (lbRunTimer.switchTo).
+   Injected into the menu the drawer draws (like the council requests row), so the drawer itself is
+   unchanged. */
+(function(){
+  var GF = {};
+  function g(n){ try { return (GF[n] || (GF[n] = new Function('return typeof ' + n + ' === "undefined" ? undefined : ' + n)))(); } catch (e) { return undefined; } }
+  function $(id){ return document.getElementById(id); }
+  function esc(v){ return String(v == null ? '' : v).replace(/[&<>"']/g, function(c){ return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+  function lsGet(k, d){ try { var v = JSON.parse(localStorage.getItem(k)); return v == null ? d : v; } catch (e) { return d; } }
+  function lsSet(k, v){ try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
+  function hhmm(t){ try { return new Date(t).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }); } catch (e) { return ''; } }
+  function hm(ms){ var m = Math.max(0, Math.floor(ms / 60000)); return Math.floor(m / 60) + ':' + String(m % 60).padStart(2, '0'); }
+  function hms(ms){ var t = Math.max(0, Math.floor(ms / 1000)), h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), s = t % 60; return (h ? h + ':' : '') + String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0'); }
+  var ICON = { Garbage: 'bin.png', Recycling: 'recycle.png', SummerRecycling: 'recycle.png', FOGO: 'fogo.png' };
+  var NAME = { Garbage: 'Garbage', Recycling: 'Recycling', SummerRecycling: 'Summer recycling', FOGO: 'FOGO', StreetGarbage: 'Street litter', StreetRecycling: 'Street recycling' };
+
+  // ---- driving vs stopped time, per shift (sampled every 2 s) ----
+  var mv = lsGet('lbShiftMove', null), mvAt = 0;
+  function moveTick(sh){
+    var now = Date.now();
+    if (!mv || mv.id !== sh.id) { mv = { id: sh.id, drive: 0, stop: 0 }; mvAt = 0; }
+    var dt = mvAt ? Math.min(10000, now - mvAt) : 0; mvAt = now;
+    var v = +g('currentMapSpeedKmh') || 0;
+    if (dt) { if (v >= 3) mv.drive += dt; else mv.stop += dt; }
+    if (!mv.saved || now - mv.saved > 30000) { mv.saved = now; lsSet('lbShiftMove', mv); }
+  }
+
+  // ---- the run being driven, for the run timer ----
+  var cand = null;
+  function runNow(){
+    var tab = g('activeTab'); if (tab !== 'map' && tab !== 'hud') return null;
+    var sel = g('selectedRunsSet'), st = g('activeFilterStream'); if (!sel || !sel.size || !st) return null;
+    // The shift's own run is kept on the map beside any other run of the stream being helped on (keepOnMap in the
+    // shift block), so with two showing the current run is the other one.
+    var runs = Array.from(sel).map(function(x){ return String(x).toUpperCase(); });
+    if (runs.length > 1) { var sh = window.uxShiftState ? window.uxShiftState() : null, mine = sh && sh.run ? String(sh.run).toUpperCase() : ''; runs = runs.filter(function(x){ return x !== mine; }); }
+    if (runs.length !== 1) return null;
+    var run = runs[0], wk = String(g('activeFilterWeek') || ''), day = String(g('activeFilterDay') || '');
+    return { key: [st, day, wk, run].join('|'), stream: st, run: run, week: wk, label: (NAME[st] || st) + ' ' + run + (wk && /^(Recycling|FOGO)$/.test(st) ? ' ' + wk : '') };
+  }
+  function timerTick(sh){
+    var T = window.lbRunTimer; if (!T || !T.switchTo) return;
+    var r = runNow(), now = Date.now(), v = +g('currentMapSpeedKmh') || 0;
+    if (!r) { cand = null; return; }
+    var st = T.state;
+    if (st.key === r.key) { cand = null; return; }
+    // a run that's been on the map 15 s with the truck driving in that time is the run being driven (not one
+    // just looked at)
+    if (!cand || cand.key !== r.key) cand = { key: r.key, at: now, moved: false };
+    if (v >= 5) cand.moved = true;
+    if (now - cand.at < 15000 || !cand.moved) return;
+    if (!st.running && !st.key && !st.ms) T.start(r.label);
+    T.switchTo(r.key, r.label); cand = null;
+  }
+
+  // ---- the sheet ----
+  function screensHtml(){
+    var cur = g('activeTab');
+    var b = function(act, tab, ico, label){ return '<button type="button" class="lbss-scr' + (cur === tab ? ' on' : '') + '" data-act="' + act + '">' + ico + '<span>' + label + '</span></button>'; };
+    var svgHome = '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" aria-hidden="true"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9v10.5a1 1 0 0 0 1 1h4v-6h4v6h4a1 1 0 0 0 1-1V9"/></svg>';
+    return b('go-home', 'welcome', svgHome, 'Home') + b('go-map', 'map', '<img class="icon-img" src="map.png" alt="">', 'Map') +
+      b('go-hud', 'hud', '<img class="icon-img" src="drive.png" alt="">', 'Streets') + b('go-search', 'search', '<img class="icon-img" src="search.png" alt="">', 'Search');
+  }
+  function stat(v, l){ return '<div class="lbss-st"><b>' + esc(v) + '</b><span>' + esc(l) + '</span></div>'; }
+  function liveHtml(sh){
+    var R = window.uxShiftRates ? window.uxShiftRates() : null, now = Date.now();
+    var T = window.lbRunTimer ? window.lbRunTimer.state : null;
+    var runIco = ICON[sh.stream] ? '<img class="icon-img lbss-ri" src="' + ICON[sh.stream] + '" alt="">' : '';
+    var h = '<div class="lbss-top">' + runIco + '<b>' + esc(sh.run ? String(sh.run).toUpperCase() + (sh.week ? ' ' + sh.week : '') : (NAME[sh.stream] || 'Shift')) + '</b>' +
+      '<span>' + esc([sh.driver, sh.truck].filter(Boolean).join(' · ')) + ' · since ' + esc(hhmm(sh.start)) + '</span></div>';
+    if (T && (T.running || T.ms)) h += '<div class="lbss-run"><span>' + esc(T.label ? 'On ' + T.label : 'This run') + '</span><b>' + esc(hms(T.ms)) + '</b>' + (T.running ? '' : '<i>paused</i>') + '</div>';
+    if (R) {
+      h += '<div class="lbss-grid">' +
+        stat(hm(R.worked), 'worked') + stat(mv && mv.id === sh.id ? hm(mv.drive) : '–', 'driving') + stat(R.km.toFixed(1), 'km') +
+        stat(R.bins, 'bins') + stat(R.perHr == null ? '–' : Math.round(R.perHr), 'bins / h') + stat(R.perKm == null ? '–' : R.perKm.toFixed(1), 'bins / km') +
+        '</div>';
+      h += '<div class="lbss-line">' + (R.recent == null ? 'Last 30 min: –' : 'Last 30 min: ' + R.recent + ' bins / h') + (mv && mv.id === sh.id ? ' · stopped ' + hm(mv.stop) : '') + '</div>';
+    }
+    try {
+      var rs = window.lbRunSheet && window.lbRunSheet._t.get(sh.id);
+      if (rs && rs.cur) h += '<div class="lbss-line">Load now: ' + rs.cur.n + ' bins' + (rs.cur.first ? ' since ' + hhmm(rs.cur.first.t) : '') + ' · ' + (rs.loads || []).length + ' tipped</div>';
+    } catch (e) {}
+    // breaks
+    var BC = window.lbBreakClock, v = null, st = null;
+    try { v = BC && BC.view ? BC.view() : null; st = BC && BC.state; } catch (e) {}
+    if (v) {
+      var nb = v.mode === 'break' ? '<b class="rest">On a break ' + hm(v.elapsed) + '</b>' + (v.counts ? ' · counts as rest' : ' · ' + hm(v.toGo) + ' to go')
+        : v.mode === 'working' ? (v.remaining <= 0 ? '<b class="over">Break overdue ' + hm(-v.remaining) + '</b> · take ' + (v.a && v.a.breakMin || 15) + ' min'
+          : 'Next break in <b>' + hm(v.remaining) + '</b>' + (v.a && v.a.breakMin ? ' · ' + v.a.breakMin + ' min' : '')) : 'Break clock not started';
+      h += '<div class="lbss-sec">Breaks</div><div class="lbss-line">' + nb + '</div>';
+      var br = (st && st.breaks || []).filter(function(b){ return (b.e == null ? now : b.e) > sh.start - 3 * 3600000; });
+      if (br.length) h += '<div class="lbss-line lbss-brs">' + br.map(function(b){ var e = b.e == null ? now : b.e; return esc(hhmm(b.s)) + '–' + (b.e == null ? 'now' : esc(hhmm(e))) + ' (' + Math.round((e - b.s) / 60000) + ' min)'; }).join(', ') +
+        ' · ' + Math.round(br.reduce(function(t, b){ return t + ((b.e == null ? now : b.e) - b.s); }, 0) / 60000) + ' min in all</div>';
+      else h += '<div class="lbss-line">No breaks yet</div>';
+    }
+    return h;
+  }
+  function sheetHtml(sh){
+    var onBrk = false; try { var s0 = window.lbBreakClock && window.lbBreakClock.state, b = s0 && s0.breaks && s0.breaks[s0.breaks.length - 1]; onBrk = !!(b && b.e == null); } catch (e) {}
+    return '<div class="lbss-live">' + liveHtml(sh) + '</div>' +
+      '<div class="lbss-acts"><button type="button" data-lbss="shift">Shift screen</button>' +
+      '<button type="button" data-lbss="brk" class="' + (onBrk ? 'go' : '') + '">' + (onBrk ? 'Back to work' : 'Start break') + '</button>' +
+      (window.lbRunSheet ? '<button type="button" data-lbss="rs">Run sheet</button>' : '') + '</div>';
+  }
+  var lastPaint = 0;
+  function inject(){
+    var body = $('lbDrawerBody'); if (!body) return;
+    var isMenu = !!body.querySelector('[data-act="drive"]');
+    var scr = $('lbssScreens'), sheet = $('lbShiftSheet');
+    if (!isMenu) { return; }
+    if (!scr) {
+      scr = document.createElement('div'); scr.id = 'lbssScreens'; scr.className = 'lbss-screens';
+      body.insertBefore(scr, body.firstChild);
+    }
+    var sh = window.uxShiftState ? window.uxShiftState() : null;
+    var scrHtml = screensHtml(); if (scr.innerHTML !== scrHtml) scr.innerHTML = scrHtml;
+    // the old Screens section at the bottom goes - the row above does it
+    body.querySelectorAll('.lb-sect-details > summary').forEach(function(su){ if ((su.textContent || '').trim() === 'Screens') su.parentNode.style.display = 'none'; });
+    if (!sh) { if (sheet) sheet.remove(); return; }
+    if (!sheet) {
+      sheet = document.createElement('div'); sheet.id = 'lbShiftSheet'; sheet.className = 'lbss';
+      scr.parentNode.insertBefore(sheet, scr.nextSibling);
+      sheet.innerHTML = sheetHtml(sh); lastPaint = Date.now(); return;
+    }
+    if (Date.now() - lastPaint >= 1000) {
+      lastPaint = Date.now();
+      var live = sheet.querySelector('.lbss-live'), lh = liveHtml(sh);
+      if (live && live.innerHTML !== lh) live.innerHTML = lh;
+      var bb = sheet.querySelector('[data-lbss="brk"]');
+      if (bb) { var onB = (function(){ try { var s0 = window.lbBreakClock.state, b = s0.breaks[s0.breaks.length - 1]; return !!(b && b.e == null); } catch (e) { return false; } })(); bb.textContent = onB ? 'Back to work' : 'Start break'; bb.classList.toggle('go', onB); }
+    }
+  }
+  document.addEventListener('click', function(ev){
+    var b = ev.target && ev.target.closest ? ev.target.closest('[data-lbss]') : null; if (!b) return;
+    ev.preventDefault();
+    var a = b.getAttribute('data-lbss'), sh = window.uxShiftState ? window.uxShiftState() : null;
+    if (a === 'brk') {
+      var BC = window.lbBreakClock; if (!BC) return;
+      var v = BC.view ? BC.view() : null;
+      if (v && v.mode === 'break') BC.endBreak(); else BC.startBreak();
+      try { BC.paint(); } catch (e) {}
+      lastPaint = 0; inject(); return;
+    }
+    if (typeof window.lbCloseDrawer === 'function') window.lbCloseDrawer();
+    if (a === 'shift' && window.uxShiftOpen) window.uxShiftOpen();
+    if (a === 'rs' && window.lbRunSheet && sh) window.lbRunSheet.open('main', sh.id);
+  });
+  setInterval(function(){
+    try {
+      var sh = window.uxShiftState ? window.uxShiftState() : null;
+      if (sh) { moveTick(sh); timerTick(sh); }
+      if (document.body.classList.contains('lb-drawer-open')) inject();
+    } catch (e) {}
+  }, 500);
+  window.lbShiftSheet = { _t: { runNow: runNow, inject: inject, liveHtml: liveHtml } };
+
+  var css = document.createElement('style');
+  css.textContent =
+    '#lbssScreens{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin:2px 0 8px}' +
+    '#lbssScreens .lbss-scr{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;min-height:54px;padding:6px 2px;border:1px solid var(--ux-line-2,rgba(255,255,255,.15));border-radius:var(--ux-rad,6px);background:transparent;color:var(--ux-text,#f1f5f9);font-size:12px;font-weight:700;cursor:pointer}' +
+    '#lbssScreens .lbss-scr .icon-img{width:22px;height:22px;filter:brightness(0) invert(1)}' +
+    'body.ux-light #lbssScreens .lbss-scr .icon-img{filter:none}' +
+    '#lbssScreens .lbss-scr.on{border-color:var(--ui-accent,#b5451b);background:color-mix(in srgb,var(--ui-accent,#b5451b) 22%,transparent)}' +
+    '#lbShiftSheet{border:1px solid var(--ux-line-2,rgba(255,255,255,.15));border-left:3px solid var(--ui-accent,#b5451b);border-radius:var(--ux-rad,6px);padding:10px 10px 8px;margin:0 0 10px;color:var(--ux-text,#f1f5f9)}' +
+    '#lbShiftSheet .lbss-top{display:flex;align-items:baseline;flex-wrap:wrap;gap:4px 8px}' +
+    '#lbShiftSheet .lbss-top b{font-size:20px;font-weight:800}' +
+    '#lbShiftSheet .lbss-top span{font-size:12px;opacity:.75}' +
+    '#lbShiftSheet .lbss-ri{width:20px;height:20px;align-self:center}' +
+    '#lbShiftSheet .lbss-run{display:flex;align-items:baseline;gap:8px;margin-top:6px;font-size:13px}' +
+    '#lbShiftSheet .lbss-run b{font-size:18px;font-variant-numeric:tabular-nums}' +
+    '#lbShiftSheet .lbss-run i{font-style:normal;font-size:11px;opacity:.7}' +
+    '#lbShiftSheet .lbss-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:8px}' +
+    '#lbShiftSheet .lbss-st{display:flex;flex-direction:column;padding:5px 6px;background:var(--ux-s2,rgba(255,255,255,.05));border-radius:var(--ux-rad,4px)}' +
+    '#lbShiftSheet .lbss-st b{font-size:17px;font-weight:800;font-variant-numeric:tabular-nums}' +
+    '#lbShiftSheet .lbss-st span{font-size:11px;opacity:.75}' +
+    '#lbShiftSheet .lbss-line{font-size:12.5px;margin-top:5px;opacity:.92}' +
+    '#lbShiftSheet .lbss-line b.over{color:#ef4444}#lbShiftSheet .lbss-line b.rest{color:#22c55e}' +
+    '#lbShiftSheet .lbss-brs{opacity:.75}' +
+    '#lbShiftSheet .lbss-sec{margin-top:9px;font-size:11px;font-weight:800;letter-spacing:.1em;text-transform:uppercase;opacity:.6}' +
+    '#lbShiftSheet .lbss-acts{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:10px}' +
+    '#lbShiftSheet .lbss-acts button{min-height:40px;padding:0 4px;border:1px solid var(--ux-line-2,rgba(255,255,255,.18));border-radius:var(--ux-rad,6px);background:transparent;color:inherit;font-size:13px;font-weight:700;cursor:pointer}' +
+    '#lbShiftSheet .lbss-acts button.go{background:#16a34a;border-color:#16a34a;color:#fff}';
+  document.head.appendChild(css);
+})();
 
 /* ========== Break overdue: had a break already? ==========
    The break clock only knows about breaks pressed on the Shift screen (or taken from the "Having a rest?"
