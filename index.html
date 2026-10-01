@@ -27135,6 +27135,10 @@ body.ux2 .ux-gta-price input{width:76px;min-height:38px;padding:0 8px;font-size:
 #uxShiftSummary .uxss-net.neg b{color:#e05252}
 #uxShiftSummary .uxss-tot{margin-top:2px;color:#c9c9c9}
 #uxShiftSummary .uxss-tot b{font-size:22px;color:#fff}
+#uxShiftSummary .uxss-got em{font-size:18px}
+#uxShiftSummary .uxss-btns{display:flex;gap:8px;margin-top:14px}
+#uxShiftSummary .uxss-btns button{flex:1;margin-top:0}
+#uxShiftSummary .uxss-dl{min-height:48px;border:1px solid rgba(255,255,255,.35);border-radius:var(--ux-rad, 4px);background:transparent;color:#fff;font-size:16px;font-weight:800;cursor:pointer}
 #uxShiftSummary .uxss-ok{display:block;width:100%;min-height:48px;margin-top:14px;border:0;border-radius:var(--ux-rad, 4px);background:#fff;color:#000;font-size:16px;font-weight:800;cursor:pointer}
 /* Wanted stars and money coming off (diesel, fines): a stack just under the top bar, top right */
 #uxGtaStack{position:fixed;right:10px;top:90px;z-index:29000;display:flex;flex-direction:column;align-items:flex-end;gap:2px;pointer-events:none}
@@ -34021,6 +34025,14 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     if (!S.led || S.led.shift !== sh.id) S.led = { shift: sh.id, start: sh.start, cash0: S.cash, bins: 0, binsN: 0, bonus: 0, bonusN: 0, pick: 0, pickN: 0, diesel: 0, km: 0, litres: 0, fines: 0, fineList: [], shown: false };
     return S.led;
   }
+  // Every pickup and bonus this shift, for the summary and its download: { t, k: cash|armour|pkg|item|bonus,
+  // what, amt, lat, lng }. (Kept in the shift's ledger, so it goes when the next shift starts.)
+  function logGot(k, what, amt){
+    var L = led(); if (!L) return;
+    if (!Array.isArray(L.got)) L.got = [];
+    var p = here();
+    L.got.push({ t: Date.now(), k: k, what: what, amt: amt || 0, lat: p ? +p.lat.toFixed(6) : null, lng: p ? +p.lng.toFixed(6) : null });
+  }
   // why: 'bins' (n = how many), 'bonus' (milestones, runs done), 'pick' (pickups)
   function addCash(n, why, count){
     S.cash += n; cashFlash = Date.now();
@@ -34144,16 +34156,16 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     drop(p);
     if (p.k === 'cash') {
       var amt = [100, 250, 250, 500, 500, 1000][Math.floor(Math.random() * 6)];
-      addCash(amt, 'pick'); feed('cash', 'Cash <em>+' + money(amt) + '</em>'); play('cash');
+      addCash(amt, 'pick'); logGot('cash', 'Cash', amt); feed('cash', 'Cash <em>+' + money(amt) + '</em>'); play('cash');
     } else if (p.k === 'armour') {
-      S.armour = Math.min(100, S.armour + 25); feed('armour', 'Body armour <em>+25</em>', '#3d8fd6'); play('armour');
+      S.armour = Math.min(100, S.armour + 25); logGot('armour', 'Body armour +25', 0); feed('armour', 'Body armour <em>+25</em>', '#3d8fd6'); play('armour');
     } else if (p.k === 'pkg') {
-      S.pk = Math.min(100, S.pk + 1); addCash(100, 'pick');
+      S.pk = Math.min(100, S.pk + 1); addCash(100, 'pick'); logGot('pkg', 'Hidden package ' + S.pk + ' of 100', 100);
       feed('pkg', 'Hidden package <em>' + S.pk + ' of 100</em>', '#f0c850');
       if (S.pk % 10 === 0) big('Hidden packages', S.pk + ' of 100 found', 'gold', 'mission'); else play('pickup');
     } else {
       var name = JUNK[Math.floor(Math.random() * JUNK.length)], val = 20 + Math.floor(Math.random() * 29) * 10;
-      S.found[name] = (S.found[name] || 0) + 1; addCash(val, 'pick');
+      S.found[name] = (S.found[name] || 0) + 1; addCash(val, 'pick'); logGot('item', name, val);
       feed('item', 'Found: ' + esc(name) + ' <em>+' + money(val) + '</em>', '#c77dff'); play('pickup');
     }
     save();
@@ -34177,12 +34189,12 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       addCash(added * 10, 'bins', added);
       var after = S.bins.length;
       if (Math.floor(after / 100) > Math.floor(before / 100)) {
-        addCash(1000, 'bonus');
+        addCash(1000, 'bonus'); logGot('bonus', Math.floor(after / 100) * 100 + ' bins', 1000);
         big(Math.floor(after / 100) * 100 + ' bins', 'Respect +  ' + money(1000), 'gold', 'mission');
       }
     }
     if (runKey && !S.done[runKey]) {
-      S.done[runKey] = 1; addCash(2500, 'bonus');
+      S.done[runKey] = 1; addCash(2500, 'bonus'); logGot('bonus', 'Mission passed: run ' + HT.run, 2500);
       setTimeout(function(){ big('Mission passed', HT.run + '  ' + money(2500), 'gold', 'mission'); }, added && Math.floor(S.bins.length / 100) > Math.floor(before / 100) ? 3600 : 0);
     }
     if (added || runKey) save();
@@ -34429,18 +34441,67 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       row('Bins emptied', L.binsN + ' \u00d7 $10', L.bins) +
       (L.bonusN ? row('Milestones and runs done', L.bonusN + (L.bonusN === 1 ? ' bonus' : ' bonuses'), L.bonus) : '') +
       (L.pickN ? row('Pickups', L.pickN + ' picked up on the way', L.pick) : '') +
+      gotHtml(L) +
       '<div class="uxss-sec">Lost</div>' +
       row('Diesel', L.km.toFixed(1) + ' km \u00b7 ' + L.litres.toFixed(1) + ' L' + (L.rate ? ' at ' + L.rate.toFixed(1) + ' L/100km' : '') + (L.price ? ', $' + L.price.toFixed(2) + '/L' : ''), L.diesel, true) +
       (L.fineList.length ? L.fineList.map(function(f){ return row('Speeding fine', f.over + ' km/h over in a ' + f.lim + ' at ' + hm2(f.t), f.amt, true); }).join('') : '<div class="uxss-none">No speeding fines. Nice.</div>') +
       '<div class="uxss-net' + (net < 0 ? ' neg' : '') + '"><span>This shift</span><b>' + (net < 0 ? '-' : '+') + money(Math.abs(net)) + '</b></div>' +
       '<div class="uxss-tot"><span>Cash now</span><b>' + money(S.cash) + '</b></div>' +
-      '<button type="button" class="uxss-ok">Done</button></div>';
+      '<div class="uxss-btns"><button type="button" class="uxss-dl">Download</button><button type="button" class="uxss-ok">Done</button></div></div>';
     var el = document.createElement('div'); el.id = 'uxShiftSummary'; el.innerHTML = h;
-    el.addEventListener('click', function(ev){ if (ev.target === el || (ev.target.closest && ev.target.closest('.uxss-ok'))) el.remove(); });
+    el.addEventListener('click', function(ev){
+      if (ev.target.closest && ev.target.closest('.uxss-dl')) { downloadSummary(L); return; }
+      if (ev.target === el || (ev.target.closest && ev.target.closest('.uxss-ok'))) el.remove();
+    });
     var old = $('uxShiftSummary'); if (old) old.remove();
     document.body.appendChild(el);
     play(net >= 0 ? 'mission' : 'fine');
   }
+  // What was picked up, grouped: hidden packages (and the running total of 100), junk by name, cash, armour,
+  // bonuses. Shifts from before this was kept have no list - just the totals above.
+  var GOT_LABEL = { pkg: 'Hidden packages', item: 'Found', cash: 'Cash', armour: 'Body armour', bonus: 'Bonuses' };
+  function gotGroups(L){
+    var g0 = {}, list = Array.isArray(L.got) ? L.got : [];
+    list.forEach(function(x){ var k = (x.k === 'item' || x.k === 'bonus') ? x.k + ':' + x.what : x.k; (g0[k] = g0[k] || { k: x.k, what: x.what, n: 0, amt: 0, last: x }).n++; g0[k].amt += x.amt || 0; g0[k].last = x; });
+    var order = ['pkg', 'item', 'cash', 'armour', 'bonus'];
+    return Object.keys(g0).map(function(k){ return g0[k]; }).sort(function(a, b){ return order.indexOf(a.k) - order.indexOf(b.k) || b.n - a.n; });
+  }
+  function gotHtml(L){
+    var gs = gotGroups(L); if (!gs.length) return '';
+    return '<div class="uxss-sec">Collected</div>' + gs.map(function(x){
+      var label = x.k === 'pkg' ? 'Hidden packages' : x.k === 'item' ? x.what : x.k === 'bonus' ? x.what : GOT_LABEL[x.k];
+      var sub = x.k === 'pkg' ? x.n + ' this shift · ' + S.pk + ' of 100 found so far' : x.k === 'bonus' ? '' : '× ' + x.n;
+      if (x.k === 'bonus' && x.n > 1) sub = '× ' + x.n;
+      return '<div class="uxss-r uxss-got"><span><b>' + esc(label) + '</b>' + (sub ? '<i>' + esc(sub) + '</i>' : '') + '</span><em>' + (x.amt ? '+' + money(x.amt) : '') + '</em></div>';
+    }).join('');
+  }
+  // A CSV of the shift's money and everything collected (time, what, $, where) - shared through the phone's
+  // share sheet where it can be, else downloaded.
+  function downloadSummary(L){
+    var q = function(v){ v = v == null ? '' : String(v); return /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; };
+    var day = new Date(L.start || Date.now()), ds = day.getFullYear() + '-' + String(day.getMonth() + 1).padStart(2, '0') + '-' + String(day.getDate()).padStart(2, '0');
+    var made = L.bins + L.bonus + L.pick, lost = L.diesel + L.fines;
+    var rows = [['Lukez Bunz shift summary', ds], [], ['Section', 'What', 'Detail', 'Amount ($)'],
+      ['Made', 'Bins emptied', L.binsN + ' x $10', L.bins], ['Made', 'Milestones and runs done', L.bonusN, L.bonus], ['Made', 'Pickups', L.pickN, L.pick],
+      ['Lost', 'Diesel', L.km.toFixed(1) + ' km, ' + L.litres.toFixed(1) + ' L', -(+L.diesel.toFixed(2))]];
+    (L.fineList || []).forEach(function(f){ rows.push(['Lost', 'Speeding fine', f.over + ' km/h over in a ' + f.lim + ' at ' + hm2(f.t), -f.amt]); });
+    rows.push(['Total', 'This shift', '', +(made - lost).toFixed(2)], ['Total', 'Cash now', '', Math.round(S.cash)], ['Total', 'Hidden packages found so far', S.pk + ' of 100', '']);
+    var list = Array.isArray(L.got) ? L.got : [];
+    if (list.length) {
+      rows.push([], ['Time', 'Collected', 'Type', 'Amount ($)', 'Lat', 'Lng']);
+      list.forEach(function(x){ rows.push([hm2(x.t), x.what, GOT_LABEL[x.k] || x.k, x.amt || '', x.lat, x.lng]); });
+    }
+    var text = rows.map(function(r){ return r.map(q).join(','); }).join('\n'), name = 'shift-summary-' + ds + '.csv';
+    try {
+      var file = new File([text], name, { type: 'text/csv' });
+      if (navigator.canShare && navigator.canShare({ files: [file] })) { navigator.share({ files: [file], title: 'Shift summary ' + ds }).catch(function(){}); return; }
+    } catch (e) {}
+    try {
+      var a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], { type: 'text/csv' })); a.download = name;
+      document.body.appendChild(a); a.click(); setTimeout(function(){ URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+    } catch (e) {}
+  }
+  window.uxGtaLastSummary = function(){ if (S.led) shiftSummary(S.led); };
   function shiftEndTick(){
     var sh = null; try { sh = window.uxShiftState ? window.uxShiftState() : null; } catch (e) {}
     if (sh && sh.id) { lastShiftId = sh.id; led(); return; }
