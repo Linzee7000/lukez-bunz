@@ -22662,105 +22662,21 @@ body.stream-slr .lb-layers-head .icon-img { filter: brightness(0); }
     if (ev.key === 'Escape' && document.body.classList.contains('lb-layers-open')) closeLayers();
   });
 
-  /* ================= RUN TIMER ======================================
-     Started by the Drive wizard's GO button alongside the snail trail,
-     so "how long has this run taken?" is answerable without a separate
-     stopwatch. Survives a reload - the start time and accumulated
-     elapsed are kept in localStorage, not just in memory. */
-  const TKEY = 'lukezBunzRunTimer';
-  let timer = { running: false, startedAt: 0, accrued: 0, label: '' };
-  try {
-    const raw = localStorage.getItem(TKEY);
-    if (raw) timer = Object.assign(timer, JSON.parse(raw));
-  } catch (e) {}
-
-  function saveTimer() {
-    try { localStorage.setItem(TKEY, JSON.stringify(timer)); } catch (e) {}
-  }
-  function elapsedMs() {
-    return timer.accrued + (timer.running ? (Date.now() - timer.startedAt) : 0);
-  }
-  function fmt(ms) {
-    const t = Math.max(0, Math.floor(ms / 1000));
-    const h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), s = t % 60;
-    const pad = n => String(n).padStart(2, '0');
-    return (h ? h + ':' : '') + pad(m) + ':' + pad(s);
-  }
-
-  // The timer is for the run being driven: switchTo (called by the side menu's shift sheet when the run on the
-  // map changes and the truck is driving it) parks the time so far against the run it was on and carries on
-  // that run's own time - going back to a run picks its time up again. Kept for the day (runs: key -> ms).
-  function todayKey() { const d = new Date(); return d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate(); }
+  /* ================= GO ===========================================
+     There was a run timer here, started by the Drive wizard's GO. It's gone - the shift is the one clock (it
+     disagreed with the shift's own times). lbRunTimer.start() stays only as the signal the break clock listens
+     for when GO is pressed (see the break clock's wiring). */
+  try { localStorage.removeItem('lukezBunzRunTimer'); } catch (e) {}
   window.lbRunTimer = {
-    start(label) {
-      timer = { running: true, startedAt: Date.now(), accrued: 0, label: label || '', key: '', runs: (timer.day === todayKey() && timer.runs) || {}, day: todayKey() };
-      saveTimer(); paintTimer();
-    },
-    switchTo(key, label) {
-      if (!key) return;
-      if (timer.day !== todayKey()) { timer.runs = {}; timer.day = todayKey(); }
-      timer.runs = timer.runs || {};
-      if (!timer.key) { timer.key = key; timer.label = label || timer.label; saveTimer(); paintTimer(); return; }   // (GO just started it on this run)
-      if (timer.key === key) { if (label && timer.label !== label) { timer.label = label; saveTimer(); } return; }
-      timer.runs[timer.key] = elapsedMs();
-      // (driving a new run means it's running, whatever the last one was doing)
-      timer = Object.assign(timer, { key: key, label: label || key, accrued: timer.runs[key] || 0, startedAt: Date.now(), running: true });
-      saveTimer(); paintTimer();
-    },
-    pause() {
-      if (!timer.running) return;
-      timer.accrued = elapsedMs();
-      timer.running = false;
-      timer.startedAt = 0;
-      saveTimer(); paintTimer();
-    },
-    resume() {
-      if (timer.running) return;
-      timer.running = true;
-      timer.startedAt = Date.now();
-      saveTimer(); paintTimer();
-    },
-    reset() {
-      timer = { running: false, startedAt: 0, accrued: 0, label: timer.label };
-      saveTimer(); paintTimer();
-    },
-    get state() { return { running: timer.running, ms: elapsedMs(), label: timer.label, key: timer.key || '' }; }
+    start() {},
+    get state() { return { running: false, ms: 0, label: '' }; }
   };
 
-  // The run timer isn't shown here any more: it's on the side menu's shift sheet, and having it in two places
-  // was confusing. Layers just has a line saying you're on shift, linking to that sheet (filled in by the side
-  // menu block, lbShiftSheet). The timer itself (lbRunTimer) still runs.
+  // Layers just has a line saying you're on shift, linking to the side menu's shift sheet (filled in by the
+  // side menu block, lbShiftSheet).
   function timerHtml() {
     return '<div id="lbLayersShift"></div>';
   }
-
-  // Only the digits are repainted on the tick - rebuilding the whole
-  // panel every second would fight with a finger already on a toggle.
-  let tick = null;
-  function paintTimer() {
-    const read = document.getElementById('lbTimerRead');
-    if (read) read.textContent = fmt(elapsedMs());
-    const box = read && read.closest('.lb-timer');
-    if (box) box.classList.toggle('running', timer.running);
-  }
-  function startTicking() {
-    if (tick) return;
-    tick = setInterval(() => {
-      if (document.body.classList.contains('lb-layers-open')) paintTimer();
-    }, 1000);
-  }
-  startTicking();
-
-  document.addEventListener('click', function(ev) {
-    const btn = ev.target && ev.target.closest ? ev.target.closest('[data-lbtimer]') : null;
-    if (!btn) return;
-    ev.preventDefault();
-    const act = btn.dataset.lbtimer;
-    if (act === 'pause') window.lbRunTimer.pause();
-    else if (act === 'resume') window.lbRunTimer.resume();
-    else if (act === 'reset') window.lbRunTimer.reset();
-    renderLayers();
-  });
 
   // GO on the Drive wizard starts the clock (and the trail, which
   // goDrive() already un-pauses). Captured on the way down so it fires
@@ -22769,7 +22685,7 @@ body.stream-slr .lb-layers-head .icon-img { filter: brightness(0); }
     const go = ev.target && ev.target.closest ? ev.target.closest('[data-act="drive-go"]') : null;
     if (!go || go.disabled) return;
     const label = (go.textContent || '').replace(/^\s*GO\s*—\s*/, '').trim();
-    window.lbRunTimer.start(label || 'Run');
+    window.lbRunTimer.start(label || 'Run');   // (tells the break clock: see its wiring)
   }, true);
 
   /* ================= SETTINGS TAB ===================================
@@ -25975,6 +25891,8 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
   }
   function staleDay(now) {
     if (S.start == null || S.start >= dayCut(now)) return false;
+    // (a running shift sets the start - an early one can begin before 3:30 - and closes itself overnight)
+    try { if (window.uxShiftState && window.uxShiftState()) return false; } catch (e) {}
     const cut = dayCut(now);   // (breaks put in for today are kept, for the shift to pick up)
     S = { start: null, lastSeen: 0, breaks: S.breaks.filter(b => (b.e == null ? now : b.e) > cut) }; lastWarn = null; save(); return true;
   }
@@ -26048,7 +25966,7 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
       <button type="button" class="lb-layer-btn" data-lbbreak="begin" data-show="idle"><span class="lb-ico">⏱</span><span class="lb-label">Start work clock now</span></button>
       <button type="button" class="lb-layer-btn" data-lbbreak="start" data-show="working"><span class="lb-ico">☕</span><span class="lb-label">Start break</span></button>
       <button type="button" class="lb-layer-btn" data-lbbreak="end" data-show="break"><span class="lb-ico">▶️</span><span class="lb-label">End break</span></button>
-      <button type="button" class="lb-layer-btn" data-lbbreak="early" data-show="working break"><span class="lb-ico">⏪</span><span class="lb-label">I started earlier…</span></button>
+      <button type="button" class="lb-layer-btn" data-lbbreak="early" data-show="working break"><span class="lb-ico">⏪</span><span class="lb-label">Shift started at…</span></button>
       <button type="button" class="lb-layer-btn" data-lbbreak="past" data-show="working break"><span class="lb-ico">☕</span><span class="lb-label">Add a break I took…</span></button>
       <button type="button" class="lb-layer-btn danger" data-lbbreak="newshift" data-show="working break"><img class="icon-img" src="minus.png" alt=""><span class="lb-label">New shift</span></button>
       <div class="lb-bc-note">NHVR Standard Hours, solo driver. A guide only - not a work diary.</div>`;
@@ -26157,11 +26075,24 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     else if (act === 'end') endBreak();
     else if (act === 'past') { if (window.lbPastBreak) window.lbPastBreak.open(true); }
     else if (act === 'early') {
+      // When the shift started - the time the breaks and hours count from. It sets the shift's own start
+      // (uxShiftSetStart), which the clock follows. Takes 6:30, 0630, 6.30, 6:30pm.
+      const cur = S.start != null ? new Date(S.start) : new Date();
+      const def = String(cur.getHours()).padStart(2, '0') + ':' + String(cur.getMinutes()).padStart(2, '0');
       const raw = (typeof window.customPrompt === 'function')
-        ? await window.customPrompt('How many minutes had you already been working before you pressed GO? (0 = none)', '0')
-        : window.prompt('Minutes already worked before GO?', '0');
-      const n = parseInt(raw, 10);
-      if (Number.isFinite(n) && n > 0 && n <= 12 * 60 && S.start != null) { S.start -= n * MIN; lastWarn = null; save(); }
+        ? await window.customPrompt('What time did your shift start? (e.g. 6:30)', def)
+        : window.prompt('What time did your shift start? (e.g. 6:30)', def);
+      const m = String(raw || '').trim().toLowerCase().match(/^(\d{1,2})(?:[:.\s]?(\d{2}))?\s*(am|pm)?$/);
+      if (m) {
+        let h = +m[1], mi = +(m[2] || 0);
+        if (m[3] === 'pm' && h < 12) h += 12; if (m[3] === 'am' && h === 12) h = 0;
+        const d = new Date(); d.setHours(h, mi, 0, 0);
+        let t = d.getTime(); if (t > Date.now() + 60000) t -= DAY;   // a time later than now was yesterday
+        if (h < 24 && mi < 60) {
+          const ok = typeof window.uxShiftSetStart === 'function' ? window.uxShiftSetStart(t) : false;
+          if (!ok && S.start != null && t <= Date.now()) { S.start = t; lastWarn = null; save(); }
+        }
+      }
     } else if (act === 'newshift') {
       const ok = (typeof window.customConfirm === 'function')
         ? await window.customConfirm('Start a new shift? This clears the break clock.')
@@ -30903,14 +30834,16 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     SH.leg = SH.run ? newLeg(SH.stream, SH.run, SH.day, SH.week) : null;
     if (o.auto && s && s.start) SH.start = s.start;
     saveSh();
-    try {
-      if (window.lbBreakClock && !o.auto) {
-        var cs = clockState();
-        if (!cs || cs.start == null || now - cs.start > 60 * 60000) window.lbBreakClock.newShift(now);
-      }
-    } catch (e) {}
+    try { if (window.lbBreakClock && window.lbBreakClock.resetStart) window.lbBreakClock.resetStart(SH.start); } catch (e) {}
     resetCounters();
   }
+  // Changing when the shift started (the Shift screen's "Shift started at…"): the break clock follows (see count()).
+  window.uxShiftSetStart = function(t){
+    if (!SH || !isFinite(t) || t > Date.now() || Date.now() - t > 16 * 3600000) return false;
+    SH.start = t; saveSh();
+    try { if (window.lbBreakClock && window.lbBreakClock.resetStart) window.lbBreakClock.resetStart(t); } catch (e) {}
+    return true;
+  };
   function finishShift(o){
     if (!SH) return null;
     var now = Date.now(), r = rates();
@@ -31062,10 +30995,12 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     // leaving legRates()/the leg-gated display with nothing to read.
     if (!SH.legs) SH.legs = [];
     if (!SH.leg && SH.run) SH.leg = newLeg(SH.stream, SH.run, SH.day, SH.week);
-    // the break clock runs from this shift's start (see resetStart in the break clock)
+    // The break clock runs from this shift's start - the shift is the one record of when work began, so the
+    // breaks, "next break" and overdue all count from the time on the shift (they used to have a start of their
+    // own, from GO or "I started earlier", and drifted from it).
     try {
       var cs2 = clockState();
-      if (window.lbBreakClock && window.lbBreakClock.resetStart && (!cs2 || cs2.start == null || cs2.start < SH.start - 3 * 3600000)) window.lbBreakClock.resetStart(SH.start);
+      if (window.lbBreakClock && window.lbBreakClock.resetStart && (!cs2 || cs2.start !== SH.start)) window.lbBreakClock.resetStart(SH.start);
     } catch (e) {}
     var ch = false, brk = onBreak();
     var loc = here();
@@ -33582,10 +33517,10 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   function syncSeason(){ document.body.classList.toggle('ux-summer-off', !summerOn()); }
   syncSeason(); setInterval(syncSeason, 3600000);
 
-  // ---- 6. run timer on the display -----------------------------------------------------
-  // The other runs already live in the next-bin card, so the strip that used to list them
-  // under the title bar shows the run timer instead. Tap = start / pause / resume.
-  // (Reset stays in the Layers panel, where the break clock is.)
+  // ---- 6. shift timer on the display ---------------------------------------------------
+  // Time since the shift started (the start on the Shift screen). There used to be a separate run
+  // timer as well, which disagreed with it; it's gone - the shift is the one clock. Tap = the Shift
+  // screen (Start shift when none is running).
   var timerEl = null, lastT = '';
   function fmt(ms){
     var t = Math.max(0, Math.floor(ms / 1000));
@@ -33596,11 +33531,10 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   var ICON_PLAY = '<path d="M7 4.5v15l12-7.5z"/>', ICON_PAUSE = '<path d="M8 5v14M16 5v14"/>';
   function tickTimer(){
     if (!timerEl) return;
-    var st = null; try { st = window.lbRunTimer && window.lbRunTimer.state; } catch (e) {}
-    // On shift, the timer is the time since the shift started (not a separate run stopwatch).
+    var st = null;
     var sh = null; try { sh = window.uxShiftState && window.uxShiftState(); } catch (e) {}
     if (sh && sh.start) st = { running: true, ms: Date.now() - sh.start };
-    if (!st) { timerEl.setAttribute('data-s', 'none'); return; }
+    if (!st) { if (lastT !== 'none') { lastT = 'none'; timerEl.setAttribute('data-s', 'idle'); var r0 = $('uxTimerRead'); if (r0) r0.textContent = 'Start shift'; var g0 = $('uxTimerGlyph'); if (g0) g0.innerHTML = ICON_PLAY; } return; }
     var mode = st.running ? 'run' : (st.ms > 0 ? 'pause' : 'idle');
     var key = mode + '|' + fmt(st.ms);
     if (key === lastT) return; lastT = key;
@@ -33612,7 +33546,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var bar = $('areaRunsBar'); if (!bar || $('uxTimer')) return;
     timerEl = document.createElement('button');
     timerEl.type = 'button'; timerEl.id = 'uxTimer'; timerEl.setAttribute('data-s', 'idle');
-    timerEl.title = 'Run timer. Tap to start, pause or resume; reset is in Layers.';
+    timerEl.title = 'Time on shift. Tap for the Shift screen.';
     // Icon before the time (not after): a glyph reads faster than a moving number when you're
     // glancing sideways at it, so it belongs at the leading edge, not trailing behind the digits.
     timerEl.innerHTML =
@@ -33621,11 +33555,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     bar.parentNode.insertBefore(timerEl, bar);
     timerEl.addEventListener('click', function(ev){
       ev.stopPropagation();
-      if (window.uxShiftState && window.uxShiftState()) { if (window.uxShiftOpen) window.uxShiftOpen(); return; }
-      var T = window.lbRunTimer; if (!T) return;
-      var st = T.state;
-      if (st.running) T.pause(); else if (st.ms > 0) T.resume(); else T.start('Run');
-      lastT = ''; tickTimer();
+      if (window.uxShiftOpen) window.uxShiftOpen();
     });
     setInterval(function(){ if (document.body.getAttribute('data-ux-screen') === 'map' && !document.hidden) tickTimer(); }, 500);
     tickTimer();
@@ -34945,7 +34875,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
    section, at the bottom). Once a shift is started, a live shift sheet sits under them: run, time on the
    current run, worked / driving time, km, bins, bins per hour and per km, the load since the last tip,
    breaks taken and the next one due, with Shift screen / break / run sheet buttons. The rest of the menu
-   follows. Also keeps the run timer on the run actually being driven (lbRunTimer.switchTo).
+   follows.
    Injected into the menu the drawer draws (like the council requests row), so the drawer itself is
    unchanged. */
 (function(){
@@ -34972,34 +34902,6 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     if (!mv.saved || now - mv.saved > 30000) { mv.saved = now; lsSet('lbShiftMove', mv); }
   }
 
-  // ---- the run being driven, for the run timer ----
-  var cand = null;
-  function runNow(){
-    var tab = g('activeTab'); if (tab !== 'map' && tab !== 'hud') return null;
-    var sel = g('selectedRunsSet'), st = g('activeFilterStream'); if (!sel || !sel.size || !st) return null;
-    // The shift's own run is kept on the map beside any other run of the stream being helped on (keepOnMap in the
-    // shift block), so with two showing the current run is the other one.
-    var runs = Array.from(sel).map(function(x){ return String(x).toUpperCase(); });
-    if (runs.length > 1) { var sh = window.uxShiftState ? window.uxShiftState() : null, mine = sh && sh.run ? String(sh.run).toUpperCase() : ''; runs = runs.filter(function(x){ return x !== mine; }); }
-    if (runs.length !== 1) return null;
-    var run = runs[0], wk = String(g('activeFilterWeek') || ''), day = String(g('activeFilterDay') || '');
-    return { key: [st, day, wk, run].join('|'), stream: st, run: run, week: wk, label: (NAME[st] || st) + ' ' + run + (wk && /^(Recycling|FOGO)$/.test(st) ? ' ' + wk : '') };
-  }
-  function timerTick(sh){
-    var T = window.lbRunTimer; if (!T || !T.switchTo) return;
-    var r = runNow(), now = Date.now(), v = +g('currentMapSpeedKmh') || 0;
-    if (!r) { cand = null; return; }
-    var st = T.state;
-    if (st.key === r.key) { cand = null; return; }
-    // a run that's been on the map 15 s with the truck driving in that time is the run being driven (not one
-    // just looked at)
-    if (!cand || cand.key !== r.key) cand = { key: r.key, at: now, moved: false };
-    if (v >= 5) cand.moved = true;
-    if (now - cand.at < 15000 || !cand.moved) return;
-    if (!st.running && !st.key && !st.ms) T.start(r.label);
-    T.switchTo(r.key, r.label); cand = null;
-  }
-
   // ---- the sheet ----
   function screensHtml(){
     var cur = g('activeTab');
@@ -35011,11 +34913,10 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   function stat(v, l){ return '<div class="lbss-st"><b>' + esc(v) + '</b><span>' + esc(l) + '</span></div>'; }
   function liveHtml(sh){
     var R = window.uxShiftRates ? window.uxShiftRates() : null, now = Date.now();
-    var T = window.lbRunTimer ? window.lbRunTimer.state : null;
     var runIco = ICON[sh.stream] ? '<img class="icon-img lbss-ri" src="' + ICON[sh.stream] + '" alt="">' : '';
     var h = '<div class="lbss-top">' + runIco + '<b>' + esc(sh.run ? String(sh.run).toUpperCase() + (sh.week ? ' ' + sh.week : '') : (NAME[sh.stream] || 'Shift')) + '</b>' +
       '<span>' + esc([sh.driver, sh.truck].filter(Boolean).join(' · ')) + ' · since ' + esc(hhmm(sh.start)) + '</span></div>';
-    if (T && (T.running || T.ms)) h += '<div class="lbss-run"><span>' + esc(T.label ? 'On ' + T.label : 'This run') + '</span><b>' + esc(hms(T.ms)) + '</b>' + (T.running ? '' : '<i>paused</i>') + '</div>';
+    h += '<div class="lbss-run"><span>On shift</span><b>' + esc(hms(now - sh.start)) + '</b></div>';
     if (R) {
       h += '<div class="lbss-grid">' +
         stat(hm(R.worked), 'worked') + stat(mv && mv.id === sh.id ? hm(mv.drive) : '–', 'driving') + stat(R.km.toFixed(1), 'km') +
@@ -35160,7 +35061,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   setInterval(function(){
     try {
       var sh = window.uxShiftState ? window.uxShiftState() : null;
-      if (sh) { moveTick(sh); timerTick(sh); }
+      if (sh) moveTick(sh);
       if (document.body.classList.contains('lb-drawer-open')) inject();
       if (document.body.classList.contains('lb-layers-open')) { panelTop('lbLayers', 'layers'); layersShift(); }
     } catch (e) {}
@@ -35196,7 +35097,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       if (c.contains('lb-layers-open')) { panelTop('lbLayers', 'layers'); layersShift(); }
     } catch (e) {}
   }).observe(document.body, { attributes: true, attributeFilter: ['class'] });
-  window.lbShiftSheet = { _t: { runNow: runNow, inject: inject, liveHtml: liveHtml } };
+  window.lbShiftSheet = { _t: { inject: inject, liveHtml: liveHtml } };
 
   var css = document.createElement('style');
   css.textContent =
