@@ -26003,8 +26003,29 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
   // GO on the Drive wizard. The first run of the day starts the clock; a later run the same shift carries
   // on where it was (time between runs is work unless a break was logged). A gap of 7 h+ since the app was
   // last looking, or a shift older than 24 h, is a new shift.
+  // A clock started before 3:30 this morning is yesterday's. lastSeen can't be trusted to show the overnight
+  // rest: it's bumped every 30 s while the app is open, even in the background - so a phone left with the app
+  // open overnight never showed the 7 h gap, the next morning's GO carried on yesterday's clock, and the
+  // 12 h limit made the break "overdue" all morning, whatever breaks were put in (1 Oct).
+  function dayCut(now) {
+    const d = new Date(now), cut = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 3, 30, 0, 0).getTime();
+    return now >= cut ? cut : cut - DAY;
+  }
+  function staleDay(now) {
+    if (S.start == null || S.start >= dayCut(now)) return false;
+    const cut = dayCut(now);   // (breaks put in for today are kept, for the shift to pick up)
+    S = { start: null, lastSeen: 0, breaks: S.breaks.filter(b => (b.e == null ? now : b.e) > cut) }; lastWarn = null; save(); return true;
+  }
+  // The running shift says when work began: the clock never starts more than 3 h before it (room for "I started
+  // earlier"), and breaks from before it are dropped.
+  function resetStart(t) {
+    S.start = t; S.lastSeen = Date.now();
+    S.breaks = S.breaks.filter(b => b.e == null || b.e > t).map(b => ({ s: Math.max(b.s, t), e: b.e }));
+    lastWarn = null; save();
+  }
   function onGo() {
     const now = Date.now();
+    staleDay(now);
     if (S.start == null || (now - (S.lastSeen || S.start)) >= MAJOR_REST || (now - S.start) >= DAY) newShift(now);
     else if (onBreak()) endBreak();
     S.lastSeen = now; save();
@@ -26248,6 +26269,7 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
   setInterval(function () {
     try {
       const now = Date.now();
+      if (staleDay(now)) saveAt = 0;
       if (S.start != null && now - saveAt > 30000) { S.lastSeen = now; save(); saveAt = now; }
       paint();
     } catch (e) { console.warn('Break clock:', e); }
@@ -26259,6 +26281,7 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     startBreak, endBreak, newShift, onGo,
     addBreak(s, e) { const ok = addBreak(s, e); paint(); return ok; },
     insertBreak(s, e) { const ok = insertBreak(s, e); paint(); return ok; },
+    resetStart(t) { resetStart(t); paint(); },
     // Which limit is passed right now and by how much - for saying WHY it's still overdue after a break is
     // put in (one 15 min break clears the 5¼ h limit, but past 7½ h the 8 h one wants 30 min): { title,
     // needMin, haveMin, winH, breakMin } or null when nothing is overdue.
@@ -30972,6 +30995,11 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     if (SH && shiftOverNight(SH)) { finishShift({ note: 'Not ended in the app: closed ' + (isStreet(SH.stream) ? 'at 3 am' : 'at midnight') }); toast('Yesterday’s shift was closed. It’s in Past shifts.'); }
     try { escalate(); } catch (e) {}
     if (!SH) return;
+    // the break clock runs from this shift's start (see resetStart in the break clock)
+    try {
+      var cs2 = clockState();
+      if (window.lbBreakClock && window.lbBreakClock.resetStart && (!cs2 || cs2.start == null || cs2.start < SH.start - 3 * 3600000)) window.lbBreakClock.resetStart(SH.start);
+    } catch (e) {}
     var ch = false, brk = onBreak();
     var loc = here();
     if (loc) {
