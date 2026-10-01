@@ -17733,10 +17733,10 @@ window.addEventListener('DOMContentLoaded', async () => {
     // (iPhones at walking pace) go by the metres driven, with forwards/reverse decided as the truck moves off
     // from a stop - it can only change gear standing still - and held until it stops again.
     // Fixes that leapt further than the truck could have driven are ignored (lbLastFixJumped), and a truck
-    // "reversing" at 14 km/h+ for 3 fixes, or for over a minute of moving, was really going forwards.
+    // "reversing" at 25 km/h+ for 3 fixes, or for over 3 minutes of moving, was really going forwards.
     if (!lbLastFixJumped) {
       const R = lbReverseState;
-      if (speedKmh < 1.5) { if (R.init) R.stopped = true; }
+      if (speedKmh < 1.5) { if (R.init) R.stopped = true; if (lbFrozenN >= 5) R.froze = true; }
       else if (speedKmh >= 3) {
         const native = (pos.coords.heading !== null && !isNaN(pos.coords.heading) && pos.coords.heading >= 0) ? pos.coords.heading : null;
         const off = (a, b) => Math.abs((a - b + 540) % 360 - 180);
@@ -17754,15 +17754,23 @@ window.addEventListener('DOMContentLoaded', async () => {
           // reversing kept it "reversing" for 60 m up Magnolia Way). After a stop only a near-about-turn (150°+)
           // is reversing (1 Oct, Augusta St: moving off backwards from a stop, the heading jumped 172° round to
           // the way the truck was going).
-          const swing = off(native, facing === null ? native : facing);
-          if (facing === null || (gap > 20000 && speedKmh >= 10)) { next = native; R.on = false; }   // first fix, or back after a long gap
-          else if (swing <= (afterStop ? 150 : 100)) { next = native; R.on = moved !== null && off(moved, native) > 120; }
+          // After a stop the truck faces where it did when it stopped - a truck can't move off forwards more than
+          // 90° from the way it faces, so more than that is reversing (1 Oct, Watson Rd: reversing round into a
+          // side street, the phone's heading moved off 123° from the truck, which the old 150° rule took as
+          // forwards). Only when the GPS froze during the stop (lbFrozenN) might the truck have turned unseen,
+          // so then it takes a near-about-turn (Marcia Cl, 30 Sep: ~100° swung round while frozen).
+          const swing = off(native, facing === null ? native : facing), stopLimit = R.froze ? 150 : 90;
+          // first fix, back after a long gap, or the phone catching up after the GPS froze (lbSpeedReset): the
+          // truck has been somewhere unseen - 1 Oct, Augusta St: frozen 24 s while it went 37 m and turned
+          // round, and the old facing made it "reverse" off at 22 km/h - so the phone's heading starts afresh
+          if (facing === null || lbSpeedReset || (gap > 20000 && speedKmh >= 10)) { next = native; R.on = moved !== null && off(moved, native) > 120; }
+          else if (swing <= (afterStop ? stopLimit : 100)) { next = native; R.on = moved !== null && off(moved, native) > 120; }
           else {
             R.on = true;
             const back = (native + 180) % 360;
             if (off(back, facing) <= 60) next = back;
           }
-          R.stopped = false; R.stopPos = null;
+          R.stopped = false; R.stopPos = null; R.froze = false;
         } else {
           const moved = lbMovedBearing();
           motion = moved;
@@ -17797,9 +17805,11 @@ window.addEventListener('DOMContentLoaded', async () => {
           }
         }
         if (motion !== null) {
-          R.fastN = speedKmh >= 14 ? R.fastN + 1 : 0;
+          // (trucks do reverse at 15-17 km/h, and for over a minute up a long street - 1 Oct, Watson Rd: the old
+          // 14 km/h / 60 s limits turned the truck round mid-reverse)
+          R.fastN = speedKmh >= 25 ? R.fastN + 1 : 0;
           R.revMs = R.on ? R.revMs + dtMs : 0;
-          if (R.on && (R.fastN >= 3 || R.revMs > 60000)) { R.on = false; R.revMs = 0; R.stopPos = null; next = motion; }
+          if (R.on && (R.fastN >= 3 || R.revMs > 180000)) { R.on = false; R.revMs = 0; R.stopPos = null; next = motion; }
           if (next !== null) { lastValidHeading = Math.round(next) % 360; R.init = true; }
         }
       }
