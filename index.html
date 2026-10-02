@@ -30974,7 +30974,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     // a fresh trail for the shift: whatever was driven before it started isn't part of it
     try { var clr = g('clearSnailTrail'); if (typeof clr === 'function') clr(); } catch (e) {}
     SH = { id: 's_' + uid(), start: now, stream: o.stream || '', run: o.run || '', day: o.run ? todayDay() : '', week: o.run ? todayWeek(o.stream) : '', driver: o.driver || '', truck: o.truck || '', rego: o.rego || '', startKm: o.km, startHrs: o.hrs, startPhoto: o.photo || null,
-      prestart: o.prestart || null, defects: [], dist: 0, bins: 0, binTs: [], auto: !!o.auto, synced: false, legs: [], leg: null };
+      prestart: o.prestart || null, defects: [], dist: 0, bins: 0, binTs: [], auto: !!o.auto, synced: false, legs: [], leg: null, truckChanges: [] };
     SH.leg = SH.run ? newLeg(SH.stream, SH.run, SH.day, SH.week) : null;
     if (o.auto && s && s.start) SH.start = s.start;
     saveSh();
@@ -31248,7 +31248,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   /* =====================================================================
      The shift sheet
      ===================================================================== */
-  var sheet = null, view = 'main', draft = null, defDraft = null, endDraft = null, lastRec = null, crDraft = null;
+  var sheet = null, view = 'main', draft = null, defDraft = null, endDraft = null, lastRec = null, crDraft = null, truckDraft = null;
   function build(){
     if (sheet) return;
     sheet = document.createElement('div'); sheet.id = 'uxShift'; sheet.className = 'modal-overlay';
@@ -31423,6 +31423,18 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
           legCountHint(curLeg, curLegBk) +
           field('uxsCrTruckCount', 'Bins counted by the truck on Run ' + esc(curLeg.run) + ' (optional)', cr.truckBinCount, 'number', 'from the truck’s own counter')) : '') +
         '<div class="drv-foot"><button type="button" class="drv-btn" data-a="back">Cancel</button><button type="button" class="drv-btn drv-go" data-a="crsave"' + (crOk ? '' : ' disabled') + '>Save</button></div>';
+    } else if (view === 'changetruck') {
+      title = 'Change truck';
+      var td = truckDraft || (truckDraft = { truck: '', rego: '', reason: 'breakdown', note: '' });
+      var tdOk = !!td.truck.trim();
+      var pend = null; try { pend = window.lbRunSheet ? window.lbRunSheet.pendingLoad(SH.id) : null; } catch (e) {}
+      h = '<div class="drv-sect"><span>Leaving ' + esc(SH.truck || 'this truck') + '</span></div>' +
+        '<div class="drv-seg"><button type="button" data-treason="breakdown" class="' + (td.reason === 'breakdown' ? 'on' : '') + '">Breakdown</button><button type="button" data-treason="swap" class="' + (td.reason === 'swap' ? 'on' : '') + '">Planned swap</button></div>' +
+        field('uxsTrNew', 'New truck', td.truck, 'text', 'Fleet no. or rego') +
+        field('uxsTrRego', 'New rego (optional)', td.rego, 'text', '') +
+        (pend ? '<div class="drv-hint">' + pend.n + ' bin' + (pend.n === 1 ? '' : 's') + ' already in ' + esc(SH.truck || 'this truck') + ' since the last tip - they stay with it, not counted again. Your bins/km and bins/h aren’t affected.</div>' : '') +
+        field('uxsTrNote', 'Note (optional)', td.note, 'text', 'anything operations should know') +
+        '<div class="drv-foot"><button type="button" class="drv-btn" data-a="back">Cancel</button><button type="button" class="drv-btn drv-go" data-a="trsave"' + (tdOk ? '' : ' disabled') + '>Save</button></div>';
     } else if (view === 'history') {
       title = 'Past shifts';
       var hs = history().slice().reverse();
@@ -31461,7 +31473,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
           : (SH.leg.pauseSince != null ? '<div class="drv-hint">Paused on Run ' + esc(SH.leg.run) + ' - stopped over a minute.</div>'
             : (legEst != null && legEst >= lr.bins + 2 ? '<div class="drv-hint">Time stopped on Run ' + esc(SH.leg.run) + ' suggests up to ~' + legEst + ' bins (' + lr.bins + ' detected) - a tightly-packed stop, like a block of units, may not all register.</div>' : ''))
       ) : '';
-      h = '<div class="drv-top">' + esc([SH.driver, SH.truck].filter(Boolean).join(' · ')) + ' · since ' + esc(clock(SH.start)) + '</div>' +
+      h = '<div class="drv-top">' + esc(SH.driver || '') + (SH.truck ? ' · ' + esc(SH.truck) : '') + ' · since ' + esc(clock(SH.start)) + '<button type="button" class="drv-link" data-a="changetruck">Change truck</button></div>' +
         '<div class="drv-note-top">' + esc((SHIFT_STREAMS.filter(function(x){ return x[0] === SH.stream; })[0] || [])[1] || SH.stream || 'No run picked') + (SH.run ? ' · Run ' + esc(SH.run) : '') + '<button type="button" class="drv-link" data-a="changerun">Change run</button></div>' +
         '<div class="drv-stats">' + stat(hm(rr.worked), 'worked') + stat(rr.km.toFixed(1), 'km') + stat(rr.bins, 'bins') +
           stat((lr && lr.perKm != null) ? lr.perKm.toFixed(1) : '–', 'bins / km') + stat((lr && lr.perHr != null) ? Math.round(lr.perHr) : '–', 'bins / h') + stat(rr.recent == null ? '–' : rr.recent, 'bins / h (last 30 min)') + '</div>' +
@@ -31549,6 +31561,14 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       if (id === 'uxsEKm') endDraft.km = t.value; else if (id === 'uxsEHrs') endDraft.hrs = t.value; else if (id === 'uxsENote') endDraft.note = t.value; else if (id === 'uxsETruckCount') endDraft.truckBinCount = t.value;
     } else if (view === 'changerun' && crDraft) {
       if (id === 'uxsCrTruckCount') crDraft.truckBinCount = t.value;
+    } else if (view === 'changetruck' && truckDraft) {
+      if (id === 'uxsTrNew') {
+        // same auto-fill-the-rego-unless-they've-typed-their-own behaviour as starting a shift
+        var autoRg = window.lbFleetRego(truckDraft.truck); truckDraft.truck = t.value;
+        if (!truckDraft.rego || truckDraft.rego === autoRg) { truckDraft.rego = window.lbFleetRego(t.value); var rgEl2 = $('uxsTrRego'); if (rgEl2) rgEl2.value = truckDraft.rego; }
+        paintSoon();
+      } else if (id === 'uxsTrRego') truckDraft.rego = t.value;
+      else if (id === 'uxsTrNote') truckDraft.note = t.value;
     } else if (view === 'brakes' && brakeDraft) {
       if (id === 'uxsBA') brakeDraft.a = t.value; else if (id === 'uxsBB') brakeDraft.b = t.value; else if (id === 'uxsBC') brakeDraft.c = t.value; else return;
       var ev2 = $('uxsBEval'); if (ev2) { ev2.innerHTML = evalHtml(brakeDraft); ev2.setAttribute('data-l', brakeLevel(brakeVals(brakeDraft))); }
@@ -31584,6 +31604,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var srn = b.getAttribute('data-srun'); if (srn && draft) { draft.run = srn; paint(); return; }
     var cst = b.getAttribute('data-csstream'); if (cst && crDraft) { if (crDraft.stream !== cst) crDraft.run = ''; crDraft.stream = cst; paint(); return; }
     var crn = b.getAttribute('data-csrun'); if (crn && crDraft) { crDraft.run = crn; paint(); return; }
+    var treason = b.getAttribute('data-treason'); if (treason && truckDraft) { truckDraft.reason = treason; paint(); return; }
     var sev = b.getAttribute('data-sev'); if (sev && defDraft) { defDraft.sev = sev; paint(); return; }
     var dsev = b.getAttribute('data-dsev'); if (dsev && dashDraft) { dashDraft.sev = dsev; paint(); return; }
     var dsafe = b.getAttribute('data-dsafe'); if (dsafe !== null && dashDraft) { dashDraft.safe = dsafe === '1'; paint(); return; }
@@ -31606,6 +31627,21 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       var crWarn = SH.leg ? legCountWarnMsg(SH.leg, crDraft.truckBinCount) : '';
       if (crWarn) { confirmIt(crWarn).then(function(ok){ if (ok) doCrSave(); }); return; }
       doCrSave(); return;
+    }
+    if (a === 'changetruck') { truckDraft = { truck: '', rego: '', reason: 'breakdown', note: '' }; view = 'changetruck'; paint(); return; }
+    if (a === 'trsave') {
+      if (!SH || !truckDraft || !truckDraft.truck.trim()) { view = 'main'; paint(); return; }
+      var fromTruck = SH.truck || '', toTruck = truckDraft.truck.trim();
+      var stranded = null;
+      try { stranded = window.lbRunSheet ? window.lbRunSheet.truckChanged(SH.id, { from: fromTruck, to: toTruck, reason: truckDraft.reason, note: truckDraft.note }) : null; } catch (e) {}
+      SH.truckChanges = SH.truckChanges || [];
+      SH.truckChanges.push({ ts: Date.now(), from: fromTruck, to: toTruck, reason: truckDraft.reason, note: truckDraft.note, strandedBins: stranded ? stranded.n : 0 });
+      SH.truck = toTruck;
+      if (truckDraft.rego.trim()) SH.rego = truckDraft.rego.trim().toUpperCase();
+      saveSh();
+      truckDraft = null; view = 'main';
+      toast(stranded ? 'Truck changed · ' + stranded.n + ' bin' + (stranded.n === 1 ? '' : 's') + ' left in ' + (fromTruck || 'the old truck') : 'Truck changed');
+      paint(); return;
     }
     if (a === 'history') { view = 'history'; paint(); return; }
     if (a === 'csv') { shiftsCsv(); return; }
@@ -35748,7 +35784,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   function fresh(id){
     var p = profile();
     return { id: id, ts: Date.now(), empNo: p.empNo || '', contract: p.contract || '', collType: '', depart: null, ret: null,
-      loads: [], cur: { n: 0, first: null, last: null }, seenBins: null, fuel: [], adblue: [], breakdowns: [],
+      loads: [], cur: { n: 0, first: null, last: null }, seenBins: null, fuel: [], adblue: [], breakdowns: [], truckChanges: [],
       unit2: { truck: '', hrsS: '', hrsE: '', kmS: '', kmE: '' }, comments: '', sig: null, sigTs: null, sentAt: null };
   }
   function get(id){ var o = all(); return o[id] || null; }
@@ -35822,6 +35858,37 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var old = tipSites().filter(function(t){ return t.name.toLowerCase() === name.toLowerCase(); })[0];
     a.push({ name: name, lat: loc ? loc.lat : (old && old.lat), lng: loc ? loc.lng : (old && old.lng) });
     lsSet('lbTipSites', a.slice(-20));
+  }
+  // Changing trucks mid-shift (breakdown, planned swap): the bins already in the hopper are
+  // physically stuck with the truck being left behind - they can't be tipped by the one taking
+  // over - so whatever load was in progress is closed out here (recorded as "not tipped", same as
+  // any other load the shift ends with still in the truck) rather than silently carried on as if
+  // the new truck already had those bins aboard. Bins flipped/km driven on the shift itself are
+  // untouched by any of this - they're not truck-specific and keep counting exactly as before.
+  // Also auto-fills the paper run sheet's existing "Unit #2" section so the driver doesn't have to
+  // re-enter the new truck's name by hand later, same spirit as the rest of this module filling in
+  // what the app already knows as the shift goes.
+  function truckChanged(id, opts){
+    var sh = shiftFor(id); if (!sh) return null;
+    var R0 = getOrMake(sh.s.id);
+    R0.truckChanges = R0.truckChanges || [];
+    var stranded = R0.cur.n > 0 ? { n: R0.cur.n, first: R0.cur.first, last: R0.cur.last } : null;
+    R0.truckChanges.push({ ts: Date.now(), from: (opts && opts.from) || '', to: (opts && opts.to) || '', reason: (opts && opts.reason) || '', note: (opts && opts.note) || '', strandedBins: stranded ? stranded.n : 0 });
+    // Not pushed into R.loads as a real load - that array is for actual tips (with a site and
+    // weights). These bins didn't get tipped, they're just stuck in the truck being left behind;
+    // they're recorded here, in the truck-change log, instead. R.cur resets either way so the next
+    // bins counted belong to the new truck's own (empty) hopper, not the old one's.
+    R0.cur = { n: 0, first: null, last: null };
+    if (!R0.unit2.truck && opts && opts.to) R0.unit2.truck = opts.to;
+    save(R0);
+    return stranded;
+  }
+  // For the live "Change truck" screen to show the driver what's about to be left behind, before
+  // they confirm - read-only, doesn't touch anything.
+  function pendingLoad(id){
+    var sh = shiftFor(id); if (!sh) return null;
+    var R0 = getOrMake(sh.s.id);
+    return R0.cur && R0.cur.n > 0 ? { n: R0.cur.n, first: R0.cur.first, last: R0.cur.last } : null;
   }
   // "At the tip": the bins since the last tip become a load
   function arriveTip(R, sh){
@@ -36171,6 +36238,11 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       'Start ' + hhmm(s.start) + ' · left depot ' + (hhmm(R.depart) || '—') + ' · back at depot ' + (hhmm(R.ret) || '—') + ' · finish ' + (hhmm(s.end) || '—'),
       'Breaks: ' + (d.br.length ? d.br.map(function(b){ return hhmm(b.s) + '–' + hhmm(b.e); }).join(', ') : 'none'),
       R.breakdowns.length ? 'Breakdowns: ' + R.breakdowns.map(function(b){ return hhmm(b.s) + '–' + hhmm(b.e); }).join(', ') : '',
+      (R.truckChanges && R.truckChanges.length) ? 'Truck changes: ' + R.truckChanges.map(function(x){
+        return hhmm(x.ts) + ' ' + (x.from || '?') + '→' + (x.to || '?') + (x.reason ? ' (' + x.reason + ')' : '') +
+          (x.strandedBins ? ' · ' + x.strandedBins + ' bin' + (x.strandedBins === 1 ? '' : 's') + ' left in ' + (x.from || 'the old truck') : '') +
+          (x.note ? ' · ' + x.note : '');
+      }).join('; ') : '',
       'Pre-start: ' + (s.prestart ? 'done ' + hhmm(s.prestart.ts) : 'not done'),
       ''
     ];
@@ -36207,7 +36279,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     R.sentAt = Date.now(); save(R); toast('Run sheet sent to the leading hand'); paint();
   }
 
-  window.lbRunSheet = { open: open, missing: missing, text: function(id){ var sh = shiftFor(id); if (!sh) return ''; SHc = sh; R = getOrMake(sh.s.id); return sheetText(); }, _t: { tick: tick, get: get, all: all } };
+  window.lbRunSheet = { open: open, missing: missing, text: function(id){ var sh = shiftFor(id); if (!sh) return ''; SHc = sh; R = getOrMake(sh.s.id); return sheetText(); }, truckChanged: truckChanged, pendingLoad: pendingLoad, _t: { tick: tick, get: get, all: all } };
 })();
 </script>
 
