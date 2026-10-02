@@ -7263,20 +7263,60 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
     // All Runs means the standard services. Summer is opt-in only.
     return candidates.find(x=>x.type==='gar') || candidates.find(x=>x.type==='rec') || candidates.find(x=>x.type==='fog') || null;
   }
-  // A bin marker must represent a real, valid kerbside flip location.  Do not
-  // fall back to the house GPS: properties without a flip location are collection
-  // point / no-service candidates and must never masquerade as bin dots.
+  // A bin marker must represent a real, valid kerbside flip location - the house GPS is usually
+  // close enough for a normal block, so an unverified bin position (straight from a messy import)
+  // is sanity-checked against it, within 10m. A position the app captured itself - a driver's own
+  // "Edit Bin" / drag-to-move / Use current GPS, or the auto-learned first flip below - is already
+  // ground truth and is trusted regardless of distance: a rural block's bin can legitimately be
+  // well past 10m from the house, down a long driveway or around a corner.
   function validBinFlipCoords(site,bin){
-    const prop=gps(site?.lat,site?.lng);
     const flip=bin&&gps(bin.lat,bin.lng);
-    return flip && (!prop || metersBetween(prop,flip)<=10) ? flip : null;
+    if (!flip) return null;
+    if (bin.verified) return flip;
+    const prop=gps(site?.lat,site?.lng);
+    return (!prop || metersBetween(prop,flip)<=10) ? flip : null;
   }
   function collectionPointForSite(site){ return collectionPoints[String(site.propId||site.siteId||'')]||null; }
+  // A bin with no confirmed flip location yet (e.g. never serviced before - see the `f:`/`lat:`
+  // pairing bins get once they're first flipped) used to just vanish from the map: nothing to
+  // show, nothing to measure a flip against, so it could never be flipped and never get a location
+  // either - stuck for good. It now shows provisionally at the property's own point (`provisional:
+  // true`) so it's visible and reachable; the flip loop in onGpsPositionSuccess saves the truck's
+  // real GPS as the confirmed location the first time it's actually flipped from there.
   function sourceCoords(site,bin){
     const cp=collectionPointForSite(site);
     if(cp&&Number.isFinite(Number(cp.lat))&&Number.isFinite(Number(cp.lng))) return {lat:Number(cp.lat),lng:Number(cp.lng),collectionPoint:true};
     const prop=gps(site.lat,site.lng); const flip=validBinFlipCoords(site,bin);
-    if(pinSourceMode==='property') return prop; return flip;
+    if(pinSourceMode==='property') return prop;
+    return flip || (prop ? { lat: prop.lat, lng: prop.lng, provisional: true } : null);
+  }
+  // A bin flipped from its provisional (property-point) location gets that flip's real GPS saved
+  // as its confirmed spot from now on - the same self-correcting pattern every other bin already
+  // has from its own first flip (see the sourceCoords comment above), just done live instead of
+  // waiting on an offline data refresh. Looked up by serial within the site/stream rather than by
+  // array index, since activeMapCircleMarkers only carries the serial, not the index.
+  function confirmProvisionalBinLocation(markerObj, loc){
+    if (!markerObj || !markerObj.provisional || !loc) return;
+    const site = (typeof siteRecords !== 'undefined' ? siteRecords : []).find(s => String(s.propId || s.siteId) === String(markerObj.siteId));
+    const arr = site && site.soloStreams && site.soloStreams[markerObj.stream];
+    const bin = arr && arr.find(b => String(b.serial || '').toUpperCase() === String(markerObj.serial || '').toUpperCase());
+    if (!bin) return;
+    bin.lat = loc.lat.toFixed(6);
+    bin.lng = loc.lng.toFixed(6);
+    bin.verified = true;
+    markerObj.lat = loc.lat; markerObj.lng = loc.lng; markerObj.provisional = false;
+    logEdit({
+      timestamp: new Date().toISOString(),
+      editType: "BIN_EDIT",
+      propId: site.propId, siteId: site.siteId, address: site.addressText,
+      stream: markerObj.stream, serial: markerObj.serial,
+      lat: bin.lat, lng: bin.lng,
+      notes: 'Location learned from first auto-flip (none confirmed before)'
+    });
+    hasUnsyncedChanges = true;
+    if (typeof updateSyncButtonIcon === 'function') updateSyncButtonIcon();
+    saveToDB("masterRecords", siteRecords);
+    saveToDB("masterEditsLog", masterEditsLog);
   }
   function saveCollectionPoints(){ localStorage.setItem('lukezBunzCollectionPoints',JSON.stringify(collectionPoints)); }
   function toggleCollectionHouse(siteId){ const id=String(siteId); if(selectedCollectionHouseIds.has(id)) selectedCollectionHouseIds.delete(id); else selectedCollectionHouseIds.add(id); collectionSelectionActive=selectedCollectionHouseIds.size>0; renderMapData(); if(typeof updateBoundarySelectContextTitle==='function') updateBoundarySelectContextTitle(); }
@@ -11154,7 +11194,10 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
     if (!newSerial) { customAlert('Bin serial number is required.'); return; }
     if (!site) return;
 
-    const updatedBinData = { serial: newSerial, size: newSize, make: newType, lidColour: newLid, notes: newNotes, lat: newLat, lng: newLng };
+    // A location entered here (typed, or Use current GPS) is a deliberate human confirmation -
+    // trusted as this bin's real spot regardless of distance from the property point (see
+    // validBinFlipCoords). Left blank, this bin goes back to being unconfirmed/provisional.
+    const updatedBinData = { serial: newSerial, size: newSize, make: newType, lidColour: newLid, notes: newNotes, lat: newLat, lng: newLng, verified: !!(newLat && newLng) };
 
     if (binIdx >= 0) {
       if (origStreamKey === newStreamKey) {
@@ -17866,7 +17909,11 @@ window.addEventListener('DOMContentLoaded', async () => {
       if (servicedBinSerials.has(binId)) return;
 
       const d = getDistanceMeters(userCurrentLocation.lat, userCurrentLocation.lng, markerObj.lat, markerObj.lng);
-      if (d > 12) return;
+      // A provisional dot sits at the property's own point, not a confirmed kerbside spot - that
+      // can be a fair way from the road on a rural/acreage block (see sourceCoords), so it gets a
+      // wider first-flip radius. Once flipped it's replaced with a real kerbside position and goes
+      // back to the normal tight radius like every other bin.
+      if (d > (markerObj.provisional ? 35 : 12)) return;
 
       // Which side: judged by the bin's HOUSE, not its dot. A dot put in the middle of the road is always on
       // the right of a truck working the left kerb - going up the street and coming back down - so judged by
@@ -17885,10 +17932,13 @@ window.addEventListener('DOMContentLoaded', async () => {
 
       if (speedKmh <= 6) {
         servicedBinSerials.add(binId);
+        if (markerObj.provisional) confirmProvisionalBinLocation(markerObj, userCurrentLocation);
         if (mapMarkersLayer && markerObj.layer) mapMarkersLayer.removeLayer(markerObj.layer);
         updateFlippedBinCount();
         saveRunProgress();
-      } else if (d <= 9 && !missedBinSerials.has(binId)) {
+      } else if (!markerObj.provisional && d <= 9 && !missedBinSerials.has(binId)) {
+        // Not for a provisional dot - its position is only an approximation, so driving past it
+        // too fast to tell isn't good evidence of a genuinely missed bin.
         missedBinSerials.add(binId);
         if (markerObj.layer) {
           const innerDot = markerObj.layer.getElement()?.querySelector('.bin-dot-inner');
@@ -18369,6 +18419,9 @@ window.addEventListener('DOMContentLoaded', async () => {
             if (!p) return;
             const serial = clean(bin.serial).toUpperCase();
             if (serial && servicedBinSerials.has(serial)) return;
+            // No confirmed flip location yet (never serviced before) - shown hollow, at the
+            // property's own point, rather than not at all. See sourceCoords().
+            const isProvisional = !!p.provisional;
             // A bin already flagged missed (driven past too fast) earlier in
             // this same run stays red when its marker is (re)drawn - e.g.
             // after resuming the run - instead of drawing back in the
@@ -18386,7 +18439,7 @@ window.addEventListener('DOMContentLoaded', async () => {
 
             const key = `${siteId}|${src}|${g.stream}|${idx}|${serial}`;
             let originalDragPos = null;
-            
+
             const binMarkerIcon = L.divIcon({
               className: 'bin-map-marker-icon' + (window.lbStrayBins && window.lbStrayBins.has(lbBinKey(site, src, binStream, idx)) ? ' ux-stray' : ''),
               html: `
@@ -18395,8 +18448,8 @@ window.addEventListener('DOMContentLoaded', async () => {
                     width: 14px;
                     height: 14px;
                     border-radius: 50%;
-                    background-color: ${dotFillColor};
-                    border: 2.5px solid ${runOutlineColor};
+                    background-color: ${isProvisional ? 'transparent' : dotFillColor};
+                    border: 2.5px ${isProvisional ? 'dashed ' + dotFillColor : 'solid ' + runOutlineColor};
                     box-shadow: 0 1px 3px rgba(0,0,0,0.4);
                     box-sizing: border-box;
                   "></div>
@@ -18422,7 +18475,10 @@ window.addEventListener('DOMContentLoaded', async () => {
             m.bindPopup(() => mapPopupHTML({
               badge: binStreamLabel, badgeClass: mapStreamBadgeClass(binStream),
               title: serial || 'Bin',
-              lines: [`${esc(bin.size || '240L')} · Run: ${esc(g.run)}`],
+              lines: [
+                `${esc(bin.size || '240L')} · Run: ${esc(g.run)}`,
+                ...(isProvisional ? ['📍 Approximate spot (never flipped before) — flipping it here will set its exact location.'] : [])
+              ],
               actions: binActions
             }));
 
@@ -18475,6 +18531,7 @@ window.addEventListener('DOMContentLoaded', async () => {
                 if (targetSite.soloStreams?.[binStream]?.[idx]) {
                   targetSite.soloStreams[binStream][idx].lat = newPos.lat.toFixed(6);
                   targetSite.soloStreams[binStream][idx].lng = newPos.lng.toFixed(6);
+                  targetSite.soloStreams[binStream][idx].verified = true;
 
                   logEdit({
                     timestamp: new Date().toISOString(),
@@ -18496,6 +18553,7 @@ window.addEventListener('DOMContentLoaded', async () => {
                   if (activeObj) {
                     activeObj.lat = newPos.lat;
                     activeObj.lng = newPos.lng;
+                    activeObj.provisional = false;
                   }
                 }
                 cleanHandlers();
@@ -18503,7 +18561,7 @@ window.addEventListener('DOMContentLoaded', async () => {
             });
 
             m.addTo(mapMarkersLayer);
-            activeMapCircleMarkers.set(key, { layer: m, lat: p.lat, lng: p.lng, stream: binStream, siteId, serial });
+            activeMapCircleMarkers.set(key, { layer: m, lat: p.lat, lng: p.lng, stream: binStream, siteId, serial, provisional: isProvisional });
           });
         });
       });
@@ -30744,6 +30802,67 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       perKm: bk.km >= 0.3 ? bk.bins / bk.km : null,
       perHr: elapsed >= 5 * 60000 ? bk.bins / (elapsed / 3600000) : null };
   }
+  // A bin takes a good few seconds to actually flip - 5-15s is typical - so the gap between one
+  // bin and the next, WHEN THEY'RE FLIPPED CLOSE TOGETHER (same stop, not a drive to the next
+  // house), is a real measure of this driver's own pace on this run. Built fresh from SH.binTs
+  // each time rather than fixed, so it reflects how this driver actually works, not a guess.
+  // Gaps outside 3-45s are excluded - too short to be a real flip (a double-fire/glitch), too long
+  // to be "next bin, same stop" rather than "drove somewhere else." Needs a handful of same-stop
+  // pairs before it's trusted; returns null otherwise rather than a shaky number from 1-2 bins.
+  function legAvgSecPerBin(leg){
+    if (!leg || !SH || !SH.binTs) return null;
+    var binsNow = (leg.end != null ? leg.binsEnd : SH.bins) || 0;
+    var ts = SH.binTs.slice(leg.bins0 || 0, binsNow);
+    var gaps = [];
+    for (var i = 1; i < ts.length; i++) { var gp = (ts[i] - ts[i - 1]) / 1000; if (gp >= 3 && gp <= 45) gaps.push(gp); }
+    if (gaps.length < 3) return null;
+    return gaps.reduce(function(a, b){ return a + b; }, 0) / gaps.length;
+  }
+  // How many bins this leg's own actual working time (same elapsed figure bins/h uses - since the
+  // first pickup, pauses excluded) could plausibly account for, at this driver's own measured
+  // pace. Meant to sit ALONGSIDE the GPS-detected count, not replace it: a tightly-packed stop
+  // (several bins at a block of units, within a few metres of each other) can run well past what
+  // GPS proximity resolves bin-by-bin, and a gap between the two is worth a look either way -
+  // higher suggests bins GPS likely missed, and comparing a typed-in truck count against it catches
+  // a number that isn't physically possible for the time spent (see the Change run / End shift
+  // screens).
+  function legEstimatedBins(leg){
+    if (!leg || !leg.rateStart) return null;
+    var avg = legAvgSecPerBin(leg);
+    if (!avg) return null;
+    var endT = leg.end != null ? leg.end : Date.now();
+    var elapsed = Math.max(0, endT - leg.rateStart.t - (leg.pausedMs || 0));
+    return Math.round((elapsed / 1000) / avg);
+  }
+  // Shared by Change run / End shift: the "app counted" line (folding in the time-based estimate
+  // when it notably beats the GPS count) and, once something's typed, a warning if that figure
+  // isn't physically plausible for the time actually spent on the run - this run's own measured
+  // seconds-per-bin once there's enough data to trust one, else the bare physical floor (a bin
+  // doesn't flip in under ~3s, so ~20/min is the ceiling even on a fast, simple run).
+  // Static (doesn't depend on what's typed) - safe to show on every repaint, including while the
+  // truck-count field itself has focus (that field deliberately doesn't repaint on each keystroke,
+  // to keep the cursor from jumping back to the start - see the plausibility check below instead,
+  // which runs once at Save, for the actual typed value).
+  function legCountHint(leg, bk){
+    if (!leg) return '';
+    var est = legEstimatedBins(leg);
+    return '<div class="drv-hint">The app counted ' + bk.bins + ' bin' + (bk.bins === 1 ? '' : 's') + ' on Run ' + esc(leg.run) +
+      (est != null && est >= bk.bins + 2 ? ' (time stopped suggests up to ~' + est + ' - a tightly-packed stop may not all register)' : '') + '.</div>';
+  }
+  // Checked once at Save (crsave / finish), not live as-you-type: whether a typed truck count is
+  // physically possible for the time actually spent on the run, at this run's own measured
+  // seconds-per-bin once there's enough data to trust one, else the bare physical floor (a bin
+  // doesn't flip in under ~3s). Returns a confirmation message, or '' if there's nothing to flag -
+  // the driver's own count is never blocked, only double-checked.
+  function legCountWarnMsg(leg, typedStr){
+    var typed = num(typedStr);
+    if (!leg || typed == null || !leg.rateStart) return '';
+    var avgSec = legAvgSecPerBin(leg) || 3;
+    var elapsed = Math.max(0, Date.now() - leg.rateStart.t - (leg.pausedMs || 0));
+    var maxPlausible = Math.floor((elapsed / 1000) / avgSec);
+    if (typed <= maxPlausible) return '';
+    return 'That’s more bins than Run ' + leg.run + '’s time allows even at the fastest realistic pace (about ' + Math.round(avgSec) + 's a bin, ~' + maxPlausible + ' max). Save ' + typed + ' anyway?';
+  }
   // Closes a leg (run change or shift finish): snapshots the shift-wide totals it should be
   // diffed against from now on, and records the truck's own onboard bin count for it, if given.
   function closeLeg(leg, truckBinCountStr){
@@ -31044,11 +31163,17 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       //    tracked as accumulated paused time using real elapsed ticks (not a flat 2s guess),
       //    so it stays right even if a tick lands late or the tab was briefly backgrounded.
       var curStop = (function(){ try { return window.lbStops && window.lbStops.current(); } catch (e) { return null; } })();
-      // A stop the app only "sees" because the GPS froze mid-reverse (same spot reported for a
-      // minute-plus while the truck is actually manoeuvring) shouldn't pause the rate either -
-      // same frozen-GPS-during-a-reverse blind spot as the long-stop popups above.
-      if (curStop && (nowT - curStop.t0) > 60000 && !window.lbReversing) {
-        if (leg.pauseSince == null) leg.pauseSince = Math.max(curStop.t0 + 60000, nowT - 2500);
+      // Reversing, or a bin actually being flipped, during a stop is activity, not idling - same
+      // reasoning as the long-stop pop-ups (see lbStickerPop): a GPS fix frozen mid-reverse, or
+      // working a block of units a metre or two at a time, can look like one long stationary stop
+      // when it isn't, and shouldn't pause the bins/hour clock either.
+      if (curStop) {
+        if (leg._pauseStopT0 !== curStop.t0) { leg._pauseStopT0 = curStop.t0; leg._pauseActivityAt = 0; leg._pauseBinsAtStart = SH.bins || 0; }
+        if (window.lbReversing || (SH.bins || 0) > leg._pauseBinsAtStart) { leg._pauseActivityAt = nowT; leg._pauseBinsAtStart = SH.bins || 0; }
+      }
+      var idleSince = curStop ? (leg._pauseActivityAt || curStop.t0) : null;
+      if (curStop && (nowT - idleSince) > 60000) {
+        if (leg.pauseSince == null) leg.pauseSince = Math.max(idleSince + 60000, nowT - 2500);
         leg.pausedMs = (leg.pausedMs || 0) + Math.max(0, nowT - leg.pauseSince);
         leg.pauseSince = nowT; ch = true;
       } else if (leg.pauseSince != null) { leg.pauseSince = null; ch = true; }
@@ -31247,11 +31372,12 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     } else if (view === 'end') {
       title = 'End shift';
       var e = endDraft || (endDraft = { km: '', hrs: '', photo: null, note: '', truckBinCount: '' }), r = rates();
+      var endLeg = SH.leg && SH.leg.run ? SH.leg : null, endLegBk = endLeg ? legBinsKm(endLeg) : null;
       h = summaryHtml({ worked: r.worked, gpsKm: r.km, bins: r.bins, perKm: r.perKm, perHr: r.perHr, start: SH.start }) +
         (function(){ var c = runCheck(), l = c ? runCheckLine(c) : ''; return l ? '<div class="drv-stopbox">' + I.warn + '<span><b>Run ' + esc(c.run.run) + ':</b> ' + esc(l) + '.</span><button type="button" class="drv-link" data-a="runcheck">See</button></div>' : ''; })() +
         (function(){ var m = window.lbRunSheet ? window.lbRunSheet.missing(SH.id) : []; return m.length ? '<div class="drv-warnbox">' + I.warn + '<span>Run sheet still needs: ' + esc(m.join(' · ')) + '</span><button type="button" class="drv-link" data-a="rs:main">Fill in</button></div>' : ''; })() +
         '<div class="drv-sect"><span>Truck at the end</span></div>' + readingsHtml(e, 'uxsE') +
-        (SH.leg && SH.leg.run ? field('uxsETruckCount', 'Bins counted by the truck on Run ' + esc(SH.leg.run) + ' (optional)', e.truckBinCount, 'number', 'from the truck’s own counter') : '') +
+        (endLeg ? (legCountHint(endLeg, endLegBk) + field('uxsETruckCount', 'Bins counted by the truck on Run ' + esc(endLeg.run) + ' (optional)', e.truckBinCount, 'number', 'from the truck’s own counter')) : '') +
         field('uxsENote', 'Note (optional)', e.note, 'text', 'anything operations should know') +
         '<div class="drv-foot"><button type="button" class="drv-btn" data-a="back">Back</button><button type="button" class="drv-btn drv-go drv-bad" data-a="finish">Finish shift</button></div>';
     } else if (view === 'done') {
@@ -31269,7 +31395,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       h = '<div class="drv-sect"><span>Your run · ' + esc(todayDay()) + (cr.stream && todayWeek(cr.stream) ? ' · Week ' + todayWeek(cr.stream) : '') + '</span></div>' +
         runPickerHtml(cr, 'csstream', 'csrun') +
         (curLeg ? ('<div class="drv-sect"><span>Leaving Run ' + esc(curLeg.run) + '</span></div>' +
-          '<div class="drv-hint">The app counted ' + curLegBk.bins + ' bin' + (curLegBk.bins === 1 ? '' : 's') + ' on Run ' + esc(curLeg.run) + ' so far.</div>' +
+          legCountHint(curLeg, curLegBk) +
           field('uxsCrTruckCount', 'Bins counted by the truck on Run ' + esc(curLeg.run) + ' (optional)', cr.truckBinCount, 'number', 'from the truck’s own counter')) : '') +
         '<div class="drv-foot"><button type="button" class="drv-btn" data-a="back">Cancel</button><button type="button" class="drv-btn drv-go" data-a="crsave"' + (crOk ? '' : ' disabled') + '>Save</button></div>';
     } else if (view === 'history') {
@@ -31303,10 +31429,12 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       // bins/km and bins/h are scoped to the CURRENT run leg (gated on being inside its
       // boundary and having picked up a bin there, and paused on a stop over a minute) -
       // see legRates(). "bins / h (last 30 min)" stays a whole-shift rolling figure.
+      var legEst = (SH.leg && lr && lr.started) ? legEstimatedBins(SH.leg) : null;
       var legHint = (SH.leg && SH.leg.run) ? (
         !lr || !lr.started
           ? '<div class="drv-hint">Bins / km and bins / h for Run ' + esc(SH.leg.run) + ' start once you’re inside its boundary and have picked up a bin.</div>'
-          : (SH.leg.pauseSince != null ? '<div class="drv-hint">Paused on Run ' + esc(SH.leg.run) + ' - stopped over a minute.</div>' : '')
+          : (SH.leg.pauseSince != null ? '<div class="drv-hint">Paused on Run ' + esc(SH.leg.run) + ' - stopped over a minute.</div>'
+            : (legEst != null && legEst >= lr.bins + 2 ? '<div class="drv-hint">Time stopped on Run ' + esc(SH.leg.run) + ' suggests up to ~' + legEst + ' bins (' + lr.bins + ' detected) - a tightly-packed stop, like a block of units, may not all register.</div>' : ''))
       ) : '';
       h = '<div class="drv-top">' + esc([SH.driver, SH.truck].filter(Boolean).join(' · ')) + ' · since ' + esc(clock(SH.start)) + '</div>' +
         '<div class="drv-note-top">' + esc((SHIFT_STREAMS.filter(function(x){ return x[0] === SH.stream; })[0] || [])[1] || SH.stream || 'No run picked') + (SH.run ? ' · Run ' + esc(SH.run) : '') + '<button type="button" class="drv-link" data-a="changerun">Change run</button></div>' +
@@ -31441,13 +31569,18 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     if (a === 'changerun') { crDraft = { stream: SH ? SH.stream : '', run: SH ? SH.run : '', truckBinCount: '' }; view = 'changerun'; paint(); return; }
     if (a === 'crsave') {
       if (!SH || !crDraft) { view = 'main'; paint(); return; }
-      if (SH.leg) closeLeg(SH.leg, crDraft.truckBinCount);
-      SH.stream = crDraft.stream; SH.run = crDraft.run;
-      SH.day = crDraft.run ? todayDay() : ''; SH.week = crDraft.run ? todayWeek(crDraft.stream) : '';
-      SH.leg = SH.run ? newLeg(SH.stream, SH.run, SH.day, SH.week) : null;
-      saveSh();
-      try { openShiftRun(); } catch (e) {}
-      crDraft = null; view = 'main'; toast('Run changed'); paint(); return;
+      var doCrSave = function(){
+        if (SH.leg) closeLeg(SH.leg, crDraft.truckBinCount);
+        SH.stream = crDraft.stream; SH.run = crDraft.run;
+        SH.day = crDraft.run ? todayDay() : ''; SH.week = crDraft.run ? todayWeek(crDraft.stream) : '';
+        SH.leg = SH.run ? newLeg(SH.stream, SH.run, SH.day, SH.week) : null;
+        saveSh();
+        try { openShiftRun(); } catch (e) {}
+        crDraft = null; view = 'main'; toast('Run changed'); paint();
+      };
+      var crWarn = SH.leg ? legCountWarnMsg(SH.leg, crDraft.truckBinCount) : '';
+      if (crWarn) { confirmIt(crWarn).then(function(ok){ if (ok) doCrSave(); }); return; }
+      doCrSave(); return;
     }
     if (a === 'history') { view = 'history'; paint(); return; }
     if (a === 'csv') { shiftsCsv(); return; }
@@ -31542,10 +31675,16 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     if (a === 'setdepot') { var lh = here(); if (!lh) { toast('No GPS position yet'); return; } lsSet('lbDepot', { lat: lh.lat, lng: lh.lng, ts: Date.now() }); toast('Depot set to here'); paint(); return; }
     if (a === 'finish') {
       var e = endDraft;
-      if ((e.km === '' || e.hrs === '') && !e.photo) {
-        confirmIt('Finish without the end km and hours?').then(function(ok){ if (ok) doFinish(); }); return;
-      }
-      doFinish(); return;
+      var checkKmHrs = function(){
+        if ((e.km === '' || e.hrs === '') && !e.photo) {
+          confirmIt('Finish without the end km and hours?').then(function(ok){ if (ok) doFinish(); });
+        } else {
+          doFinish();
+        }
+      };
+      var endBinWarn = (SH && SH.leg) ? legCountWarnMsg(SH.leg, e.truckBinCount) : '';
+      if (endBinWarn) { confirmIt(endBinWarn).then(function(ok){ if (ok) checkKmHrs(); }); return; }
+      checkKmHrs(); return;
     }
     if (a === 'share') { var s = history().filter(function(x){ return x.id === b.getAttribute('data-id'); })[0]; if (s) shareText(summaryText(s), 'Shift ' + dateStr(s.start)); return; }
     if (a === 'runcheck') { view = 'runcheck'; paint(); return; }
@@ -35352,15 +35491,23 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     (window.lbGpsLog || []).forEach(function(e){
       rows.push([hms(e.at), e.k, e.t ? hms(e.t) : '', e.lat == null ? '' : e.lat, e.lng == null ? '' : e.lng, e.acc == null ? '' : e.acc,
         e.ps == null ? '' : e.ps, e.ph == null ? '' : e.ph, e.v == null ? '' : e.v, e.j || '', e.f == null ? '' : e.f, e.r || '',
-        e.k === 'err' ? ('code ' + e.code + ' ' + (e.msg || '')).replace(/,/g, ' ') : ''].join(','));
+        e.k === 'err' ? ('code ' + e.code + ' ' + (e.msg || '')).replace(/,/g, ' ')
+          : e.k === 'note' ? String(e.note || '').replace(/,/g, ' ')
+          : ''].join(','));
     });
     rows.push('# ' + navigator.userAgent.replace(/,/g, ' '));
     return rows.join('\n');
   }
-  window.lbSendGpsLog = async function(){
+  // `reason` (optional): what the driver was actually doing when this log was triggered - e.g. from
+  // the "I was reversing" / "picking up bins in a row" buttons on the long-stop pop-up (see
+  // lbStickerPop). Recorded both as a lead comment line in the CSV and in the filename, so it's
+  // clear at a glance what a log is about without having to open it.
+  window.lbSendGpsLog = async function(reason){
     var text = csv(), n = (window.lbGpsLog || []).length;
     if (!n) { customAlert('No GPS readings recorded yet - drive with the app open, then try again.'); return; }
-    var name = 'gps-log-' + new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-') + '.csv';
+    if (reason) text = '# reason: ' + String(reason).replace(/\n/g, ' ') + '\n' + text;
+    var slug = reason ? '-' + String(reason).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-+|-+$)/g, '').slice(0, 30) : '';
+    var name = 'gps-log' + slug + '-' + new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-') + '.csv';
     try {
       var file = new File([text], name, { type: 'text/csv' });
       if (navigator.canShare && navigator.canShare({ files: [file] })) { await navigator.share({ files: [file], title: 'Lukez Bunz GPS log' }); return; }
@@ -36240,7 +36387,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   }
 
   // stages: 1 stickering, 2 mess, 3 having a rest, 4 back on the road with a break running, 9 a note
-  var el = null, key = '', waved = {}, shown = 0, doneSeen = null, stopT0 = 0, restBreak = 0, noteTimer = 0, revSeen = false;
+  var el = null, key = '', waved = {}, shown = 0, doneSeen = null, stopT0 = 0, restBreak = 0, noteTimer = 0, lastActivityAt = 0, binsAtStopStart = 0;
   function build(){
     if (el) return el;
     el = document.createElement('div'); el.id = 'lbStickerPop'; el.setAttribute('role', 'status'); el.setAttribute('aria-live', 'polite');
@@ -36268,6 +36415,13 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
         else note('Couldn’t start the break', 'Is a shift running? Check the break clock in Layers.');
       } else if (a === 'endbrk' && BC && BC.endBreak) {
         BC.endBreak(); try { BC.paint(); } catch (e) {} restBreak = 0; note('Break ended', 'Back to work.');
+      } else if (a === 'logrev' || a === 'logbins') {
+        // Wrongly flagged as a long stop - tag and send the last 15 minutes of GPS fixes so it can
+        // be checked later, same CSV as Customize > Send GPS log, with the reason baked in.
+        waved[key + '|1'] = waved[key + '|2'] = 1;
+        var reason = a === 'logrev' ? 'Reversing' : 'Picking up multiple bins in a row';
+        if (typeof window.lbGpsLogAdd === 'function') window.lbGpsLogAdd({ k: 'note', note: reason });
+        if (typeof window.lbSendGpsLog === 'function') window.lbSendGpsLog(reason);
       }
     });
     document.body.appendChild(el);
@@ -36294,6 +36448,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
         '<div class="lbsp-s">' + (stage === 1 ? 'Stopped over a minute.' : 'Stopped over three minutes.') + '</div>' + sub +
         '<div class="lbsp-b lbsp-b4"><button type="button" class="go" data-a="go">Stickering a bin</button><button type="button" data-a="mess">Knocked over a bin</button>' +
         '<button type="button" data-a="slash">Taking a slash</button><button type="button" data-a="hot">Checking out the hotties</button></div>' +
+        '<div class="lbsp-w">None of those - wrongly flagged? Send a GPS log so it can be looked at:</div>' +
+        '<div class="lbsp-b lbsp-b3"><button type="button" data-a="logrev">I was reversing</button><button type="button" data-a="logbins">Picking up bins in a row</button></div>' +
         '<div class="lbsp-b"><button type="button" data-a="x">Not now</button></div>';
     } else if (stage === 3) {
       html = '<div class="lbsp-t">Having a rest, ' + name + '?</div><div class="lbsp-s">Stopped since ' + esc(hhmm(st.t0)) + ' (' + Math.floor((Date.now() - st.t0) / MIN) + ' min).</div>' +
@@ -36328,22 +36484,25 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     if (cur.t0 !== stopT0) {            // a new stop: remember which bins were already done when it began
       stopT0 = cur.t0; key = String(cur.t0); waved = {};
       var done = g('servicedBinSerials'); doneSeen = new Set(done && done.forEach ? Array.from(done) : []);
-      revSeen = false;
+      lastActivityAt = 0; binsAtStopStart = done ? done.size : 0;
       if (shown) hide();
     }
-    // Reversing seen at any point during this stop: the truck is being manoeuvred (a reverse, a
-    // three-point turn), not left standing, so don't ask about a bin or a rest. A GPS fix can freeze
-    // solid for a minute or more during a slow reverse (same position, 0 speed reported the whole
-    // time) and look exactly like a long genuine stop; this is the one signal already on hand that
-    // tells the two apart (1 Oct, end of Bungower Rd: a long reverse past a dead end froze the GPS
-    // the whole way back and this popped "Stickering a bin?" with nothing actually going on).
-    if (window.lbReversing) revSeen = true;
+    // Reversing, or a bin actually being flipped, at any point during this stop is activity, not
+    // idling - "how long since anything happened" restarts from whichever was most recent instead
+    // of counting straight from when the stop began. Two real cases this fixes:
+    //  - a GPS fix can freeze solid for a minute or more during a slow reverse (same position, 0
+    //    speed reported the whole time) and look exactly like a long genuine stop (1 Oct, end of
+    //    Bungower Rd: a long reverse past a dead end froze the GPS the whole way back);
+    //  - working a block of units, moving only 1-2m between each bin, can look like one long stop
+    //    even with 8 bins flipped one after another (2 Oct).
+    var servicedNow = g('servicedBinSerials'), binsNow = servicedNow ? servicedNow.size : 0;
+    if (window.lbReversing || binsNow > binsAtStopStart) { lastActivityAt = Date.now(); binsAtStopStart = binsNow; }
     if (brk) { if (shown) hide(); return; }                   // already on a break: nothing to ask
-    var ms = Date.now() - cur.t0, p = { lat: cur.lat, lng: cur.lng }, place = placeAt(p);
+    var ms = Date.now() - (lastActivityAt || cur.t0), p = { lat: cur.lat, lng: cur.lng }, place = placeAt(p);
     var issue = document.getElementById('uxIssue'), busy = issue && issue.classList.contains('open');
-    if (ms >= REST_MS && place !== 'tip' && !waved[key + '|3'] && !busy && !revSeen) { if (shown !== 3) show(3, { t0: cur.t0 }); return; }
+    if (ms >= REST_MS && place !== 'tip' && !waved[key + '|3'] && !busy) { if (shown !== 3) show(3, { t0: cur.t0 }); return; }
     var stage = ms >= STAGE2_S * 1000 ? 2 : ms >= STAGE1_S * 1000 ? 1 : 0;
-    if (!stage || place || revSeen) { if (shown) hide(); return; }
+    if (!stage || place) { if (shown) hide(); return; }
     if (waved[key + '|' + stage] || busy) { if (shown === stage) hide(); return; }
     if (shown === stage) return;
     var bin = binAt({ lat: cur.lat, lng: cur.lng, doneSeen: doneSeen });
