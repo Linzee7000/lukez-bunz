@@ -18129,12 +18129,12 @@ window.addEventListener('DOMContentLoaded', async () => {
     }
     const here = userCurrentLocation, heading = lastValidHeading || 0;
     const currentId = binPropertyHighlight.siteId;
-    let nextId = null, nextD = Infinity, currentD = Infinity;
+    let nextId = null, nextAlong = Infinity, currentD = Infinity;
     activeMapCircleMarkers.forEach(m => {
       if (!m || !m.siteId) return;
       const d = getDistanceMeters(here.lat, here.lng, m.lat, m.lng);
       if (m.siteId === currentId && d < currentD) currentD = d;
-      if (d > BIN_HIGHLIGHT_ENTER_M || d >= nextD) return;
+      if (d > BIN_HIGHLIGHT_ENTER_M) return;
       // Same left / right cones and side setting as the pass / pull-up check (judged by the bin's house).
       const ref = lbBinSideRef(m);
       const rel = (getBearing(here.lat, here.lng, ref.lat, ref.lng) - heading + 360) % 360;
@@ -18143,7 +18143,18 @@ window.addEventListener('DOMContentLoaded', async () => {
       if (travelMode === 'left' && !isLeft) return;
       if (travelMode === 'right' && !isRight) return;
       if (travelMode === 'all' && !(isLeft || isRight)) return;
-      nextId = m.siteId; nextD = d;
+      // Picked by how far ALONG the direction of travel the property sits, not raw straight-line
+      // distance. On closely-spaced frontages (neighbouring bins well under the 12 m catch radius
+      // apart - e.g. Stella Avenue, Tyabb, where houses run about 12-16 m apart), a bin set further
+      // off to the side than its neighbour (set back from the road, or just placed differently on
+      // the block) can read as "closer" in a straight line before the truck has actually reached
+      // it, jumping the red outline onto the next property early. Projected onto the heading, this
+      // along-the-road distance stays correctly ordered by progress down the street regardless of
+      // how far sideways a bin's dot sits - matching the same trick the next-bin box already uses
+      // (see nextBin() / lbNextBin in lb-street-stats-script).
+      const along = Math.abs(d * Math.cos(rel * Math.PI / 180));
+      if (along >= nextAlong) return;
+      nextId = m.siteId; nextAlong = along;
     });
     const targetId = nextId || (currentD <= BIN_HIGHLIGHT_EXIT_M ? currentId : null);
     if (!targetId) { if (currentId) clearBinPropertyHighlight(); return; }
