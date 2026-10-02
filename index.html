@@ -31044,7 +31044,10 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       //    tracked as accumulated paused time using real elapsed ticks (not a flat 2s guess),
       //    so it stays right even if a tick lands late or the tab was briefly backgrounded.
       var curStop = (function(){ try { return window.lbStops && window.lbStops.current(); } catch (e) { return null; } })();
-      if (curStop && (nowT - curStop.t0) > 60000) {
+      // A stop the app only "sees" because the GPS froze mid-reverse (same spot reported for a
+      // minute-plus while the truck is actually manoeuvring) shouldn't pause the rate either -
+      // same frozen-GPS-during-a-reverse blind spot as the long-stop popups above.
+      if (curStop && (nowT - curStop.t0) > 60000 && !window.lbReversing) {
         if (leg.pauseSince == null) leg.pauseSince = Math.max(curStop.t0 + 60000, nowT - 2500);
         leg.pausedMs = (leg.pausedMs || 0) + Math.max(0, nowT - leg.pauseSince);
         leg.pauseSince = nowT; ch = true;
@@ -36237,7 +36240,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   }
 
   // stages: 1 stickering, 2 mess, 3 having a rest, 4 back on the road with a break running, 9 a note
-  var el = null, key = '', waved = {}, shown = 0, doneSeen = null, stopT0 = 0, restBreak = 0, noteTimer = 0;
+  var el = null, key = '', waved = {}, shown = 0, doneSeen = null, stopT0 = 0, restBreak = 0, noteTimer = 0, revSeen = false;
   function build(){
     if (el) return el;
     el = document.createElement('div'); el.id = 'lbStickerPop'; el.setAttribute('role', 'status'); el.setAttribute('aria-live', 'polite');
@@ -36325,14 +36328,22 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     if (cur.t0 !== stopT0) {            // a new stop: remember which bins were already done when it began
       stopT0 = cur.t0; key = String(cur.t0); waved = {};
       var done = g('servicedBinSerials'); doneSeen = new Set(done && done.forEach ? Array.from(done) : []);
+      revSeen = false;
       if (shown) hide();
     }
+    // Reversing seen at any point during this stop: the truck is being manoeuvred (a reverse, a
+    // three-point turn), not left standing, so don't ask about a bin or a rest. A GPS fix can freeze
+    // solid for a minute or more during a slow reverse (same position, 0 speed reported the whole
+    // time) and look exactly like a long genuine stop; this is the one signal already on hand that
+    // tells the two apart (1 Oct, end of Bungower Rd: a long reverse past a dead end froze the GPS
+    // the whole way back and this popped "Stickering a bin?" with nothing actually going on).
+    if (window.lbReversing) revSeen = true;
     if (brk) { if (shown) hide(); return; }                   // already on a break: nothing to ask
     var ms = Date.now() - cur.t0, p = { lat: cur.lat, lng: cur.lng }, place = placeAt(p);
     var issue = document.getElementById('uxIssue'), busy = issue && issue.classList.contains('open');
-    if (ms >= REST_MS && place !== 'tip' && !waved[key + '|3'] && !busy) { if (shown !== 3) show(3, { t0: cur.t0 }); return; }
+    if (ms >= REST_MS && place !== 'tip' && !waved[key + '|3'] && !busy && !revSeen) { if (shown !== 3) show(3, { t0: cur.t0 }); return; }
     var stage = ms >= STAGE2_S * 1000 ? 2 : ms >= STAGE1_S * 1000 ? 1 : 0;
-    if (!stage || place) { if (shown) hide(); return; }
+    if (!stage || place || revSeen) { if (shown) hide(); return; }
     if (waved[key + '|' + stage] || busy) { if (shown === stage) hide(); return; }
     if (shown === stage) return;
     var bin = binAt({ lat: cur.lat, lng: cur.lng, doneSeen: doneSeen });
