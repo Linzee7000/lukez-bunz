@@ -3612,6 +3612,8 @@ body:not(.dark-mode) .welcome-go-wrap {
     border: none !important;
     cursor: grab !important;
   }
+  /* Unconfirmed bins (dashed circles) are only drawn with Layers > Unconfirmed bins on - see showProvisionalBins. */
+  html:not(.lb-prov-bins) .bin-map-marker-icon.bin-provisional { display: none !important; }
   .bin-map-marker-icon:active {
     cursor: grabbing !important;
   }
@@ -3990,7 +3992,7 @@ body:not(.dark-mode) .welcome-go-wrap {
 </head>
 
 <body class="ux2 dark-mode">
-<script>(function(){try{var t=localStorage.getItem('lbTheme');var light=(t==='light');document.body.classList.toggle('dark-mode',!light);document.documentElement.classList.toggle('ux-light',light);}catch(e){}try{var u=JSON.parse(localStorage.getItem('lbUx')||'{}')||{};if(u.skin&&u.skin!=='slate')document.documentElement.setAttribute('data-ux-skin',u.skin);if(u.maptint&&u.maptint!=='normal')document.documentElement.setAttribute('data-ux-maptint',u.maptint);}catch(e){}})();</script>
+<script>(function(){try{var t=localStorage.getItem('lbTheme');var light=(t==='light');document.body.classList.toggle('dark-mode',!light);document.documentElement.classList.toggle('ux-light',light);}catch(e){}try{var u=JSON.parse(localStorage.getItem('lbUx')||'{}')||{};var sk=u.skin||'rubbish',mt=u.maptint||(u.skin?'normal':'gta');if(sk!=='slate')document.documentElement.setAttribute('data-ux-skin',sk);if(mt!=='normal')document.documentElement.setAttribute('data-ux-maptint',mt);}catch(e){}})();</script>
 
 <div class="container">
   <div class="app-header" id="appHeader">
@@ -5419,6 +5421,13 @@ const STREET_LITTER_SERVICE_LEVELS = {"seasons":[{"key":"tourist1","label":"Tour
   // Rings round houses whose pin sits outside its lot (orange) or has no lot near it (red): possible address /
   // pin problems. Handy when checking data, noise when driving, so off unless switched on (Layers).
   let showPinRings = (function(){ try { return localStorage.getItem('lbShowPinRings') === '1'; } catch (e) { return false; } })();
+  // The dashed circles: bins with no confirmed spot yet, drawn at the house's own point (see sourceCoords).
+  // A run with a lot of them is a map full of rings, so they are not drawn unless switched on (Layers >
+  // Unconfirmed bins). Only the drawing is switched off (CSS on <html>, .lb-prov-bins): the markers are
+  // still there, so driving past one still collects it and saves its real location, exactly as before -
+  // hiding them must not bring back the "can never be flipped" problem they were added to fix.
+  let showProvisionalBins = (function(){ try { return localStorage.getItem('lbShowProvisionalBins') === '1'; } catch (e) { return false; } })();
+  document.documentElement.classList.toggle('lb-prov-bins', showProvisionalBins);
 
   let isTruckFollowEnabled = true;
   let isNextBinBoxVisible = localStorage.getItem('lukezBunzNextBinBoxVisible') !== 'false';
@@ -5500,7 +5509,10 @@ const STREET_LITTER_SERVICE_LEVELS = {"seasons":[{"key":"tourist1","label":"Tour
   async function persistKmzDataByRun(){
     await saveToDB('kmzDataByRun', Object.fromEntries(kmzDataByRun));
   }
-  let kmzLayersVisible = true;
+  // The imported KML/KMZ truck routes: off unless switched on (Layers > KML routes > Show KMZ runs), and
+  // remembered once they have been - a lot of lines on the map for a driver who hasn't asked for them.
+  // Loading a KML for a run switches them on (see the import further down), or nothing would appear.
+  let kmzLayersVisible = (function(){ try { return localStorage.getItem('lukezBunzKmzLayers') === '1'; } catch (e) { return false; } })();
   let mapKmzRouteLayer = null;
   let mapKmzLiftLayer = null;
   let recyclingLiftColor = '#facc15';
@@ -6435,6 +6447,12 @@ const STREET_LITTER_SERVICE_LEVELS = {"seasons":[{"key":"tourist1","label":"Tour
     if (typeof updateMapSideLayersUI === 'function') updateMapSideLayersUI();
   }
   window.togglePinRings = togglePinRings;
+  function toggleProvisionalBins() {
+    showProvisionalBins = !showProvisionalBins;
+    try { localStorage.setItem('lbShowProvisionalBins', showProvisionalBins ? '1' : '0'); } catch (e) {}
+    document.documentElement.classList.toggle('lb-prov-bins', showProvisionalBins);
+  }
+  window.toggleProvisionalBins = toggleProvisionalBins;
   function togglePropertyBoundaries() {
     showPropertyBoundaries = !showPropertyBoundaries;
     renderMapData();
@@ -9078,6 +9096,7 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
 
   function toggleKmzLayers(){
     kmzLayersVisible=!kmzLayersVisible;
+    try { localStorage.setItem('lukezBunzKmzLayers', kmzLayersVisible ? '1' : '0'); } catch (e) {}
     const b=document.getElementById('btnKmzToggle');
     if(b) b.classList.toggle('active',kmzLayersVisible);
     renderMapData();
@@ -15143,6 +15162,12 @@ window.addEventListener('DOMContentLoaded', async () => {
     existing.files.push(...imported);
     kmzDataByRun.set(key, existing);
     await persistKmzDataByRun();
+    // Just loaded, so show it: KMZ runs are off by default now, and an import that draws nothing looks broken.
+    if (!kmzLayersVisible) {
+      kmzLayersVisible = true;
+      try { localStorage.setItem('lukezBunzKmzLayers', '1'); } catch (e) {}
+      if (typeof updateMapSideLayersUI === 'function') updateMapSideLayersUI();
+    }
     renderMapData();
 
     const totalRoutes = existing.files.reduce((n, f) => n + f.routes.length, 0);
@@ -18452,7 +18477,7 @@ window.addEventListener('DOMContentLoaded', async () => {
             let originalDragPos = null;
 
             const binMarkerIcon = L.divIcon({
-              className: 'bin-map-marker-icon' + (window.lbStrayBins && window.lbStrayBins.has(lbBinKey(site, src, binStream, idx)) ? ' ux-stray' : ''),
+              className: 'bin-map-marker-icon' + (isProvisional ? ' bin-provisional' : '') + (window.lbStrayBins && window.lbStrayBins.has(lbBinKey(site, src, binStream, idx)) ? ' ux-stray' : ''),
               html: `
                 <div style="width:30px; height:30px; display:flex; align-items:center; justify-content:center;">
                   <div class="bin-dot-inner" style="
@@ -22566,6 +22591,7 @@ body.stream-slr .lb-layers-head .icon-img { filter: brightness(0); }
       case 'bounds':    return typeof showRunBoundaries !== 'undefined' && showRunBoundaries;
       case 'propBounds':return typeof showPropertyBoundaries !== 'undefined' && showPropertyBoundaries;
       case 'pinRings':  return typeof showPinRings !== 'undefined' && showPinRings;
+      case 'provBins':  return typeof showProvisionalBins !== 'undefined' && showProvisionalBins;
       case 'streetModes':return typeof showStreetModes !== 'undefined' && showStreetModes;
       case 'kmz':       return typeof kmzLayersVisible !== 'undefined' && kmzLayersVisible;
       case 'nextBin':   return typeof isNextBinBoxVisible !== 'undefined' && isNextBinBoxVisible;
@@ -22621,6 +22647,7 @@ body.stream-slr .lb-layers-head .icon-img { filter: brightness(0); }
     ['houses',   'toggleHouseGpsDots',            'img:houses.png',   'Houses'],
     ['bounds',   'toggleRunBoundaries',           'img:boundary.png', 'Run boundaries'],
     ['propBounds','togglePropertyBoundaries',     'img:boundary.png', 'Property boundaries'],
+    ['provBins', 'toggleProvisionalBins',         '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.6" stroke-dasharray="4.200 3.200" aria-hidden="true"><circle cx="12" cy="12" r="8"/></svg>', 'Unconfirmed bins'],
     ['pinRings', 'togglePinRings',                '⭕',               'Address check rings'],
     ['streetModes','toggleStreetModes',           'img:route.png',    'Reverse in / drive in streets'],
     ['geofence', 'toggleGeofenceLayerVisibility', '🚧',               'Geofences'],
@@ -27107,7 +27134,7 @@ body:not(.ux-gta-game) #uxGtaStack{display:none}
 #uxGtaStack .uxgs-fine b{font-size:32px}
 @keyframes uxgsIn{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:none}}
 body.ux-gta-wasted #mainLeafletMap{filter:grayscale(1) brightness(.8);transition:filter .6s}
-html:not([data-ux-skin="gta"]) body.ux2 .ux-gta-card{display:none !important}
+html:not([data-ux-skin="gta"]):not([data-ux-skin="rubbish"]) body.ux2 .ux-gta-card{display:none !important}
 body.ux2:not(.ux-gta-game) .ux-gta-card [data-sw="gtasnd"]{opacity:.45;pointer-events:none}
 /* "Mission passed" splash when the skin is picked - see gtaSplash() in the Customize script */
 #uxGtaSplash{position:fixed;left:0;right:0;top:34%;z-index:30000;pointer-events:none;text-align:center;padding:14px 0 16px;background:linear-gradient(90deg, transparent, rgba(0,0,0,.78) 20%, rgba(0,0,0,.78) 80%, transparent);animation:uxGtaSplash 3.2s ease forwards}
@@ -29318,8 +29345,12 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     { id: 'outback', l: 'Outback', d: ['#140d09', '#32231a', '#fbf1e8'], lt: ['#f5ede3', '#fffaf4', '#2a1a10'] },
     { id: 'dusk',    l: 'Dusk',    d: ['#0e0a16', '#271e3a', '#f4f0fb'], lt: ['#f0ecf7', '#ffffff', '#1a1128'] },
     { id: 'carbon',  l: 'Carbon',  d: ['#000000', '#1f1f1f', '#ffffff'], lt: ['#ffffff', '#e6e6e6', '#000000'] },
-    { id: 'gta',     l: 'GTA',     d: ['#000000', '#2f6fc2', '#72cc72'], lt: ['#e6e6e6', '#2f6fc2', '#000000'] }
+    { id: 'gta',     l: 'GTA',     d: ['#000000', '#2f6fc2', '#72cc72'], lt: ['#e6e6e6', '#2f6fc2', '#000000'] },
+    { id: 'rubbish', l: 'Hard Rubbish', d: ['#1a1b1e', '#2a2c31', '#ffd21f'], lt: ['#e4e0d6', '#ffffff', '#000000'] }
   ];
+  // The skins that come with Game mode (health bar, cash, pickups, wanted stars): GTA, and Hard Rubbish
+  // (the same game in the hazard-stripe look - see the lb-rubbish blocks at the bottom of the file).
+  function gameSkin(id){ return id === 'gta' || id === 'rubbish'; }
   var MAPTINTS = ['normal', 'dim', 'night', 'grey', 'gta'];
   function skinOf(id){ return SKINS.filter(function(x){ return x.id === id; })[0] || SKINS[0]; }
 
@@ -29335,8 +29366,11 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       hud: (o.hud === 'panel' || o.hud === 'focus') ? o.hud : 'bands',
       nav: (o.nav === 'compact' || o.nav === 'bar') ? o.nav : 'menu',
       cr: (o.cr === 'sharp' || o.cr === 'round') ? o.cr : 'soft',
-      skin: skinOf(o.skin).id,
-      maptint: MAPTINTS.indexOf(o.maptint) >= 0 ? o.maptint : 'normal',
+      // No skin saved (Customize has never been used on this phone): Hard Rubbish, and the dark radar map
+      // that goes with it. A saved skin - Slate included - is left as it is. The inline script after <body>
+      // makes the same choice before first paint; keep the two in step.
+      skin: o.skin ? skinOf(o.skin).id : 'rubbish',
+      maptint: MAPTINTS.indexOf(o.maptint) >= 0 ? o.maptint : (o.skin ? 'normal' : 'gta'),
       truck: /^(standard|auto|recycle|fogo|garbage|glass)$/.test(o.truck) ? o.truck : 'standard',
       gtafx: o.gtafx !== false,
       gtasnd: o.gtasnd !== false,
@@ -29378,7 +29412,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   }
 
   // Read by the GTA game mode block further down.
-  window.uxGtaOpts = function(){ var on = st.skin === 'gta'; return { skin: on, game: on && st.gtafx, sound: on && st.gtafx && st.gtasnd }; };
+  window.uxGtaOpts = function(){ var on = gameSkin(st.skin); return { skin: on, game: on && st.gtafx, sound: on && st.gtafx && st.gtasnd }; };
 
   function gtaSplash(){
     // The game mode block (loaded later) owns the big messages and the sounds; this is the fallback.
@@ -29420,13 +29454,21 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     if (st.skin === 'slate') h.removeAttribute('data-ux-skin'); else h.setAttribute('data-ux-skin', st.skin);
     if (st.maptint === 'normal') h.removeAttribute('data-ux-maptint'); else h.setAttribute('data-ux-maptint', st.maptint);
     syncThemeColor();
-    b.classList.toggle('ux-gta-game', st.skin === 'gta' && st.gtafx);
+    b.classList.toggle('ux-gta-game', gameSkin(st.skin) && st.gtafx);
     if (window.lbTrucks && st.truck !== lastTruck) { lastTruck = st.truck; window.lbTrucks.refresh(); }
     if (st.skin === 'gta' && !document.getElementById('uxGtaFont')) {
       var fl = document.createElement('link');
       fl.id = 'uxGtaFont'; fl.rel = 'stylesheet';
       fl.href = 'https://fonts.googleapis.com/css2?family=Anton&display=swap';
       document.head.appendChild(fl);
+    }
+    // Hard Rubbish's heavy display font, fetched only while that skin is on (same idea as Anton above:
+    // with no signal the headings fall back to Impact / Arial Black and nothing breaks).
+    if (st.skin === 'rubbish' && !document.getElementById('uxRbFont')) {
+      var rf = document.createElement('link');
+      rf.id = 'uxRbFont'; rf.rel = 'stylesheet';
+      rf.href = 'https://fonts.googleapis.com/css2?family=Bowlby+One&display=swap';
+      document.head.appendChild(rf);
     }
     if (!styleEl) { styleEl = document.createElement('style'); styleEl.id = 'ux-hide-css'; document.head.appendChild(styleEl); }
     var css = '';
@@ -29506,7 +29548,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
         return;
       }
       if (t.getAttribute('data-cz') === 'reset') {
-        st = { nerd: false, density: 'normal', text: 'normal', hand: 'right', hud: 'bands', nav: 'menu', cr: 'soft', skin: 'slate', maptint: 'normal', truck: 'standard', gtafx: true, gtasnd: true, ov: {} };
+        st = { nerd: false, density: 'normal', text: 'normal', hand: 'right', hud: 'bands', nav: 'menu', cr: 'soft', skin: 'rubbish', maptint: 'gta', truck: 'standard', gtafx: true, gtasnd: true, ov: {} };
         if (typeof window.uxSetTheme === 'function') window.uxSetTheme('dark', true);
         if (typeof window.lbSetQuickSide === 'function') window.lbSetQuickSide('left');
         save(); apply(); sync(); return;
@@ -29519,8 +29561,9 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
         st.skin = skinOf(skinId).id;
         // The GTA skin brings its radar-style map with it; leaving it puts the map back, unless
         // Map colours was changed by hand in between.
-        if (st.skin === 'gta' && was !== 'gta') { if (st.maptint === 'normal') st.maptint = 'gta'; gtaSplash(); }
-        else if (st.skin !== 'gta' && st.maptint === 'gta') st.maptint = 'normal';
+        // (Hard Rubbish keeps the same dark radar map as GTA.)
+        if (gameSkin(st.skin) && !gameSkin(was)) { if (st.maptint === 'normal') st.maptint = 'gta'; gtaSplash(); }
+        else if (!gameSkin(st.skin) && st.maptint === 'gta') st.maptint = 'normal';
         save(); apply(); sync(); return;
       }
       var segEl = t.parentNode && t.parentNode.getAttribute && t.parentNode.getAttribute('data-seg');
@@ -29686,7 +29729,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     list: '<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/>',
     plus: '<path d="M12 5v14M5 12h14"/>',
     share: '<path d="M12 3v12M8 7l4-4 4 4M5 13v7h14v-7"/>',
-    undo: '<path d="M9 14 4 9l5-5"/><path d="M4 9h11a5 5 0 0 1 0 10h-3"/>'
+    undo: '<path d="M9 14 4 9l5-5"/><path d="M4 9h11a5 5 0 0 1 0 10h-3"/>',
+    tipped: '<path d="M2 20h20"/><path d="M8 9.500h12v7.500H8z"/><path d="M5 8v11"/><path d="M11 13h6"/>'
   };
   function ico(name, cls){
     var P = window.UX_ICON_PATHS || {};
@@ -29698,7 +29742,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     bin: { title: 'Bin', items: [
       ['overfull', 'Overfull', 'box'], ['heavy', "Too heavy / can't lift", 'weight'], ['contaminated', 'Contaminated', 'alert'],
       ['broken', 'Broken / damaged', 'wrench'], ['noaccess', 'No access to bin', 'ban'], ['notout', 'Not put out', 'eyeoff'],
-      ['jammed', 'Jammed / stuck', 'lockk'], ['spill', 'Prior spill', 'alert'] ] },
+      ['knocked', 'Knocked over', 'tipped'], ['jammed', 'Jammed / stuck', 'lockk'], ['spill', 'Prior spill', 'alert'] ] },
     house: { title: 'House', items: [
       ['blocked', 'Blocked access', 'ban'], ['trees', 'Trees / overhang', 'tree'], ['vehicle', 'Vehicle in the way', 'car'],
       ['gate', 'Locked gate', 'lockk'], ['dog', 'Dog / unsafe', 'dog'], ['moved', 'Bins wrong place', 'pin'] ] },
@@ -33200,10 +33244,22 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     chip.addEventListener('click', function(){ openSheet(); });
     return chip;
   }
+  // It shows for 10 seconds (counted only while the map is the screen showing) and then goes, so it isn't
+  // sitting on the map all shift. It comes back if the number goes up. The same list is always under
+  // Edit & settings > Location problems.
+  var chipFor = 0, chipLeft = 0;
+  setInterval(function(){
+    if (chipLeft <= 0 || !chip || !chip.classList.contains('ux-on')) return;
+    if (document.hidden || !document.body.classList.contains('lb-map-screen')) return;
+    chipLeft -= 1000;
+    if (chipLeft <= 0) chip.classList.remove('ux-on');
+  }, 1000);
   function refreshChip(){
     var v = window.lbStrayView, c = ensureChip(); if (!c) return;
     var n = v && v.count || 0;
-    c.classList.toggle('ux-on', n > 0);
+    if (n > chipFor) chipLeft = 10000;
+    chipFor = n;
+    c.classList.toggle('ux-on', n > 0 && chipLeft > 0);
     if (n > 0) c.innerHTML = WARN + '<span>' + n + (n === 1 ? ' location looks' : ' locations look') + ' wrong</span>';
   }
 
@@ -38518,6 +38574,955 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
 
   window.lbCouncilRequests = { open: open, load: load, results: function(){ return results; },
     _t: { tableFrom: tableFrom, readCsv: readCsv, readXlsx: readXlsx, matchAll: matchAll, toCsv: toCsv, runsFor: runsFor, streetOf: streetOf, tokens: tokens } };
+})();
+</script>
+
+<style id="lb-rubbish-style">
+/* =====================================================================
+   Hard Rubbish skin (Customize > Look > Skin > Hard Rubbish).
+
+   The GTA skin's game (cash, health bar, pickups, wanted stars) in a kerbside look that is the same on
+   every screen: asphalt-grey ground, near-black bars, and everything you can tap or read is a "slab" -
+   a thick black outline, a hard black drop shadow and a square-ish corner, like a sticker on the side
+   of a bin. Hazard stripes (the stream's colour and black) mark the edges of the bars. Headings and big
+   numbers use Bowlby One (fetched only while this skin is on - see apply() in the Customize script;
+   with no signal they fall back to Impact / Arial Black). Everything a driver reads at speed (street
+   names, addresses, serials) stays in the normal font.
+
+   --rb-a is the accent: the colour of the stream being worked (Garbage red, Recycling yellow, FOGO
+   green, street litter blue), hazard yellow with no stream picked. Anything filled with it carries
+   black text. Pressed / selected = filled with the accent and pushed down into its own shadow.
+
+   Every rule starts html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x). Nothing has the id
+   rb-x: the two :not()s are only there to lift these rules over the ux2 layer's own, many of which are
+   written with one or two ids (the map header, the next-bin card) that no number of classes could
+   outrank. So within this block the usual rule holds - the later rule wins.
+
+   Like every skin this is only CSS on top of the ux2 layer: html[data-ux-skin="rubbish"] outranks the
+   plain "body.ux2 ..." rules, so nothing above had to change. The drive screen's extra pieces (the
+   dash cluster, the clock, the pop-up sized bin box) are built by lb-rubbish-script below and only
+   show while this skin is on.
+   ===================================================================== */
+html[data-ux-skin="rubbish"]{background:#111214 !important}
+html[data-ux-skin="rubbish"].ux-light{background:#e4e0d6 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x){--rb-font:"Bowlby One", Impact, "Arial Black", sans-serif;--rb-a:#ffd21f;--rb-bar:#111214;--rb-slab:#2a2c31;--rb-slab-2:#34373d;--rb-k:#b9bdc4;--rb-sh:4px 4px 0 #000;--rb-sh-sm:2px 2px 0 #000;--rb-hz:repeating-linear-gradient(-45deg, var(--rb-a) 0 10px, #000 10px 20px);--rb-red:#ff4b3e;--rb-yel:#ffd21f;--rb-grn:#2ecc62;--rb-blu:#4f8bff;--rb-lab:var(--rb-a);
+  --ux-bg:#1a1b1e;--ux-s1:#222428;--ux-s2:#2a2c31;--ux-s3:#34373d;--ux-s4:#41454c;--ux-line:rgba(0,0,0,.6);--ux-line-2:#000;--ux-text:#ffffff;--ux-text-2:#b9bdc4;--ux-text-3:#8b9099;--ux-chrome-glass:rgba(17,18,20,.94);--ux-skin-bar:#111214;
+  --ui-accent:var(--rb-a);--ui-accent-ink:#000;--ui-accent-fg:var(--rb-a);
+  --ux-c-gar:#ff4b3e;--ux-c-gar-ink:#000;--ux-c-rec:#ffd21f;--ux-c-rec-ink:#000;--ux-c-sum:#ffa81f;--ux-c-sum-ink:#000;--ux-c-fog:#2ecc62;--ux-c-fog-ink:#000;--ux-c-slg:#4f8bff;--ux-c-slg-ink:#000;--ux-c-slr:#7cc4ff;--ux-c-slr-ink:#000}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(.dark-mode){--rb-lab:#000;--rb-slab:#ffffff;--rb-slab-2:#f1eee6;--rb-k:#4a4d52;--ux-bg:#e4e0d6;--ux-s1:#ffffff;--ux-s2:#f6f3ec;--ux-s3:#e9e5db;--ux-s4:#d3cec1;--ux-line:rgba(0,0,0,.35);--ux-line-2:#000;--ux-text:#000000;--ux-text-2:#33363a;--ux-text-3:#5d6167;--ux-glass:rgba(255,255,255,.97);--ux-chrome-glass:rgba(17,18,20,.94)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(.ux-cr-sharp):not(.ux-cr-round){--ux-rad:8px}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x).stream-gar{--rb-a:var(--rb-red)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x).stream-rec{--rb-a:var(--rb-yel)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x).stream-summer{--rb-a:#ffa81f}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x).stream-fog{--rb-a:var(--rb-grn)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x).stream-slg{--rb-a:var(--rb-blu)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x).stream-slr{--rb-a:#7cc4ff}
+
+/* ---- header ---- */
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .app-header{background:var(--rb-bar) !important;border-bottom:3px solid #000 !important;margin-bottom:12px !important;overflow:visible !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .app-header::after{content:"" !important;position:absolute !important;left:0 !important;right:0 !important;top:100% !important;bottom:auto !important;height:9px !important;margin-top:3px !important;background:var(--rb-hz) !important;border-bottom:3px solid #000 !important;opacity:1 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .app-header h1{font-family:var(--rb-font) !important;font-size:19px !important;font-weight:400 !important;letter-spacing:.02em !important;color:#fff !important;text-shadow:3px 3px 0 #000 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .app-header h1::before{display:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .sync-btn, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .gps-badge{background:#2a2c31 !important;border:3px solid #000 !important;border-radius:var(--ux-rad) !important;box-shadow:var(--rb-sh-sm) !important;color:#fff !important;height:40px !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .sync-btn{width:40px !important;min-width:40px !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .sync-btn:active, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .sync-btn.fullscreen-btn.active{background:var(--rb-a) !important;color:#000 !important;transform:translate(2px,2px) !important;box-shadow:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .gps-badge.searching{background:var(--rb-yel) !important;color:#000 !important}
+
+/* ---- bottom bar ---- */
+@media (max-width: 899px), (hover: none){
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(.ux-nav-menu):not(.ux-nav-compact){--ux-dock-h:58px}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .bottom-nav{background:var(--rb-bar) !important;border-top:3px solid #000 !important;padding:7px 9px calc(var(--ux-safe-b) + 9px) 7px !important;gap:7px !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .bottom-nav::before{display:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .nav-item{border:3px solid #000 !important;border-radius:var(--ux-rad) !important;background:#2a2c31 !important;box-shadow:var(--rb-sh-sm) !important;color:#b9bdc4 !important;gap:5px !important;min-width:0 !important;overflow:hidden !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .nav-item .nav-label{letter-spacing:.03em !important;font-size:11px !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .nav-item .nav-icon{width:20px !important;height:20px !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .nav-item .nav-icon svg{width:20px !important;height:20px !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .nav-item.active{background:var(--rb-a) !important;color:#000 !important;box-shadow:none !important;transform:translate(2px,2px) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .nav-item.active::before{display:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .nav-item.active .nav-icon{color:#000 !important}
+}
+
+/* ---- Home ---- */
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .welcome-today-day{font-family:var(--rb-font) !important;font-weight:400 !important;text-transform:uppercase !important;font-size:26px !important;letter-spacing:.01em !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x).dark-mode .welcome-today-day{text-shadow:3px 3px 0 #000 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .welcome-today-pill{height:34px !important;gap:7px !important;background:var(--rb-slab) !important;border:3px solid #000 !important;border-radius:var(--ux-rad) !important;box-shadow:var(--rb-sh-sm) !important;padding:0 11px 0 9px !important;color:#000 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .welcome-today-pill.pill-gar{background:var(--rb-red) !important;padding:0 9px !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .welcome-today-pill.pill-rec{background:var(--rb-yel) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .welcome-today-pill.pill-fog{background:var(--rb-grn) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .welcome-today-pill .icon-img{width:20px !important;height:20px !important;filter:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .welcome-today-pill b{font-family:var(--rb-font) !important;font-weight:400 !important;font-size:17px !important;line-height:1 !important;color:#000 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .welcome-today-pill .rb-wk{display:none}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .welcome-q{font-size:11px !important;font-weight:800 !important;letter-spacing:.1em !important;color:var(--rb-k) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .welcome-btn{background:var(--rb-slab) !important;border:3px solid #000 !important;border-radius:var(--ux-rad) !important;box-shadow:var(--rb-sh) !important;margin-bottom:10px !important;width:calc(100% - 4px) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .welcome-btn::after{display:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .welcome-btn:active{background:var(--rb-a) !important;color:#000 !important;transform:translate(3px,3px) !important;box-shadow:1px 1px 0 #000 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .welcome-btn:active .welcome-sub, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .welcome-btn:active .welcome-chev{color:#000 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .welcome-btn .welcome-ico{background:var(--rb-bar) !important;border:3px solid #000 !important;border-radius:var(--ux-rad) !important;color:var(--rb-a) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .welcome-btn .welcome-ico .icon-img{filter:brightness(0) invert(1) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .welcome-btn .welcome-chev{color:var(--rb-lab) !important;font-weight:800 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .welcome-btn.danger .welcome-ico{background:var(--rb-red) !important;color:#000 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .welcome-btn.primary{background:var(--rb-a) !important;color:#000 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .welcome-btn.primary .welcome-label, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .welcome-btn.primary .welcome-sub, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .welcome-btn.primary .welcome-chev{color:#000 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .welcome-btn.ux-home-search{background:var(--rb-bar) !important;box-shadow:none !important;width:100% !important}
+
+/* ---- cards: Streets and Search ---- */
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .street-group-card, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .address-card{background:var(--rb-slab) !important;border:3px solid #000 !important;border-radius:var(--ux-rad) !important;box-shadow:var(--rb-sh) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .street-group-card::after, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .address-card::after{display:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .search-card, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .search-card[class*="stream-"]{background:none !important;border:0 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .main-search-input, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .filter-menu-btn{background:var(--rb-bar) !important;border:3px solid #000 !important;border-radius:var(--ux-rad) !important;color:#fff !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .main-search-input:focus{border-color:var(--rb-a) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .filter-menu-btn.active{background:var(--rb-a) !important;color:#000 !important}
+
+/* ---- sheets and pop-ups: one look for all of them ----
+   Whatever opens over a screen (Customize, Select run, Shift, Report an issue, a property, an OK /
+   Cancel question) is the same box: a hazard stripe along the top, the title in the display font
+   over a black rule with a square close button, and the buttons along the bottom over another black
+   rule - the main one filled with the accent. */
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .modal-box{background:var(--ux-bg) !important;border:3px solid #000 !important;border-radius:var(--ux-rad) !important;box-shadow:6px 6px 0 #000 !important;padding-top:12px !important;overflow:hidden auto}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .modal-box::before{content:"" !important;display:block !important;position:absolute !important;left:0 !important;right:0 !important;top:0 !important;width:auto !important;height:12px !important;box-sizing:border-box !important;margin:0 !important;background:var(--rb-hz) !important;border:0 !important;border-bottom:3px solid #000 !important;border-radius:0 !important;opacity:1 !important;z-index:3 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .modal-header, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .drv-head, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .uxi-head{min-height:56px !important;box-sizing:border-box !important;margin:0 !important;padding:8px 10px 8px 14px !important;background:none !important;border:0 !important;border-bottom:3px solid #000 !important;border-radius:0 !important;align-items:center !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .modal-header::after, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .modal-actions::before{display:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .modal-header h3, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .drv-head b, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .uxi-head b{font-family:var(--rb-font) !important;font-size:20px !important;font-weight:400 !important;line-height:1.1 !important;text-transform:uppercase !important;letter-spacing:.01em !important;color:var(--ux-text) !important;text-shadow:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x).dark-mode .modal-header h3, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x).dark-mode .drv-head b, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x).dark-mode .uxi-head b{text-shadow:3px 3px 0 #000 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .modal-close-btn, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .drv-x, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .uxi-x{width:40px !important;height:40px !important;min-width:40px !important;flex:none !important;background:#2a2c31 !important;border:3px solid #000 !important;border-radius:var(--ux-rad) !important;box-shadow:var(--rb-sh-sm) !important;color:#fff !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .modal-actions{padding-top:12px !important;border:0 !important;border-top:3px solid #000 !important;background:none !important;gap:10px !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .btn-save{background:var(--rb-a) !important;color:#000 !important;border:3px solid #000 !important;border-radius:var(--ux-rad) !important;box-shadow:var(--rb-sh) !important;font-weight:800 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .btn-cancel{background:#2a2c31 !important;border:3px solid #000 !important;border-radius:var(--ux-rad) !important;box-shadow:var(--rb-sh) !important;color:#fff !important;font-weight:800 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .btn-save:active, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .btn-cancel:active, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .modal-close-btn:active, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .drv-x:active, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .uxi-x:active{transform:translate(2px,2px) !important;box-shadow:none !important}
+
+/* ---- map: top bar - the time with the health bar under it on the left, the cash on the right (and the
+   break countdown beside it for the last 15 minutes). The recording light is left out in this skin. ---- */
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #mapNormalTopBar, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #mapContextBar, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #mapSettingsBar{background:var(--rb-bar) !important;border-bottom:3px solid #000 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #mapNormalTopBar::after{content:"" !important;position:absolute !important;left:0 !important;right:0 !important;top:100% !important;height:9px !important;margin-top:3px !important;background:var(--rb-hz) !important;border-bottom:3px solid #000 !important;pointer-events:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #mapRunColoredBox{background:none !important;border:0 !important;box-shadow:none !important;color:#fff !important;min-height:50px !important;height:50px !important;align-items:center !important;flex-wrap:nowrap !important;gap:10px !important;padding:0 0 0 10px !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #mapRunColoredBox::before, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #mapRunColoredBox::after, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #mapRunColoredBox .map-run-divider{display:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #mapRunColoredBox #uxMsStats{display:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x).rb-has-run #mapRunColoredBox .map-run-title{display:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #mapRunColoredBox .map-run-title{color:#fff !important;font-weight:800 !important}
+#rbClock, #rbBreak, #rbCluster, #rbPop, #rbStats{display:none}
+html:not([data-ux-skin="rubbish"]) .rb-only{display:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbClock{display:inline-grid;grid-template-columns:auto auto;justify-content:start;align-items:baseline;column-gap:4px;row-gap:3px;color:#fff;white-space:nowrap}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbClock b{font-family:var(--rb-font) !important;font-size:23px !important;font-weight:400 !important;line-height:1 !important;letter-spacing:.01em !important;color:#fff !important;text-shadow:3px 3px 0 #000}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbClock small{font-family:var(--rb-font) !important;font-size:11px !important;font-weight:400 !important;text-transform:uppercase;text-shadow:2px 2px 0 #000}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbClock .rb-hp, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbClock .rb-ar{grid-column:1 / span 2;display:block;height:11px;box-sizing:border-box;border:2px solid #000;border-radius:5px;background:#1a1b1e;box-shadow:2px 2px 0 #000;overflow:hidden}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbClock .rb-ar{height:7px;box-shadow:none}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbClock .rb-hp i, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbClock .rb-ar i{display:block;height:100%;width:100%;background:var(--rb-grn);transition:width .6s linear, background .3s}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbClock .rb-ar i{background:var(--rb-blu)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbClock[data-lvl="low"] .rb-hp i, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbClock[data-lvl="empty"] .rb-hp i{background:var(--rb-red)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbClock[data-lvl="low"] .rb-hp i{animation:rbBlink .8s steps(2, jump-none) infinite}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbClock[data-lvl="empty"] .rb-hp{background:#5a0d0d;animation:rbBlink .5s steps(2, jump-none) infinite}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbClock:not([data-game="1"]) .rb-hp, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbClock:not([data-game="1"]) .rb-ar, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbClock[data-ar="0"] .rb-ar{display:none}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxHdrTools{gap:10px !important;align-items:center !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbBreak{display:inline-flex;align-items:center;height:40px;padding:0 9px;border:3px solid #000;border-radius:var(--ux-rad);box-shadow:3px 3px 0 #000;background:var(--rb-yel);color:#000;white-space:nowrap;font:inherit;cursor:pointer}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbBreak span{display:flex;flex-direction:column;align-items:flex-start;gap:2px;line-height:1}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbBreak i{font-style:normal;font-size:9px;font-weight:800;letter-spacing:.1em;text-transform:uppercase;color:#000}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbBreak b{min-width:74px;font-family:var(--rb-font) !important;font-weight:400 !important;font-size:18px !important;line-height:1;font-variant-numeric:tabular-nums;text-align:left}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbBreak[data-lvl="low"], html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbBreak[data-lvl="over"]{background:var(--rb-red)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbBreak[data-lvl="over"]{animation:rbBlink .8s steps(2, jump-none) infinite}
+@keyframes rbBlink{50%{opacity:.55}}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxHdrTools, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxTimer{background:none !important;border:0 !important;box-shadow:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxHdrTools::before, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxHdrTools::after, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxTimer::before, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxTimer::after{display:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxTimer{padding:0 !important;min-width:0 !important;width:auto !important;height:auto !important;color:#fff !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .map-header-panel > .lb-break-chip, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #lbBreakChip, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxHdrTools #uxBreak{display:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x).ux-gta-game #uxGtaHealth{display:block !important;width:auto !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxGtaHealth .uxgh-bar{display:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #snailTrailRecLight{display:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxGtaHealth .uxgh-cash{display:block;padding:5px 8px 3px !important;border:3px solid #000 !important;border-radius:6px !important;background:var(--rb-grn) !important;color:#000 !important;box-shadow:3px 3px 0 #000 !important;font-family:var(--rb-font) !important;font-weight:400 !important;font-size:17px !important;line-height:1 !important;letter-spacing:.01em !important;text-shadow:none !important;transform:rotate(2deg)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxGtaHealth .uxgh-cash.up{background:#8ef0a8 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxGtaHealth .uxgh-cash.neg{background:var(--rb-red) !important}
+
+/* ---- map: wanted stars (top right, only while wanted), money coming off, the feed, the big messages ---- */
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxGtaStack{margin-top:14px}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxGtaStack .uxgs-stars{padding:2px 7px 4px;gap:2px;background:var(--rb-bar);border:3px solid #000;border-radius:var(--ux-rad);box-shadow:var(--rb-sh)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxGtaStack .uxgs-stars i{font-size:25px;color:#3a3d44;text-shadow:none}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxGtaStack .uxgs-stars i.on{color:var(--rb-yel)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxGtaStack .uxgs-t b, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxGtaStack .uxgs-fine b{font-family:var(--rb-font);font-weight:400;font-size:30px;color:var(--rb-red);text-shadow:2px 0 0 #000, -2px 0 0 #000, 0 2px 0 #000, 0 -2px 0 #000, 3px 3px 0 #000}
+/* Money in (the feed, top left of the map) is drawn exactly like money out (the lines top right): a small
+   white label and the amount in the big outlined display font - green in, red out. No box, no icon. */
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxGtaFeed{margin-top:14px;gap:2px}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxGtaFeed .uxgf{display:flex;flex-wrap:wrap;align-items:baseline;gap:0 6px;padding:0;background:none;border:0;border-radius:0;box-shadow:none;color:#fff;font:800 11px/1.2 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;letter-spacing:.08em;text-transform:uppercase;text-shadow:0 1px 0 #000, 0 0 3px #000}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxGtaFeed .uxgf .uxgp{display:none}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxGtaFeed .uxgf em{font-family:var(--rb-font);font-style:normal;font-weight:400;font-size:30px;line-height:1.05;letter-spacing:.02em;text-transform:none;color:var(--rb-grn);text-shadow:2px 0 0 #000, -2px 0 0 #000, 0 2px 0 #000, 0 -2px 0 #000, 3px 3px 0 #000}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxGtaFeed .uxgf em[style*="ff6b6b"]{color:var(--rb-red) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxGtaFeed .uxgf:has(.uxgp-pkg){display:none}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxGtaSplash{left:28px;right:32px;top:24%;max-width:340px;margin:0 auto;padding:14px 12px 16px;background:var(--rb-yel);border:3px solid #000;border-radius:var(--ux-rad);box-shadow:6px 6px 0 #000;animation-name:rbSplash}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxGtaSplash b{font-family:var(--rb-font);font-size:34px;color:#000;text-shadow:none;letter-spacing:.01em}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxGtaSplash span{display:inline-block;margin-top:8px;padding:4px 10px;border-radius:5px;background:#000;color:var(--rb-yel);font-size:12px;font-weight:800;letter-spacing:.08em}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxGtaSplash span:empty{display:none}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxGtaSplash.k-red{background:var(--rb-red)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxGtaSplash.k-red span{color:var(--rb-red)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxGtaSplash.k-white{background:#fff}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxGtaSplash.k-white span{color:#fff}
+@keyframes rbSplash{0%{opacity:0;transform:rotate(-2deg) scale(1.2)}10%{opacity:1;transform:rotate(-2deg) scale(1)}85%{opacity:1;transform:rotate(-2deg)}100%{opacity:0;transform:rotate(-2deg)}}
+
+/* ---- map: stickers (slow down, hidden package) ---- */
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbPop.on{display:block;position:fixed;left:28px;right:32px;top:calc(env(safe-area-inset-top, 0px) + 178px);z-index:29000;max-width:340px;margin:0 auto;overflow:hidden;border:3px solid #000;border-radius:var(--ux-rad);box-shadow:6px 6px 0 #000;color:#000;text-align:center;pointer-events:none}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbPop.rb-pop-slow{background:var(--rb-yel);transform:rotate(-2deg);animation:rbPopA .22s ease-out}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbPop.rb-pop-pkg{background:var(--rb-grn);transform:rotate(2deg);animation:rbPopB .22s ease-out}
+@keyframes rbPopA{from{opacity:0;transform:rotate(-2deg) scale(1.15)}}
+@keyframes rbPopB{from{opacity:0;transform:rotate(2deg) scale(1.15)}}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbPop .rb-hz{border-top:0;background:repeating-linear-gradient(-45deg, var(--rb-red) 0 10px, #000 10px 20px)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbPop .rb-pop-in{padding:10px 12px 13px}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbPop .rb-k{color:#000}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbPop .rb-d{display:block;font-family:var(--rb-font);font-weight:400;text-transform:uppercase;font-size:32px;line-height:1.05}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbPop.rb-pop-pkg .rb-d{font-size:25px;margin-top:2px}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbPop p{margin:4px 0 0;font-size:17px;font-weight:800}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbPop small{display:inline-block;margin-top:8px;padding:3px 10px;border-radius:5px;background:#000;color:var(--rb-yel);font-size:12px;font-weight:800;letter-spacing:.08em;text-transform:uppercase}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbPop.rb-pop-pkg small{display:block;margin:6px 0 0;padding:0;background:none;color:#000}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbPop em{display:inline-block;margin-top:8px;padding:5px 14px 3px;border-radius:6px;background:#000;color:var(--rb-grn);font:400 38px/1 var(--rb-font)}
+
+/* ---- map: the dash cluster ---- */
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .rb-hz{height:15px;box-sizing:border-box;border-top:3px solid #000;border-bottom:3px solid #000;background:var(--rb-hz)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .rb-k{display:block;font-size:10.5px;font-weight:800;letter-spacing:.07em;white-space:nowrap;text-transform:uppercase;color:#b9bdc4;line-height:1.1}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbCluster{display:block;position:relative;background:var(--rb-bar);pointer-events:auto}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbCluster .rb-cl{display:grid;grid-template-columns:minmax(0,1fr) 112px minmax(0,1fr);gap:10px;align-items:end;padding:10px 16px 12px 12px}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbCluster .rb-ct{position:relative;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;gap:4px;height:64px;margin:0;padding:0 12px;border:3px solid #000;border-radius:var(--ux-rad);background:#2a2c31;box-shadow:var(--rb-sh);color:#fff;font:inherit;text-align:left;cursor:pointer;min-width:0}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbCluster .rb-ct b{font:400 26px/1 var(--rb-font) !important;white-space:nowrap}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbCluster .rb-ct:active{transform:translate(2px,2px);box-shadow:2px 2px 0 #000}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbCluster #rbStat[data-k="fines"] b{color:var(--rb-red)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbCluster #rbStat.rb-flip .rb-k, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbCluster #rbStat.rb-flip b{animation:rbFlip .28s ease-out}
+@keyframes rbFlip{from{opacity:0;transform:translateY(8px)}}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbCluster .rb-pips{position:absolute;right:7px;top:50%;transform:translateY(-50%);display:flex;flex-direction:column;gap:3px}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbCluster .rb-pips i{width:4px;height:4px;border-radius:50%;background:#000}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbCluster .rb-pips i.on{background:var(--rb-a)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbCluster .rb-spd{position:relative;display:flex;flex-direction:column;align-items:center;justify-content:center;height:92px;margin-top:-38px;border:3px solid #000;border-radius:var(--ux-rad);background:var(--rb-bar);box-shadow:var(--rb-sh);color:var(--rb-grn);font-size:11px;font-weight:800;text-transform:uppercase}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbCluster .rb-spd b{font:400 48px/1 var(--rb-font) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbCluster .rb-spd[data-over="1"]{background:var(--rb-red);color:#000}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbCluster .rb-lim{position:absolute;right:-12px;top:-14px;display:flex;align-items:center;justify-content:center;width:36px;height:36px;box-sizing:border-box;border-radius:50%;background:#fff;border:4px solid #e0261b;box-shadow:2px 2px 0 #000;color:#000;font:800 14px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;font-style:normal}
+@media (prefers-reduced-motion: reduce){html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbCluster #rbStat.rb-flip .rb-k, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbCluster #rbStat.rb-flip b, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbPop.on, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbBreak[data-lvl="over"]{animation:none}}
+
+/* ---- map: street name, and the bin box as a pop-up ----
+   The app's own next-bin card (so serial taps, reminders and the report button still work), drawn the
+   size of the other pop-ups: the address on a strip of the stream's colour, then a row per bin with
+   its size on the stream's colour and the serial beside it. On the move it is the address line only. */
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxStreetStrip .address-telemetry-speed, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxStreetStrip #mapSpeedLimitSign{display:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxCardStack .map-address-telemetry, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxCardStack div.map-address-telemetry{margin:0 34px 40px 26px !important;width:auto !important;max-width:none !important;padding:0 !important;background:var(--rb-bar) !important;border:3px solid #000 !important;border-radius:var(--ux-rad) !important;box-shadow:6px 6px 0 #000 !important;overflow:hidden !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxCardStack .map-address-telemetry::before, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxCardStack .map-address-telemetry::after{display:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x).rb-rolling #uxCardStack .map-address-telemetry #mapBinsAtAddress, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x).rb-rolling #uxCardStack .map-address-telemetry #mapRunsAtAddress{display:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxCardStack .address-telemetry-grid{display:block !important;padding:0 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxCardStack .address-telemetry-address-row{background:var(--rb-a) !important;color:#000 !important;padding:7px 10px 6px !important;margin:0 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxCardStack #mapLiveStreet{text-shadow:none !important;color:#000 !important;font-size:17px !important;font-weight:800 !important;letter-spacing:0 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxCardStack #mapRunsAtAddress{padding:6px 8px 7px !important;border-top:3px solid #000 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxCardStack #mapRunsAtAddress:empty{display:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxCardStack .map-stream-tabs-row{gap:8px !important;padding:0 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxCardStack .map-stream-tab{--c:var(--rb-red);height:28px !important;padding:0 8px 0 6px !important;background:var(--c) !important;border:2px solid #000 !important;border-radius:6px !important;box-shadow:2px 2px 0 #000 !important;color:#000 !important;font-weight:800 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxCardStack .map-stream-tab[data-stream="Recycling"]{--c:var(--rb-yel)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxCardStack .map-stream-tab[data-stream="FOGO"]{--c:var(--rb-grn)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxCardStack .map-stream-tab::before, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxCardStack .map-stream-tab::after{display:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxCardStack .map-stream-tab.tab-front{box-shadow:none !important;transform:translate(2px,2px) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxCardStack .map-stream-tab .icon-img{filter:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxCardStack .map-stream-tab *{color:#000 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxCardStack #mapBinsAtAddress{display:block !important;width:100% !important;margin:0 !important;padding:0 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxCardStack #mapBinsAtAddress:empty{display:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxCardStack #mapBinsAtAddress .next-bin-row{--c:var(--rb-red);background:none !important;border:0 !important;border-top:3px solid #000 !important;min-height:46px !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxCardStack #mapBinsAtAddress .next-bin-row.next-bin-stream-recycling{--c:var(--rb-yel)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxCardStack #mapBinsAtAddress .next-bin-row.next-bin-stream-fogo{--c:var(--rb-grn)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxCardStack #mapBinsAtAddress .next-bin-row::before, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxCardStack #mapBinsAtAddress .next-bin-row::after{display:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxCardStack #mapBinsAtAddress .next-bin-row > div:first-child{position:relative !important;width:auto !important;min-width:0 !important;flex:none !important;flex-direction:column !important;align-items:flex-start !important;justify-content:center !important;gap:3px !important;padding:4px 0 4px 54px !important;background:none !important;color:#000 !important;font-size:13px !important;font-weight:800 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxCardStack #mapBinsAtAddress .next-bin-row > div:first-child::before{content:"";position:absolute;left:0;top:0;bottom:0;width:44px;box-sizing:border-box;background:var(--c);border-right:3px solid #000}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxCardStack #mapBinsAtAddress .next-bin-row > div:first-child .icon-img{position:absolute !important;left:11px !important;top:50% !important;transform:translateY(-50%) !important;width:22px !important;height:22px !important;filter:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxCardStack #mapBinsAtAddress .next-bin-row > div:first-child span{display:block !important;padding:2px 6px !important;background:var(--c) !important;border:2px solid #000 !important;border-radius:5px !important;color:#000 !important;font-size:13px !important;font-weight:800 !important;line-height:1.1 !important;opacity:1 !important;margin:0 !important;white-space:nowrap !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxCardStack #mapBinsAtAddress .next-bin-row > div:first-child span + span{background:none !important;border:0 !important;padding:0 !important;color:var(--rb-k) !important;font-size:10px !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxCardStack #mapBinsAtAddress .next-bin-serial-area{padding:0 6px 0 2px !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxCardStack #mapBinsAtAddress .next-bin-serial-area > div{padding:4px 0 4px 6px !important;border-bottom-color:#000 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxCardStack #mapBinsAtAddress .bin-serial-text{font-size:21px !important;font-weight:800 !important;color:#fff !important;letter-spacing:.02em !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxCardStack #mapBinsAtAddress .next-bin-serial-area button{width:38px !important;height:38px !important;min-width:38px !important;background:var(--rb-bar) !important;border:3px solid #000 !important;border-radius:var(--ux-rad) !important;color:var(--rb-a) !important;font-size:17px !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxCardStack #mapBinsAtAddress .next-bin-serial-area button:active{background:var(--rb-a) !important;color:#000 !important}
+
+/* ---- map: the button columns ---- */
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #mapScreenContainer .map-fixed-side-overlay > button, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #mapScreenContainer .map-fixed-side-overlay-left > button, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #mapScreenContainer .map-side-layers-toggle,
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #mapScreenContainer .map-side-follow-toggle, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #mapScreenContainer .map-side-track-toggle,
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #mapScreenContainer .leaflet-control-zoom a{background:#2a2c31 !important;border:3px solid #000 !important;border-radius:var(--ux-rad) !important;box-shadow:var(--rb-sh-sm) !important;color:#fff !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #mapScreenContainer .map-side-follow-toggle.active, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #mapScreenContainer .map-side-track-toggle.active{background:var(--rb-a) !important;color:#000 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .map-side-follow-toggle.active .lb-mask-ico, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .map-side-track-toggle.active .lb-mask-ico{background-color:#000 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #mapScreenContainer .map-fixed-side-overlay, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #mapScreenContainer .map-fixed-side-overlay-left{gap:8px !important}
+
+/* ---- Streets screen: the driving display ---- */
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxHud .uxh-cell{background:var(--rb-slab) !important;border:0 !important;border-bottom:3px solid #000 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxHud .uxh-cell::after, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxHud .uxh-house::before, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxHud .uxh-run::before, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxHud .uxh-prog::before{display:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxHud .uxh-k{letter-spacing:.1em !important;color:var(--rb-k) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxHud .uxh-run{background:var(--rb-a) !important;color:#000 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxHud .uxh-run .uxh-k, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxHud .uxh-run .uxh-runsub, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxHud .uxh-run .uxh-runname{color:#000 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxHud .uxh-counts{border-bottom:0 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x)[data-hud="bands"] #uxHud .uxh-counts{background:none !important;color:#000 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x)[data-hud="bands"] #uxHud .uxh-counts i, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x)[data-hud="bands"] #uxHud .uxh-counts b{color:#000 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxHud .uxh-runname, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxHud .uxh-counts b, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxHud .uxh-prog-nums b, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxHud .uxh-speedno b{font-family:var(--rb-font) !important;font-weight:400 !important;letter-spacing:0 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxHud[data-run="0"] .uxh-runname{color:#000 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxHud .uxh-bar{height:14px !important;box-sizing:border-box !important;border:3px solid #000 !important;border-radius:7px !important;background:var(--rb-bar) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxHud .uxh-bar .d{background:var(--rb-a) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxHud .uxh-bar .m{background:repeating-linear-gradient(-45deg, var(--rb-red) 0 4px, #000 4px 8px) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxHud .uxh-prog-nums .t b{color:var(--rb-lab) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxHud .uxh-speedno b{color:var(--rb-grn) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxHud[data-over="1"] .uxh-speedno b{color:var(--rb-red) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxHud .uxh-house{background:var(--rb-slab) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxHud .uxh-bin{color:#fff !important;background:var(--rb-bar) !important;border:3px solid #000 !important;border-radius:var(--ux-rad) !important;overflow:hidden !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxHud .uxh-bin::before{display:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxHud .uxh-bin-s{align-self:stretch !important;align-items:center !important;justify-content:center !important;width:46px !important;padding:0 !important;margin-right:10px !important;background:var(--c) !important;border-right:3px solid #000 !important;color:#000 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxHud .uxh-bin-s svg{display:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxHud .uxh-bin-s::before{content:"";width:24px;height:24px;background:#000;-webkit-mask:url(garbage.png) center / contain no-repeat;mask:url(garbage.png) center / contain no-repeat}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxHud .uxh-bin[data-s="rec"] .uxh-bin-s::before{-webkit-mask-image:url(recycle.png);mask-image:url(recycle.png)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxHud .uxh-bin[data-s="fog"] .uxh-bin-s::before{-webkit-mask-image:url(fogo.png);mask-image:url(fogo.png)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxHud .uxh-bin-size{background:var(--c) !important;color:#000 !important;border:2px solid #000 !important;border-radius:5px !important;font-weight:800 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxHud .uxh-bin[data-state="done"]{opacity:.55 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxHud .uxh-bang{background:#2a2c31 !important;border:0 !important;border-left:3px solid #000 !important;color:var(--rb-a) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxHud .uxh-bang:active{background:var(--rb-a) !important;color:#000 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxHud .uxh-issues{background:var(--rb-bar) !important;padding:10px 12px 12px 10px !important;gap:8px !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxHud .uxh-ibtn{background:#2a2c31 !important;border:3px solid #000 !important;border-radius:var(--ux-rad) !important;box-shadow:var(--rb-sh-sm) !important;color:#fff !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxHud .uxh-ibtn::before, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxHud .uxh-ibtn::after{display:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxHud .uxh-ibtn:active{background:var(--rb-a) !important;color:#000 !important;transform:translate(2px,2px) !important;box-shadow:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxHud .uxh-ibtn svg{color:var(--rb-a) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxHud .uxh-ibtn:active svg{color:#000 !important}
+
+/* ---- Streets and Search lists ---- */
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .uxh-listhead{letter-spacing:.1em !important;color:var(--rb-k) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .drive-sort-toggle{border:0 !important;gap:8px !important;padding:0 4px 4px 0 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .drive-sort-btn{background:var(--rb-slab) !important;border:3px solid #000 !important;border-radius:var(--ux-rad) !important;box-shadow:var(--rb-sh-sm) !important;margin:0 !important;color:var(--ux-text) !important;font-weight:800 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .drive-sort-btn.active{background:var(--rb-a) !important;color:#000 !important;box-shadow:none !important;transform:translate(2px,2px) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .drive-sort-btn.active .icon-img{filter:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxDriveBar{background:var(--rb-slab) !important;border:3px solid #000 !important;border-radius:var(--ux-rad) !important;box-shadow:var(--rb-sh) !important;margin-right:4px !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxDriveBar button{background:var(--rb-a) !important;color:#000 !important;border:3px solid #000 !important;border-radius:6px !important}
+
+/* ---- the slide-in panels: Menu, Layers, Edit & settings ---- */
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #lbDrawer, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #lbLayers, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #lbSettings{background:var(--ux-bg) !important;border-right:3px solid #000 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #lbDrawer::after, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #lbLayers::after, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #lbSettings::after{display:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .lbp-tabs{display:flex !important;justify-content:flex-start !important;gap:8px !important;padding:10px 14px 6px 12px !important;background:none !important;border:0 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .lbp-tab{flex:0 0 auto !important;min-height:40px !important;height:40px !important;padding:0 14px 0 12px !important;gap:7px !important;background:var(--rb-slab) !important;border:3px solid #000 !important;border-radius:var(--ux-rad) !important;box-shadow:var(--rb-sh-sm) !important;color:var(--ux-text) !important;font-size:14px !important;font-weight:800 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .lbp-tab.on{background:var(--rb-a) !important;color:#000 !important;box-shadow:none !important;transform:translate(2px,2px) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .lbp-tab.on .icon-img{filter:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .lbp-search input, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #lbDrawerInput, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .lb-drawer-search input{background:var(--rb-bar) !important;border:3px solid #000 !important;border-radius:var(--ux-rad) !important;color:#fff !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .lb-drawer-close, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #lbLayersCloseBtn, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #lbSettingsCloseBtn, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .ux-cz-head-btn, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxLayersAll{background:var(--rb-slab) !important;border:3px solid #000 !important;border-radius:var(--ux-rad) !important;box-shadow:var(--rb-sh-sm) !important;color:var(--ux-text) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .lbss-scr{background:var(--rb-slab) !important;border:3px solid #000 !important;border-radius:var(--ux-rad) !important;box-shadow:var(--rb-sh-sm) !important;color:var(--ux-text) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .lbss-scr.on{background:var(--rb-a) !important;color:#000 !important;box-shadow:none !important;transform:translate(2px,2px) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .lbss-scr.on .icon-img{filter:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .lb-layers-sect, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .lb-drawer-sect{color:var(--rb-lab) !important;letter-spacing:.1em !important;font-weight:800 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .lb-layer-btn, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .lb-drawer-item{background:var(--rb-slab) !important;border:3px solid #000 !important;border-radius:var(--ux-rad) !important;box-shadow:var(--rb-sh-sm) !important;color:var(--ux-text) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .lb-layer-btn::before, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .lb-layer-btn::after, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .lb-drawer-item::before, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .lb-drawer-item::after{display:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .lb-layer-btn.on, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .lb-drawer-item.current{background:var(--rb-a) !important;color:#000 !important;box-shadow:none !important;transform:translate(2px,2px) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .lb-layer-btn.on *, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .lb-drawer-item.current *{color:#000 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .lb-layer-btn.on .icon-img, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .lb-drawer-item.current .icon-img{filter:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .lb-layer-btn.danger{color:var(--rb-red) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .lb-layer-btn:active, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .lb-drawer-item:active{transform:translate(2px,2px) !important;box-shadow:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .lbp-shiftlink, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .lbss-live{background:var(--rb-slab) !important;border:3px solid #000 !important;border-radius:var(--ux-rad) !important;box-shadow:var(--rb-sh) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .lbss-st{background:var(--rb-bar) !important;border:3px solid #000 !important;border-radius:var(--ux-rad) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .lbss-st b, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .lbss-top b{font-family:var(--rb-font) !important;font-weight:400 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .lbss-acts button{background:var(--rb-a) !important;color:#000 !important;border:3px solid #000 !important;border-radius:var(--ux-rad) !important;box-shadow:var(--rb-sh-sm) !important;font-weight:800 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .lbss-acts button:active{transform:translate(2px,2px) !important;box-shadow:none !important}
+
+/* ---- sheets: Customize, Shift, Report an issue and the rest ---- */
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .modal-box input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]):not([type="color"]), html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .modal-box select, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .modal-box textarea{background:var(--rb-bar) !important;border:3px solid #000 !important;border-radius:var(--ux-rad) !important;color:#fff !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .modal-box input:focus, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .modal-box select:focus, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .modal-box textarea:focus{border-color:var(--rb-a) !important;outline:0 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .ux-cz-sec{font-family:var(--rb-font) !important;font-weight:400 !important;font-size:16px !important;letter-spacing:.02em !important;color:var(--rb-lab) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .ux-seg{border:0 !important;gap:8px !important;padding:0 4px 4px 0 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .ux-seg button{background:var(--rb-slab) !important;border:3px solid #000 !important;border-radius:var(--ux-rad) !important;box-shadow:var(--rb-sh-sm) !important;margin:0 !important;color:var(--ux-text) !important;font-weight:800 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .ux-seg button.on{background:var(--rb-a) !important;color:#000 !important;box-shadow:none !important;transform:translate(2px,2px) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .ux-sw{width:50px !important;height:28px !important;box-sizing:border-box !important;border:3px solid #000 !important;border-radius:14px !important;background:var(--rb-bar) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .ux-sw i{top:2px !important;left:2px !important;width:18px !important;height:18px !important;background:#8b9099 !important;border-radius:50% !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .ux-sw-row.on .ux-sw{background:var(--rb-a) !important;border-color:#000 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .ux-sw-row.on .ux-sw i{background:#000 !important;transform:translateX(22px) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .ux-nerd-card, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .ux-cz-group, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .ux-cz-link{background:var(--rb-slab) !important;border:3px solid #000 !important;border-radius:var(--ux-rad) !important;box-shadow:var(--rb-sh) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .ux-skin-sw, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .ux-truck-sw{background:var(--rb-slab) !important;border:3px solid #000 !important;border-radius:var(--ux-rad) !important;box-shadow:var(--rb-sh-sm) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .ux-skin-sw.on, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .ux-truck-sw.on{border-color:#000 !important;background:var(--rb-a) !important;color:#000 !important;box-shadow:none !important;transform:translate(2px,2px) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .ux-skin-pv{border:2px solid #000 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .drv-stat{background:var(--rb-slab) !important;border:3px solid #000 !important;border-radius:var(--ux-rad) !important;box-shadow:var(--rb-sh-sm) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .drv-stat b{font-family:var(--rb-font) !important;font-weight:400 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .drv-btn, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .drv-link, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .uxi-change{background:var(--rb-slab) !important;border:3px solid #000 !important;border-radius:var(--ux-rad) !important;box-shadow:var(--rb-sh-sm) !important;color:var(--ux-text) !important;font-weight:800 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .drv-btn.drv-go{background:var(--rb-a) !important;color:#000 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .drv-btn.drv-bad{background:var(--rb-red) !important;color:#000 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .drv-btn.drv-warnb{background:var(--rb-yel) !important;color:#000 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .drv-btn.drv-rest{background:var(--rb-grn) !important;color:#000 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .drv-btn:active, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .drv-link:active{transform:translate(2px,2px) !important;box-shadow:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .drv-sect{color:var(--rb-lab) !important;letter-spacing:.1em !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .lb-bclock{background:var(--rb-slab) !important;border:3px solid #000 !important;border-radius:var(--ux-rad) !important;box-shadow:var(--rb-sh) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .lb-bc-read{font-family:var(--rb-font) !important;font-weight:400 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .drv-warnbox{border:3px solid #000 !important;border-radius:var(--ux-rad) !important;background:var(--rb-yel) !important;color:#000 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .drv-warnbox *{color:#000 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .uxi-tabs{border:0 !important;gap:8px !important;padding:10px 14px 4px 10px !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .uxi-tabs button{background:var(--rb-slab) !important;border:3px solid #000 !important;border-radius:var(--ux-rad) !important;box-shadow:var(--rb-sh-sm) !important;color:var(--ux-text) !important;font-weight:800 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .uxi-tabs button.on{background:var(--rb-a) !important;color:#000 !important;box-shadow:none !important;transform:translate(2px,2px) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .uxi-grid button{background:var(--rb-slab) !important;border:3px solid #000 !important;border-radius:var(--ux-rad) !important;box-shadow:var(--rb-sh) !important;color:var(--ux-text) !important;font-weight:800 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .uxi-grid button svg{color:var(--rb-lab) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .uxi-grid button:active, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .uxi-grid button.on{background:var(--rb-a) !important;color:#000 !important;transform:translate(3px,3px) !important;box-shadow:1px 1px 0 #000 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .uxi-grid button:active svg, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .uxi-grid button.on svg{color:#000 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .uxi-ctx{background:var(--rb-slab) !important;border:3px solid #000 !important;border-radius:var(--ux-rad) !important}
+
+/* ---- Select run ---- */
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .map-run-picker-label{letter-spacing:.1em !important;color:var(--rb-lab) !important;font-weight:800 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .unified-filter-grid{gap:8px !important;padding:0 4px 4px 0 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .unified-filter-btn{--sc:var(--rb-a);background:var(--rb-slab) !important;border:3px solid #000 !important;border-radius:var(--ux-rad) !important;box-shadow:var(--rb-sh-sm) !important;color:var(--ux-text) !important;font-weight:800 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .unified-filter-btn::before, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .unified-filter-btn::after{display:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .unified-filter-btn.stream-gar{--sc:var(--rb-red)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .unified-filter-btn.stream-rec{--sc:var(--rb-yel)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .unified-filter-btn.stream-summer{--sc:#ffa81f}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .unified-filter-btn.stream-fog{--sc:var(--rb-grn)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .unified-filter-btn.stream-slg{--sc:var(--rb-blu)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .unified-filter-btn.stream-slr{--sc:#7cc4ff}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .unified-filter-btn.active, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .unified-filter-btn[class*="stream-"].active{background:var(--sc) !important;color:#000 !important;box-shadow:none !important;transform:translate(2px,2px) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .unified-filter-btn.active .icon-img, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .unified-filter-btn[class*="stream-"].active .icon-img{filter:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .unified-filter-btn.active *{color:#000 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .unified-filter-btn.unified-run-btn{font-family:var(--rb-font) !important;font-weight:400 !important;font-size:19px !important}
+
+/* ---- Streets and Search: the bins in a card, drawn like the bins on the Streets display ---- */
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .stream-group-card{--c:var(--rb-red);background:linear-gradient(90deg, var(--c) 0 43px, #000 43px 46px, var(--rb-bar) 46px) !important;border:3px solid #000 !important;border-radius:var(--ux-rad) !important;box-shadow:none !important;overflow:hidden !important;margin-bottom:6px !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .stream-group-card:has(> .header-rec){--c:var(--rb-yel)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .stream-group-card:has(> .header-fog){--c:var(--rb-grn)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .stream-group-card::before, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .stream-group-card::after, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .stream-group-header::before, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .stream-group-header::after{display:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .stream-group-header{background:none !important;border:0 !important;color:#fff !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .stream-group-header > .icon-img, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .stream-group-header > span:first-child .icon-img:first-child, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .stream-group-header > img{filter:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .hdr-run-badge{background:var(--c) !important;color:#000 !important;border:2px solid #000 !important;border-radius:5px !important;font-weight:800 !important;padding:1px 7px !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .hdr-run-badge .icon-img{filter:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .hdr-run-badge::before, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .hdr-run-badge::after{display:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .serial-text{color:#fff !important;font-weight:800 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .size-badge{background:var(--c) !important;color:#000 !important;border:2px solid #000 !important;border-radius:5px !important;font-weight:800 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .address-line1, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .street-summary-name{font-weight:800 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .distance-pill, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .street-summary-dist{background:var(--rb-bar) !important;border:2px solid #000 !important;border-radius:6px !important;color:var(--ux-text) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .single-nav-btn{color:var(--rb-lab) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .street-map-btn{background:var(--rb-a) !important;border:3px solid #000 !important;border-radius:var(--ux-rad) !important;box-shadow:var(--rb-sh-sm) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .street-map-btn .icon-img{filter:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .street-tab-btn{--c:#c8ced6;background:var(--c) !important;border:3px solid #000 !important;border-radius:var(--ux-rad) !important;box-shadow:var(--rb-sh-sm) !important;color:#000 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .street-tab-btn.street-tab-gar{--c:var(--rb-red)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .street-tab-btn.street-tab-rec{--c:var(--rb-yel)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .street-tab-btn.street-tab-fog{--c:var(--rb-grn)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .street-tab-btn *{color:#000 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .street-tab-btn .icon-img{filter:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .street-tab-btn.tab-open{box-shadow:none !important;transform:translate(2px,2px) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .street-tab-btn::before, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .street-tab-btn::after{display:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .street-group-body{border-top:3px solid #000 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .street-group-body .address-card{box-shadow:none !important;border-width:0 0 3px 0 !important;border-radius:0 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .stream-count-pill{border:2px solid #000 !important;border-radius:5px !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .active-chip{background:var(--rb-slab) !important;border:2px solid #000 !important;border-radius:6px !important;color:var(--ux-text) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .active-chip-clear{background:none !important;border:2px dashed #000 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .active-chip-stream-gar{background:var(--rb-red) !important;color:#000 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .active-chip-stream-rec, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .active-chip-stream-summer{background:var(--rb-yel) !important;color:#000 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .active-chip-stream-fog{background:var(--rb-grn) !important;color:#000 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .active-chip-stream-slg, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .active-chip-stream-slr{background:var(--rb-blu) !important;color:#000 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .active-chip[class*="active-chip-stream-"] .icon-img{filter:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .active-chip[class*="active-chip-stream-"] *{color:#000 !important}
+
+/* ---- a property (tap the bin box, or Edit on a card) ---- */
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .uprop-suburb{color:var(--rb-k) !important;letter-spacing:.1em !important;font-weight:800 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .uprop-tabs-row{gap:8px !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .uprop-tab{--c:#c8ced6;background:var(--c) !important;border:3px solid #000 !important;border-radius:var(--ux-rad) !important;box-shadow:var(--rb-sh-sm) !important;color:#000 !important;opacity:1 !important;font-weight:800 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .uprop-tab.uprop-tab-garbage{--c:var(--rb-red)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .uprop-tab.uprop-tab-recycling{--c:var(--rb-yel)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .uprop-tab.uprop-tab-fogo{--c:var(--rb-grn)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .uprop-tab *{color:#000 !important;opacity:1 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .uprop-tab .icon-img, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .uprop-tab svg{filter:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .uprop-tab.uprop-tab-active{box-shadow:none !important;transform:translate(2px,2px) !important;outline:3px solid #fff !important;outline-offset:-6px !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .uprop-tab::before, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .uprop-tab::after{display:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .uprop-content{background:none !important;border:0 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .uprop-info-block{background:var(--rb-slab) !important;border:3px solid #000 !important;border-radius:var(--ux-rad) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .uprop-map-btn, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .uprop-flat-btn, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .uprop-run-picker-btn, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .uprop-run-box-select{background:var(--rb-slab) !important;border:3px solid #000 !important;border-radius:var(--ux-rad) !important;box-shadow:var(--rb-sh-sm) !important;color:var(--ux-text) !important;font-weight:800 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .uprop-run-picker-btn.active{background:var(--rb-a) !important;color:#000 !important;box-shadow:none !important;transform:translate(2px,2px) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .uprop-run-box{border:3px solid #000 !important;border-radius:var(--ux-rad) !important}
+
+/* ---- the rest of the sheets' pieces: steps and tabs, list rows, the map's chips ---- */
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .sf-steps, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .sf-tabs, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .drv-seg{border:0 !important;gap:8px !important;padding:8px 14px 6px 10px !important;background:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .drv-seg{padding:0 4px 4px 0 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .sf-steps button, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .sf-tabs button, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .drv-seg button{background:var(--rb-slab) !important;border:3px solid #000 !important;border-radius:var(--ux-rad) !important;box-shadow:var(--rb-sh-sm) !important;color:var(--ux-text) !important;font-weight:800 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .sf-steps button.on, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .sf-tabs button.on, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .drv-seg button.on{background:var(--rb-a) !important;color:#000 !important;box-shadow:none !important;transform:translate(2px,2px) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .sf-steps button.on *, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .sf-tabs button.on *{color:#000 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .drv-seg button.bad.on{background:var(--rb-red) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .drv-li, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .rs-li, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .sf-slot, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .drv-stopbox, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .drv-result, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .uxl-item, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .sf-emerg, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .drv-empty{background:var(--rb-slab) !important;border:3px solid #000 !important;border-radius:var(--ux-rad) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .sf-emerg{background:var(--rb-red) !important;color:#000 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .sf-emerg *{color:#000 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .uxl-foot button{background:var(--rb-slab) !important;border:3px solid #000 !important;border-radius:var(--ux-rad) !important;box-shadow:var(--rb-sh-sm) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxDaysBar{background:var(--rb-bar) !important;border-bottom:3px solid #000 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxDaysBar .uxd-top b{font-family:var(--rb-font) !important;font-weight:400 !important;font-size:18px !important;letter-spacing:.01em !important;text-shadow:3px 3px 0 #000 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxDaysBar .uxd-row{gap:6px !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxDaysBar .uxd-chip{background:#2a2c31 !important;border:2px solid #000 !important;border-radius:6px !important;box-shadow:2px 2px 0 #000 !important;color:#fff !important;font-weight:800 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxDaysBar .uxd-chip.on{background:var(--c) !important;color:#000 !important;box-shadow:none !important;transform:translate(2px,2px) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxDaysBar .uxd-chip.on i{color:#000 !important;opacity:1 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxDaysBar .uxd-x{background:#2a2c31 !important;border:3px solid #000 !important;border-radius:var(--ux-rad) !important;color:#fff !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .map-context-btn{background:#2a2c31 !important;border:3px solid #000 !important;border-radius:var(--ux-rad) !important;box-shadow:var(--rb-sh-sm) !important;color:#fff !important;font-weight:800 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .map-context-btn.active{background:var(--rb-a) !important;color:#000 !important;box-shadow:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .map-context-btn.danger{color:var(--rb-red) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .map-settings-top-btn, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .ux-map-btn{background:#2a2c31 !important;border:3px solid #000 !important;border-radius:var(--ux-rad) !important;box-shadow:var(--rb-sh-sm) !important;color:#fff !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxStrayChip, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxRunHereChip, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxMyRunChip, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxLowHint{background:#2a2c31 !important;border:3px solid #000 !important;border-left-width:3px !important;border-radius:var(--ux-rad) !important;box-shadow:var(--rb-sh-sm) !important;color:#fff !important;font-weight:800 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxStrayChip{margin:14px 0 0 8px !important;color:var(--rb-red) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxMyRunChip, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxRunHereChip{background:var(--rb-a) !important;color:#000 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxRunHereChip *{color:#000 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxRunHereChip .icon-img{filter:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .lb-ss-side{background:#2a2c31 !important;border:3px solid #000 !important;border-radius:var(--ux-rad) !important;margin-top:14px !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #lbStreetSides::before, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #lbStreetSides::after, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .lb-ss-side::before, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .lb-ss-side::after{display:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .area-run-row{border:2px solid #000 !important;border-radius:6px !important;color:#000 !important;font-weight:800 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .area-run-row.area-run-gar{background:var(--rb-red) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .area-run-row.area-run-rec{background:var(--rb-yel) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .area-run-row.area-run-summer{background:#ffa81f !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .area-run-row.area-run-fog{background:var(--rb-grn) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .area-run-row.area-run-litter{background:var(--rb-blu) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .area-run-row.area-run-litter-rec{background:#7cc4ff !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .area-run-row *{color:#000 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .area-run-row .icon-img{filter:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxStreetStrip #mapStreetOverlay{font-weight:800 !important;text-shadow:2px 0 0 #000, -2px 0 0 #000, 0 2px 0 #000, 0 -2px 0 #000, 3px 3px 0 #000 !important}
+
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxHud .uxh-bin-ser{color:#fff !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .distance-pill, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .street-summary-dist{color:#fff !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .street-summary-dist .icon-img{filter:brightness(0) invert(1) !important}
+
+/* ---- Report an issue: which bin, and photo / voice / scan ---- */
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxiSerials button{--c:var(--rb-red);display:inline-flex !important;align-items:center !important;gap:7px !important;background:var(--c) !important;border:3px solid #000 !important;border-radius:var(--ux-rad) !important;box-shadow:var(--rb-sh-sm) !important;color:#000 !important;font-weight:800 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxiSerials button[data-s="rec"]{--c:var(--rb-yel)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxiSerials button[data-s="fog"]{--c:var(--rb-grn)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxiSerials button::before{content:"" !important;position:static !important;display:block !important;flex:none;width:18px !important;height:18px !important;background:#000 !important;-webkit-mask:url(garbage.png) center / contain no-repeat;mask:url(garbage.png) center / contain no-repeat}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxiSerials button[data-s="rec"]::before{-webkit-mask-image:url(recycle.png);mask-image:url(recycle.png)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxiSerials button[data-s="fog"]::before{-webkit-mask-image:url(fogo.png);mask-image:url(fogo.png)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxiSerials button svg{display:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxiSerials button.on{box-shadow:none !important;transform:translate(2px,2px) !important;outline:3px solid #fff !important;outline-offset:-6px !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxiMedia button, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .drv-media button{background:var(--rb-slab) !important;border:3px solid #000 !important;border-radius:var(--ux-rad) !important;box-shadow:var(--rb-sh-sm) !important;color:var(--ux-text) !important;font-weight:800 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxiMedia button svg{color:var(--rb-lab) !important}
+
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbCluster .rb-k{font-size:10px;letter-spacing:.04em}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbCluster #rbStat{padding-right:16px}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxTimer b{font-family:var(--rb-font) !important;font-weight:400 !important;color:#fff !important;letter-spacing:.01em !important}
+
+/* ---- wide screens and a phone on its side ----
+   On a wide screen the ux2 layer keeps the timer in the title box's stats row, which this skin hides -
+   so the health bar and cash keep their top-right corner here at every width. On its side a phone has
+   very little height: the cluster and the bin box shrink and the bin box drops its run tabs. */
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxHdrTools{display:flex !important;position:absolute !important;right:10px !important;top:5px !important;left:auto !important;height:40px !important;z-index:3 !important}
+@media (orientation: landscape) and (max-height: 520px){
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(.ux-nav-menu):not(.ux-nav-compact){--ux-dock-h:46px}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .bottom-nav{padding:4px 9px calc(var(--ux-safe-b) + 6px) 7px !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbCluster .rb-hz{height:11px}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbCluster .rb-cl{grid-template-columns:minmax(0,1fr) 92px minmax(0,1fr);gap:8px;padding:6px 12px 8px 8px}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbCluster .rb-ct{height:46px;gap:2px}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbCluster .rb-ct b{font-size:20px !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbCluster .rb-spd{height:54px;margin-top:-8px}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbCluster .rb-spd b{font-size:30px !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbCluster .rb-lim{width:30px;height:30px;font-size:12px;top:-10px;right:-10px}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxCardStack #mapRunsAtAddress{display:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxCardStack #mapBinsAtAddress .next-bin-row{min-height:40px !important}
+}
+
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x).ux-nav-menu #rbCluster .rb-cl{padding-bottom:calc(16px + var(--ux-safe-b))}
+@media (max-width: 899px), (hover: none){html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x).ux-nav-compact .bottom-nav{padding:3px 9px calc(var(--ux-safe-b) + 5px) 7px !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x).ux-nav-compact .nav-item{border-width:2px !important}}
+
+/* ---- on its side: a split screen - the info down the left, the map on the right ----
+   A phone or tablet in landscape (anything without the desktop's side rail). The left --rb-pw of the
+   screen is a panel holding, top to bottom: the time, health bar and cash; the street name; the bin
+   box (always open here - it covers no map - and it scrolls if the house has a lot of bins); on a
+   tablet, where there is height to spare, every one of the cluster's turn-taking numbers at once; the
+   dash cluster; and, on the map screen, the bottom bar. The map gets the rest at full height.
+   Both the map's box (#mapScreenContainer, which track-up rotation measures to centre the truck) and
+   the map itself (#mainLeafletMap, a sibling of that box, not a child) move over, so the truck stays
+   in the middle of the map half; the oversized rotated map that track-up uses spills left under the
+   panel, which is solid and above it. lb-rubbish-script
+   tells the map to re-measure when this layout switches on or off. The warning chips that hang under
+   the top bar, the game's feed and the stickers are slid across so they sit over the map half. */
+@media (orientation: landscape) and (max-width: 899px), (orientation: landscape) and (hover: none){
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x){--rb-pw:clamp(320px, 42vw, 440px)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x)[data-ux-screen="map"]{--ux-side-lift:0px !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #mapScreenContainer{left:var(--rb-pw) !important;right:0 !important;width:auto !important;top:0 !important;bottom:0 !important;height:auto !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #mainLeafletMap{left:var(--rb-pw) !important;width:calc(100% - var(--rb-pw)) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #mainLeafletMap.map-track-up-enlarged{left:calc(var(--tu-map-left, 0px) + var(--rb-pw)) !important;width:var(--tu-map-w, 100%) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .map-header-panel{position:fixed !important;left:0 !important;right:auto !important;top:0 !important;width:var(--rb-pw) !important;margin:0 !important;gap:6px !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #mapNormalTopBar{height:56px !important;min-height:0 !important;box-sizing:border-box !important;padding:0 0 0 env(safe-area-inset-left, 0px) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .map-header-panel > #uxStrayChip, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .map-header-panel > #lbStreetSides, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .map-header-panel > #areaRunsBar, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .map-header-panel > #uxLowHint{transform:translate(calc(var(--rb-pw) + 58px), -62px) !important;margin-top:0 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxCardStack{left:0 !important;right:auto !important;width:var(--rb-pw) !important;top:71px !important;bottom:var(--ux-dock-total) !important;box-sizing:border-box !important;padding-left:env(safe-area-inset-left, 0px) !important;background:var(--ux-bg) !important;border-right:3px solid #000 !important;pointer-events:auto !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxStreetStrip{flex:none !important;padding:8px 10px 0 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxStreetStrip::before{display:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxCardStack .map-address-telemetry, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxCardStack div.map-address-telemetry{flex:0 1 auto !important;min-height:0 !important;max-height:none !important;margin:10px 16px 12px 10px !important;overflow:hidden auto !important;box-shadow:var(--rb-sh) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxCardStack #mapBinsAtAddress{max-height:none !important;overflow:visible !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbCluster{flex:none;margin-top:auto}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbCluster .rb-cl{grid-template-columns:minmax(0,1fr) 100px minmax(0,1fr);padding-left:10px}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x)[data-ux-screen="map"] .bottom-nav{right:auto !important;width:var(--rb-pw) !important;box-sizing:border-box !important;border-right:3px solid #000 !important;padding-left:calc(7px + env(safe-area-inset-left, 0px)) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x)[data-ux-screen="map"] .nav-item:not(.active) .nav-label{display:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #mapFixedLeftControls{left:calc(var(--rb-pw) + 8px) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #mapScreenContainer #mapFixedSideControls{top:50% !important;bottom:auto !important;transform:translateY(-50%) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x)[data-ux-screen="map"] #lbParcelPill{left:calc(50% + var(--rb-pw) / 2) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x)[data-ux-screen="map"] #uxGtaStack{top:8px !important;margin-top:0}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x)[data-ux-screen="map"] #uxGtaFeed{left:calc(var(--rb-pw) + 66px);top:46px !important;margin-top:0}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x)[data-ux-screen="map"] #rbPop.on, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x)[data-ux-screen="map"] #uxGtaSplash{left:calc(var(--rb-pw) + 28px);top:22%}
+}
+@media (orientation: landscape) and (max-width: 899px) and (min-height: 600px), (orientation: landscape) and (hover: none) and (min-height: 600px){
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbStats{display:grid;grid-template-columns:repeat(2, minmax(0,1fr));gap:10px;flex:none;margin:auto 16px 34px 10px}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbStats .rb-st{display:flex;flex-direction:column;justify-content:center;gap:4px;min-height:62px;padding:0 12px;border:3px solid #000;border-radius:var(--ux-rad);background:var(--rb-slab);box-shadow:var(--rb-sh)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbStats .rb-st b{font:400 26px/1 var(--rb-font) !important;color:var(--ux-text)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbStats .rb-st .rb-k{color:var(--rb-k)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbStats .rb-st[data-k="fines"] b{color:var(--rb-red)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #rbStats + #rbCluster{margin-top:0}
+}
+
+/* ---- header with the menu button showing (Navigation: Menu only - the default): room for the title ---- */
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxNavBtn{background:#2a2c31 !important;border:3px solid #000 !important;border-radius:var(--ux-rad) !important;box-shadow:var(--rb-sh-sm) !important;color:#fff !important;width:40px !important;min-width:40px !important;height:40px !important;flex:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) .app-header h1{min-width:0 !important;white-space:nowrap !important;overflow:hidden !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x).ux-nav-menu .app-header h1{font-size:15px !important;letter-spacing:0 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x).ux-nav-menu .app-header .header-actions{gap:5px !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x)[data-hud="bands"] #uxHud .uxh-runname{font-size:26px !important;max-width:150px !important;overflow:hidden !important;text-overflow:ellipsis !important}
+</style>
+
+<script id="lb-rubbish-script">
+/* =====================================================================
+   Hard Rubbish skin: the drive screen's extra pieces (see lb-rubbish-style above for the look).
+
+   Everything here only shows while the skin is on (Customize > Look > Skin > Hard Rubbish); with any
+   other skin the elements are either never built or hidden by CSS, and the tick does nothing.
+
+   On the map it adds:
+   - The time of day where the run number was (top left). The run number doesn't change all shift;
+     the time is what gets looked at. Tapping it still opens the run picker, and with no run picked
+     "Select run" still shows beside it.
+   - The break clock as a health bar under the time, and for the last 15 minutes a countdown beside
+     the cash, running down in tenths of a second.
+   - The dash cluster along the bottom: bins on the truck (taking turns with each run's share when
+     the load is from more than one run), the speed (with the street's limit, where
+     the map knows it), and one box that takes turns showing bins to go, streets to go, km driven,
+     bins an hour and this shift's fines. It changes every few seconds; a tap moves it on.
+   - The bin box as a pop-up the size of the other pop-ups: while the truck is rolling it is one
+     line (the next house), and it opens to the bins, sizes and serials once the truck slows to a
+     stop. A tap on the line opens it for a few seconds without stopping.
+   - With the phone or tablet on its side, a split screen: all of the above down the left, the map
+     on the right (the layout is CSS; this block only tells the map to re-measure itself).
+   - "Slow down" while over the posted limit (the same 3 km/h over for 3 s that earns a wanted
+     star), and "Hidden package" when one is picked up, as stickers over the map.
+
+   Nothing in the app's own logic is touched: this only reads what the other blocks already work out
+   (lbHudTotals, the run sheet's truck count, the shift's rates, the break clock, the game's stats)
+   and draws it. The bin box is the app's own next-bin card, restyled, so serial taps, reminders and
+   the report button all still do what they did.
+   ===================================================================== */
+(function(){
+  'use strict';
+  var HTML = document.documentElement;
+  function on(){ return HTML.getAttribute('data-ux-skin') === 'rubbish'; }
+  function $(id){ return document.getElementById(id); }
+  var GF = {};
+  function g(n){ try { return (GF[n] || (GF[n] = new Function('return ' + n)))(); } catch (e) { return undefined; } }
+  function txt(el, v){ v = String(v); if (el && el.textContent !== v) el.textContent = v; }
+  function attr(el, k, v){ v = String(v); if (el && el.getAttribute(k) !== v) el.setAttribute(k, v); }
+  function onMap(){ return document.body.getAttribute('data-ux-screen') === 'map'; }
+  function shift(){ try { return window.uxShiftState ? window.uxShiftState() : null; } catch (e) { return null; } }
+  function game(){ try { return !!(window.uxGtaOpts && window.uxGtaOpts().game); } catch (e) { return false; } }
+
+  // ---- the clock, where the run number was ---------------------------------------------------
+  function paintClock(){
+    var box = $('mapRunColoredBox'); if (!box) return;
+    var c = $('rbClock');
+    if (!c || c.parentNode !== box) {
+      if (c) c.remove();
+      c = document.createElement('span'); c.id = 'rbClock';
+      c.innerHTML = '<b></b><small></small><span class="rb-hp" aria-hidden="true"><i></i></span><span class="rb-ar" aria-hidden="true"><i></i></span>';
+      box.insertBefore(c, box.firstChild);
+    }
+    var d = new Date(), h = d.getHours(), m = d.getMinutes();
+    txt(c.querySelector('b'), ((h + 11) % 12 + 1) + ':' + (m < 10 ? '0' : '') + m);
+    txt(c.querySelector('small'), h < 12 ? 'am' : 'pm');
+    // The health bar (and armour) sit under the time, as on the game's HUD. The game mode block works
+    // them out and draws its own copy beside the cash (hidden in this skin); this one just follows it.
+    var src = $('uxGtaHealth'), on = game() && !!src;
+    attr(c, 'data-game', on ? '1' : '0');
+    if (on) {
+      var hp = src.querySelector('.hp i'), ar = src.querySelector('.ar i');
+      c.querySelector('.rb-hp i').style.width = (hp && hp.style.width) || '100%';
+      c.querySelector('.rb-ar i').style.width = (ar && ar.style.width) || '0%';
+      attr(c, 'data-lvl', src.getAttribute('data-lvl') || 'ok');
+      attr(c, 'data-ar', src.getAttribute('data-ar') || '0');
+    }
+    // "Select run" has to stay readable when there's no run; with one picked the title gives way to the clock
+    var HT = null; try { HT = window.lbHudTotals ? window.lbHudTotals() : null; } catch (e) {}
+    document.body.classList.toggle('rb-has-run', !!(HT && HT.run));
+  }
+
+  // ---- Home: the day's week pills as stream-coloured stickers -------------------------------------
+  // Home draws "[recycling logo] week B" and "[FOGO logo] week A". In this skin each is a box in its
+  // stream's colour with just the logo and the letter, and Garbage (every week, so no letter) gets a
+  // box too. Done without changing what Home wrote: "week " is wrapped in a span this skin's CSS
+  // hides, and the Garbage box only shows in this skin - so the other skins look as they did.
+  function paintHome(){
+    var day = document.querySelector('#welcomeBody .welcome-today'); if (!day) return;
+    var pills = day.querySelectorAll('.welcome-today-pill:not(.pill-gar)');
+    Array.prototype.forEach.call(pills, function(p){
+      var b = p.querySelector('b'); if (!b || b.querySelector('.rb-wk')) return;
+      var m = /^(week\s+)(.+)$/i.exec(b.textContent || ''); if (!m) return;
+      b.textContent = '';
+      var w = document.createElement('span'); w.className = 'rb-wk'; w.textContent = m[1];
+      b.appendChild(w); b.appendChild(document.createTextNode(m[2]));
+    });
+    if (pills.length && !day.querySelector('.pill-gar')) {
+      var gp = document.createElement('span'); gp.className = 'welcome-today-pill pill-gar rb-only';
+      gp.innerHTML = '<img class="icon-img" src="garbage.png" alt="Garbage, every week">';
+      pills[0].parentNode.insertBefore(gp, pills[0]);
+    }
+  }
+
+  // ---- the break: a countdown for the last 15 minutes ---------------------------------------------
+  // The break clock is the health bar under the time (paintClock). When the break is 15 minutes away
+  // a countdown comes up beside the cash and runs down in tenths of a second - the last stretch is
+  // when the exact time matters. Past due it says "Break now". The tenths run on their own 100 ms
+  // timer, only while it is showing.
+  var SOON = 15 * 60000, brAt = 0, brFast = 0;
+  function two(n){ return (n < 10 ? '0' : '') + n; }
+  function paintCount(){
+    var el = $('rbBreak'); if (!el || !brAt) return;
+    var t = Math.floor(Math.max(0, brAt - Date.now()) / 100);
+    txt(el.querySelector('b'), Math.floor(t / 600) + ':' + two(Math.floor(t / 10) % 60) + '.' + (t % 10));
+  }
+  function paintBreak(){
+    var host = $('uxHdrTools'), timer = $('uxTimer'); if (!host || !timer) return;
+    var el = $('rbBreak');
+    if (!el || el.parentNode !== host) {
+      if (el) el.remove();
+      el = document.createElement('button'); el.type = 'button'; el.id = 'rbBreak';
+      el.innerHTML = '<span><i></i><b></b></span>';
+      el.addEventListener('click', function(ev){ ev.stopPropagation(); if (typeof window.uxShiftOpen === 'function') window.uxShiftOpen(); });
+      host.insertBefore(el, timer);
+    }
+    var v = null; try { v = window.lbBreakClock ? window.lbBreakClock.view() : null; } catch (e) {}
+    var show = false, lab = el.querySelector('i'), val = el.querySelector('b');
+    brAt = 0;
+    if (v && v.mode === 'working' && v.a) {
+      if (v.a.overdue) { show = true; txt(lab, 'Break'); txt(val, 'Now'); attr(el, 'data-lvl', 'over'); attr(el, 'aria-label', 'Break overdue'); }
+      else if (v.remaining <= SOON) {
+        show = true; brAt = v.a.at || (Date.now() + v.remaining);
+        txt(lab, 'Break in'); attr(el, 'data-lvl', v.remaining < 5 * 60000 ? 'low' : 'soon');
+        attr(el, 'aria-label', 'Break in ' + Math.ceil(v.remaining / 60000) + ' minutes');
+        paintCount();
+      }
+    }
+    el.style.display = show ? '' : 'none';
+    if (brAt && !brFast) brFast = setInterval(function(){ if (!document.hidden) paintCount(); }, 100);
+    else if (!brAt && brFast) { clearInterval(brFast); brFast = 0; }
+  }
+  function stopBreak(){ if (brFast) { clearInterval(brFast); brFast = 0; } brAt = 0; }
+
+  // ---- the numbers behind the cluster --------------------------------------------------------------
+  // Bins on the truck since the last tip (the run sheet's count), and how many of them came from each
+  // run when the load is from more than one (a run changed part way through a load). The load is the
+  // last cur.n bins of the shift; each run's leg knows which of the shift's bins were its own (bins0 to
+  // binsEnd), so each run's share is where those overlap. null when there is no run sheet going.
+  function onTruck(){
+    var sh = shift(), R = null;
+    try { R = sh && window.lbRunSheet && window.lbRunSheet._t ? window.lbRunSheet._t.get(sh.id) : null; } catch (e) {}
+    if (!(R && R.cur && typeof R.cur.n === 'number')) return null;
+    var n = R.cur.n, total = sh.bins || 0, from = Math.max(0, total - n), by = {}, order = [];
+    (sh.legs || []).concat(sh.leg ? [sh.leg] : []).forEach(function(l){
+      if (!l || !l.run) return;
+      var a = Math.max(from, l.bins0 || 0), b = Math.min(total, l.binsEnd == null ? total : l.binsEnd);
+      if (b <= a) return;
+      if (!(l.run in by)) { by[l.run] = 0; order.push(l.run); }
+      by[l.run] += b - a;
+    });
+    return { n: n, runs: order.map(function(r){ return { run: r, n: by[r] }; }) };
+  }
+  function doneCount(){ var s = g('servicedBinSerials'); return (s && s.size != null) ? s.size : 0; }
+  // Streets with at least one bin still to empty, from the run the street counts were worked out for
+  // (lb-street-stats). Only re-counted when a bin is collected or the run changes.
+  var sgKey = '', sgVal = null;
+  function streetsToGo(){
+    var st = null; try { st = window.lbStreetStats._t.state(); } catch (e) { return null; }
+    var run = st && st.run, done = g('servicedBinSerials');
+    if (!run || !run.streets || !done || typeof done.has !== 'function') return null;
+    var key = run.sig + '|' + done.size;
+    if (key === sgKey) return sgVal;
+    var n = 0;
+    run.streets.forEach(function(s){
+      var items = s.items || [];
+      for (var i = 0; i < items.length; i++) {
+        var ser = items[i].serials || [];
+        for (var j = 0; j < ser.length; j++) if (!done.has(ser[j])) { n++; return; }
+      }
+    });
+    sgKey = key; sgVal = n;
+    return n;
+  }
+  function limitNow(){
+    var sg = $('mapSpeedLimitSign');
+    if (!sg || sg.classList.contains('speed-sign-hidden')) return 0;
+    var n = parseInt(sg.textContent, 10); return (n >= 10 && n <= 130) ? n : 0;
+  }
+  function money(n){ return '$' + Math.round(n).toLocaleString('en-AU'); }
+  // What the right-hand box takes turns showing. Only what there is a number for: km, bins an hour
+  // and fines need a shift (and fines need Game mode).
+  function statList(){
+    var out = [], HT = null, sh = shift();
+    try { HT = window.lbHudTotals ? window.lbHudTotals() : null; } catch (e) {}
+    if (HT && HT.run) out.push({ k: 'togo', l: 'Bins to go', v: Math.max(0, (HT.bins || 0) - doneCount()) });
+    var sg = streetsToGo(); if (sg != null && HT && HT.run) out.push({ k: 'streets', l: 'Streets to go', v: sg });
+    var r = null; try { r = window.uxShiftRates ? window.uxShiftRates() : null; } catch (e) {}
+    if (r) {
+      out.push({ k: 'km', l: 'Km driven', v: r.km < 100 ? r.km.toFixed(1) : Math.round(r.km) });
+      var ph = r.perHr != null ? r.perHr : r.recent;
+      if (ph != null) out.push({ k: 'rate', l: 'Bins / hour', v: Math.round(ph) });
+    }
+    if (sh && game()) {
+      var f = 0; try { var S = window.uxGta.stats(); if (S.led && S.led.shift === sh.id) f = S.led.fines || 0; } catch (e) {}
+      out.push({ k: 'fines', l: 'Fines', v: money(f) });
+    }
+    if (!out.length) out.push({ k: 'none', l: 'Bins to go', v: '-' });
+    return out;
+  }
+
+  // ---- the dash cluster ------------------------------------------------------------------------
+  var TURN = 5000, statAt = 0, statHold = 0, statKey = '';
+  function buildCluster(){
+    var stack = $('uxCardStack'); if (!stack) return null;
+    var el = $('rbCluster');
+    if (el && el.parentNode === stack && stack.lastElementChild === el) return el;
+    if (!el) {
+      el = document.createElement('div'); el.id = 'rbCluster';
+      el.innerHTML = '<div class="rb-hz" aria-hidden="true"></div><div class="rb-cl">' +
+        '<button type="button" class="rb-ct" id="rbTruck"><span class="rb-k">On truck</span><b>-</b></button>' +
+        '<div class="rb-spd" id="rbSpd"><i class="rb-lim" id="rbLim" aria-hidden="true"></i><b id="rbSpdN">0</b><span>km/h</span></div>' +
+        '<button type="button" class="rb-ct" id="rbStat" title="Tap for the next number"><span class="rb-k"></span><b></b><span class="rb-pips" aria-hidden="true"></span></button>' +
+        '</div>';
+      el.addEventListener('click', function(ev){
+        var t = ev.target.closest ? ev.target.closest('button') : null; if (!t) return;
+        ev.stopPropagation();
+        if (t.id === 'rbStat') { statAt++; statHold = Date.now() + 15000; paintCluster(); }
+        else if (t.id === 'rbTruck' && typeof window.uxShiftOpen === 'function') window.uxShiftOpen();
+      });
+    }
+    stack.appendChild(el);
+    return el;
+  }
+  function paintCluster(){
+    var el = buildCluster(); if (!el) return;
+    // on truck (the run sheet's count since the last tip); with a load from two or more runs it takes
+    // turns: the total, then each run's share. With no run sheet going, bins collected.
+    var T = onTruck(), tk = $('rbTruck'), lab = 'Collected', val = doneCount();
+    if (T) {
+      lab = 'On truck'; val = T.n;
+      if (T.runs.length > 1) {
+        var i = Math.floor(Date.now() / 3000) % (T.runs.length + 1);
+        if (i > 0) { lab = 'From ' + T.runs[i - 1].run; val = T.runs[i - 1].n; }
+      }
+    }
+    txt(tk.querySelector('.rb-k'), lab); txt(tk.querySelector('b'), val);
+    attr(tk, 'aria-label', lab + ' ' + val);
+    // speed, and the limit where the map has one
+    var sp = Math.round(+g('currentMapSpeedKmh') || 0), lim = limitNow(), box = $('rbSpd');
+    txt($('rbSpdN'), sp);
+    var lm = $('rbLim'); txt(lm, lim || ''); lm.style.display = lim ? '' : 'none';
+    attr(box, 'data-over', (lim && sp > lim + 2) ? '1' : '0');
+    attr(box, 'aria-label', 'Speed ' + sp + ' kilometres an hour' + (lim ? ', limit ' + lim : ''));
+    // the box that takes turns
+    var list = statList(), now = Date.now();
+    if (now > statHold && now - (paintCluster._t || 0) >= TURN) { paintCluster._t = now; statAt++; }
+    var s = list[statAt % list.length], st = $('rbStat');
+    txt(st.querySelector('.rb-k'), s.l); txt(st.querySelector('b'), s.v);
+    attr(st, 'data-k', s.k);
+    attr(st, 'aria-label', s.l + ' ' + s.v);
+    if (statKey !== s.k) { statKey = s.k; st.classList.remove('rb-flip'); void st.offsetWidth; st.classList.add('rb-flip'); }
+    var pips = st.querySelector('.rb-pips'), want = list.length > 1 ? list.map(function(x){ return '<i' + (x === s ? ' class="on"' : '') + '></i>'; }).join('') : '';
+    if (pips.innerHTML !== want) pips.innerHTML = want;
+  }
+
+  // ---- landscape: info on the left, map on the right ---------------------------------------------
+  // The layout itself is CSS (same media query, in lb-rubbish-style). Moving the map's box over is
+  // not something the map notices on its own, so when the split comes on or goes off (the phone is
+  // turned, the skin is picked, the map screen is opened) the track-up sizing is redone and Leaflet is
+  // told to measure its box again - otherwise the truck sits off-centre and a strip of map stays grey.
+  var SPLIT_MQ = '(orientation: landscape) and (max-width: 899px), (orientation: landscape) and (hover: none)';
+  var splitMq = null; try { splitMq = window.matchMedia ? window.matchMedia(SPLIT_MQ) : null; } catch (e) {}
+  function split(){ return !!(splitMq && splitMq.matches) && on(); }
+  var wasSplit = null;
+  function remeasureMap(){
+    [50, 350].forEach(function(ms){
+      setTimeout(function(){
+        try { if (typeof window.applyMapHeadingRotation === 'function') window.applyMapHeadingRotation(); } catch (e) {}
+        try { var m = g('leafletMap'); if (m) m.invalidateSize({ pan: false, animate: false }); } catch (e) {}
+      }, ms);
+    });
+  }
+  function paintSplit(){
+    var s = split() && onMap();
+    if (s === wasSplit) return;
+    var first = wasSplit === null; wasSplit = s;
+    if (s || !first) remeasureMap();
+  }
+  try {
+    if (splitMq && splitMq.addEventListener) splitMq.addEventListener('change', function(){ paintSplit(); });
+    else if (splitMq && splitMq.addListener) splitMq.addListener(function(){ paintSplit(); });
+  } catch (e) {}
+
+  // On a tablet on its side the info panel has room to spare under the bin box, so every number the
+  // cluster's right-hand box takes turns showing is laid out there at once (the box keeps turning).
+  // Only built and filled while that layout is showing; CSS hides it everywhere else.
+  function paintStats(){
+    var stack = $('uxCardStack'), cl = $('rbCluster'); if (!stack || !cl) return;
+    var el = $('rbStats');
+    if (!split() || window.innerHeight < 600) return;
+    if (!el) { el = document.createElement('div'); el.id = 'rbStats'; }
+    if (el.parentNode !== stack || el.nextElementSibling !== cl) stack.insertBefore(el, cl);
+    var html = statList().filter(function(x){ return x.k !== 'none'; }).map(function(x){
+      return '<div class="rb-st" data-k="' + x.k + '"><span class="rb-k">' + x.l + '</span><b>' + x.v + '</b></div>';
+    }).join('');
+    if (el._html !== html) { el._html = html; el.innerHTML = html; }
+  }
+
+  // ---- rolling or stopped: the bin box is one line on the move, and opens when the truck stops -------
+  var rolling = false, pinUntil = 0;
+  function paintRolling(){
+    var sp = +g('currentMapSpeedKmh') || 0;
+    if (sp >= 9) rolling = true; else if (sp <= 4) rolling = false;
+    var pin = Date.now() < pinUntil;
+    // (in the landscape split the bin box has its own place beside the map, so it stays open)
+    document.body.classList.toggle('rb-rolling', rolling && !pin && !split());
+  }
+  // A tap on the one-line box opens it for a while instead of going to "edit this property" (which
+  // is what a tap on the open box does).
+  document.addEventListener('click', function(ev){
+    if (!on() || !document.body.classList.contains('rb-rolling')) return;
+    var card = ev.target.closest ? ev.target.closest('.map-address-telemetry') : null;
+    if (!card) return;
+    ev.preventDefault(); ev.stopPropagation();
+    pinUntil = Date.now() + 12000; paintRolling();
+  }, true);
+
+  // ---- stickers over the map: slow down, hidden package --------------------------------------------
+  var popEl = null, popKind = '', popT = 0;
+  function pop(kind, html, ms){
+    if (!popEl) { popEl = document.createElement('div'); popEl.id = 'rbPop'; popEl.setAttribute('role', 'status'); document.body.appendChild(popEl); }
+    if (popKind !== kind || popEl._html !== html) { popEl._html = html; popEl.innerHTML = html; }
+    if (popKind !== kind) { popEl.className = ''; void popEl.offsetWidth; popEl.className = 'rb-pop-' + kind + ' on'; }
+    popKind = kind;
+    clearTimeout(popT);
+    if (ms) popT = setTimeout(function(){ unpop(kind); }, ms);
+  }
+  function unpop(kind){ if (popEl && (!kind || popKind === kind)) { popEl.className = ''; popKind = ''; } }
+  var overSince = 0, lastPk = null;
+  function paintPops(){
+    // over the limit by 3 or more for 3 seconds - the same as the wanted stars
+    var sp = Math.round(+g('currentMapSpeedKmh') || 0), lim = limitNow(), now = Date.now();
+    if (lim && sp - lim >= 3) {
+      if (!overSince) overSince = now;
+      if (now - overSince >= 3000) {
+        var L = 0; if (game()) { try { L = window.uxGta._t.wanted().L || 0; } catch (e) {} }
+        pop('slow', '<div class="rb-hz" aria-hidden="true"></div><div class="rb-pop-in"><b class="rb-d">Slow down</b><p>' + sp + ' in a ' + lim + ' zone</p>' + (L ? '<small>Wanted level ' + L + '</small>' : '') + '</div>');
+      }
+    } else { overSince = 0; unpop('slow'); }
+    // a hidden package picked up (the game's count of them went up)
+    if (!game()) { lastPk = null; return; }
+    var pk = null; try { pk = window.uxGta.stats().pk; } catch (e) {}
+    if (pk != null && lastPk != null && pk > lastPk && popKind !== 'slow') {
+      pop('pkg', '<div class="rb-pop-in"><span class="rb-k">You found a</span><b class="rb-d">Hidden package</b><em>+$100</em><small>' + pk + ' of 100</small></div>', 4500);
+    }
+    lastPk = pk;
+  }
+
+  // ---- the loop -------------------------------------------------------------------------------
+  function tick(){
+    if (!on()) {
+      if (document.body.classList.contains('rb-rolling')) document.body.classList.remove('rb-rolling');
+      unpop(); stopBreak(); overSince = 0; lastPk = null;
+      try { paintSplit(); } catch (e) {}
+      return;
+    }
+    if (document.hidden) return;
+    try { paintClock(); } catch (e) {}
+    try { paintHome(); } catch (e) {}
+    try { paintSplit(); } catch (e) {}
+    if (!onMap()) { unpop('slow'); return; }
+    try { paintBreak(); } catch (e) {}
+    try { paintCluster(); } catch (e) {}
+    try { paintStats(); } catch (e) {}
+    try { paintRolling(); } catch (e) {}
+    try { paintPops(); } catch (e) {}
+  }
+  setInterval(function(){ try { tick(); } catch (e) { console.warn('Hard Rubbish:', e); } }, 1000);
+  setTimeout(tick, 0);
+  window.lbRubbish = { tick: tick, _t: { onTruck: onTruck, paintBreak: paintBreak, statList: statList, streetsToGo: streetsToGo, pop: pop, unpop: unpop, pin: function(ms){ pinUntil = Date.now() + (ms || 12000); }, next: function(){ statAt++; statHold = Date.now() + 15000; } } };
 })();
 </script>
 
