@@ -5665,6 +5665,7 @@ const STREET_LITTER_SERVICE_LEVELS = {"seasons":[{"key":"tourist1","label":"Tour
     const w = currentGpsTrailWeight();
     gpsTrailLines.forEach(seg => seg.setStyle({ weight: w }));
   }
+  window.lbTrailRefresh = function () { try { if (!leafletMap) return; const any = gpsTrailLiveSegment || gpsTrailLines[gpsTrailLines.length - 1]; if (!any) return; const rd = any._renderer; if (rd && rd._update) rd._update(); gpsTrailLines.slice(-6).forEach(sg => sg.redraw && sg.redraw()); if (gpsTrailLiveSegment && gpsTrailLiveSegment.redraw) gpsTrailLiveSegment.redraw(); } catch (e) {} };
 
   // A small filled chevron pointing "up" (north) at rest, rotated clockwise
   // by the given compass bearing (0-360, same convention as getBearing()/
@@ -6687,7 +6688,7 @@ const STREET_LITTER_SERVICE_LEVELS = {"seasons":[{"key":"tourist1","label":"Tour
   function recordSnailTrailPoint(lat, lng) {
     if (snailTrailPaused) return;
     // The trail is the shift's: nothing is recorded before Start shift (or GO) or after End shift.
-    if (typeof window.lbShiftOn === 'function' && !window.lbShiftOn()) return;
+    if (typeof window.lbShiftOn === 'function' && !window.lbShiftOn() && !(window.lbBreakClock && window.lbBreakClock.state && window.lbBreakClock.state.start != null)) return;
     // Rolled over to a new day with the app still open (left running overnight, or a very early
     // start): yesterday's line would otherwise keep drawing and make streets look already done.
     // The same clear happens on load for the ordinary case of reopening the app next morning.
@@ -26071,15 +26072,18 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
   }
 
   /* ---------- panel ---------- */
-  function sectionHtml() {
+  let LASTT = {}, LASTM = 'idle', LASTL = 'ok';
+  function clkHtml(str) { const q = String(str || '').trim().match(/^(?:(\d+):)?(\d+):(\d+)$/); if (!q) return ''; const p = n => String(n).padStart(2, '0'), sx = p(+q[3]); return '<i class="h">' + (q[1] != null ? p(+q[1]) : '') + '</i><i class="m">' + p(+q[2]) + '</i><i class="sec"><i class="s">' + sx[0] + '</i><i class="s">' + sx[1] + '</i></i>'; }
+  function sectionHtml() { return sectionHtml0().replace(/data-show="([^"]*)"/g, (m, s) => m + (s.split(' ').indexOf(LASTM) >= 0 ? '' : ' style="display:none"')); }
+  function sectionHtml0() {
     setTimeout(paint, 0);
     return `
       <div class="lb-layers-sect">Next break</div>
-      <div class="lb-bclock" id="lbBreakBox" data-mode="idle" data-level="ok">
-        <div class="lb-bc-label" id="lbBcLabel">Break clock</div>
-        <div class="lb-bc-read" id="lbBcRead">--:--</div>
-        <div class="lb-bc-sub" id="lbBcSub"></div>
-        <div class="lb-bc-sub2" id="lbBcSub2"></div>
+      <div class="lb-bclock" id="lbBreakBox" data-mode="${LASTM}" data-level="${LASTL}" data-clk="${clkHtml(LASTT.lbBcRead) ? 1 : ''}">
+        <div class="lb-bc-label" id="lbBcLabel">${LASTT.lbBcLabel || 'Break clock'}</div>
+        <div class="lb-bc-read" id="lbBcRead">${LASTT.lbBcRead || '--:--'}</div><b class="rb-bcc" id="rbBcc">${clkHtml(LASTT.lbBcRead)}</b>
+        <div class="lb-bc-sub" id="lbBcSub">${LASTT.lbBcSub || ''}</div>
+        <div class="lb-bc-sub2" id="lbBcSub2">${LASTT.lbBcSub2 || ''}</div>
       </div>
       <button type="button" class="lb-layer-btn" data-lbbreak="begin" data-show="idle"><span class="lb-ico">⏱</span><span class="lb-label">Start work clock now</span></button>
       <button type="button" class="lb-layer-btn" data-lbbreak="start" data-show="working"><span class="lb-ico">☕</span><span class="lb-label">Start break</span></button>
@@ -26090,7 +26094,7 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
       <div class="lb-bc-note">NHVR Standard Hours, solo driver. A guide only - not a work diary.</div>`;
   }
 
-  function setText(id, v) { const e = document.getElementById(id); if (e && e.textContent !== v) e.textContent = v; }
+  function setText(id, v) { LASTT[id] = v; const e = document.getElementById(id); if (e && e.textContent !== v) e.textContent = v; }
 
   let lastWarn = null;
   function warn(v) {
@@ -26167,7 +26171,7 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
       sub2 = 'Worked ' + hm(a.worked) + ' of 12:00 · shift started ' + clock(S.start);
     }
 
-    box.dataset.mode = v.mode; box.dataset.level = level;
+    box.dataset.mode = v.mode; box.dataset.level = level; LASTM = v.mode; LASTL = level;
     setText('lbBcLabel', label); setText('lbBcRead', read); setText('lbBcSub', sub); setText('lbBcSub2', sub2);
     const wrap = box.parentNode;
     if (wrap && wrap.querySelectorAll) {
@@ -35144,7 +35148,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var c = choice();
     if (c === 'auto') {
       var sh = null; try { sh = window.uxShiftState ? window.uxShiftState() : null; } catch (e) {}
-      c = (sh && BY_STREAM[sh.stream]) || 'standard';
+      c = (sh && BY_STREAM[sh.stream]) || BY_STREAM[g('activeFilterStream')] || 'standard';
     }
     return TRUCKS.filter(function(t){ return t.id === c && loaded[t.id]; })[0] || null;
   }
@@ -39266,7 +39270,8 @@ html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x) #lbPastBreak .lbpb-li
 html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x) #lbBreakBig .rb-bbc,
 html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx-h b,
 html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x) #uxShift .drv-menu button b,
-html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x) #uxShift .drv-note-top{font-style:italic !important;font-weight:600 !important;letter-spacing:0 !important}
+html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x) #uxShift .drv-note-top,
+html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x) #lbBreakBox[data-clk="1"] .rb-bcc{font-style:italic !important;font-weight:600 !important;letter-spacing:0 !important}
 
 /* no hazard stripes, no hard edges */
 html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x) .app-header::after, html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x) #mapNormalTopBar::after, html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x) .modal-box::before, html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x) .rb-hz{display:none !important}
@@ -40015,6 +40020,25 @@ html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):no
 html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx .rbx-none .rbx-sn{font:800 12px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;letter-spacing:.12em;text-transform:uppercase;color:var(--rb-k, #b9bdc4) !important}
 html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx .rbx-sn::before, html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx .rbx-bin::before{content:none !important;display:none !important;background-image:none !important}
 html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx .rbx-sn{background-image:none !important}
+
+/* ---- round 20: the break card on the Shift page, in the clock style; the banner is tappable ---- */
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) .rb-bcc{display:none}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #lbBreakBox[data-clk="1"] .lb-bc-read{display:none !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #lbBreakBox[data-clk="1"] .rb-bcc{display:block;font:400 40px/1 var(--rb-font) !important;color:#fff;text-shadow:var(--rb-tsh);text-align:center;white-space:nowrap;margin:8px 0 4px}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) .rb-bcc i{font-style:normal;font:inherit;display:inline}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) .rb-bcc .h{color:var(--rb-a)}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) .rb-bcc .m{margin-left:.12em}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) .rb-bcc .sec{margin-left:.1em}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) .rb-bcc .sec, html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) .rb-bcc .sec i{color:var(--rb-secc) !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) .rb-bcc .sec i{display:inline-block;text-align:center}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) .rb-bcc .sec .s{font-size:.7em;width:.66em}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) .lb-bclock{background:var(--rb-bar, #111214) !important;text-align:center}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) .lb-bclock[data-level="over"]{border-color:var(--rb-red) !important;animation:none !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) .lb-bclock[data-level="red"], html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) .lb-bclock[data-level="amber"]{border-color:var(--rb-yel) !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) .lb-bclock .lb-bc-label{font:800 11px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;letter-spacing:.16em !important;text-transform:uppercase;color:var(--rb-k, #b9bdc4) !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) .lb-bclock .lb-bc-read{color:#fff !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) .lb-bclock .lb-bc-sub, html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) .lb-bclock .lb-bc-sub2{color:var(--rb-k, #b9bdc4) !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #lbBreakBig{pointer-events:auto !important;cursor:pointer}
 </style>
 
 <script id="lb-rubbish-script">
@@ -40202,7 +40226,8 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
     var show = false, lab = el.querySelector('i'), val = el.querySelector('b');
     brAt = 0;
     if (v && v.mode === 'working' && v.a) {
-      if (v.a.overdue) { show = true; txt(lab, 'Break'); txt(val, 'Now'); attr(el, 'data-lvl', 'over'); attr(el, 'aria-label', 'Break overdue'); }
+      var bg = $('lbBreakBig'), bgOn = !!(bg && bg.style.display !== 'none');
+      if (v.a.overdue || bgOn) { show = false; }
       else if (v.remaining <= SOON) {
         show = true; brAt = v.a.at || (Date.now() + v.remaining);
         txt(lab, 'Break in'); attr(el, 'data-lvl', v.remaining < 5 * 60000 ? 'low' : 'soon');
@@ -40870,10 +40895,10 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
   setInterval(function(){
     try {
       var sp = $('lbStickerPop'), st = sp && sp.classList.contains('on') ? sp.getAttribute('data-stage') : '';
-      var cur = (st === '1' || st === '2') && on() && window.lbStops && window.lbStops.current ? window.lbStops.current() : null;
+      var cur = (st === '1' || st === '2' || st === '3') && on() && window.lbStops && window.lbStops.current ? window.lbStops.current() : null;
       Array.prototype.forEach.call(document.querySelectorAll('.rb-stp'), function(n){ if (!cur || n.parentNode !== sp) n.remove(); });
       if (!cur) return;
-      var tm = sp.querySelector('.rb-stp'), after = sp.querySelector('.lbsp-s');
+      var tm = sp.querySelector('.rb-stp'), after = sp.querySelector('.lbsp-s') || sp.querySelector('.lbsp-t');
       if (!tm) { tm = document.createElement('div'); tm.className = 'rb-cd rb-stp'; tm.innerHTML = '<span>Stopped for</span><b></b>'; if (after) after.parentNode.insertBefore(tm, after.nextSibling); else return; }
       var tt = Math.max(0, Math.floor((Date.now() - cur.t0) / 1000)), th = Math.floor(tt / 3600);
       if (!tm.lastChild.querySelector('.h')) tm.lastChild.innerHTML = '<i class="h"></i><i class="m"></i><i class="sec"><i class="s"></i><i class="s"></i></i>';
@@ -40904,6 +40929,17 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
   }
   var CLK = '<i class="h"></i><i class="m"></i><i class="sec"><i class="s"></i><i class="s"></i><i class="t"></i></i>';
   // the big break banner: its own digits are hidden and the clock is drawn instead
+  document.addEventListener('click', function(ev){ try {
+    if (!on() || !ev.target || !ev.target.closest) return;
+    if (ev.target.closest('#lbBreakBig') && typeof window.uxShiftOpen === 'function') { ev.stopPropagation(); window.uxShiftOpen(); }
+  } catch (e) {} }, true);
+  // the break card on the Shift page: same clock as everywhere else (the text read-out stays for the other skins)
+  setInterval(function(){ try {
+    var rd = $('lbBcRead'), cc = $('rbBcc'); if (!rd || !cc || !on()) return;
+    var isClk = /^(?:\d+:)?\d+:\d+$/.test(rd.textContent.trim());
+    if (isClk) { if (!cc.firstChild) cc.innerHTML = CLK; fillClock(cc, rd.textContent); }
+    var bx = $('lbBreakBox'); if (bx) bx.setAttribute('data-clk', isClk ? '1' : '');
+  } catch (e) {} }, 100);
   setInterval(function(){ try {
     var big = $('lbBreakBig'); if (!big || !on()) return;
     var c = big.querySelector('.rb-bbc');
@@ -40913,7 +40949,7 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
   function cdHost(){
     var sp = $('lbStickerPop'), pb = $('lbPastBreak');
     var stg = sp && sp.classList.contains('on') ? sp.getAttribute('data-stage') : '';
-    if (stg === '3') return { box: sp, after: sp.querySelector('.lbsp-t') };
+    if (stg === '3') return { box: sp, after: sp.querySelector('.rb-stp') || sp.querySelector('.lbsp-s') || sp.querySelector('.lbsp-t') };
     if (stg === '1' || stg === '2') return { box: sp, after: sp.querySelector('.rb-stp') || sp.querySelector('.lbsp-s') };
     if (pb && pb.classList.contains('on')) { var c = pb.querySelector('.lbpb-card'); if (c) return { box: c, after: c.querySelector('.lbpb-t') }; }
     return null;
@@ -40968,6 +41004,8 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
   setInterval(function(){ try { tick(); } catch (e) { console.warn('Hard Rubbish:', e); } }, 1000);
   setTimeout(tick, 0);
   window.lbRubbish = { tick: tick, _t: { toast: toast, onTruck: onTruck, paintBreak: paintBreak, statList: statList, streetsToGo: streetsToGo, pop: pop, unpop: unpop, pin: function(ms){ pinUntil = Date.now() + (ms || 12000); }, next: function(){ statAt++; statHold = Date.now() + 15000; } } };
+  // keep the trail painted: the vector layer sometimes only repaints when something else disturbs the map
+  setInterval(function(){ try { if (on() && !document.hidden && typeof window.lbTrailRefresh === 'function') window.lbTrailRefresh(); } catch (e) {} }, 3000);
 })();
 </script>
 
