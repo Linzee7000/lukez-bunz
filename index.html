@@ -30017,7 +30017,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     sheet.className = 'modal-overlay';
     sheet.innerHTML =
       '<div class="modal-box uxi-box" role="dialog" aria-label="Report an issue">' +
-        '<div class="uxi-head"><b>Report an issue</b><button type="button" class="uxi-x" data-x="1" aria-label="Close">' + ico('close') + '</button></div>' +
+        '<div class="uxi-head"><b id="uxiTitle">Report an issue</b><button type="button" class="uxi-x" data-x="1" aria-label="Close">' + ico('close') + '</button></div>' +
         '<div class="uxi-tabs" role="tablist">' +
           ['bin', 'house', 'street'].map(function(k){ return '<button type="button" role="tab" data-scope="' + k + '">' + ISSUES[k].title + '</button>'; }).join('') +
           '<button type="button" role="tab" data-scope="truck">Truck</button>' +
@@ -30033,6 +30033,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     $('uxiPickQ').addEventListener('input', function(){ cur.q = this.value; paintPick(); });
     sheet.addEventListener('click', function(ev){
       if (ev.target === sheet) { closeIssue(); return; }
+      var tg = ev.target.closest ? ev.target.closest('[data-tog]') : null;
+      if (tg) { var tk = tg.getAttribute('data-tog'); cur.rbx = cur.rbx || {}; cur.rbx[tk] = !(tk in cur.rbx ? cur.rbx[tk] : tk === cur.stream); paintSheet(); return; }
       var ch = ev.target.closest ? ev.target.closest('[data-change]') : null;
       if (ch) { cur.picking = !cur.picking; cur.q = ''; $('uxiPickQ').value = ''; paintSheet(); if (cur.picking) $('uxiPickQ').focus(); return; }
       var b = ev.target.closest ? ev.target.closest('button') : null; if (!b || !sheet.contains(b)) return;
@@ -30063,6 +30065,25 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     });
   }
 
+  function rbxBox(site, cs){
+    var src = (g('activeFilterDataSource') === 'council') ? (site && site.councilStreams) : (site && site.soloStreams), by = {}, order = [];
+    ['Garbage', 'Recycling', 'FOGO'].forEach(function(k){ var l = (site && src && src[k]) || []; if (l.length) { by[k] = l; order.push(k); } });
+    var addr = site ? siteAddress(site) : '', sub = ''; try { sub = site ? clean(getAddressSuburb(site)) : ''; } catch (e) {}
+    var IMG = { Garbage: 'garbage', Recycling: 'recycle', FOGO: 'fogo' }, im = function(k){ return '<img class="icon-img" src="' + IMG[k] + '.png" alt="">'; };
+    var isOpen = function(k){ return cs.rbx && (k in cs.rbx) ? cs.rbx[k] : k === cs.stream; };
+    var h = '<div class="rbx"><div class="rbx-h"><div><b>' + esc(addr || (cs.street ? cs.street : 'No house in range')) + '</b>' + (sub || !site ? '<small>' + esc(sub || 'Tagged to your GPS position') + '</small>' : '') + '</div><button type="button" class="rbx-chg" data-change="1">' + (cs.picking ? 'Done' : 'Change') + '</button></div>';
+    if (cs.scanMiss) h += '<div class="rbx-note">Scanned <b>' + esc(cs.serial) + '</b>: not in the bin list, logged as scanned</div>';
+    // the other streams at this address: small buttons on the right of the first row
+    var others = order.filter(function(k){ return !isOpen(k); }).map(function(k){
+      return '<button type="button" class="rbx-chip" data-s="' + SKEY[k] + '" data-tog="' + k + '" aria-expanded="false">' + im(k) + (by[k].length > 1 ? '<span class="rbx-n">' + by[k].length + '</span>' : '') + '</button>'; }).join('');
+    var first = true;
+    order.forEach(function(k){ if (!isOpen(k)) return;
+      by[k].forEach(function(b){ var s = clean(b.serial);
+        h += '<div class="rbx-bin' + (s === cs.serial ? ' on' : '') + '" data-s="' + SKEY[k] + '"><span class="rbx-t">' + im(k) + '<em>' + esc(b.size || '') + '</em></span>' +
+          '<button type="button" class="rbx-sn" data-ser="' + esc(s) + '" data-stream="' + k + '" data-s="' + SKEY[k] + '">' + esc(s || 'no serial') + '</button>' + (first ? '<span class="rbx-o">' + others + '</span>' : '') + '</div>'; first = false; }); });
+    if (first && others) h += '<div class="rbx-bin rbx-none"><span class="rbx-sn">Tap a bin type</span><span class="rbx-o">' + others + '</span></div>';
+    return h + '</div>';
+  }
   function paintMedia(){
     var el = $('uxiMedia'); if (!el) return;
     var M = window.lbMedia, I2 = window.UX_DRIVER_ICONS || {};
@@ -30091,6 +30112,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     $('uxiCtx').innerHTML = '<span>' + ctx + '</span><button type="button" class="uxi-change" data-change="1">' + (cur.picking ? 'Done' : 'Change') + '</button>';
     $('uxiPick').style.display = cur.picking ? '' : 'none';
     if (cur.picking) paintPick();
+    sheet.setAttribute('data-sc', cur.scope);
+    if (cur.scope === 'bin') $('uxiSerials').innerHTML = rbxBox(site0, cur); else
     $('uxiSerials').innerHTML = (cur.scope === 'bin' && houseBins.length > 1)
       ? houseBins.map(function(x){ var s = clean(x.b.serial); return '<button type="button" data-ser="' + esc(s) + '" data-stream="' + esc(x.stream) + '" data-s="' + SKEY[x.stream] + '" class="' + (s === cur.serial ? 'on' : '') + '">' + ico(SICON[x.stream]) + esc(s || 'no serial') + '</button>'; }).join('')
       : '';
@@ -30102,6 +30125,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
 
   function openIssue(scope, opt){
     buildSheet();
+    try { var dn = String((JSON.parse(localStorage.getItem('lbDriver') || '{}') || {}).name || '').trim().split(/\s+/)[0]; $('uxiTitle').textContent = dn ? 'Report from ' + dn : 'Report an issue'; } catch (e) {}
     if (cur && cur.media && cur.media.length && window.lbMedia) cur.media.forEach(function(id){ window.lbMedia.del(id); });
     cur = { scope: scope || 'bin', serial: (opt && opt.serial) || '', stream: (opt && opt.stream) || '', media: [], site: null, street: '', scanMiss: false, picking: false, q: '' };
     if (opt && opt.site) cur.site = (typeof opt.site === 'object') ? opt.site : findSite(opt.site);
@@ -31416,7 +31440,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
         '<div class="drv-media">' + d.media.map(function(id){ return thumb(id, true); }).join('') + '<button type="button" class="drv-btn" data-a="dphoto">' + I.cam + 'Photo</button><button type="button" class="drv-btn" data-a="dvoice">' + I.mic + 'Record sound</button></div>' +
         '<div class="drv-foot"><button type="button" class="drv-btn" data-a="back">Cancel</button><button type="button" class="drv-btn drv-go" data-a="dsave"' + (d.item ? '' : ' disabled') + '>Save defect</button></div>';
     } else if (view === 'truck') {
-      title = 'Truck';
+      title = 'Truck' + (((SH && SH.truck) || me().truck) ? ' ' + ((SH && SH.truck) || me().truck) : '');
       var od = oosList();
       var pend = (window.lbOutbox && window.lbOutbox.pending()) || 0;
       h = (pend ? '<div class="drv-stopbox">' + I.warn + '<span><b>' + pend + ' report' + (pend === 1 ? '' : 's') + ' not sent yet.</b> ' + (navigator.onLine === false ? 'No signal: they send by themselves when you have signal.' : 'Trying again.') + '</span><button type="button" class="drv-link" data-a="retrysend">Try now</button></div>' : '') +
@@ -39238,7 +39262,11 @@ html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x) #lbStickerPop .lbsp-t
 html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x) #lbPastBreak .lbpb-t,
 html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x) .rb-cd b,
 html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x) .rb-stp b,
-html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x) #lbPastBreak .lbpb-li b{font-style:italic !important;font-weight:600 !important;letter-spacing:0 !important}
+html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x) #lbPastBreak .lbpb-li b,
+html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x) #lbBreakBig .rb-bbc,
+html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx-h b,
+html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x) #uxShift .drv-menu button b,
+html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x) #uxShift .drv-note-top{font-style:italic !important;font-weight:600 !important;letter-spacing:0 !important}
 
 /* no hazard stripes, no hard edges */
 html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x) .app-header::after, html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x) #mapNormalTopBar::after, html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x) .modal-box::before, html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x) .rb-hz{display:none !important}
@@ -39894,6 +39922,99 @@ html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):no
 html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #lbStickerPop .rb-cd b{font-size:34px !important}
 html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #lbStickerPop .rb-stp b{font-size:30px !important}
 html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #lbStickerPop{overflow-y:auto !important;max-height:calc(100vh - 150px) !important}
+
+/* round 17: seconds light grey on every clock; the overdue banner drawn like the title-bar clock */
+:root{--rb-secc:#c9ccd3}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #rbClock .rb-sec, html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #rbClock .rb-sec i{color:var(--rb-secc) !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) .rb-cd b .sec, html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) .rb-cd b .sec i, html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) .rb-bbc .sec, html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) .rb-bbc .sec i{color:var(--rb-secc) !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #lbBreakBig{background:var(--rb-bar, #111214) !important;border:var(--rb-bd) !important;border-radius:8px !important;box-shadow:var(--rb-sh) !important;padding:10px 22px 12px !important;color:var(--rb-k, #b9bdc4) !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #lbBreakBig[data-level="over"]{border-color:var(--rb-red) !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #lbBreakBig[data-level="red"]{border-color:var(--rb-yel) !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #lbBreakBig .lb-bb-label{font:800 11px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;letter-spacing:.16em !important;opacity:1 !important;color:var(--rb-k, #b9bdc4) !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #lbBreakBig .lb-bb-time{display:none !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #lbBreakBig .rb-bbc, html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) .rb-cd b{display:block;font:400 48px/1 var(--rb-font) !important;color:#fff;text-shadow:var(--rb-tsh);text-align:center;white-space:nowrap}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #lbBreakBig .rb-bbc{margin-top:8px}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #lbBreakBig .rb-bbc i{font-style:normal;font:inherit;display:inline}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #lbBreakBig .rb-bbc .h{color:var(--rb-a)}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #lbBreakBig .rb-bbc .m{margin-left:.12em;color:#fff}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #lbBreakBig .rb-bbc .sec{margin-left:.1em}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #lbBreakBig .rb-bbc .sec i{display:inline-block;text-align:center}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #lbBreakBig .rb-bbc .sec .s{font-size:.7em;width:.66em}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #lbBreakBig .rb-bbc .sec .t{font-size:.5em;width:.7em}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) .rb-stp b .sec i{display:inline-block;text-align:center;font-size:.7em;width:.66em}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) .rb-stp b .m{margin-left:.12em}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) .rb-stp b .h{color:var(--rb-a)}
+
+/* round 17: Report from ... - the Bin tab drawn as the bin box */
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue[data-sc="bin"] #uxiCtx{display:none !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .uxi-serials:has(.rbx){display:block !important;padding:6px 14px 4px 10px !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx{background:var(--rb-slab);border:var(--rb-bd);border-radius:10px;box-shadow:var(--rb-sh);overflow:hidden}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx-h{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 10px 8px 12px;background:var(--rb-a);color:#000;border-bottom:var(--rb-bd)}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx-h b{font:400 18px/1.1 var(--rb-font);text-transform:uppercase;letter-spacing:.01em;min-width:0}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx .rbx-chg{flex:none;min-height:34px !important;padding:0 12px !important;background:var(--rb-bar) !important;color:#fff !important;border:var(--rb-bd) !important;border-radius:8px !important;font:800 13px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;box-shadow:var(--rb-sh-sm) !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx-sub{padding:6px 12px 2px;font:800 11px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;letter-spacing:.16em;text-transform:uppercase;color:var(--rb-k, #b9bdc4)}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx-note{padding:8px 12px 0;font-size:13px;color:var(--rb-k, #b9bdc4)}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx-chips{display:flex;flex-wrap:wrap;gap:8px;padding:8px 12px 10px}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx .rbx-chip{--c:var(--rb-red);display:inline-flex !important;align-items:center;gap:6px;min-height:34px !important;padding:0 10px !important;background:var(--c) !important;color:#000 !important;border:var(--rb-bd) !important;border-radius:10px !important;box-shadow:var(--rb-sh-sm) !important;font:800 15px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx .rbx-chip[data-s="rec"]{--c:var(--rb-yel)}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx .rbx-chip[data-s="fog"]{--c:var(--rb-grn)}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx .rbx-chip svg{width:18px !important;height:18px !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx .rbx-bin{--c:var(--rb-red);display:flex !important;align-items:stretch;gap:0 !important;width:100%;min-height:50px !important;padding:0 !important;background:none !important;color:#fff !important;border:0 !important;border-top:var(--rb-bd) !important;border-radius:0 !important;box-shadow:none !important;text-align:left;outline:0 !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx .rbx-bin[data-s="rec"]{--c:var(--rb-yel)}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx .rbx-bin[data-s="fog"]{--c:var(--rb-grn)}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx .rbx-t{flex:none;width:58px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;background:var(--c);color:#000;border-right:var(--rb-bd)}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx .rbx-t svg{width:20px !important;height:20px !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx .rbx-t em{font:800 11px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;font-style:normal}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx .rbx-sn{flex:1;display:flex;align-items:center;padding:0 12px;font:800 21px/1 ui-monospace, Menlo, Consolas, monospace;letter-spacing:.02em}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx .rbx-bin.on{background:var(--rb-bar) !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx .rbx-bin.on .rbx-sn{color:var(--rb-a)}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx .rbx-bin.on .rbx-sn::after{content:"\2713";margin-left:auto;font-family:inherit}
+
+/* round 17: the Truck log in the skin */
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxShift .drv-menu{display:flex;flex-direction:column;gap:12px !important;margin-top:10px !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxShift .drv-menu button{--c:var(--rb-yel);display:flex !important;align-items:center !important;gap:12px !important;min-height:78px !important;padding:8px 12px 8px 8px !important;background:var(--rb-slab) !important;border:var(--rb-bd) !important;border-left:var(--rb-bd) !important;border-radius:10px !important;box-shadow:var(--rb-sh) !important;color:#fff !important;text-align:left !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxShift .drv-menu button[data-a="accident"]{--c:var(--rb-red)}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxShift .drv-menu button svg{flex:none;width:46px !important;height:46px !important;padding:9px !important;box-sizing:border-box;background:var(--c);color:#000 !important;border:var(--rb-bd2, 2px solid #000);border-radius:8px}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxShift .drv-menu button b{display:block;font:400 16px/1.15 var(--rb-font) !important;text-transform:uppercase !important;letter-spacing:.01em;color:#fff}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxShift .drv-menu button em{display:block;margin-top:4px !important;font:600 12px/1.3 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;font-style:normal !important;color:var(--rb-k, #b9bdc4) !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxShift .drv-menu button:active{transform:var(--rb-press) !important;box-shadow:var(--rb-sh-xs, 1px 1px 0 #000) !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxShift .drv-note-top{display:flex;align-items:center;gap:8px;font:400 18px/1 var(--rb-font) !important;text-transform:uppercase;color:#fff}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxShift .drv-note-top svg{width:26px;height:26px;padding:4px;box-sizing:border-box;background:var(--rb-a);color:#000;border:2px solid #000;border-radius:6px}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxShift .drv-f span, html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxShift .drv-hint2, html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxShift .drv-hint{font:800 11px/1.3 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;letter-spacing:.1em;text-transform:uppercase;color:var(--rb-k, #b9bdc4) !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxShift .drv-f input, html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxShift .drv-f select, html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxShift .drv-f textarea{background:var(--rb-bar, #111214) !important;color:#fff !important;border:var(--rb-bd) !important;border-radius:8px !important;min-height:44px}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxShift .drv-stopbox{background:var(--rb-slab) !important;border:var(--rb-bd) !important;border-left:var(--rb-bd) !important;border-radius:10px !important;box-shadow:var(--rb-sh-sm) !important;color:#fff !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxShift .drv-stopbox svg{color:var(--rb-red) !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxShift .drv-li{background:var(--rb-slab) !important;border:var(--rb-bd) !important;border-radius:10px !important;box-shadow:var(--rb-sh-sm) !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx .rbx-chg svg, html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx .rbx-chg::before, html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx .rbx-chg::after{display:none !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx .rbx-bin .rbx-t{display:flex !important;flex-direction:column !important;align-items:center !important;justify-content:center !important;width:58px !important;min-width:58px !important;height:auto !important;padding:4px 0 !important;position:static !important;background:var(--c) !important;color:#000 !important;border:0 !important;border-right:var(--rb-bd) !important;border-radius:0 !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx .rbx-bin .rbx-t svg{position:static !important;width:20px !important;height:20px !important;color:#000 !important;opacity:1 !important;transform:none !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx .rbx-bin .rbx-t em{display:block !important;position:static !important;margin:0 !important;padding:0 !important;background:none !important;border:0 !important;color:#000 !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx .rbx-bin{align-items:stretch !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx .rbx-bin .rbx-t{align-self:stretch !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx .rbx-bin .rbx-sn{align-self:center}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx .rbx-bin .rbx-t svg{display:block !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx .rbx-bin::before, html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx .rbx-bin::after{display:none !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx .rbx-chip img.icon-img, html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx .rbx-t img.icon-img{width:20px !important;height:20px !important;display:block !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx img.icon-img{background:none !important;padding:0 !important;margin:0 !important;filter:brightness(0) !important;object-fit:contain;border:0 !important;box-shadow:none !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx img.icon-img::before, html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx img.icon-img::after, html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx .rbx-chip::before, html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx .rbx-chip::after, html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx .rbx-t::before, html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx .rbx-t::after{display:none !important;content:none !important}
+/* round 18: compact bin rows; the open stream's icon is the tile, the other streams sit at the right */
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx-chips, html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx-sub{display:none !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx-h{padding:6px 10px 6px 12px}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx-h > div{display:flex;flex-direction:column;gap:3px;min-width:0}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx-h small{font:800 10px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;letter-spacing:.16em;text-transform:uppercase;color:rgba(0,0,0,.6)}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx .rbx-bin{display:flex !important;align-items:stretch !important;min-height:42px !important;width:auto !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx .rbx-bin .rbx-t{width:46px !important;min-width:46px !important;padding:2px 0 !important;gap:1px !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx .rbx-bin .rbx-t img.icon-img{width:17px !important;height:17px !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx .rbx-bin .rbx-t em{font-size:10px !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx .rbx-sn{flex:1;min-width:0;display:flex;align-items:center;justify-content:flex-start;padding:0 10px !important;background:none !important;border:0 !important;box-shadow:none !important;border-radius:0 !important;color:#fff !important;font:800 19px/1 ui-monospace, Menlo, Consolas, monospace !important;letter-spacing:.02em;text-align:left;min-height:0 !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx .rbx-bin.on .rbx-sn{color:var(--rb-a) !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx .rbx-bin.on .rbx-sn::after{content:none !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx .rbx-o{display:flex;align-items:center;gap:6px;padding:0 8px 0 0}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx .rbx-o .rbx-chip{min-height:30px !important;padding:0 8px !important;border-radius:8px !important;gap:4px !important;font-size:13px !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx .rbx-o .rbx-chip img.icon-img{width:16px !important;height:16px !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx .rbx-none .rbx-sn{font:800 12px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;letter-spacing:.12em;text-transform:uppercase;color:var(--rb-k, #b9bdc4) !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx .rbx-sn::before, html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx .rbx-bin::before{content:none !important;display:none !important;background-image:none !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxIssue .rbx .rbx-sn{background-image:none !important}
 </style>
 
 <script id="lb-rubbish-script">
@@ -40754,7 +40875,10 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
       if (!cur) return;
       var tm = sp.querySelector('.rb-stp'), after = sp.querySelector('.lbsp-s');
       if (!tm) { tm = document.createElement('div'); tm.className = 'rb-cd rb-stp'; tm.innerHTML = '<span>Stopped for</span><b></b>'; if (after) after.parentNode.insertBefore(tm, after.nextSibling); else return; }
-      txt(tm.lastChild, stopClock(Date.now() - cur.t0));
+      var tt = Math.max(0, Math.floor((Date.now() - cur.t0) / 1000)), th = Math.floor(tt / 3600);
+      if (!tm.lastChild.querySelector('.h')) tm.lastChild.innerHTML = '<i class="h"></i><i class="m"></i><i class="sec"><i class="s"></i><i class="s"></i></i>';
+      txt(tm.lastChild.querySelector('.h'), th ? two(th) : ''); txt(tm.lastChild.querySelector('.m'), two(Math.floor((tt % 3600) / 60)));
+      var sq = tm.lastChild.querySelectorAll('.sec i'), sv = two(tt % 60); txt(sq[0], sv.charAt(0)); txt(sq[1], sv.charAt(1));
     } catch (e) {}
   }, 250);
 
@@ -40771,6 +40895,21 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
   // ---- the big break countdown lives inside the question when there is one ----------------------------------
   // "BREAK OVERDUE 6:29:54.4" is drawn big in the middle of the map; with a break question up, it goes into that
   // card instead, so there is only the one pop-up.
+  // "2:02:33.5" -> 02 02 33 5, drawn like the clock in the title bar (no colons; seconds light grey)
+  function fillClock(b, str){
+    var q = String(str || '').trim().match(/^(?:(\d+):)?(\d+):(\d+)(?:\.(\d))?$/); if (!q || !b) return;
+    var k, dg = b.querySelectorAll('.sec i'), sx = two(+q[3]) + (q[4] || '0');
+    txt(b.querySelector('.h'), q[1] != null ? two(+q[1]) : ''); txt(b.querySelector('.m'), two(+q[2]));
+    for (k = 0; k < dg.length; k++) txt(dg[k], sx.charAt(k));
+  }
+  var CLK = '<i class="h"></i><i class="m"></i><i class="sec"><i class="s"></i><i class="s"></i><i class="t"></i></i>';
+  // the big break banner: its own digits are hidden and the clock is drawn instead
+  setInterval(function(){ try {
+    var big = $('lbBreakBig'); if (!big || !on()) return;
+    var c = big.querySelector('.rb-bbc');
+    if (!c) { c = document.createElement('b'); c.className = 'rb-bbc'; c.innerHTML = CLK; big.appendChild(c); }
+    var tm = big.querySelector('.lb-bb-time'); fillClock(c, tm ? tm.textContent : '');
+  } catch (e) {} }, 100);
   function cdHost(){
     var sp = $('lbStickerPop'), pb = $('lbPastBreak');
     var stg = sp && sp.classList.contains('on') ? sp.getAttribute('data-stage') : '';
@@ -40787,18 +40926,13 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
       Array.prototype.forEach.call(document.querySelectorAll('.rb-cd:not(.rb-stp)'), function(n){ if (!show || !h || n.parentNode !== h.box) n.remove(); });
       if (!show || !h || !h.after) return;
       var cd = h.box.querySelector('.rb-cd:not(.rb-stp)');
-      if (!cd) { cd = document.createElement('div'); cd.className = 'rb-cd'; cd.innerHTML = '<span></span><b><i class="h"></i><i class="m"></i><i class="sec"><i class="s"></i><i class="s"></i><i class="t"></i></i></b>'; h.after.parentNode.insertBefore(cd, h.after.nextSibling); }
+      if (!cd) { cd = document.createElement('div'); cd.className = 'rb-cd'; cd.innerHTML = '<span></span><b>' + CLK + '</b>'; h.after.parentNode.insertBefore(cd, h.after.nextSibling); }
       var lab = big.querySelector('.lb-bb-label'), tm = big.querySelector('.lb-bb-time');
       // the label only when the title above doesn't already say "break"
       txt(cd.firstChild, /break/i.test((h.box.querySelector('.lbsp-t, .lbpb-t') || {}).textContent || '') ? '' : (lab ? lab.textContent : ''));
       cd.firstChild.style.display = cd.firstChild.textContent ? '' : 'none';
       // "2:02:33.5" -> 02 02 33 5, as the clock in the title bar draws it
-      var q = ((tm && tm.textContent) || '').trim().match(/^(?:(\d+):)?(\d+):(\d+)(?:\.(\d))?$/);
-      if (q) {
-        txt(cd.querySelector('.h'), q[1] != null ? two(+q[1]) : ''); txt(cd.querySelector('.m'), two(+q[2]));
-        var dg = cd.querySelectorAll('.sec i'), sx = two(+q[3]) + (q[4] || '0');
-        for (var k = 0; k < dg.length; k++) txt(dg[k], sx.charAt(k));
-      }
+      fillClock(cd.lastChild, (tm && tm.textContent) || '');
       cd.setAttribute('data-lvl', big.dataset.level || '');
     } catch (e) {}
   }, 100);
