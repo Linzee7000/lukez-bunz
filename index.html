@@ -42589,7 +42589,11 @@ document.addEventListener('click', function(ev){
     return shrink(file, kind === 'dockets' ? 1800 : 2200).then(function(o){
       var ac = new AbortController(), to = setTimeout(function(){ ac.abort(); }, 60000);
       return fetch(url(), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ image: o.b64, mime: o.mime, kind: kind }), signal: ac.signal })
-        .then(function(r){ clearTimeout(to); if (!r.ok) return r.json().catch(function(){ return {}; }).then(function(j){ throw new Error('reader ' + r.status + (j && j.detail ? ' ' + String(j.detail).slice(0, 60) : '')); }); return r.json(); });
+        .then(function(r){ clearTimeout(to); if (!r.ok) return r.json().catch(function(){ return {}; }).then(function(j){
+          // the reader answers 502 for anything the AI service refused; its text says why, so say it in plain words
+          var det = String((j && j.detail) || ''), why = /credit balance/i.test(det) ? 'the API account is out of credit (top up under Billing at console.anthropic.com)' : /rate_limit/i.test(det) ? 'too many pages at once, the AI service is rate limiting' : /overloaded/i.test(det) ? 'the AI service is busy' : /authentication|x-api-key/i.test(det) ? 'the API key is not valid' : /too large|exceed|size/i.test(det) ? 'that page is too big' : det.slice(0, 90);
+          var e = new Error('reader ' + r.status + (why ? ': ' + why : '')); e.soft = /rate_limit|overloaded/i.test(det); throw e;
+        }); return r.json(); });
     }).then(function(d){
       // an older deployed reader ignores "kind" and answers with the single-docket shape
       if (kind === 'auto' ? !(d && typeof d.type === 'string') : kind === 'dockets' ? !Array.isArray(d && d.dockets) : !(d && 'loads' in d)) throw new Error('the reader needs updating (redeploy it)');
@@ -42892,7 +42896,7 @@ document.addEventListener('click', function(ev){
         P.state[k] = 'busy'; paint();
         return P.files[k].reduce(function(pr, f){ return pr.then(function(acc){ return readOne(f, k).then(function(d){ acc.push(d); return acc; }); }); }, Promise.resolve([])).then(function(list){
           raw[k] = k === 'dockets' ? [].concat.apply([], list.map(function(d){ return d.dockets || []; })) : merge(list); P.state[k] = 'ok';
-        }).catch(function(e){ P.state[k] = 'Could not read'; P.err = (P.err ? P.err + ' · ' : '') + k + ': ' + String((e && e.message) || 'failed').slice(0, 80); });
+        }).catch(function(e){ P.state[k] = 'Could not read'; P.err = (P.err ? P.err + ' · ' : '') + k + ': ' + String((e && e.message) || 'failed').slice(0, 150); });
       });
     });
     chain.then(function(){
@@ -43078,13 +43082,14 @@ document.addEventListener('click', function(ev){
     D.phase = 'read'; var done = 0, total = list.length, last = 0;
     var tick = function(){ var t = Date.now(); if (t - last > 400 || done === total) { last = t; D.msg = 'Reading page ' + done + ' of ' + total; if (P && P.view === 'day') paint(); } };
     D.msg = 'Reading page 0 of ' + total; paint();
-    return pool(list, 4, function(p){
+    return pool(list, 3, function(p){
       p.state = 'busy'; var tries = 0;
       var go = function(){
         tries++;
         return readOne(p.file, 'auto').then(function(r){ p.res = r; p.state = 'ok'; p.err = ''; }, function(e){
           var m = String((e && e.message) || 'failed'); p.err = m;
-          if (tries < 2 && !/needs updating|reader 4/.test(m)) return new Promise(function(r){ setTimeout(r, 1500); }).then(go);
+          var soft = !!(e && e.soft), max = soft ? 5 : 2;
+          if (tries < max && !/needs updating|out of credit|not valid/.test(m)) return new Promise(function(r){ setTimeout(r, soft ? 4000 * tries : 1500); }).then(go);
           p.state = 'err';
         });
       };
@@ -43145,7 +43150,7 @@ document.addEventListener('click', function(ev){
     } else if (D.phase === 'done') {
       var G = D.G, fix = G.groups.filter(function(g){ return g.issues; }).length, bad = D.pages.filter(function(p){ return p.state === 'err'; }).length;
       h += '<div class="rbpw-ok">' + G.groups.length + ' driver' + (G.groups.length === 1 ? '' : 's') + ' checked · ' + fix + ' with something to fix. All saved in the run records.</div>';
-      if (bad) h += '<div class="rbpw-err">' + bad + ' page' + (bad === 1 ? '' : 's') + ' could not be read (' + esc(D.pages.filter(function(p){ return p.state === 'err'; })[0].err.slice(0, 60)) + ').</div><button type="button" class="rbpw-go" data-pw="d-redo">Read those pages again</button>';
+      if (bad) h += '<div class="rbpw-err">' + bad + ' page' + (bad === 1 ? '' : 's') + ' could not be read (' + esc(D.pages.filter(function(p){ return p.state === 'err'; })[0].err.slice(0, 140)) + ').</div><button type="button" class="rbpw-go" data-pw="d-redo">Read those pages again</button>';
       h += G.groups.map(groupHtml).join('');
       if (G.loose.length || G.orphan) h += '<div class="rbpw-sync">' + (G.loose.length ? G.loose.length + ' website page' + (G.loose.length === 1 ? '' : 's') + ' with no paper run sheet to match (' + G.loose.slice(0, 6).map(function(q){ return 'run ' + (q.res.run || '?'); }).join(', ') + (G.loose.length > 6 ? '…' : '') + '). ' : '') + (G.orphan ? G.orphan + ' docket' + (G.orphan === 1 ? '' : 's') + ' could not be matched to a run (no docket number, run number or rego that fits).' : '') + '</div>';
       h += '<button type="button" class="rbpw-lnk" data-pw="d-new">Check another day</button><button type="button" class="rbpw-lnk" data-pw="records">Run records · ' + recs().length + ' saved</button>';
