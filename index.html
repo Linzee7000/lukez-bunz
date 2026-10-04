@@ -4977,7 +4977,7 @@ const STREET_LITTER_SERVICE_LEVELS = {"seasons":[{"key":"tourist1","label":"Tour
                 <div style="display:flex; align-items:center; justify-content:space-between; ${idx < bins.length - 1 ? 'border-bottom:1px solid rgba(255,255,255,0.2);' : ''} padding:3px 6px; position:relative; ${hasRem ? `background:rgba(147,51,234,0.5); border-radius:var(--ux-rad); ${isDue ? 'animation: rec-light-pulse 1.6s ease-in-out infinite;' : ''}` : ''}">
                   <span class="bin-serial-tap-target" style="display:flex; align-items:center; gap:6px; min-width:0; flex:1 1 auto; overflow:hidden; ${(hasRem || canEditPencil) ? 'cursor:pointer;' : ''}" title="${hasRem ? esc(remTitle) : (canEditPencil ? 'Edit bin' : '')}" ${hasRem ? `onclick="event.stopPropagation(); window.toggleBinReminderMenu(event, '${remMenuId}')"` : (canEditPencil ? `onclick="event.stopPropagation(); window.toggleDriveBinEditorInline('${propId}', '${st.key}', ${soloIdxForPencil})"` : '')}>
                     <span class="bin-serial-text" data-serial="${esc(serialLabel)}" data-msg="${hasRem && rem.message ? esc(rem.message) : ''}" style="font-size:17px; font-family:monospace; letter-spacing:0.5px; max-width:170px; flex:0 1 auto; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#fff; font-weight:${hasRem ? '700' : '400'};">
-                      ${esc(serialLabel)}
+                      ${esc(String(serialLabel).replace(/__\d+$/, ''))}
                     </span>
                     ${hasRem ? `<span class="reminder-date-badge app-marquee" style="font-size:13px; font-weight:700; color:${isDue ? '#fca5a5' : '#e9d5ff'}; flex:1 1 auto; min-width:0;"><span class="app-marquee-inner">${isDue ? '⏰ DUE' : '📅 ' + esc(remDateLabel)}</span></span>` : ''}
                   </span>
@@ -16111,6 +16111,7 @@ window.addEventListener('DOMContentLoaded', async () => {
         mapEl.style.setProperty('--tu-map-w', bigW + 'px');
         mapEl.style.setProperty('--tu-map-h', bigH + 'px');
         mapEl.style.transform = `rotate(${-heading}deg)`;
+        mapEl.style.setProperty('--rb-rot', (-heading) + 'deg');
         // Only tell Leaflet to re-measure when the size actually changed, not on every GPS fix.
         const sizeSig = bigW + 'x' + bigH;
         if (leafletMap && mapEl.dataset.tuSize !== sizeSig) { mapEl.dataset.tuSize = sizeSig; leafletMap.invalidateSize({ pan: false, animate: false }); }
@@ -17381,9 +17382,13 @@ window.addEventListener('DOMContentLoaded', async () => {
     try { if (typeof window.lbNextBin === 'function' && userCurrentLocation) nb = window.lbNextBin(userCurrentLocation, lastValidHeading || 0, wantSide === 'left' ? 'L' : wantSide === 'right' ? 'R' : null, isBothSidesSite); } catch (e) { nb = undefined; }
     // (lbNextBin covers the bin beside the truck too, and judges its kerb by the street's odd/even sides,
     // which a few metres of GPS error can't flip - so when it has an answer, it decides.)
-    const currentSite = nb !== undefined ? nb
+    const currentSite0 = nb !== undefined ? nb
       : (nearestBinSite && nearestBinDist <= BIN_AT_TRUCK_M) ? nearestBinSite
       : (nearestSameSideSite && nearestSameSideDist <= 300) ? nearestSameSideSite : null;
+    // A bin within 8 m of the truck is the one it is at, even if lbNextBin chose a house further on (its street
+    // name differs from the street being driven - 3461 Graydon Heights, 4 Graydon Court, was skipped).
+    const currentSite = (nearestBinSite && nearestBinDist <= 8 && currentSite0 !== nearestBinSite &&
+      (!currentSite0 || (binDistBySite.get(String(currentSite0.propId || currentSite0.siteId || '')) ?? 1e9) > nearestBinDist + 3)) ? nearestBinSite : currentSite0;
     if (currentSite) lastSideOfTravel = isBothSidesSite(currentSite) ? null : (sideOfSite(currentSite) || lastSideOfTravel);
     const mapLiveStreet = q('mapLiveStreet');
     if (mapLiveStreet) {
@@ -17859,7 +17864,11 @@ window.addEventListener('DOMContentLoaded', async () => {
           if (next !== null) { lastValidHeading = Math.round(next) % 360; R.init = true; }
         }
       }
-      if (window.lbReversing !== R.on) { window.lbReversing = R.on; document.body.classList.toggle('lb-reversing', R.on); }
+      if (speedKmh >= 1.5) R.moveT = Date.now();
+      // R.on is the facing latch (kept so the arrow stays right); "reversing" for the stop prompts and shift clock
+      // is only true while the truck is actually moving - 4 Oct: it stayed on through a 1-minute stop.
+      const revNow = !!(R.on && Date.now() - (R.moveT || 0) < 6000);
+      if (window.lbReversing !== revNow) { window.lbReversing = revNow; document.body.classList.toggle('lb-reversing', revNow); }
     }
     // If stopped or < 4 km/h, lastValidHeading remains locked to your last driving direction
     lbGpsLogAdd({ k: 'fix', t: fixT, lat: +pos.coords.latitude.toFixed(6), lng: +pos.coords.longitude.toFixed(6), acc: accuracy,
@@ -34881,12 +34890,16 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     // a big jump is the run's progress being restored - neither is new driving
     var ms = g('missedBinSerials'), n = (ms && ms.size != null) ? ms.size : 0;
     if (!W.t0) W.t0 = now;
+    var sv = g('servicedBinSerials'), sn = (sv && sv.size != null) ? sv.size : 0;
+    if (W.svSeen == null || sn < W.svSeen || sn - W.svSeen > 30 || now - W.t0 < 60000) W.svSeen = sn;
+    else if (sn > W.svSeen) { W.svSeen = sn; W.missAcc = 0; }
     // (the run's progress comes back from the phone's storage a bit after the app opens, sometimes in
     // pieces - the first minute only sets the starting point)
     if (W.missSeen < 0 || n < W.missSeen || n - W.missSeen > 30 || now - W.t0 < 60000) W.missSeen = n;
     else if (n > W.missSeen) {
+      // "10 missed in a row": a bin emptied since the last miss starts the count from 0 (see svSeen below)
       W.missAcc += n - W.missSeen; W.missSeen = n;
-      while (W.missAcc >= 10) { W.missAcc -= 10; raise(W.L + 1); feed('item', '10 bins driven past <em style="color:#ff6b6b">wanted +1</em>', '#e05252'); }
+      while (W.missAcc >= 10) { W.missAcc -= 10; raise(W.L + 1); feed('miss', 'Missed 10 bins', '#e05252'); }
     }
     if (W.L > 0 && !W.ep && now - W.last >= 60000) {
       if (W.L === 5) { var rw = 5000; addCash(rw, 'bonus'); logGot('bonus', 'Lost the cops (5 to 4 stars)', rw); feed('cash', 'Lost the cops <em>+' + money(rw) + '</em>', '#f0c850'); play('cash'); save(); }
@@ -35832,6 +35845,53 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       + (id && typeof openPropertyInspectModal === 'function' ? '<div class="map-popup-actions"><button type="button" class="map-popup-btn" onclick="openPropertyInspectModal(\'' + id.replace(/[^\w.-]/g, '') + '\')">Property</button></div>' : '')
       + '</div>';
   }
+  function unitOf(site){
+    var a = String(site.addressText || site.baseStreetLine || '').split(',')[0].trim();
+    var m = /^(?:unit|u|flat|apt|shop|suite|villa)?\s*([A-Za-z0-9]+)\s*\/\s*(.+)$/i.exec(a);
+    return m ? { u: m[1], base: m[2] } : { u: a.split(' ')[0] || a, base: '' };
+  }
+  // many addresses on one lot: what is here in total, then a button per unit to open that unit's own details
+  function summaryHTML(all){
+    var list = all.slice(0, 80).map(function(s){ var u = unitOf(s); return { s: s, u: u.u, base: u.base }; });
+    list.sort(function(a, b){ var x = parseFloat(a.u), y = parseFloat(b.u); return (isNaN(x) || isNaN(y)) ? String(a.u).localeCompare(String(b.u)) : x - y; });
+    var base = ''; list.forEach(function(x){ if (!base && x.base) base = x.base; });
+    var s0 = list[0].s, sub = String(s0.suburbLine || '').trim(), day = (s0.soloSchedule || {}).day;
+    var done = (typeof servicedBinSerials !== 'undefined' && servicedBinSerials) ? servicedBinSerials : null;
+    var rows = '', flags = '', summer = [];
+    list.forEach(function(x){ var r = String((x.s.soloSchedule || {}).recSummerRun || '').trim(); if (r && summer.indexOf(r) < 0) summer.push(r); });
+    STREAMS.forEach(function(st){
+      var runs = [], n = 0, ok = 0;
+      list.forEach(function(x){
+        var sch = x.s.soloSchedule || {}, run = String(sch[st.run] || '').trim(), wk = String(sch.weekLetter || '').trim().toUpperCase();
+        var tx = run ? run + (st.week && wk ? ' ' + wk : '') : '';
+        if (tx && runs.indexOf(tx) < 0) runs.push(tx);
+        ((binsOf(x.s)[st.k]) || []).forEach(function(b){ n++; if (done && b.serial && done.has(b.serial)) ok++; });
+      });
+      if (!n && !runs.length) return;
+      rows += '<div class="ux-lot-row" style="border-left-color:' + st.col + '"><img class="icon-img" src="' + st.icon + '" alt=""><div class="ux-lot-run">' + (runs.length ? 'Run ' + h(runs.join(', ')) : 'No run') + '</div><div class="ux-lot-bins"><div class="ux-lot-bin"><b>' + n + ' bin' + (n === 1 ? '' : 's') + '</b>' + (ok ? ' <i>\u2713 ' + ok + ' emptied</i>' : '') + '</div></div></div>';
+    });
+    if (summer.length) rows += '<div class="ux-lot-row" style="border-left-color:#f59e0b">☀️<div class="ux-lot-run">Summer run ' + h(summer.join(', ')) + '</div><div class="ux-lot-bins"><div class="ux-lot-bin"><span>Recycling bins</span></div></div></div>';
+    list.forEach(function(x){ var nt = String(x.s.runFlags || '').trim(); if (nt) flags += '<div class="ux-lot-flag"><i></i><span>' + h((all.length > 1 ? 'Unit ' + x.u + ': ' : '') + nt) + '</span></div>'; });
+    var btns = list.map(function(x, i){ return '<button type="button" class="ux-lot-unit' + (String(x.s.runFlags || '').trim() ? ' flag' : '') + '" data-i="' + i + '">' + h(x.u) + '</button>'; }).join('');
+    var det = list.map(function(x, i){ return '<div class="ux-lot-detail" data-i="' + i + '"><button type="button" class="ux-lot-back">\u2190 All ' + all.length + ' addresses</button>' + siteHTML(x.s) + '</div>'; }).join('');
+    return '<div class="map-popup ux-lot-pop ux-lot-multi"><div class="ux-lot-sum">'
+      + '<div class="map-popup-meta">' + all.length + ' addresses on this lot</div>'
+      + '<div class="map-popup-title">' + h(base || String(s0.addressText || '').split(',')[0]) + '</div>'
+      + '<div class="map-popup-meta">' + h([sub, day].filter(Boolean).join(' \u00b7 ')) + '</div>'
+      + flags + rows
+      + '<div class="ux-lot-units-h">Pick a unit</div><div class="ux-lot-units">' + btns + '</div></div>' + det + '</div>';
+  }
+  // one listener on the page (the popup's own element is rebuilt by the skin's popup code, so one on it is lost)
+  document.addEventListener('click', function(e){
+    var b = e.target && e.target.closest && e.target.closest('.ux-lot-unit, .ux-lot-back'); if (!b) return;
+    var box = b.closest('.ux-lot-pop'); if (!box) return;
+    var i = b.classList.contains('ux-lot-back') ? null : b.getAttribute('data-i');
+    box.classList.toggle('ux-lot-picked', i !== null);
+    [].forEach.call(box.querySelectorAll('.ux-lot-detail'), function(d){ d.classList.toggle('on', i !== null && d.getAttribute('data-i') === i); });
+    var sc = box.closest('.leaflet-popup-content'); if (sc) sc.scrollTop = 0;
+    try { if (leafletMap && leafletMap._popup) { leafletMap._popup._updateLayout(); leafletMap._popup._updatePosition(); } } catch (er) {}
+    e.stopPropagation();
+  }, true);
   function clear(){ if (outline) { try { outline.remove(); } catch (e) {} outline = null; } }
   function show(latlng){
     var r = null;
@@ -35840,7 +35900,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     clear();
     if (r.ring) { try { outline = L.polygon(r.ring, { interactive: false, color: '#f97316', weight: 3, fillColor: '#f97316', fillOpacity: 0.15 }).addTo(leafletMap); } catch (e) {} }
     var sites = r.sites.slice(0, MAX_SITES);
-    var html = '<div class="map-popup ux-lot-pop">'
+    var html = r.sites.length > 1 ? summaryHTML(r.sites) : '<div class="map-popup ux-lot-pop">'
       + (r.sites.length > 1 ? '<div class="map-popup-meta">' + r.sites.length + ' addresses on this lot' + (r.sites.length > MAX_SITES ? ' (first ' + MAX_SITES + ')' : '') + '</div>' : '')
       + (sites.length ? sites.map(siteHTML).join('') : '<div class="map-popup-title">No address on this lot</div><div class="map-popup-meta">Nobody\'s bins are listed here.</div>')
       + '</div>';
@@ -37418,6 +37478,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     }
     st.rot = rot; st.W = W; st.H = H; st.D = D;
     c.style.transform = rot ? 'rotate(' + rot + 'deg)' : '';
+    c.style.setProperty('--rb-rot', rot + 'deg');
     if (keep) { st.map.invalidateSize({ pan: false, animate: false }); st.map.setView(keep.c, keep.z, { animate: false }); }
   }
   // map-container pixel -> page pixel, and back
@@ -39430,7 +39491,8 @@ html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x) #uxShiftSummary .uxss
 html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x) #uxShiftSummary .uxss-tot,
 html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x) #uxShiftSummary .uxss-net b,
 html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x) #uxShiftSummary .uxss-tot b,
-html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x) #lbssStart b{font-style:italic !important;font-weight:600 !important;letter-spacing:0 !important}
+html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x) #lbssStart b,
+html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x) .ux-lot-unit{font-style:italic !important;font-weight:600 !important;letter-spacing:0 !important}
 
 /* no hazard stripes, no hard edges */
 html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x) .app-header::after, html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x) #mapNormalTopBar::after, html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x) .modal-box::before, html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x) .rb-hz{display:none !important}
@@ -40644,6 +40706,27 @@ html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):no
 html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) .ux-lot-flag span{font:800 14px/1.2 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;letter-spacing:.02em;text-transform:uppercase;color:#000}
 html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) .ux-lot-stars{display:flex;align-items:center;gap:8px;margin:6px 0 2px;color:var(--rb-yel);font-size:20px;line-height:1;letter-spacing:.08em;text-shadow:1px 1px 0 #000}
 html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) .ux-lot-stars em{font:600 12px/1.2 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;font-style:normal;letter-spacing:.02em;color:var(--rb-k);text-shadow:none}
+/* round 39: popups stay upright when the map is turned (rotate composes with Leaflet's translate) */
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) .leaflet-popup{rotate:calc(var(--rb-rot, 0deg) * -1);transform-origin:50% 100%}
+
+/* round 39: missed bins / missed street = a red card; wanted stars sit bare at the top right of the map */
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxGtaFeed .uxgf.rb-gc.rb-miss{background:var(--rb-red) !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxGtaFeed .uxgf.rb-gc.rb-miss .rb-gh{background:#000}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxGtaFeed .uxgf.rb-gc.rb-miss .rb-gt{color:#000;font-size:24px}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxGtaFeed .uxgf.rb-gc.rb-miss .rb-gs{color:#000}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxGtaStack .uxgs-stars{background:none !important;border:0 !important;box-shadow:none !important;padding:0 !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxGtaStack .uxgs-stars i{text-shadow:2px 0 0 #000, -2px 0 0 #000, 0 2px 0 #000, 0 -2px 0 #000 !important}
+/* round 40: a lot with several addresses = a summary and a unit picker */
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) .ux-lot-detail{display:none}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) .ux-lot-detail.on{display:block}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) .ux-lot-picked .ux-lot-sum{display:none}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) .ux-lot-units-h{margin:12px 0 6px;font-size:11px;font-weight:800;letter-spacing:.1em;text-transform:uppercase;color:var(--ux-text-3, #8b95a3)}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) .ux-lot-units{display:flex;flex-wrap:wrap;gap:6px}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) .ux-lot-unit{min-width:50px;height:44px;padding:0 10px;border:var(--rb-bd);border-radius:8px;background:var(--rb-ground, #1a1b1e);color:#fff;font:400 21px/1 var(--rb-font);box-shadow:var(--rb-sh-sm)}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) .ux-lot-unit.flag{background:var(--rb-red);color:#000}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) .ux-lot-unit:active{background:var(--rb-yel);color:#000}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) .ux-lot-back{display:block;width:calc(100% - 30px);margin:0 0 8px;padding:9px 10px;border:var(--rb-bd);border-radius:8px;background:var(--rb-yel);color:#000;font:800 13px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;letter-spacing:.06em;text-transform:uppercase;text-align:left}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) .ux-lot-multi .ux-lot-bin b{font-size:inherit}
 </style>
 
 <script id="lb-rubbish-script">
@@ -41408,9 +41491,9 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
       else before = body.textContent || '';
       before = before.replace(/[\s:\-\u00b7]+$/, '').trim(); after = after.replace(/^[\s\u00b7\-]+/, '').trim();
       if (em && !money) { after = (amt + (after ? ' \u00b7 ' + after : '')).trim(); amt = ''; }
-      var neg = /^[\-\u2212]/.test(amt) || (/fine|diesel|fined/i.test(before) && !money);
+      var miss = /^missed\b/i.test(before), neg = miss || /^[\-\u2212]/.test(amt) || (/fine|diesel|fined/i.test(before) && !money);
       if (/^speeding fine$/i.test(before)) before = 'Fined';
-      it.className = 'uxgf rb-gc ' + (neg ? 'rb-neg' : 'rb-pos');
+      it.className = 'uxgf rb-gc ' + (neg ? 'rb-neg' : 'rb-pos') + (miss ? ' rb-miss' : '');
       it.removeAttribute('style');
       it.innerHTML = '<i class="rb-gh"></i><div class="rb-gb">' + (amt ? '<span class="rb-ga"></span>' : '') + '<div><b class="rb-gt"></b><span class="rb-gs"></span></div></div>';
       if (amt) txt(it.querySelector('.rb-ga'), amt);
@@ -41823,6 +41906,9 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
 
   // ---- found something on the map: a sticker, like the hidden package ------------------------------
   new MutationObserver(function(ms){
+    // round 39: a pickup is the one card in the feed (cash, armour, found item); the "You found" sticker that
+    // used to come up on top of it as a second, different pop-up is gone
+    return;
     if (!on() || !window.rbPop) return;
     ms.forEach(function(m){ [].forEach.call(m.addedNodes, function(n){
       if (n.nodeType !== 1 || !n.classList || !n.classList.contains('uxgf')) return;
@@ -42067,6 +42153,64 @@ document.addEventListener('click', function(ev){
   var t = ev.target; if (!t || !t.closest || !t.closest('#uxGtaHealth')) return;
   if (typeof window.uxGtaBreakdown === 'function') { ev.stopPropagation(); window.uxGtaBreakdown(); }
 }, true);
+
+
+/* round 39: a court / close you never drove into costs $1,000
+   A dead-end street on the run (a court, close, cove, place ...) that still has bins to do, that the truck came
+   past (within 70 m of its houses, so it went by the mouth) but never turned into (never within 12 m of one),
+   and has now driven 250 m away from: "Missed <street>  -$1,000", once a day per street. Needs the street
+   index the street counts are built on (lbStreetStats), so it only runs while a run is on the map. */
+(function(){
+  'use strict';
+  var FINE = 1000, PASS_M = 70, ENTER_M = 12, LEFT_M = 250, SPAN_M = 220;
+  var DEAD = /\b(court|ct|close|cl|cove|place|pl|mews|retreat|rise)\b/i;
+  var mem = null, GF = {};
+  function g(n){ try { return (GF[n] || (GF[n] = new Function('return typeof ' + n + ' === "undefined" ? undefined : ' + n)))(); } catch (e) { return undefined; } }
+  function on(){ var s = document.documentElement.getAttribute('data-ux-skin'); return s === 'rubbish' || s === 'speedo'; }
+  function game(){ try { return !!(window.uxGtaOpts && window.uxGtaOpts().game); } catch (e) { return false; } }
+  function dm(a, b){ var r = Math.PI / 180, x = (b.lng - a.lng) * r * Math.cos((a.lat + b.lat) / 2 * r), y = (b.lat - a.lat) * r; return Math.sqrt(x * x + y * y) * 6371000; }
+  function day(){ var d = new Date(); return d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate(); }
+  function fined(){ try { var o = JSON.parse(localStorage.getItem('rbMissedStreets') || 'null'); return o && o.day === day() ? o.ids : []; } catch (e) { return []; } }
+  function markFined(id){ try { var a = fined(); a.push(id); localStorage.setItem('rbMissedStreets', JSON.stringify({ day: day(), ids: a })); } catch (e) {} }
+  function todo(it){
+    if (!it.onRun || !it.bins) return 0;
+    var done = g('servicedBinSerials');
+    if (!done || !it.serials || !it.serials.length) return it.bins;
+    return it.serials.filter(function(x){ return !x || !done.has(x); }).length;
+  }
+  function tick(){
+    if (!on() || !game() || !window.lbStreetStats || !window.lbStreetStats._t) return;
+    var st = window.lbStreetStats._t.state(), run = st && st.run, l = g('userCurrentLocation');
+    if (!run || !run.streets || !l || !isFinite(l.lat)) { mem = null; return; }
+    var here = { lat: +l.lat, lng: +l.lng };
+    if (!mem || mem.sig !== run.sig) mem = { sig: run.sig, t0: Date.now(), by: {}, last: null };
+    // the first minute only learns where the truck is (a run just opened, or the phone restoring its state)
+    var sp = +g('currentMapSpeedKmh') || 0, ids = fined();
+    run.streets.forEach(function(s, id){
+      if (ids.indexOf(id) >= 0 || !DEAD.test(s.name || '')) return;
+      var M = mem.by[id];
+      if (!M) {
+        var n = 0, a = null, span = 0;
+        s.items.forEach(function(it){ n += todo(it); if (!a) a = it.pos; else span = Math.max(span, dm(a, it.pos)); });
+        M = mem.by[id] = { todo: n > 0, span: span, min: 1e9 };
+      }
+      if (!M.todo || M.span > SPAN_M) return;
+      var dmin = 1e9;
+      for (var i = 0; i < s.items.length; i++) { var d = dm(here, s.items[i].pos); if (d < dmin) dmin = d; }
+      if (dmin < M.min) M.min = dmin;
+      if (Date.now() - mem.t0 < 60000 || sp < 5) return;
+      if (M.min <= PASS_M && M.min > ENTER_M && dmin >= LEFT_M) {
+        // still bins left there? (they may have been done or been written off since)
+        var left = 0; s.items.forEach(function(it){ left += todo(it); });
+        if (!left) { M.todo = false; return; }
+        markFined(id);
+        var name = String(s.name || 'street').replace(/\b\w/g, function(c){ return c.toUpperCase(); });
+        if (window.uxGtaFine) window.uxGtaFine(FINE, 'Missed ' + name, 'You never drove in');
+      }
+    });
+  }
+  setInterval(function(){ try { tick(); } catch (e) {} }, 2000);
+})();
 </script>
 
 </body>
