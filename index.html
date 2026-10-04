@@ -42567,18 +42567,19 @@ document.addEventListener('click', function(ev){
     });
   }
   function isPdf(f){ return /pdf/i.test(f.type || '') || /\.pdf$/i.test(f.name || ''); }
-  function pdfPages(file, px, prog){
+  function pdfPages(file, px, prog, skip, openDoc){
     var base = String(file.name || 'file').replace(/\.pdf$/i, '');
-    return loadPdfJs().then(function(lib){ return file.arrayBuffer().then(function(buf){ return lib.getDocument({ data: buf }).promise; }); }).then(function(doc){
+    return (openDoc ? Promise.resolve(openDoc) : loadPdfJs().then(function(lib){ return file.arrayBuffer().then(function(buf){ return lib.getDocument({ data: buf }).promise; }); })).then(function(doc){
       var out = [], i = 1;
       function next(){
         if (i > doc.numPages) return out;
+        if (skip && skip[i]) { i++; return next(); }
         if (prog) prog(i, doc.numPages);
         return doc.getPage(i).then(function(pg){
           var v0 = pg.getViewport({ scale: 1 }), vp = pg.getViewport({ scale: px / Math.max(v0.width, v0.height) }), c = document.createElement('canvas');
           c.width = Math.round(vp.width); c.height = Math.round(vp.height);
           return pg.render({ canvasContext: c.getContext('2d'), viewport: vp }).promise.then(function(){
-            return new Promise(function(r){ c.toBlob(function(b){ out.push(new File([b], base + '-p' + i + '.jpg', { type: 'image/jpeg' })); i++; c.width = c.height = 0; r(); }, 'image/jpeg', 0.85); });
+            return new Promise(function(r){ c.toBlob(function(b){ out.push(new File([b], base + '-p' + i + '.jpg', { type: 'image/jpeg' })); out[out.length - 1].pageNo = i; i++; c.width = c.height = 0; r(); }, 'image/jpeg', 0.85); });
           });
         }).then(next);
       }
@@ -42894,7 +42895,7 @@ document.addEventListener('click', function(ev){
       if (!P.files[k].length) return;
       chain = chain.then(function(){
         P.state[k] = 'busy'; paint();
-        return P.files[k].reduce(function(pr, f){ return pr.then(function(acc){ return readOne(f, k).then(function(d){ acc.push(d); return acc; }); }); }, Promise.resolve([])).then(function(list){
+        return P.files[k].reduce(function(pr, f){ return pr.then(function(acc){ return (k === 'portal' ? readPortal(f, raw.sheet) : readOne(f, k)).then(function(d){ acc.push(d); return acc; }); }); }, Promise.resolve([])).then(function(list){
           raw[k] = k === 'dockets' ? [].concat.apply([], list.map(function(d){ return d.dockets || []; })) : merge(list); P.state[k] = 'ok';
         }).catch(function(e){ P.state[k] = 'Could not read'; P.err = (P.err ? P.err + ' · ' : '') + k + ': ' + String((e && e.message) || 'failed').slice(0, 150); });
       });
@@ -42938,6 +42939,89 @@ document.addEventListener('click', function(ev){
       if (a === 'csv') return shareCsv();
     }); }
     el.classList.add('on'); paint();
+  }
+
+  /* ---- the office website print-out, read without the AI --------------------------------------------------------------------------------
+     The website's PDF has a text layer, so every value is already there as text with a position. This reads it by position (the layout is
+     the same every page), which costs nothing and cannot misread a digit. `items` are pdf.js text items: { str, transform:[..,x,y] }. */
+  function pwTime(s){
+    if (/^\s*01\/01\b/.test(String(s || ''))) return null;   // the website shows 01/01 for a time nobody filled in
+    var m = /(\d{1,2}):(\d{2})\s*(AM|PM)?/i.exec(String(s || '')); if (!m) return null;
+    var h = +m[1], mi = +m[2], ap = (m[3] || '').toUpperCase();
+    if (ap === 'PM' && h < 12) h += 12; if (ap === 'AM' && h === 12) h = 0;
+    return (h < 10 ? '0' : '') + h + ':' + (mi < 10 ? '0' : '') + mi;
+  }
+  function pwNum(s){ var t = String(s || '').replace(/[^0-9.\-]/g, ''); var v = parseFloat(t); return isFinite(v) ? v : null; }
+  function parsePortalPage(items){
+    var T = items.map(function(i){ return { s: String(i.str || '').trim(), x: i.transform[4], y: i.transform[5] }; }).filter(function(i){ return i.s; });
+    if (!T.some(function(i){ return /^Driver:/.test(i.s); })) return null;
+    // the text inside a box: items in an x range and a y band, top to bottom, joined (a time wraps its AM/PM onto the next line)
+    var box = function(x0, x1, yHi, yLo, sep){ return T.filter(function(i){ return i.x >= x0 && i.x < x1 && i.y <= yHi && i.y > yLo; }).sort(function(a, b){ return (b.y - a.y) || (a.x - b.x); }).map(function(i){ return i.s; }).join(sep == null ? ' ' : sep); };
+    var find = function(re){ for (var k = 0; k < T.length; k++) { var m = re.exec(T[k].s); if (m) return { m: m, it: T[k] }; } return null; };
+    var o = { type: 'portal', local: true, breaks: [], loads: [] };
+    var f;
+    if ((f = find(/^(\d+[A-Za-z]?)\s+(Mon|Tues|Wednes|Thurs|Fri|Satur|Sun)day/i))) o.run = f.m[1];
+    if ((f = find(/(\d{2})\/(\d{2})\/(\d{4})/))) o.date = f.m[3] + '-' + f.m[2] + '-' + f.m[1];
+    if ((f = find(/^Domestic (Garbage|Organics|Recycling)/i))) o.stream = f.m[1];
+    if ((f = find(/^Driver:\s*(.+)$/))) o.driver = f.m[1].trim();
+    if ((f = find(/^Employee ID:\s*(\d+)/))) o.emp = f.m[1];
+    if ((f = find(/^Unit:\s*(\S+)/))) o.truck = f.m[1];
+    if ((f = find(/^Rego:\s*(\S*)/))) { o.rego = f.m[1] || null; if (!o.rego) { var rg = T.filter(function(i){ return Math.abs(i.y - f.it.y) < 4 && i.x > f.it.x + 5 && i.x < f.it.x + 120; })[0]; if (rg) o.rego = rg.s; } }
+    var rowY = function(label, x0, x1){ var r = T.filter(function(i){ return i.s === label && i.x >= x0 && i.x < x1; })[0]; return r ? r.y : null; };
+    // driver block: Shift / Rest 1 / Rest 2 / Breakdown, each with a start box and an end box
+    var cell = function(label, x0, x1){ var y = rowY(label, 20, 90); if (y == null) return null; return pwTime(box(x0, x1, y + 5, y - 17)); };
+    o.shiftStart = cell('Shift', 90, 165); o.shiftEnd = cell('Shift', 165, 245);
+    ['Rest 1', 'Rest 2'].forEach(function(l){ var s = cell(l, 90, 165), e = cell(l, 165, 245); if (s || e) o.breaks.push({ s: s, e: e }); });
+    // vehicle block: depart / return in two columns, odometer and engine hours below
+    var yTime = rowY('Time', 240, 300), yOdo = rowY('Odometer', 240, 300), yEng = rowY('Engine Hours', 240, 300);
+    if (yTime != null) { o.depart = pwTime(box(340, 410, yTime + 5, yTime - 17)); o.ret = pwTime(box(410, 480, yTime + 5, yTime - 17)); }
+    if (yOdo != null) { o.kmS = pwNum(box(340, 410, yOdo + 5, yOdo - 5)); o.kmE = pwNum(box(410, 480, yOdo + 5, yOdo - 5)); }
+    if (yEng != null) { o.hrsS = pwNum(box(340, 410, yEng + 5, yEng - 5)); o.hrsE = pwNum(box(410, 480, yEng + 5, yEng - 5)); }
+    // additives
+    var ya = rowY('AD BLUE', 480, 560), yf = rowY('FUEL', 480, 560);
+    o.adblue = ya != null ? pwNum(box(560, 700, ya + 5, ya - 5)) : null; o.fuel = yf != null ? pwNum(box(560, 700, yf + 5, yf - 5)) : null;
+    // loads: a row starts at each "#" number in the first column and runs down to the next one (or to "Booked Jobs")
+    var ends = T.filter(function(i){ return i.s === 'Booked Jobs' || /^Flagged Sites/.test(i.s); }), bottom = ends.length ? Math.max.apply(null, ends.map(function(i){ return i.y; })) + 8 : 70;
+    var hdr = T.filter(function(i){ return i.s === '#' && i.x < 60; })[0], top = hdr ? hdr.y : 9999;
+    var nums = T.filter(function(i){ return /^\d{1,2}$/.test(i.s) && i.x < 55 && i.y < top - 5 && i.y > bottom; }).sort(function(a, b){ return b.y - a.y; });
+    var X = [55, 100, 185, 245, 300, 385, 440, 480, 520, 580, 622, 660, 712, 742, 9999];
+    nums.forEach(function(n, k){
+      var hi = n.y + 6, lo = k + 1 < nums.length ? nums[k + 1].y + 6 : bottom;
+      var c = function(i, sep){ return box(X[i], X[i + 1], hi, lo, sep); };
+      var L = { first: pwTime(c(0)), firstKm: pwNum(c(2)), last: pwTime(c(3)), lastKm: pwNum(c(5)), bins: pwNum(c(6)), site: c(7) || null, arrT: pwTime(c(8)), arrW: pwNum(c(9, '')), depW: pwNum(c(10, '')), depT: pwTime(c(11)), docket: c(13, '').replace(/\D/g, '') || null };
+      if (L.first || L.last || L.arrT || L.depT || L.docket || L.firstKm || L.lastKm) o.loads.push(L);   // a bare "1 bin" is the website's placeholder row
+    });
+    return o;
+  }
+
+  // opens a PDF once and reads the website's text layer. Resolves { n: pages, list: [{ n: page number, o: parsed page }], doc } and never rejects
+  function pdfLocal(file){
+    return loadPdfJs().then(function(lib){ return file.arrayBuffer().then(function(buf){ return lib.getDocument({ data: buf }).promise; }); }).then(function(doc){
+      var list = [], i = 1;
+      function next(){
+        if (i > doc.numPages) return { n: doc.numPages, list: list, doc: doc };
+        var n = i++;
+        return doc.getPage(n).then(function(pg){ return pg.getTextContent(); }).then(function(tc){ var o = parsePortalPage(tc.items); if (o) list.push({ n: n, o: o }); }, function(){}).then(next);
+      }
+      return next();
+    }).catch(function(){ return { n: 0, list: [], doc: null }; });
+  }
+  // the single check: a website PDF with several drivers is cut down to the one whose run sheet is also in the check
+  function readPortal(f, sheetRaw){
+    if (!isPdf(f)) return readOne(f, 'portal');
+    return pdfLocal(f).then(function(r){
+      if (!r.list.length) return readOne(f, 'portal');
+      var pick = r.list.map(function(x){ return x.o; });
+      if (sheetRaw) {
+        var m = pick.filter(function(o){ return (!sheetRaw.run || !o.run || runKey(o.run) === runKey(sheetRaw.run)) && !(empOf(sheetRaw) && empOf(o) && empOf(sheetRaw) !== empOf(o)) && samePerson(sheetRaw, o); });
+        if (!m.length) m = pick.filter(function(o){ return samePerson(sheetRaw, o); });
+        if (!m.length) m = pick.filter(function(o){ return sheetRaw.run && runKey(o.run) === runKey(sheetRaw.run); });
+        if (m.length) pick = m;
+      }
+      var who = {}; pick.forEach(function(o){ who[runKey(o.run) + '|' + (empOf(o) || o.driver)] = 1; });
+      if (Object.keys(who).length > 1) throw new Error('that PDF holds ' + Object.keys(who).length + ' drivers, add the paper run sheet as well so the right one is found');
+      return merge(pick);
+    });
   }
 
   /* ---- Check a whole day -------------------------------------------------------------------------------------------------
@@ -43106,19 +43190,25 @@ document.addEventListener('click', function(ev){
   }
   function dayRun(){
     if (!D || !D.files.length || D.phase === 'prep' || D.phase === 'read') return;
-    D.err = ''; D.phase = 'prep'; D.pages = []; D.G = null; D.cancel = false; var me = D;
+    D.err = ''; D.phase = 'prep'; D.pages = []; D.localPages = 0; D.G = null; D.cancel = false; var me = D;
     D.msg = 'Opening the files…'; paint();
     var chain = Promise.resolve();
     D.files.forEach(function(f, fi){
       chain = chain.then(function(){
         if (me.cancel) return;
         if (!isPdf(f)) { me.pages.push({ fi: fi, file: f, label: f.name || 'photo', state: 'wait' }); return; }
-        return pdfPages(f, 2200, function(i, n){ me.msg = 'Opening ' + (f.name || 'PDF') + ' · page ' + i + ' of ' + n; if (D === me && P && P.view === 'day') paint(); }).then(function(list){
-          list.forEach(function(x, i){ me.pages.push({ fi: fi, file: x, label: (f.name || 'PDF') + ' p' + (i + 1), state: 'wait' }); });
+        me.msg = 'Opening ' + (f.name || 'PDF') + '…'; if (D === me && P && P.view === 'day') paint();
+        return pdfLocal(f).then(function(r){
+          var skip = {}; r.list.forEach(function(x){ skip[x.n] = 1; me.pages.push({ fi: fi, file: null, label: (f.name || 'PDF') + ' p' + x.n, state: 'ok', res: x.o, local: true }); });
+          me.localPages = (me.localPages || 0) + r.list.length;
+          if (r.list.length && r.list.length >= r.n) return;   // every page was website text: nothing to read
+          return pdfPages(f, 2200, function(i, n){ me.msg = 'Opening ' + (f.name || 'PDF') + ' · page ' + i + ' of ' + n; if (D === me && P && P.view === 'day') paint(); }, skip, r.doc).then(function(list){
+            list.forEach(function(x){ me.pages.push({ fi: fi, file: x, label: (f.name || 'PDF') + ' p' + (x.pageNo || '?'), state: 'wait' }); });
+          });
         });
       });
     });
-    chain.then(function(){ if (D !== me || me.cancel) return; return dayReadPages(me.pages); }).then(function(){ if (D === me) dayFinish(); }, function(e){
+    chain.then(function(){ if (D !== me || me.cancel) return; return dayReadPages(me.pages.filter(function(p){ return !p.res; })); }).then(function(){ if (D === me) dayFinish(); }, function(e){
       if (D !== me) return; me.phase = 'pick'; me.err = String((e && e.message) || 'could not open those files').slice(0, 140); paint();
     });
   }
@@ -43149,7 +43239,7 @@ document.addEventListener('click', function(ev){
         '<p class="rbpw-p rbpw-s">Keep this screen open. A big stack takes a few minutes.</p><button type="button" class="rbpw-lnk" data-pw="d-stop">Stop</button>';
     } else if (D.phase === 'done') {
       var G = D.G, fix = G.groups.filter(function(g){ return g.issues; }).length, bad = D.pages.filter(function(p){ return p.state === 'err'; }).length;
-      h += '<div class="rbpw-ok">' + G.groups.length + ' driver' + (G.groups.length === 1 ? '' : 's') + ' checked · ' + fix + ' with something to fix. All saved in the run records.</div>';
+      h += '<div class="rbpw-ok">' + G.groups.length + ' driver' + (G.groups.length === 1 ? '' : 's') + ' checked · ' + fix + ' with something to fix. All saved in the run records.' + (D.localPages ? '<br>' + D.localPages + ' website page' + (D.localPages === 1 ? '' : 's') + ' read from the PDF text, no AI used.' : '') + '</div>';
       if (bad) h += '<div class="rbpw-err">' + bad + ' page' + (bad === 1 ? '' : 's') + ' could not be read (' + esc(D.pages.filter(function(p){ return p.state === 'err'; })[0].err.slice(0, 140)) + ').</div><button type="button" class="rbpw-go" data-pw="d-redo">Read those pages again</button>';
       h += G.groups.map(groupHtml).join('');
       if (G.loose.length || G.orphan) h += '<div class="rbpw-sync">' + (G.loose.length ? G.loose.length + ' website page' + (G.loose.length === 1 ? '' : 's') + ' with no paper run sheet to match (' + G.loose.slice(0, 6).map(function(q){ return 'run ' + (q.res.run || '?'); }).join(', ') + (G.loose.length > 6 ? '…' : '') + '). ' : '') + (G.orphan ? G.orphan + ' docket' + (G.orphan === 1 ? '' : 's') + ' could not be matched to a run (no docket number, run number or rego that fits).' : '') + '</div>';
