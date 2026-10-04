@@ -42530,6 +42530,38 @@ document.addEventListener('click', function(ev){
       } catch (e) { plain(); }
     });
   }
+  /* Big scanned PDFs (a run sheet and its dockets from the office scanner run 5-17 MB) are too heavy to send as they are. They are
+     turned into one smaller picture per page on the phone with pdf.js (fetched the first time it is needed), and each page then goes
+     through the normal photo path, so a 14-page scan is read like 14 photos and merged. Small PDFs go up untouched. */
+  var PDFJS = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/';
+  function loadPdfJs(){
+    if (window.pdfjsLib) return Promise.resolve(window.pdfjsLib);
+    return new Promise(function(res, rej){
+      var sc = document.createElement('script'); sc.src = PDFJS + 'pdf.min.js';
+      sc.onload = function(){ try { window.pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS + 'pdf.worker.min.js'; res(window.pdfjsLib); } catch (e) { rej(e); } };
+      sc.onerror = function(){ rej(new Error('could not load the PDF reader, it needs signal the first time')); };
+      document.head.appendChild(sc);
+    });
+  }
+  function isPdf(f){ return /pdf/i.test(f.type || '') || /\.pdf$/i.test(f.name || ''); }
+  function pdfPages(file, px, prog){
+    var base = String(file.name || 'file').replace(/\.pdf$/i, '');
+    return loadPdfJs().then(function(lib){ return file.arrayBuffer().then(function(buf){ return lib.getDocument({ data: buf }).promise; }); }).then(function(doc){
+      var out = [], i = 1;
+      function next(){
+        if (i > doc.numPages) return out;
+        if (prog) prog(i, doc.numPages);
+        return doc.getPage(i).then(function(pg){
+          var v0 = pg.getViewport({ scale: 1 }), vp = pg.getViewport({ scale: px / Math.max(v0.width, v0.height) }), c = document.createElement('canvas');
+          c.width = Math.round(vp.width); c.height = Math.round(vp.height);
+          return pg.render({ canvasContext: c.getContext('2d'), viewport: vp }).promise.then(function(){
+            return new Promise(function(r){ c.toBlob(function(b){ out.push(new File([b], base + '-p' + i + '.jpg', { type: 'image/jpeg' })); i++; c.width = c.height = 0; r(); }, 'image/jpeg', 0.85); });
+          });
+        }).then(next);
+      }
+      return next();
+    });
+  }
   function readOne(file, kind){
     return shrink(file, kind === 'dockets' ? 1800 : 2200).then(function(o){
       var ac = new AbortController(), to = setTimeout(function(){ ac.abort(); }, 60000);
@@ -42812,7 +42844,17 @@ document.addEventListener('click', function(ev){
   }
   function pickFiles(k){
     var inp = document.createElement('input'); inp.type = 'file'; inp.accept = 'image/*,application/pdf'; inp.multiple = true; inp.style.display = 'none';
-    inp.onchange = function(){ [].forEach.call(inp.files || [], function(f){ P.files[k].push(f); }); P.state[k] = 'idle'; inp.remove(); paint(); };
+    inp.onchange = function(){
+      var list = [].slice.call(inp.files || []), me = P; inp.remove();
+      var big = list.filter(function(f){ return isPdf(f) && f.size > 2500000; });
+      if (big.length) { P.state[k] = 'Preparing PDF…'; P.err = ''; paint(); }
+      list.reduce(function(pr, f){
+        return pr.then(function(){
+          if (!(isPdf(f) && f.size > 2500000)) { me.files[k].push(f); return; }
+          return pdfPages(f, k === 'dockets' ? 1800 : 2200, function(i, n){ me.state[k] = 'Preparing PDF ' + i + '/' + n + '…'; if (P === me) paint(); }).then(function(pages){ pages.forEach(function(x){ me.files[k].push(x); }); });
+        });
+      }, Promise.resolve()).then(function(){ me.state[k] = 'idle'; }, function(e){ me.state[k] = 'idle'; me.err = String((e && e.message) || 'could not open that PDF').slice(0, 120); }).then(function(){ if (P === me) paint(); });
+    };
     document.body.appendChild(inp); inp.click();
   }
   function run(){
