@@ -42946,7 +42946,61 @@ document.addEventListener('click', function(ev){
     if (runKey(a.run) && runKey(b.run)) return runKey(a.run) === runKey(b.run) && (!a.driver || !b.driver || surname(a.driver).some(function(t){ return surname(b.driver).indexOf(t) >= 0; }));
     return !!(a.driver && b.driver && surname(a.driver).some(function(t){ return surname(b.driver).indexOf(t) >= 0; }));
   }
+  function digitsOf(x){ return String(x == null ? '' : x).replace(/\D/g, ''); }
+  function regoKey(x){ return String(x == null ? '' : x).toUpperCase().replace(/[^A-Z0-9]/g, ''); }
+  /* Which driver does each docket belong to? Strongest first:
+     1. the docket's own number is on a driver's run sheet or website entry (a load split over two runs lands on both);
+     2. the number written on it in pen matches a run number or a truck number;
+     3. the rego on it matches the rego on the run sheet or website, or a rego already seen on a docket that was matched by 2;
+     4. where it sits in the stack: after a run sheet, in the same file. */
   function dayGroup(pages){
+    var groups = [], cur = null, portals = [], items = [], lastFi = -1;
+    pages.forEach(function(p){
+      if (!p.res) return;
+      if (p.fi !== lastFi) { cur = null; lastFi = p.fi; }
+      var t = p.res.type;
+      if (t === 'sheet') {
+        if (cur && sameSheet(cur.sheets[0], p.res)) cur.sheets.push(p.res); else { cur = { sheets: [p.res], dockets: [], portals: [], pages: [] }; groups.push(cur); }
+        cur.pages.push(p.label);
+      } else if (t === 'dockets') {
+        (p.res.dockets || []).forEach(function(d){ items.push({ d: d, seq: cur, label: p.label }); });
+      } else if (t === 'portal') portals.push({ res: p.res, label: p.label, used: false });
+    });
+    groups.forEach(function(g){
+      var h = g.sheets[0], rk = runKey(h.run), dt = h.date || null, nm = surname(h.driver || '');
+      var pick = function(test){ portals.forEach(function(q){ if (!q.used && test(q.res)) { q.used = true; g.portals.push(q.res); g.pages.push(q.label); } }); };
+      if (rk) pick(function(r){ return runKey(r.run) === rk && (!dt || !r.date || r.date === dt); });
+      if (!g.portals.length && nm.length) pick(function(r){ var o = surname(r.driver || ''); return o.length && o.some(function(t){ return nm.indexOf(t) >= 0; }) && (!dt || !r.date || r.date === dt); });
+      // what each driver wrote down, to match dockets against
+      g.nums = {}; g.rego = {}; g.run = rk; g.truck = '';
+      g.sheets.concat(g.portals).forEach(function(r){
+        (r.loads || []).forEach(function(L){ var n = digitsOf(L && L.docket); if (n) g.nums[n] = 1; });
+        if (r.rego) g.rego[regoKey(r.rego)] = 1;
+        if (!g.truck && r.truck) g.truck = digitsOf(r.truck) || regoKey(r.truck);
+      });
+    });
+    var learned = {}, orphan = 0, put = function(g, it){ g.dockets.push(it.d); if (g.pages.indexOf(it.label) < 0) g.pages.push(it.label); };
+    var left = [];
+    items.forEach(function(it){
+      var n = digitsOf(it.d.docket), hit = n ? groups.filter(function(g){ return g.nums[n]; }) : [];
+      if (hit.length) { hit.forEach(function(g){ put(g, it); }); return; }
+      var note = String(it.d.note || ''), toks = note.match(/[A-Za-z]*\d+[A-Za-z]*/g) || [], best = null;
+      groups.forEach(function(g){
+        toks.forEach(function(tk){ var k = runKey(tk), dg = digitsOf(tk); if ((g.run && k === g.run) || (g.run && dg && dg === digitsOf(g.run) && !/[A-Za-z]/.test(g.run)) || (g.truck && dg && dg === g.truck)) best = best || g; });
+      });
+      if (best) { var rg = regoKey(it.d.rego); if (rg) learned[rg] = best; put(best, it); return; }
+      left.push(it);
+    });
+    left.forEach(function(it){
+      var rg = regoKey(it.d.rego), cand = rg ? groups.filter(function(g){ return g.rego[rg]; }) : [];
+      if (cand.length === 1) return put(cand[0], it);
+      if (rg && learned[rg]) return put(learned[rg], it);
+      if (it.seq) return put(it.seq, it);
+      orphan++;
+    });
+    return { groups: groups, loose: portals.filter(function(q){ return !q.used; }), orphan: orphan };
+  }
+  function dayGroupOld(pages){
     var groups = [], cur = null, portals = [], orphan = 0, lastFi = -1;
     pages.forEach(function(p){
       if (!p.res) return;
@@ -43051,10 +43105,10 @@ document.addEventListener('click', function(ev){
       h += '<div class="rbpw-ok">' + G.groups.length + ' driver' + (G.groups.length === 1 ? '' : 's') + ' checked · ' + fix + ' with something to fix. All saved in the run records.</div>';
       if (bad) h += '<div class="rbpw-err">' + bad + ' page' + (bad === 1 ? '' : 's') + ' could not be read (' + esc(D.pages.filter(function(p){ return p.state === 'err'; })[0].err.slice(0, 60)) + ').</div><button type="button" class="rbpw-go" data-pw="d-redo">Read those pages again</button>';
       h += G.groups.map(groupHtml).join('');
-      if (G.loose.length || G.orphan) h += '<div class="rbpw-sync">' + (G.loose.length ? G.loose.length + ' website page' + (G.loose.length === 1 ? '' : 's') + ' with no paper run sheet to match (' + G.loose.slice(0, 6).map(function(q){ return 'run ' + (q.res.run || '?'); }).join(', ') + (G.loose.length > 6 ? '…' : '') + '). ' : '') + (G.orphan ? G.orphan + ' docket' + (G.orphan === 1 ? '' : 's') + ' came before any run sheet, so they were not matched.' : '') + '</div>';
+      if (G.loose.length || G.orphan) h += '<div class="rbpw-sync">' + (G.loose.length ? G.loose.length + ' website page' + (G.loose.length === 1 ? '' : 's') + ' with no paper run sheet to match (' + G.loose.slice(0, 6).map(function(q){ return 'run ' + (q.res.run || '?'); }).join(', ') + (G.loose.length > 6 ? '…' : '') + '). ' : '') + (G.orphan ? G.orphan + ' docket' + (G.orphan === 1 ? '' : 's') + ' could not be matched to a run (no docket number, run number or rego that fits).' : '') + '</div>';
       h += '<button type="button" class="rbpw-lnk" data-pw="d-new">Check another day</button><button type="button" class="rbpw-lnk" data-pw="records">Run records · ' + recs().length + ' saved</button>';
     } else {
-      h += '<p class="rbpw-p">Add everything from the day in one go: scanned stacks, PDFs, photos and the website print-outs, in any mix. Each driver\'s run sheet should be followed by that driver\'s dockets.</p>';
+      h += '<p class="rbpw-p">Add everything from the day in one go: scanned stacks, PDFs, photos and the website print-outs, in any mix. Dockets are matched to the right driver by their number, the run number written on them, or the rego.</p>';
       h += D.files.map(function(f, i){ return '<div class="rbpw-fl"><span>' + esc(f.name || 'photo') + ' · ' + kb(f.size) + '</span><button type="button" class="rbpw-clr" data-pw="d-rm" data-k="' + i + '" aria-label="Remove">✕</button></div>'; }).join('');
       h += '<button type="button" class="rbpw-lnk" data-pw="d-add">' + (D.files.length ? 'Add more files' : 'Add files') + '</button>';
       h += '<button type="button" class="rbpw-go" data-pw="d-go"' + (D.files.length ? '' : ' disabled') + '>Check the day' + (D.files.length ? ' · ' + D.files.length + ' file' + (D.files.length === 1 ? '' : 's') : '') + '</button>';
@@ -43068,7 +43122,7 @@ document.addEventListener('click', function(ev){
     var V = window.lbVault, go = function(){ (typeof openInner === 'function' ? openInner : open)(null); D = { files: [], phase: 'pick', pages: [], msg: '', err: '', G: null, openG: null, cancel: false }; P.view = 'day'; paint(); };
     if (V) V.ensure().then(go, function(){}); else go();
   }
-  window.lbPaperwork = { open: open, openDay: openDay, _t0: 1, _t: { setReader: function(f){ readOne = f; }, compare: compare, buildRecord: buildRecord, saveRecord: saveRecord, recs: recs, csv: csv, norm: norm, fromDockets: fromDockets, merge: merge, show: function(S){ P = P || { id: null, files: { dockets: [], sheet: [], portal: [] }, state: {} }; if (!el) open(null); P.res = compare(S); paint(); } } };
+  window.lbPaperwork = { open: open, openDay: openDay, _t0: 1, _t: { dayGroup: function(p){ return dayGroup(p); }, setReader: function(f){ readOne = f; }, compare: compare, buildRecord: buildRecord, saveRecord: saveRecord, recs: recs, csv: csv, norm: norm, fromDockets: fromDockets, merge: merge, show: function(S){ P = P || { id: null, files: { dockets: [], sheet: [], portal: [] }, state: {} }; if (!el) open(null); P.res = compare(S); paint(); } } };
 })();
 
 /* round 50: Check the paperwork from the menus, so it does not need a shift. Home gets a row under "Issues today" and the side menu gets
