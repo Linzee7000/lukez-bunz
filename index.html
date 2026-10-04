@@ -31144,11 +31144,12 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var s = clockState(), now = Date.now();
     // a fresh trail for the shift: whatever was driven before it started isn't part of it
     try { var clr = g('clearSnailTrail'); if (typeof clr === 'function') clr(); } catch (e) {}
-    SH = { id: 's_' + uid(), start: now, stream: o.stream || '', run: o.run || '', day: o.run ? todayDay() : '', week: o.run ? todayWeek(o.stream) : '', driver: o.driver || '', truck: o.truck || '', rego: o.rego || '', startKm: o.km, startHrs: o.hrs, startPhoto: o.photo || null,
+    SH = { id: 's_' + uid(), start: now, stream: o.stream || '', run: o.run || '', day: o.run ? todayDay() : '', week: o.run ? todayWeek(o.stream) : '', driver: o.driver || '', emp: o.emp || '', truck: o.truck || '', rego: o.rego || '', startKm: o.km, startHrs: o.hrs, startPhoto: o.photo || null,
       prestart: o.prestart || null, defects: [], dist: 0, bins: 0, binTs: [], auto: !!o.auto, synced: false, legs: [], leg: null, truckChanges: [] };
     SH.leg = SH.run ? newLeg(SH.stream, SH.run, SH.day, SH.week) : null;
     if (o.auto && s && s.start) SH.start = s.start;
     saveSh();
+    try { recordReading(SH.truck, o.km, o.hrs); } catch (e) {}
     try { if (window.lbBreakClock && window.lbBreakClock.resetStart) window.lbBreakClock.resetStart(SH.start); } catch (e) {}
     resetCounters();
   }
@@ -31172,6 +31173,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     delete rec.binTs;
     rec.trail = saveTrail(rec);
     var h = history(); h.push(rec); lsSet('lbShiftHistory', h.slice(-90));
+    try { recordReading(rec.truck, o.km, o.hrs); } catch (e) {}
     SH = null; saveSh();
     try { if (window.lbBreakClock && window.lbBreakClock.endShift) window.lbBreakClock.endShift(); } catch (e) {}
     return rec;
@@ -31474,7 +31476,38 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   window.lbFleetInfo = function(unit){ return FLEET_INFO[String(unit || '').trim()] || ''; };
   window.lbFleetUse = function(unit){ return FLEET_USE[String(unit || '').trim()] || ''; };
   window.lbFleetRego = function(unit){ var k = String(unit || '').trim().toLowerCase(), rg = lsGet('lbRegos', {}) || {}; return rg[k] || FLEET[k] || ''; };
-  function newDraft(){ var d = me(), rg = lsGet('lbRegos', {}) || {}; draft = draft || { driver: d.name || '', truck: d.truck || '', rego: rg[String(d.truck || '').toLowerCase()] || '', km: '', hrs: '', photo: null, checks: {}, stream: streamForTruck(d.truck) }; }
+  function newDraft(){ var d = me(), rg = lsGet('lbRegos', {}) || {}; draft = draft || { driver: d.name || '', emp: d.emp || '', truck: d.truck || '', rego: rg[String(d.truck || '').toLowerCase()] || '', km: '', hrs: '', photo: null, checks: {}, stream: streamForTruck(d.truck) };
+    if (!draft._ap) { draft._ap = 1; applyLast(draft); } refreshLast(); }
+  /* The last odometer / engine hours for a truck - the newest of this phone's own and what other phones sent
+     (kind 'truckReading' places, pulled with the fleet's places), so the next driver starts from where the last
+     one finished. */
+  window.lbTruckLast = function(unit){
+    var k = String(unit || '').trim().toLowerCase(); if (!k) return null;
+    var a = (lsGet('lbTruckReadings', {}) || {})[k], b = (lsGet('lbTruckReadingsFleet', {}) || {})[k];
+    return (a && b) ? ((b.ts || 0) > (a.ts || 0) ? b : a) : (a || b || null);
+  };
+  function recordReading(unit, km, hrs){
+    unit = String(unit || '').trim(); if (!unit || (km == null && hrs == null)) return;
+    var k = unit.toLowerCase(), all = lsGet('lbTruckReadings', {}) || {}, prev = window.lbTruckLast(unit) || {};
+    var rec = { id: 'truck_' + k.replace(/[^a-z0-9]/g, ''), kind: 'truckReading', unit: unit, km: km != null ? km : (prev.km == null ? null : prev.km), hrs: hrs != null ? hrs : (prev.hrs == null ? null : prev.hrs), ts: Date.now(), driver: (SH && SH.driver) || me().name || '' };
+    all[k] = rec; lsSet('lbTruckReadings', all);
+    try { if (window.lbOutbox && window.lbOutbox.sendPlace) window.lbOutbox.sendPlace(rec); } catch (e) {}
+  }
+  function applyLast(d){
+    var L = d && d.truck ? window.lbTruckLast(d.truck) : null; if (!L) return;
+    if (!d.kmT && L.km != null) d.km = String(L.km);
+    if (!d.hrsT && L.hrs != null) d.hrs = String(L.hrs);
+  }
+  var lastPull = 0;
+  function refreshLast(){
+    if (Date.now() - lastPull < 45000) return; lastPull = Date.now();
+    try { var pr = window.lbOutbox && window.lbOutbox.pullPlaces && window.lbOutbox.pullPlaces();
+      if (pr && pr.then) pr.then(function(){ if (draft && !SH) { var b4 = draft.km + '|' + draft.hrs; applyLast(draft); if (b4 !== draft.km + '|' + draft.hrs) paint(); } }); } catch (e) {}
+  }
+  function lastHint(o){
+    var L = o && o.truck ? window.lbTruckLast(o.truck) : null; if (!L) return '';
+    return '<div class="drv-hint2 uxl-last">Last on ' + esc(o.truck) + ': ' + (L.km != null ? esc(L.km) + ' km' : '') + (L.hrs != null ? ' \u00b7 ' + esc(L.hrs) + ' h' : '') + (L.driver ? ' \u00b7 ' + esc(L.driver) : '') + (L.ts ? ' \u00b7 ' + esc(dateStr(L.ts)) : '') + '</div>';
+  }
   var brakeDraft = null, dashDraft = null, brakeRes = null, pendingEnd = false;
   function newBrake(why){
     var lb = lastBrake(SH && SH.truck || me().truck), p = lb ? lb.vals.map(String) : null;   /* keep last week's three numbers; change them if the dash reads different */
@@ -31508,7 +31541,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       }).join('') + '</div>';
   }
   function readingsHtml(o, pre){
-    return '<div class="drv-row2">' + field(pre + 'Km', 'Odometer (km)', o.km, 'number', 'e.g. 184320') + field(pre + 'Hrs', 'Engine hours', o.hrs, 'number', 'e.g. 9120.5') + '</div>' +
+    return '<div class="drv-row2">' + field(pre + 'Km', 'Odometer (km)', o.km, 'number', 'e.g. 184320') + field(pre + 'Hrs', 'Engine hours', o.hrs, 'number', 'e.g. 9120.5') + '</div>' + lastHint(o) +
       '<div class="drv-photo">' + (o.photo ? thumb(o.photo, true) : '') + '<button type="button" class="drv-btn" data-a="dash">' + I.cam + (o.photo ? 'Retake dash photo' : 'Photo of the dash') + '</button></div>';
   }
 
@@ -31626,12 +31659,11 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       var oosT = oosFor(dr.truck);
       var runOk = !!dr.run || (!!dr.stream && !todaysRuns(dr.stream).length);
       var ready = runOk && dr.driver.trim() && n === CHECKS.length && ((dr.km !== '' && dr.hrs !== '') || dr.photo) && (!oosT || isLead());
-      h = '<div class="drv-row2">' + field('uxsName', 'Driver', dr.driver, 'text', 'Your name') + field('uxsTruck', 'Unit number', dr.truck, 'text', 'Fleet no.') + '</div>' +
-        '<div class="drv-row2">' + field('uxsRego', 'Unit rego', dr.rego || '', 'text', 'Number plate') + '</div>' +
+      h = '<div class="drv-row2">' + field('uxsName', 'Driver', dr.driver, 'text', 'Your name') + field('uxsEmp', 'Employee number', dr.emp || '', 'text', 'Employee no.') + '</div>' +
         (oosT ? '<div class="drv-stopbox">' + I.warn + '<span><b>' + esc(oosT.truck) + ' is out of service.</b> Brakes were at ' + oosT.min + '% on ' + esc(dateStr(oosT.ts)) + '. Do not use it until the brakes are replaced and your leading hand clears it.</span></div>' : '') +
         '<div class="drv-sect"><span>Your run · ' + esc(todayDay()) + (dr.stream && todayWeek(dr.stream) ? ' · Week ' + todayWeek(dr.stream) : '') + '</span></div>' +
         runPickerHtml(dr, 'sstream', 'srun') +
-        '<div class="drv-sect"><span>Truck at the start</span></div>' + readingsHtml(dr, 'uxsS') + checksHtml(dr.checks) +
+        '<div class="drv-sect"><span>Truck info</span></div><div class="drv-row2">' + field('uxsTruck', 'Unit', dr.truck, 'text', 'Fleet no.') + field('uxsRego', 'Rego', dr.rego || '', 'text', 'Number plate') + '</div>' + readingsHtml(dr, 'uxsS') + checksHtml(dr.checks) +
         (faults.length ? '<div class="drv-warnbox">' + I.warn + '<span>' + faults.length + ' fault' + (faults.length > 1 ? 's' : '') + ': ' + esc(faults.map(function(k){ return CHK[k]; }).join(', ')) + '. Log each one as a defect (you’ll be asked after starting).</span></div>' : '') +
         '<div class="drv-foot"><button type="button" class="drv-btn" data-a="history">' + I.list + 'Past shifts</button><button type="button" class="drv-btn drv-go" data-a="start"' + (ready ? '' : ' disabled') + '>Start shift</button></div>' +
         (ready ? '' : '<div class="drv-hint">' + esc(oosT && !isLead() ? 'This truck can’t be started.' : !runOk ? 'Pick your stream and run.' : !dr.driver.trim() ? 'Put your name in.' : ((dr.km === '' || dr.hrs === '') && !dr.photo) ? 'Put in the km and hours, or take a photo of the dash.' : 'Tick every pre-start item.') + '</div>') + roleHtml();
@@ -31648,9 +31680,9 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
           : (SH.leg.pauseSince != null ? '<div class="drv-hint">Paused on Run ' + esc(SH.leg.run) + ' - stopped over a minute.</div>'
             : (legEst != null && legEst >= lr.bins + 2 ? '<div class="drv-hint">Time stopped on Run ' + esc(SH.leg.run) + ' suggests up to ~' + legEst + ' bins (' + lr.bins + ' detected) - a tightly-packed stop, like a block of units, may not all register.</div>' : ''))
       ) : '';
-      h = '<div class="drv-top">' + esc(SH.driver || '') + (SH.truck ? ' · ' + esc(SH.truck) : '') + ' · since ' + esc(clock(SH.start)) + '<button type="button" class="drv-link" data-a="changetruck">Change</button></div>' +
+      h = logTop() +
         '<div class="drv-note-top">' + (function(){ var ic = { Garbage: 'garbage', Recycling: 'recycle', SummerRecycling: 'recycle', FOGO: 'fogo' }[SH.stream], nm = (SHIFT_STREAMS.filter(function(x){ return x[0] === SH.stream; })[0] || [])[1] || SH.stream || 'No run picked'; return (ic ? '<span class="rb-sticw"><img class="icon-img" src="' + ic + '.png" alt="' + esc(nm) + '"></span>' : '<span>' + esc(nm) + '</span>') + (SH.run ? '<span class="rb-runl">' + esc(SH.run) + esc(SH.week && !/[A-Za-z]$/.test(SH.run) ? SH.week : '') + (SH.day ? ' · ' + esc(String(SH.day).slice(0, 3)) : '') + '</span>' : ''); })() + '<button type="button" class="drv-link" data-a="changerun">Change</button></div>' +
-        '<div class="drv-stats">' + '<div class="drv-stat"><b class="rb-ckb">' + ckH(rr.worked) + '</b><span>worked</span></div>' + stat(rr.km.toFixed(1), 'km') + stat(rr.bins, 'bins') +
+        logGrid() + '<div class="drv-stats">' + '<div class="drv-stat"><b class="rb-ckb">' + ckH(rr.worked) + '</b><span>worked</span></div>' + stat(rr.km.toFixed(1), 'km') + stat(rr.bins, 'bins') +
           stat((lr && lr.perKm != null) ? lr.perKm.toFixed(1) : '–', 'bins / km') + stat((lr && lr.perHr != null) ? Math.round(lr.perHr) : '–', 'bins / h') + stat(rr.recent == null ? '–' : rr.recent, 'bins / h (last 30 min)') + '</div>' +
         legHint +
         '<div class="drv-big">' + (br ? '<button type="button" class="drv-btn drv-go" data-a="work">' + I.play + 'Back to work</button>' : '<button type="button" class="drv-btn drv-rest" data-a="rest">' + I.cup + 'Start break</button>') + '</div>' +
@@ -31675,6 +31707,24 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     if (fid && $(fid)) { var ne = $(fid); ne.focus(); try { if (sel != null) ne.setSelectionRange(sel, sel); } catch (e) {} }
     hydrate(body);
   }
+  function hhmm(t){ if (!t) return ''; var d = new Date(t); return two(d.getHours()) + ':' + two(d.getMinutes()); }
+  function lcell(l, v){ return '<div class="uxl-c"><span>' + esc(l) + '</span><b>' + (v == null || v === '' ? '\u2013' : esc(v)) + '</b></div>'; }
+  function ltime(l, key){ var t = SH.log && SH.log[key]; return '<label class="uxl-c uxl-in"><span>' + esc(l) + '</span><input type="time" class="uxl-t" data-log="' + key + '" value="' + hhmm(t) + '"></label>'; }
+  function logTop(){ return '<div class="uxl-drv"><span>Driver</span><b>' + esc(SH.driver || '\u2013') + (SH.emp ? ' <em>#' + esc(SH.emp) + '</em>' : '') + '</b></div><div class="uxl-lab">Shift(s)</div>'; }
+  function logGrid(){
+    var legs = (SH.legs || []).filter(function(l){ return l && l.run; }), lh = '';
+    if (legs.length) lh = '<div class="uxl-legs">' + legs.map(function(l){ var ic = { Garbage: 'garbage', Recycling: 'recycle', SummerRecycling: 'recycle', FOGO: 'fogo' }[l.stream]; return '<span class="uxl-leg">' + (ic ? '<img class="icon-img" src="' + ic + '.png" alt="">' : '') + esc(l.run) + '</span>'; }).join('') + '</div>';
+    var br = breaksIn(SH.start, Date.now()), ob = onBreak(), r = '';
+    r += '<div class="uxl-row">' + lcell('Start time', clock(SH.start)) + lcell('Finish time', '') + '</div>';
+    for (var i = 0; i < 3; i++) { var b = br[i]; r += '<div class="uxl-row">' + lcell('Rest ' + (i + 1) + ' start', b ? clock(b.s) : '') + lcell('Rest ' + (i + 1) + ' finish', b && !(ob && i === br.length - 1) ? clock(b.e) : '') + '</div>'; }
+    r += '<div class="uxl-row">' + lcell('Truck number', SH.truck) + lcell('Rego', SH.rego) + '</div>';
+    r += '<div class="uxl-row">' + lcell('KM start', SH.startKm) + lcell('KM finish', '') + '</div>';
+    r += '<div class="uxl-row">' + lcell('Hours start', SH.startHrs) + lcell('Hours finish', '') + '</div>';
+    r += '<div class="uxl-row">' + ltime('Depart depot', 'depart') + ltime('Arrive depot', 'arrive') + '</div>';
+    r += '<div class="uxl-row">' + ltime('Breakdown start', 'bdStart') + ltime('Breakdown finish', 'bdEnd') + '</div>';
+    return lh + '<div class="uxl-grid">' + r + '</div><div class="uxl-chg"><button type="button" class="drv-link" data-a="changetruck">Change truck</button></div>';
+  }
+  window.uxShiftSetLog = function(p){ if (!SH) return false; SH.log = Object.assign(SH.log || {}, p); saveSh(); return true; };
   function stat(v, l){ return '<div class="drv-stat"><b>' + esc(v) + '</b><span>' + esc(l) + '</span></div>'; }
   function ckH(ms){ var m = Math.max(0, Math.floor(ms / 60000)), p = function(n){ return (n < 10 ? '0' : '') + n; }; return '<i class="h">' + p(Math.floor(m / 60)) + '</i><i class="m">' + p(m % 60) + '</i>'; }
   function dashListHtml(){
@@ -31723,15 +31773,15 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   function onInput(ev){
     var t = ev.target, id = t.id;
     if (view === 'main' && !SH && draft) {
-      if (id === 'uxsName') draft.driver = t.value; else if (id === 'uxsTruck') {
+      if (id === 'uxsName') draft.driver = t.value; else if (id === 'uxsEmp') draft.emp = t.value; else if (id === 'uxsTruck') {
         // fill the rego from the fleet list, unless the driver has typed their own
-        var auto = window.lbFleetRego(draft.truck); draft.truck = t.value;
+        var auto = window.lbFleetRego(draft.truck); draft.truck = t.value; applyLast(draft);
         if (!draft.rego || draft.rego === auto) { draft.rego = window.lbFleetRego(t.value); var rgEl = $('uxsRego'); if (rgEl) rgEl.value = draft.rego; }
         // the truck's usual stream is picked for them (still changeable), unless they've already chosen one
         var use = streamForTruck(t.value);
         if (use && !draft.run && draft.stream !== use) { draft.stream = use; clearTimeout(draft._pt); draft._pt = setTimeout(function(){ var f = document.activeElement, id0 = f && f.id, pos = f && f.selectionStart; paint(); var f2 = id0 && $(id0); if (f2) { f2.focus(); try { f2.setSelectionRange(pos, pos); } catch (e) {} } }, 600); }
       } else if (id === 'uxsRego') draft.rego = t.value;
-      else if (id === 'uxsSKm') draft.km = t.value; else if (id === 'uxsSHrs') draft.hrs = t.value; else return;
+      else if (id === 'uxsSKm') { draft.km = t.value; draft.kmT = true; } else if (id === 'uxsSHrs') { draft.hrs = t.value; draft.hrsT = true; } else return;
       paintSoon();
     } else if (view === 'end' && endDraft) {
       if (id === 'uxsEKm') endDraft.km = t.value; else if (id === 'uxsEHrs') endDraft.hrs = t.value; else if (id === 'uxsENote') endDraft.note = t.value; else if (id === 'uxsETruckCount') endDraft.truckBinCount = t.value;
@@ -31828,22 +31878,22 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     }
     if (a === 'start') {
       var dr = draft;
-      lsSet('lbDriver', { name: dr.driver.trim(), truck: dr.truck.trim() });
+      lsSet('lbDriver', { name: dr.driver.trim(), emp: String(dr.emp || '').trim(), truck: dr.truck.trim() });
       // The rego is remembered per unit, so the next shift on the same truck (and the accident card) fill it in.
       if (dr.truck && dr.rego) { var rgS = lsGet('lbRegos', {}) || {}; rgS[String(dr.truck).trim().toLowerCase()] = String(dr.rego).trim().toUpperCase(); lsSet('lbRegos', rgS); }
       var faults = Object.keys(dr.checks).filter(function(k){ return dr.checks[k] === 'fault'; });
-      startShift({ stream: dr.stream || '', run: dr.run || '', driver: dr.driver.trim(), truck: dr.truck.trim(), rego: String(dr.rego || '').trim().toUpperCase(), km: num(dr.km), hrs: num(dr.hrs), photo: dr.photo, prestart: { ts: Date.now(), checks: dr.checks, faults: faults } });
+      startShift({ stream: dr.stream || '', run: dr.run || '', driver: dr.driver.trim(), emp: String(dr.emp || '').trim(), truck: dr.truck.trim(), rego: String(dr.rego || '').trim().toUpperCase(), km: num(dr.km), hrs: num(dr.hrs), photo: dr.photo, prestart: { ts: Date.now(), checks: dr.checks, faults: faults } });
       draft = null; localStorage.removeItem('lbShiftNoAuto');
       if (faults.length) { view = 'defect'; newDefect(faults[0]); pendingFaults = faults.slice(1); }
       else { view = 'main'; toast('Shift started'); }
       try { openShiftRun(); } catch (e) {}
       paint(); return;
     }
-    if (a === 'prestart') { var d0 = me(); pre = { checks: {}, km: SH.startKm == null ? '' : SH.startKm, hrs: SH.startHrs == null ? '' : SH.startHrs, photo: SH.startPhoto, driver: SH.driver || d0.name || '', truck: SH.truck || d0.truck || '' }; view = 'prestart'; paintPre(); return; }
+    if (a === 'prestart') { var d0 = me(); pre = { checks: {}, km: SH.startKm == null ? '' : SH.startKm, hrs: SH.startHrs == null ? '' : SH.startHrs, photo: SH.startPhoto, driver: SH.driver || d0.name || '', emp: SH.emp || d0.emp || '', rego: SH.rego || '', truck: SH.truck || d0.truck || '' }; view = 'prestart'; paintPre(); return; }
     if (a === 'presave') {
       var fl = Object.keys(pre.checks).filter(function(k){ return pre.checks[k] === 'fault'; });
       SH.prestart = { ts: Date.now(), checks: pre.checks, faults: fl }; SH.startKm = num(pre.km); SH.startHrs = num(pre.hrs); SH.startPhoto = pre.photo;
-      SH.driver = pre.driver.trim(); SH.truck = pre.truck.trim(); lsSet('lbDriver', { name: SH.driver, truck: SH.truck }); saveSh();
+      SH.driver = pre.driver.trim(); SH.truck = pre.truck.trim(); SH.emp = String(pre.emp || '').trim(); if (pre.rego) SH.rego = String(pre.rego).trim().toUpperCase(); lsSet('lbDriver', { name: SH.driver, emp: SH.emp, truck: SH.truck }); saveSh(); try { recordReading(SH.truck, SH.startKm, SH.startHrs); } catch (e) {}
       if (fl.length) { view = 'defect'; newDefect(fl[0]); pendingFaults = fl.slice(1); } else view = 'main';
       paint(); return;
     }
@@ -31942,8 +31992,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   function paintPre(){
     var body = $('uxsBody'); $('uxsTitle').textContent = 'Pre-start check';
     var n = Object.keys(pre.checks).length, ok = n === CHECKS.length;
-    body.innerHTML = '<div class="drv-row2">' + field('uxsPName', 'Driver', pre.driver, 'text', 'Your name') + field('uxsPTruck', 'Truck', pre.truck, 'text', 'Fleet no. or rego') + '</div>' +
-      '<div class="drv-sect"><span>Truck at the start</span></div>' + readingsHtml(pre, 'uxsP') + checksHtml(pre.checks) +
+    body.innerHTML = '<div class="drv-row2">' + field('uxsPName', 'Driver', pre.driver, 'text', 'Your name') + field('uxsPEmp', 'Employee number', pre.emp || '', 'text', 'Employee no.') + '</div>' +
+      '<div class="drv-sect"><span>Truck info</span></div><div class="drv-row2">' + field('uxsPTruck', 'Unit', pre.truck, 'text', 'Fleet no.') + field('uxsPRego', 'Rego', pre.rego || '', 'text', 'Number plate') + '</div>' + readingsHtml(pre, 'uxsP') + checksHtml(pre.checks) +
       '<div class="drv-foot"><button type="button" class="drv-btn" data-a="back">Later</button><button type="button" class="drv-btn drv-go" data-a="presave"' + (ok ? '' : ' disabled') + '>Save pre-start</button></div>';
     hydrate(body);
   }
@@ -31953,7 +32003,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   document.addEventListener('input', function(ev){
     if (view !== 'prestart' || !pre || !sheet || !sheet.contains(ev.target)) return;
     var id = ev.target.id;
-    if (id === 'uxsPKm') pre.km = ev.target.value; else if (id === 'uxsPHrs') pre.hrs = ev.target.value; else if (id === 'uxsPName') pre.driver = ev.target.value; else if (id === 'uxsPTruck') pre.truck = ev.target.value;
+    if (id === 'uxsPKm') pre.km = ev.target.value; else if (id === 'uxsPHrs') pre.hrs = ev.target.value; else if (id === 'uxsPName') pre.driver = ev.target.value; else if (id === 'uxsPEmp') pre.emp = ev.target.value; else if (id === 'uxsPRego') pre.rego = ev.target.value; else if (id === 'uxsPTruck') pre.truck = ev.target.value;
   });
 
   /* ---- ticking ---- */
@@ -32261,6 +32311,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       // collection points and house driving modes shared between phones travel as places too (no lat/lng, so not pins)
       var ha = Object.keys(r.places).map(function(k){ return r.places[k]; }).filter(function(p){ return p && p.kind === 'houseAccess' && p.propId; });
       lsSet('lbHouseAccessFleet', ha);
+      var trk = {}; Object.keys(r.places).forEach(function(k){ var p = r.places[k]; if (p && p.kind === 'truckReading' && p.unit) { var uk = String(p.unit).trim().toLowerCase(); if (!trk[uk] || (p.ts || 0) > (trk[uk].ts || 0)) trk[uk] = p; } });
+      lsSet('lbTruckReadingsFleet', trk);
       // run map edits (section colours, drawn lines, notes) made on other phones: newest per run
       var rme = {};
       Object.keys(r.places).forEach(function(k){ var p = r.places[k]; if (p && p.kind === 'runMapEdit' && p.key && p.edits && (!rme[p.key] || (p.ts || 0) > (rme[p.key].ts || 0))) rme[p.key] = Object.assign({}, p.edits, { ts: p.ts || p.edits.ts || 0 }); });
@@ -32292,9 +32344,9 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
      Turn the app's records into messages
      ===================================================================== */
   function when(ts){ try { return new Date(ts || Date.now()).toLocaleString('en-AU', { weekday: 'short', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' }); } catch (e) { return ''; } }
-  function who(r){ return (r.driver || 'A driver') + (r.truck ? ' · truck ' + r.truck : ''); }
+  function who(r){ var emp = r.emp || (function(){ try { return JSON.parse(localStorage.getItem('lbDriver') || '{}').emp || ''; } catch (e) { return ''; } })(); return (r.driver || 'A driver') + (emp ? ' (employee ' + emp + ')' : '') + (r.truck ? ' · truck ' + r.truck : ''); }
   function loc(r){ return r.lat != null ? 'Location: ' + r.lat + ', ' + r.lng : 'Location: not known'; }
-  function base(r){ return { driver: r.driver || '', truck: r.truck || '', lat: r.lat == null ? null : r.lat, lng: r.lng == null ? null : r.lng, ts: r.ts }; }
+  function base(r){ return { driver: r.driver || '', emp: r.emp || (function(){ try { return JSON.parse(localStorage.getItem('lbDriver') || '{}').emp || ''; } catch (e) { return ''; } })(), truck: r.truck || '', lat: r.lat == null ? null : r.lat, lng: r.lng == null ? null : r.lng, ts: r.ts }; }
 
   function report(kind, r){
     if (!r) return null;
@@ -39492,7 +39544,11 @@ html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x) #uxShiftSummary .uxss
 html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x) #uxShiftSummary .uxss-net b,
 html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x) #uxShiftSummary .uxss-tot b,
 html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x) #lbssStart b,
-html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x) .ux-lot-unit{font-style:italic !important;font-weight:600 !important;letter-spacing:0 !important}
+html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x) .ux-lot-unit,
+html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x) #uxShift .uxl-drv b,
+html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x) #uxShift .uxl-leg,
+html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x) #uxShift .uxl-c b,
+html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x) #uxShift .uxl-c input{font-style:italic !important;font-weight:600 !important;letter-spacing:0 !important}
 
 /* no hazard stripes, no hard edges */
 html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x) .app-header::after, html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x) #mapNormalTopBar::after, html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x) .modal-box::before, html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x) .rb-hz{display:none !important}
@@ -40727,6 +40783,28 @@ html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):no
 html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) .ux-lot-unit:active{background:var(--rb-yel);color:#000}
 html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) .ux-lot-back{display:block;width:calc(100% - 30px);margin:0 0 8px;padding:9px 10px;border:var(--rb-bd);border-radius:8px;background:var(--rb-yel);color:#000;font:800 13px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;letter-spacing:.06em;text-transform:uppercase;text-align:left}
 html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) .ux-lot-multi .ux-lot-bin b{font-size:inherit}
+/* round 41: the shift log sheet on the On Shift screen */
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxShift .uxl-drv{display:flex;align-items:baseline;gap:10px;margin:2px 0 8px}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxShift .uxl-drv span, html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxShift .uxl-lab, html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxShift .uxl-c span{font:800 11px/1.3 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;letter-spacing:.1em;text-transform:uppercase;color:var(--rb-lab, #8b95a3)}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxShift .uxl-drv b{font:400 22px/1 var(--rb-font);text-transform:uppercase;color:#fff}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxShift .uxl-drv em{font-style:normal;color:var(--rb-a)}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxShift .uxl-lab{margin:4px 0 6px}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxShift .uxl-legs{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0 2px}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxShift .uxl-leg{display:inline-flex;align-items:center;gap:6px;padding:4px 10px 4px 6px;border:var(--rb-bd);border-radius:8px;background:var(--rb-bar, #111214);font:400 16px/1 var(--rb-font);color:#fff}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxShift .uxl-leg img{width:20px;height:20px;object-fit:contain}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxShift .uxl-grid{display:grid;gap:6px;margin:12px 0 4px}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxShift .uxl-row{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxShift .uxl-c{display:block;min-width:0;padding:7px 10px 8px;border:var(--rb-bd);border-radius:8px;background:var(--rb-bar, #111214)}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxShift .uxl-c b{display:block;margin-top:3px;font:400 20px/1.1 var(--rb-font);color:#fff;text-transform:uppercase;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxShift .uxl-c input{display:block;width:100%;margin-top:3px;padding:0;border:0 !important;background:none !important;font:400 20px/1.1 var(--rb-font);color:#fff !important;min-height:0 !important;-webkit-appearance:none;appearance:none}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxShift .uxl-chg{display:flex;justify-content:flex-end;margin:0 0 10px}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxShift .uxl-last{margin:-4px 0 8px}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxShift .uxl-drv span, html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxShift .uxl-lab, html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxShift .uxl-c span{color:var(--rb-lab, #8b95a3) !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxShift .uxl-drv{align-items:center;padding:0 2px}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxShift .uxl-drv b{font-size:20px;line-height:1.2}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxShift .uxl-c{padding:5px 10px 6px}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxShift .uxl-c b, html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxShift .uxl-c input{font-size:18px;margin-top:2px}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxShift .uxl-grid{gap:5px}
 </style>
 
 <script id="lb-rubbish-script">
@@ -42210,6 +42288,33 @@ document.addEventListener('click', function(ev){
     });
   }
   setInterval(function(){ try { tick(); } catch (e) {} }, 2000);
+})();
+
+/* round 41: the shift log sheet - time cells (depart / arrive depot, breakdown) and the depot times filled in
+   from the truck's position when they are still blank */
+(function(){
+  'use strict';
+  function g(n){ try { return (new Function('return typeof ' + n + ' === "undefined" ? undefined : ' + n))(); } catch (e) { return undefined; } }
+  document.addEventListener('change', function(ev){
+    var t = ev.target; if (!t || !t.classList || !t.classList.contains('uxl-t') || !window.uxShiftSetLog) return;
+    var key = t.getAttribute('data-log'), v = t.value, p = {};
+    if (!v) p[key] = null;
+    else { var m = /^(\d{1,2}):(\d{2})$/.exec(v), d = new Date(); if (!m) return; d.setHours(+m[1], +m[2], 0, 0); if (d.getTime() > Date.now() + 3600000) d.setDate(d.getDate() - 1); p[key] = d.getTime(); }
+    window.uxShiftSetLog(p);
+  });
+  function dm(a, b){ var r = Math.PI / 180, x = (b.lng - a.lng) * r * Math.cos((a.lat + b.lat) / 2 * r), y = (b.lat - a.lat) * r; return Math.sqrt(x * x + y * y) * 6371000; }
+  var atDepot = null, shiftId = '';
+  setInterval(function(){
+    try {
+      var sh = window.uxShiftState && window.uxShiftState(); if (!sh) { atDepot = null; shiftId = ''; return; }
+      if (sh.id !== shiftId) { shiftId = sh.id; atDepot = null; }
+      var dep = window.lbKnownPlaces && window.lbKnownPlaces.depot && window.lbKnownPlaces.depot(), l = g('userCurrentLocation');
+      if (!dep || !l || !isFinite(l.lat) || !isFinite(dep.lat)) return;
+      var d = dm({ lat: +l.lat, lng: +l.lng }, { lat: +dep.lat, lng: +dep.lng }), log = sh.log || {};
+      if (d <= 250) { atDepot = true; if (log.depart && !log.arrive && d <= 150 && Date.now() - log.depart > 10 * 60000) window.uxShiftSetLog({ arrive: Date.now() }); }
+      else if (atDepot && !log.depart) window.uxShiftSetLog({ depart: Date.now() });
+    } catch (e) {}
+  }, 5000);
 })();
 </script>
 
