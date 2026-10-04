@@ -42520,6 +42520,16 @@ document.addEventListener('click', function(ev){
   var USE_APP = false, P = null, el = null;
   function esc(s){ return String(s == null ? '' : s).replace(/[&<>"]/g, function(c){ return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
   function url(){ try { return localStorage.getItem('lbDocketUrl') || DOCKET_URL; } catch (e) { return DOCKET_URL; } }
+  /* Docket numbers: the website field takes digits only, and drivers often write just the last few digits on their run sheet, while the
+     docket itself prints a longer number. So numbers are kept as their last 6 digits and two numbers are "the same" when one ends with the
+     other (at least 4 digits, so a short note still finds its load). */
+  function dk6(x){ var d = String(x == null ? '' : x).replace(/\D/g, ''); return d ? d.slice(-6) : null; }
+  function sameDk(a, b){
+    a = String(a == null ? '' : a).replace(/\D/g, ''); b = String(b == null ? '' : b).replace(/\D/g, '');
+    if (!a || !b) return false; if (a === b) return true;
+    var s = a.length <= b.length ? a : b, l = a.length <= b.length ? b : a;
+    return s.length >= 4 && l.slice(-s.length) === s;
+  }
   function num(v){ if (typeof v === 'string') v = v.replace(/,/g, ''); v = parseFloat(v); return isFinite(v) ? v : null; }
   function mins(t){ var q = /^(\d{1,2}):(\d{2})$/.exec(String(t || '')); return q ? (+q[1]) * 60 + (+q[2]) : null; }
   function tidyT(t){ var m = mins(t); return m == null ? null : (m < 600 ? '0' : '') + Math.floor(m / 60) + ':' + (m % 60 < 10 ? '0' : '') + (m % 60); }
@@ -42594,7 +42604,7 @@ document.addEventListener('click', function(ev){
       Object.keys(d).forEach(function(k){ if (k !== 'loads' && k !== 'breaks' && out[k] == null && d[k] != null) out[k] = d[k]; });
       (d.breaks || []).forEach(function(b){ if (!out.breaks.some(function(x){ return x.s === b.s; })) out.breaks.push(b); });
       (d.loads || []).forEach(function(L){
-        var same = out.loads.filter(function(x){ return (x.docket && x.docket === L.docket) || (!L.docket && x.first && x.first === L.first); })[0];
+        var same = out.loads.filter(function(x){ return (x.docket && L.docket && sameDk(x.docket, L.docket)) || (!L.docket && x.first && x.first === L.first); })[0];
         if (!same) { out.loads.push(L); return; }
         // the same tip load printed on another run's sheet (the driver picked up part of it there): add the two halves together
         if (d.run != null && out.run != null && String(d.run) !== String(out.run)) {
@@ -42613,7 +42623,7 @@ document.addEventListener('click', function(ev){
       breaks: (d.breaks || []).map(function(b){ return { s: tidyT(b.s), e: tidyT(b.e) }; }).filter(function(b){ return b.s || b.e; }), loads: [] };
     (d.loads || []).forEach(function(L){
       L = L || {};
-      var r = { first: tidyT(L.first), firstKm: num(L.firstKm), last: tidyT(L.last), lastKm: num(L.lastKm), bins: num(L.bins), site: L.site || null, arrT: tidyT(L.arrT), arrW: num(L.arrW), depW: num(L.depW), depT: tidyT(L.depT), docket: L.docket != null ? String(L.docket).replace(/\D/g, '') || null : null };
+      var r = { first: tidyT(L.first), firstKm: num(L.firstKm), last: tidyT(L.last), lastKm: num(L.lastKm), bins: num(L.bins), site: L.site || null, arrT: tidyT(L.arrT), arrW: num(L.arrW), depW: num(L.depW), depT: tidyT(L.depT), docket: dk6(L.docket) };
       // weights in kg slipped through? a truck weighs tens of tonnes, not thousands
       ['arrW', 'depW'].forEach(function(k){ if (r[k] != null && r[k] > 200) r[k] = Math.round(r[k]) / 1000; });
       if (Object.keys(r).some(function(k){ return r[k] != null; })) o.loads.push(r);
@@ -42670,7 +42680,8 @@ document.addEventListener('click', function(ev){
     var have = SRC.map(function(s){ return s[0]; }).filter(function(k){ return S[k]; }), rows = [], loadRows = [];
     var pick = function(f){ var o = {}; have.forEach(function(k){ var v = f(S[k]); if (v != null) o[k] = v; }); return o; };
     var add = function(label, f, kind, into){ var r = judge(label, pick(f), kind, have.filter(function(k){ return k === 'sheet' || k === 'portal'; })); if (r) (into || rows).push(r); };
-    add('Date', function(d){ return d.date; }, 'txt'); add('Run', function(d){ return d.run; }, 'txt'); add('Driver', function(d){ return d.driver && String(d.driver).split(/[ ,]+/).filter(Boolean).sort().join(' '); }, 'txt');
+    add('Date', function(d){ return d.date; }, 'txt'); add('Run', function(d){ return d.run; }, 'txt'); var canonName = null; have.forEach(function(k){ var v = S[k] && S[k].driver; if (v && (!canonName || nameInfo(v).set.length > nameInfo(canonName).set.length)) canonName = v; });
+    add('Driver', function(d){ if (!d.driver) return null; var v = (canonName && nameMatch(d.driver, canonName)) ? canonName : d.driver; return String(v).split(/[ ,]+/).filter(Boolean).sort().join(' '); }, 'txt');
     add('Employee number', function(d){ return d.emp; }, 'txt'); add('Truck', function(d){ return d.truck; }, 'txt');
     add('Shift start', function(d){ return d.shiftStart; }, 'time'); add('Left the depot', function(d){ return d.depart; }, 'time');
     add('Back at the depot', function(d){ return d.ret; }, 'time'); add('Shift finish', function(d){ return d.shiftEnd; }, 'time');
@@ -42686,10 +42697,10 @@ document.addEventListener('click', function(ev){
     var groups = [];
     have.forEach(function(k){
       (S[k].loads || []).forEach(function(L, idx){
-        var g = L.docket ? groups.filter(function(x){ return x.docket === L.docket; })[0] : null;
+        var g = L.docket ? groups.filter(function(x){ return x.docket && sameDk(x.docket, L.docket); })[0] : null;
         if (!g && !L.docket) { var cand = groups[idx]; if (cand && !cand.by[k]) g = cand; }
         if (!g) { g = { docket: L.docket || null, by: {} }; groups.push(g); }
-        if (!g.by[k]) g.by[k] = L; if (L.docket && !g.docket) g.docket = L.docket;
+        if (!g.by[k]) g.by[k] = L; if (L.docket && (!g.docket || L.docket.length > g.docket.length)) g.docket = L.docket;
       });
     });
     groups.sort(function(a, b){ var f = function(g){ var m = null; Object.keys(g.by).forEach(function(k){ var t = mins(g.by[k].first || g.by[k].arrT); if (t != null && (m == null || t < m)) m = t; }); return m == null ? 9999 : m; }; return f(a) - f(b); });
@@ -42699,7 +42710,7 @@ document.addEventListener('click', function(ev){
       ad('Bins', function(L){ return L.bins; }, 'n'); ad('First pick up', function(L){ return L.first; }, 'time'); ad('KM at first pick up', function(L){ return L.firstKm; }, 'km');
       ad('Last pick up', function(L){ return L.last; }, 'time'); ad('KM at last pick up', function(L){ return L.lastKm; }, 'km');
       ad('Arrived at the tip', function(L){ return L.arrT; }, 'time'); ad('Weight in', function(L){ return L.arrW; }, 't');
-      ad('Weight out', function(L){ return L.depW; }, 't'); ad('Left the tip', function(L){ return L.depT; }, 'time'); ad('Docket', function(L){ return L.docket; }, 'txt');
+      ad('Weight out', function(L){ return L.depW; }, 't'); ad('Left the tip', function(L){ return L.depT; }, 'time'); ad('Docket', function(L){ return L.docket && g.docket && sameDk(L.docket, g.docket) ? g.docket : L.docket; }, 'txt');
       // a load one source has and another lacks entirely is the loudest finding of all
       var absent = have.filter(function(k){ return k !== 'app' && !g.by[k]; });
       loadRows.push({ n: gi + 1, docket: g.docket, rows: rs, absent: absent, has: Object.keys(g.by) });
@@ -42940,11 +42951,36 @@ document.addEventListener('click', function(ev){
       pump();
     });
   }
-  function surname(s){ var t = String(s || '').toLowerCase().replace(/[^a-z, ]/g, ' ').split(/[\s,]+/).filter(function(x){ return x.length > 2; }); return t; }
+  /* Drivers write nicknames on sheets and dockets. This list says who they are (a phone can add more under localStorage lbNicknames as
+     {"nick":"Full Name"}). A nickname counts as the whole name, so "Keno" matches "Oliver, Robert" on the website. */
+  var NICK = { keno: 'Robert Oliver', mgak: 'Adam Kelly', simmo: 'Mark Simmonds', bluey: 'Adam Stewart', lord: 'Adam Stewart', con: 'Conor White', ronoc: 'Conor White' };
+  try { var xn = JSON.parse(localStorage.getItem('lbNicknames') || 'null'); if (xn) Object.keys(xn).forEach(function(k){ NICK[String(k).toLowerCase()] = String(xn[k]); }); } catch (e) {}
+  function nameInfo(s){
+    var words = String(s || '').toLowerCase().replace(/[^a-z, ]/g, ' ').split(/[\s,]+/).filter(function(x){ return x.length > 2; }), set = [], n = 0;
+    words.forEach(function(w){
+      if (NICK[w]) { n += 2; String(NICK[w]).toLowerCase().split(/\s+/).forEach(function(x){ if (set.indexOf(x) < 0) set.push(x); }); }
+      else { n++; if (set.indexOf(w) < 0) set.push(w); }
+    });
+    return { set: set, n: n };
+  }
+  function surname(s){ return nameInfo(s).set; }
+  function empOf(x){ var e = String(x && x.emp != null ? x.emp : '').replace(/\D/g, ''); return e.length >= 4 ? e : ''; }
+  // two names are the same person when they share as many words as the shorter one has (a lone surname is enough; "Adam" alone is not)
+  function nameMatch(a, b){
+    var x = nameInfo(a), y = nameInfo(b); if (!x.set.length || !y.set.length) return false;
+    var shared = x.set.filter(function(t){ return y.set.indexOf(t) >= 0; }).length;
+    return shared >= Math.min(2, x.n, y.n) && shared > 0;
+  }
+  // the same driver? An employee number on both settles it either way; with one missing it comes down to the name (nicknames included)
+  function samePerson(a, b){
+    var ea = empOf(a), eb = empOf(b);
+    if (ea && eb) return ea === eb;
+    return !!(a.driver && b.driver && nameMatch(a.driver, b.driver));
+  }
   function runKey(r){ return r == null ? '' : String(r).toUpperCase().replace(/\s+/g, ''); }
   function sameSheet(a, b){
-    if (runKey(a.run) && runKey(b.run)) return runKey(a.run) === runKey(b.run) && (!a.driver || !b.driver || surname(a.driver).some(function(t){ return surname(b.driver).indexOf(t) >= 0; }));
-    return !!(a.driver && b.driver && surname(a.driver).some(function(t){ return surname(b.driver).indexOf(t) >= 0; }));
+    if (runKey(a.run) && runKey(b.run)) return runKey(a.run) === runKey(b.run) && (!a.driver || !b.driver || samePerson(a, b));
+    return samePerson(a, b);
   }
   function digitsOf(x){ return String(x == null ? '' : x).replace(/\D/g, ''); }
   function regoKey(x){ return String(x == null ? '' : x).toUpperCase().replace(/[^A-Z0-9]/g, ''); }
@@ -42969,8 +43005,8 @@ document.addEventListener('click', function(ev){
     groups.forEach(function(g){
       var h = g.sheets[0], rk = runKey(h.run), dt = h.date || null, nm = surname(h.driver || '');
       var pick = function(test){ portals.forEach(function(q){ if (!q.used && test(q.res)) { q.used = true; g.portals.push(q.res); g.pages.push(q.label); } }); };
-      if (rk) pick(function(r){ return runKey(r.run) === rk && (!dt || !r.date || r.date === dt); });
-      if (!g.portals.length && nm.length) pick(function(r){ var o = surname(r.driver || ''); return o.length && o.some(function(t){ return nm.indexOf(t) >= 0; }) && (!dt || !r.date || r.date === dt); });
+      if (rk) pick(function(r){ return runKey(r.run) === rk && !(empOf(h) && empOf(r) && empOf(h) !== empOf(r)) && (!dt || !r.date || r.date === dt); });
+      if (!g.portals.length && (nm.length || empOf(h))) pick(function(r){ return samePerson(h, r) && (empOf(h) && empOf(r) || (h.driver && r.driver)) && (!dt || !r.date || r.date === dt); });
       // what each driver wrote down, to match dockets against
       g.nums = {}; g.rego = {}; g.run = rk; g.truck = '';
       g.sheets.concat(g.portals).forEach(function(r){
@@ -42982,12 +43018,18 @@ document.addEventListener('click', function(ev){
     var learned = {}, orphan = 0, put = function(g, it){ g.dockets.push(it.d); if (g.pages.indexOf(it.label) < 0) g.pages.push(it.label); };
     var left = [];
     items.forEach(function(it){
-      var n = digitsOf(it.d.docket), hit = n ? groups.filter(function(g){ return g.nums[n]; }) : [];
+      var n = digitsOf(it.d.docket), hit = [];
+      if (n) {
+        // a driver may have written only the last few digits: keep the groups that share the longest tail with this docket
+        var best0 = 0, ov = groups.map(function(g){ var m = 0; Object.keys(g.nums).forEach(function(k){ if (sameDk(k, n)) m = Math.max(m, Math.min(k.length, n.length)); }); if (m > best0) best0 = m; return m; });
+        if (best0) hit = groups.filter(function(g, i){ return ov[i] === best0; });
+      }
       if (hit.length) { hit.forEach(function(g){ put(g, it); }); return; }
       var note = String(it.d.note || ''), toks = note.match(/[A-Za-z]*\d+[A-Za-z]*/g) || [], best = null;
       groups.forEach(function(g){
-        toks.forEach(function(tk){ var k = runKey(tk), dg = digitsOf(tk); if ((g.run && k === g.run) || (g.run && dg && dg === digitsOf(g.run) && !/[A-Za-z]/.test(g.run)) || (g.truck && dg && dg === g.truck)) best = best || g; });
+        toks.forEach(function(tk){ var k = runKey(tk), dg = digitsOf(tk); if ((g.run && k === g.run) || (g.run && dg && dg === digitsOf(g.run) && !/[A-Za-z]/.test(g.run)) || (g.truck && dg && dg === g.truck) || (dg.length >= 4 && dg === empOf(g.sheets[0]))) best = best || g; });
       });
+      if (!best && note) { var nh = groups.filter(function(g){ return g.sheets[0].driver && nameMatch(g.sheets[0].driver, note.replace(/[^A-Za-z ]/g, ' ')) && nameInfo(note.replace(/[^A-Za-z ]/g, ' ')).n > 0; }); if (nh.length === 1) best = nh[0]; }
       if (best) { var rg = regoKey(it.d.rego); if (rg) learned[rg] = best; put(best, it); return; }
       left.push(it);
     });
@@ -43016,8 +43058,8 @@ document.addEventListener('click', function(ev){
     groups.forEach(function(g){
       var h = g.sheets[0], rk = runKey(h.run), dt = h.date || null, nm = surname(h.driver || '');
       var pick = function(test){ portals.forEach(function(q){ if (!q.used && test(q.res)) { q.used = true; g.portals.push(q.res); g.pages.push(q.label); } }); };
-      if (rk) pick(function(r){ return runKey(r.run) === rk && (!dt || !r.date || r.date === dt); });
-      if (!g.portals.length && nm.length) pick(function(r){ var o = surname(r.driver || ''); return o.length && o.some(function(t){ return nm.indexOf(t) >= 0; }) && (!dt || !r.date || r.date === dt); });
+      if (rk) pick(function(r){ return runKey(r.run) === rk && !(empOf(h) && empOf(r) && empOf(h) !== empOf(r)) && (!dt || !r.date || r.date === dt); });
+      if (!g.portals.length && (nm.length || empOf(h))) pick(function(r){ return samePerson(h, r) && (empOf(h) && empOf(r) || (h.driver && r.driver)) && (!dt || !r.date || r.date === dt); });
     });
     return { groups: groups, loose: portals.filter(function(q){ return !q.used; }), orphan: orphan };
   }
@@ -43122,7 +43164,7 @@ document.addEventListener('click', function(ev){
     var V = window.lbVault, go = function(){ (typeof openInner === 'function' ? openInner : open)(null); D = { files: [], phase: 'pick', pages: [], msg: '', err: '', G: null, openG: null, cancel: false }; P.view = 'day'; paint(); };
     if (V) V.ensure().then(go, function(){}); else go();
   }
-  window.lbPaperwork = { open: open, openDay: openDay, _t0: 1, _t: { dayGroup: function(p){ return dayGroup(p); }, setReader: function(f){ readOne = f; }, compare: compare, buildRecord: buildRecord, saveRecord: saveRecord, recs: recs, csv: csv, norm: norm, fromDockets: fromDockets, merge: merge, show: function(S){ P = P || { id: null, files: { dockets: [], sheet: [], portal: [] }, state: {} }; if (!el) open(null); P.res = compare(S); paint(); } } };
+  window.lbPaperwork = { open: open, openDay: openDay, _t0: 1, _t: { nameMatch: function(a, b){ return nameMatch(a, b); }, dayGroup: function(p){ return dayGroup(p); }, setReader: function(f){ readOne = f; }, compare: compare, buildRecord: buildRecord, saveRecord: saveRecord, recs: recs, csv: csv, norm: norm, fromDockets: fromDockets, merge: merge, show: function(S){ P = P || { id: null, files: { dockets: [], sheet: [], portal: [] }, state: {} }; if (!el) open(null); P.res = compare(S); paint(); } } };
 })();
 
 /* round 50: Check the paperwork from the menus, so it does not need a shift. Home gets a row under "Issues today" and the side menu gets
