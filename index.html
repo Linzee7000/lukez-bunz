@@ -17987,9 +17987,11 @@ window.addEventListener('DOMContentLoaded', async () => {
     // While the driver has manually spun/panned the map away (see
     // armMapManualOverride), live GPS re-centring is paused rather than
     // switched off - it resumes on its own via endMapManualOverride().
-    if (mapManualOverrideActive && speedKmh >= 4) {
+    // Back to following / Track-Up as soon as the truck is really moving again: faster than 6 km/h on two fixes
+    // running (one fix alone can be GPS jitter while parked). Otherwise it comes back 5 s after the last touch.
+    if (mapManualOverrideActive && speedKmh > 6) {
       if (mapManualOverrideMoveStartTs === null) mapManualOverrideMoveStartTs = Date.now();
-      else if (Date.now() - mapManualOverrideMoveStartTs >= 2000) endMapManualOverride();
+      else if (Date.now() - mapManualOverrideMoveStartTs >= 800) endMapManualOverride();
     } else if (mapManualOverrideActive) {
       mapManualOverrideMoveStartTs = null;
     }
@@ -41456,7 +41458,7 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
           m.invalidateSize({ pan: false, animate: false });
           // following the truck: put it back in the middle of the new box now, not at the next GPS fix
           var loc = g('userCurrentLocation');
-          if (g('isTruckFollowEnabled') && loc && isFinite(loc.lat) && isFinite(loc.lng) && (loc.lat || loc.lng)) m.setView([loc.lat, loc.lng], m.getZoom(), { animate: false });
+          if (g('isTruckFollowEnabled') && !g('mapManualOverrideActive') && loc && isFinite(loc.lat) && isFinite(loc.lng) && (loc.lat || loc.lng)) m.setView([loc.lat, loc.lng], m.getZoom(), { animate: false });
         } catch (e) {}
       }, ms);
     });
@@ -44797,6 +44799,62 @@ html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x){--mn-rad:14px}
   if (mq) { if (mq.addEventListener) mq.addEventListener('change', apply); else if (mq.addListener) mq.addListener(apply); }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();
   setInterval(function(){ try { paint(); } catch (e) {} }, 500);
+})();
+</script>
+
+<style id="lb-mapfeel-style">
+/* zoomed out = looking at the run as a whole: the "street you are on" name, the house counts either side of it and the speed go */
+html:not([data-ux-skin="rubbish"]):not([data-ux-skin="speedo"]) body.lb-zoomed-out #uxStreetStrip,body.lb-zoomed-out #mapStreetOverlay,body.lb-zoomed-out #lbStreetSides,body.lb-zoomed-out #rbSpd,body.lb-zoomed-out #lbSpeedBadge,body.lb-zoomed-out .rb-side,body.lb-zoomed-out #rbSideL,body.lb-zoomed-out #rbSideR{display:none !important}
+</style>
+<script id="lb-mapfeel-script">
+/* =====================================================================
+   How the map feels under a finger.
+
+   1. Dragging a turned map. Track-Up turns #mainLeafletMap with a CSS rotate, but Leaflet works out a drag in
+      screen pixels, so on a turned map a swipe "up" slid the map off at the truck's angle (and slower, because
+      Leaflet also reads the rotated box as a scaled one). The drag is now turned back into the map's own axes,
+      so the ground follows the finger whatever way the map is pointing.
+   2. Touching the map already pauses Follow-me and Track-Up (armMapManualOverride in the main script); they
+      come back 5 s after the last touch, or once the truck is doing more than 6 km/h.
+   3. Zoomed out past street level, the current street name and the speed are hidden (body.lb-zoomed-out).
+   ===================================================================== */
+(function(){
+  'use strict';
+  function patchDrag(){
+    var L = window.L; if (!L || !L.Draggable || L.Draggable.prototype._lbRot) return !!(L && L.Draggable);
+    var orig = L.Draggable.prototype._onMove;
+    L.Draggable.prototype._lbRot = true;
+    L.Draggable.prototype._onMove = function(e){
+      try {
+        var deg = +window.mapRotationDeg || 0;
+        var el = this._element;
+        if (!(deg % 360) || !el || !el.classList || !el.classList.contains('leaflet-map-pane') || !this._startPoint) return orig.call(this, e);
+        if (e.touches && e.touches.length > 1) return orig.call(this, e);
+        var first = (e.touches && e.touches.length === 1) ? e.touches[0] : e;
+        var dx = first.clientX - this._startPoint.x, dy = first.clientY - this._startPoint.y;
+        var t = deg * Math.PI / 180, c = Math.cos(t), sn = Math.sin(t);
+        var rx = dx * c + dy * sn, ry = -dx * sn + dy * c;
+        var ps = this._parentScale || { x: 1, y: 1 };       // Leaflet divides by this; cancel it out
+        var px = this._startPoint.x + rx * (ps.x || 1), py = this._startPoint.y + ry * (ps.y || 1);
+        var fake = { type: e.type, target: e.target, srcElement: e.srcElement, clientX: px, clientY: py, timeStamp: e.timeStamp,
+          touches: e.touches ? [{ clientX: px, clientY: py, target: first.target }] : undefined,
+          preventDefault: function(){ try { e.preventDefault(); } catch (x) {} }, stopPropagation: function(){ try { e.stopPropagation(); } catch (x) {} }, originalEvent: e };
+        return orig.call(this, fake);
+      } catch (err) { return orig.call(this, e); }
+    };
+    return true;
+  }
+  if (!patchDrag()) { var iv = setInterval(function(){ if (patchDrag()) clearInterval(iv); }, 300); }
+
+  function g(n){ try { return (new Function('return typeof ' + n + ' !== "undefined" ? ' + n + ' : undefined'))(); } catch (e) { return undefined; } }
+  var hooked = null;
+  function zoomClass(){
+    var m = g('leafletMap'); if (!m) return;
+    if (hooked !== m) { hooked = m; try { m.on('zoomend', zoomClass); } catch (e) {} }
+    var z = 18; try { z = m.getZoom(); } catch (e) {}
+    document.body.classList.toggle('lb-zoomed-out', z < 16.5);
+  }
+  setInterval(zoomClass, 1500);
 })();
 </script>
 </body>
