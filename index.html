@@ -21775,6 +21775,10 @@ body.lb-on-welcome #lbDrawerTab { display: none; }
     if (!onTab && !inPanel && !isOpen) return;
     // Let the options list scroll normally; only the head area drags.
     if (inPanel && ev.target.closest('.lb-drawer-body')) return;
+    // ...and never from something you tap. A finger always moves a few pixels during a tap; on a button in the head
+    // (the run chips under the search box, the X, the search box) that was read as the start of a sideways drag, the
+    // drag cancelled the tap, and the "runs servicing this street" chips could not be pressed on a phone.
+    if (inPanel && ev.target.closest('button, input, a, label, select, #lbStreetRuns')) return;
     onStart(t.clientX, t.clientY, !!onTab);
   }, { passive: true });
 
@@ -22556,7 +22560,7 @@ body.stream-slr .lb-layers-head .icon-img { filter: brightness(0); }
       html += `<div class="lb-drawer-sect">Streets</div><div class="lb-drawer-results">` +
         r.streets.map(s => `
           <button type="button" class="lb-res-row is-street" data-lbgo="street" data-key="${esc(s.key)}">
-            <img class="icon-img" src="search.png" alt="">
+            <img class="icon-img" src="houses.png" alt="">
             <span class="lb-res-main">${esc(s.label)}
               <small>${esc(s.n)} propert${s.n === 1 ? 'y' : 'ies'}${s.suburb ? ' · ' + esc(s.suburb) : ''}</small>
             </span>
@@ -22585,9 +22589,9 @@ body.stream-slr .lb-layers-head .icon-img { filter: brightness(0); }
         r.bins.map(b => `
           <button type="button" class="lb-res-row is-address" data-lbgo="bin"
                   data-pid="${esc(String(b.site.propId || b.site.siteId || ''))}" data-serial="${esc(b.serial)}">
-            <img class="icon-img" src="bin.png" alt="">
+            <img class="icon-img" src="${({ Garbage: 'garbage.png', Recycling: 'recycle.png', SummerRecycling: 'summer.png', FOGO: 'fogo.png' })[b.stream] || 'bin.png'}" alt="">
             <span class="lb-res-main">${esc(b.serial)}
-              <small>${esc([b.size, b.stream].filter(Boolean).join(' '))} · ${esc(b.site.baseStreetLine || b.site.addressText || '')}</small>
+              <small>${esc(b.size || '')} · ${esc(b.site.baseStreetLine || b.site.addressText || '')}</small>
               ${runBadgesHtmlForSite(b.site)}
             </span>
             <span class="lb-res-go">›</span>
@@ -22599,7 +22603,7 @@ body.stream-slr .lb-layers-head .icon-img { filter: brightness(0); }
         r.props.map(s => `
           <button type="button" class="lb-res-row is-address" data-lbgo="prop"
                   data-pid="${esc(String(s.propId || s.siteId || ''))}">
-            <img class="icon-img" src="houses.png" alt="">
+            <svg class="lb-svg-ico" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true"><path d="M3 11.5 12 4l9 7.5"/><path d="M5.5 10v10h13V10"/><path d="M10 20v-6h4v6"/></svg>
             <span class="lb-res-main">${esc(s.baseStreetLine || s.addressText || '')}
               ${s.suburbLine ? `<small>${esc(s.suburbLine)}</small>` : ''}
               ${runBadgesHtmlForSite(s)}
@@ -34544,7 +34548,9 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   var S = (function(){
     var o = {}; try { o = JSON.parse(localStorage.getItem(KEY) || '{}') || {}; } catch (e) { o = {}; }
     return {
-      day: o.day || '', bins: Array.isArray(o.bins) ? o.bins : [], cash: +o.cash || 0, armour: +o.armour || 0, pk: +o.pk || 0,
+      day: o.day || '', bins: Array.isArray(o.bins) ? o.bins : [],
+      // cash is TODAY's; bank is every day before today. A save from before the bank existed held one running total: that all goes to the bank.
+      cash: (o.bank === undefined) ? 0 : (+o.cash || 0), bank: (o.bank === undefined) ? (+o.cash || 0) : (+o.bank || 0), armour: +o.armour || 0, pk: +o.pk || 0,
       found: (o.found && typeof o.found === 'object') ? o.found : {}, done: (o.done && typeof o.done === 'object') ? o.done : {},
       wasted: o.wasted || 0, healed: o.healed || 0, led: (o.led && typeof o.led === 'object') ? o.led : null,
       price: (+o.price > 0.5 && +o.price < 6) ? +o.price : 2.70,
@@ -34555,6 +34561,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   function save(){ try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) {} }
   function rollDay(){
     if (S.day === today()) return;
+    // a new day: yesterday's cash goes to the bank and the figure at the top of the screen starts again from $0
+    S.bank = (+S.bank || 0) + (+S.cash || 0); S.cash = 0; if (S.led) S.led.cash0 = 0;
     S.day = today(); S.bins = []; S.done = {}; S.armour = 0; binSet = new Set(); save();
   }
   function money(n){ return (n < 0 ? '-$' : '$') + Math.abs(Math.round(n)).toLocaleString('en-AU'); }
@@ -34741,7 +34749,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var tip = !H || H.mode === 'idle' ? 'Health: full (no shift on)'
       : H.mode === 'break' ? 'Health ' + pct + '% - on break' + (H.full ? ', break done' : ', full in ' + hm(H.left))
       : H.overdue ? 'Health empty - break overdue' : 'Health ' + pct + '% - break due in ' + hm(H.left);
-    el.parentNode.title = tip + ' · ' + txt;
+    el.parentNode.title = tip + ' · today ' + txt + ' · bank ' + money((+S.bank || 0) + S.cash);
   }
 
   // ---- pickups -----------------------------------------------------------------------------
@@ -35141,7 +35149,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       (L.fineList.length ? L.fineList.map(function(f){ return f.busted ? row('Busted', 'Past 5 stars at ' + hm2(f.t), f.amt, true) : f.reason ? row(f.reason, hm2(f.t), f.amt, true) : row('Speeding fine', f.over + ' km/h over in a ' + f.lim + ' at ' + hm2(f.t), f.amt, true); }).join('') : '<div class="uxss-none">No fines. Nice.</div>') +
       '<div class="uxss-net' + (net < 0 ? ' neg' : '') + '"><span>This shift</span><b>' + (net < 0 ? '-' : '+') + money(Math.abs(net)) + '</b></div>' +
       (ttl ? '<div class="uxss-sec">So far</div>' + row('Fines paid', 'All fines, every shift', S.fines || 0, true) + '<div class="uxss-r"><span><b>Hidden packages</b><i>' + (S.pk || 0) + ' of 100 found</i></span><em></em></div>' + '<div class="uxss-r"><span><b>Body armour</b><i>' + Math.round(S.armour || 0) + '%</i></span><em></em></div>' : '') +
-      '<div class="uxss-tot"><span>Cash now</span><b>' + money(S.cash) + '</b></div>' +
+      '<div class="uxss-tot"><span>Today</span><b>' + money(S.cash) + '</b></div>' +
+      '<div class="uxss-tot uxss-bank"><span>Bank (all days)</span><b>' + money((+S.bank || 0) + S.cash) + '</b></div>' +
       '<div class="uxss-btns"><button type="button" class="uxss-dl">Download</button><button type="button" class="uxss-ok">Done</button></div></div>';
     var el = document.createElement('div'); el.id = 'uxShiftSummary'; el.innerHTML = h;
     el.addEventListener('click', function(ev){
@@ -35180,7 +35189,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       ['Made', 'Bins emptied', L.binsN + ' x $10', L.bins], ['Made', 'Milestones and runs done', L.bonusN, L.bonus], ['Made', 'Pickups', L.pickN, L.pick],
       ['Lost', 'Diesel', L.km.toFixed(1) + ' km, ' + L.litres.toFixed(1) + ' L', -(+L.diesel.toFixed(2))]];
     (L.fineList || []).forEach(function(f){ rows.push(['Lost', f.busted ? 'Busted' : f.reason || 'Speeding fine', f.busted ? 'Past 5 stars at ' + hm2(f.t) : f.reason ? hm2(f.t) : f.over + ' km/h over in a ' + f.lim + ' at ' + hm2(f.t), -f.amt]); });
-    rows.push(['Total', 'This shift', '', +(made - lost).toFixed(2)], ['Total', 'Cash now', '', Math.round(S.cash)], ['Total', 'Hidden packages found so far', S.pk + ' of 100', '']);
+    rows.push(['Total', 'This shift', '', +(made - lost).toFixed(2)], ['Total', 'Today', '', Math.round(S.cash)], ['Total', 'Bank (all days)', '', Math.round((+S.bank || 0) + S.cash)], ['Total', 'Hidden packages found so far', S.pk + ' of 100', '']);
     var list = Array.isArray(L.got) ? L.got : [];
     if (list.length) {
       rows.push([], ['Time', 'Collected', 'Type', 'Amount ($)', 'Lat', 'Lng']);
@@ -44605,6 +44614,36 @@ html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c) #mapRunTitleText, html body.ux2:n
 html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d) #mapRunColoredBox{padding-right:calc(var(--mn-tools-w,56px) + 14px) !important;gap:8px !important}
 html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d) #mapRunColoredBox > #mapRunTitleText{order:1 !important;flex:0 0 auto !important;min-width:max-content !important;max-width:none !important;overflow:visible !important}
 html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d) #mapRunColoredBox > #rbClock{order:2 !important;position:static !important;left:auto !important;top:auto !important;transform:none !important;flex:0 1 auto !important;min-width:0 !important;overflow:hidden !important;margin:0 auto !important}
+/* the burger that sits next to every X (back to the menu): orange like the menu button everywhere else */
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e) .mn-burger{order:-1 !important;flex:none !important;width:36px !important;height:36px !important;min-width:0 !important;min-height:0 !important;margin:0 !important;padding:0 !important;display:inline-flex !important;align-items:center !important;justify-content:center !important;position:static !important;background:#f28c38 !important;color:#000 !important;border:var(--mn-bd) !important;border-color:#000 !important;border-radius:var(--mn-rad) !important;box-shadow:var(--mn-sh) !important;cursor:pointer}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e) .mn-burger svg{width:20px !important;height:20px !important;stroke:#000 !important;color:#000 !important;background:none !important;padding:0 !important;border:0 !important}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e) #lbDrawer.mn-inmenu .mn-burger{display:none !important}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e) #lbRunMap .rm-bar .mn-burger{width:40px !important;height:40px !important}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e) #lbHub .lbh-top{display:flex !important;flex-direction:row !important;align-items:center !important;justify-content:flex-start !important;gap:10px !important}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e) #lbHub .lbh-top .lbh-x{order:-1 !important;flex:none !important;width:36px !important;height:36px !important}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e) #lbHub .lbh-top b{flex:1 1 auto !important;min-width:0 !important;font-family:var(--mn-font) !important;font-weight:var(--mn-fw) !important;font-size:17px !important;text-transform:var(--mn-tr) !important}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e) #uxDaysBar .uxd-top .uxd-x{order:-1 !important}
+/* Layers / Edit & settings: the menu's search box across the top (it opens the menu's search) */
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e) :is(#lbLayers,#lbSettings) .lb-layers-head .lb-layers-title{display:none !important}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e) :is(#lbLayers,#lbSettings) .lb-layers-head{gap:8px !important;justify-content:flex-start !important}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e) .mn-hsearch{flex:1 1 auto !important;min-width:0 !important;width:auto !important;height:46px !important;min-height:0 !important;margin:0 !important;padding:0 12px !important;display:flex !important;align-items:center !important;justify-content:flex-start !important;gap:10px !important;overflow:hidden !important;text-align:left !important;font:500 15px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif !important;text-transform:none !important;letter-spacing:0 !important;background:var(--mn-bar) !important;color:var(--mn-text2) !important;border:var(--mn-bd) !important;border-radius:var(--mn-rad) !important;box-shadow:none !important;cursor:text}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e) .mn-hsearch svg{flex:none;width:22px !important;height:22px !important;color:var(--ui-accent) !important;stroke:var(--ui-accent) !important}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e) .mn-hsearch span{flex:1 1 auto;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--mn-text2) !important}
+/* "runs servicing this street" under the menu's search box: the same one-line chips */
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e) #lbStreetRuns.has-runs{display:flex !important;flex-wrap:wrap !important;align-items:center !important;gap:5px !important;padding:8px 12px !important;background:var(--mn-bg) !important;border-bottom:var(--mn-bd) !important}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e) #lbStreetRuns .lb-runs-label{flex:0 0 100% !important;margin:0 0 2px !important;color:var(--ui-accent) !important}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e) #lbStreetRuns .lb-run-chip{display:inline-flex !important;align-items:center !important;gap:4px !important;flex:0 0 auto !important;width:auto !important;min-width:0 !important;height:36px !important;min-height:0 !important;margin:0 !important;padding:0 8px 0 6px !important;white-space:nowrap !important;font-family:var(--mn-font) !important;font-size:15px !important;font-weight:var(--mn-fw) !important;line-height:1 !important;letter-spacing:0 !important;border:2px solid #000 !important;border-radius:6px !important;box-shadow:none !important;background:#ffd21f !important;color:#000 !important}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e) #lbStreetRuns .lb-run-chip :is(.icon-img,.ux-ico,svg){width:16px !important;height:16px !important;margin:0 !important;filter:brightness(0) !important;color:#000 !important}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e) #lbStreetRuns .lb-run-chip.run-gar{background:#ff4d3d !important;color:#fff !important}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e) #lbStreetRuns .lb-run-chip.run-gar .icon-img{filter:brightness(0) invert(1) !important}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e) #lbStreetRuns .lb-run-chip.run-summer{background:#f59e0b !important}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e) #lbStreetRuns .lb-run-chip.run-fog{background:#2fd16a !important}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e) #lbStreetRuns .lb-run-chip:is(.run-slg,.run-slr){background:#3b82f6 !important;color:#fff !important}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e) #lbStreetRuns .lb-run-chip:is(.run-slg,.run-slr) .icon-img{filter:brightness(0) invert(1) !important}
+/* the header clock always shows its seconds: it never shrinks; a long cash figure gets smaller lettering instead */
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d) #mapRunColoredBox > #rbClock{flex:0 0 auto !important;overflow:visible !important;min-width:max-content !important}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c) #uxHdrTools.mn-long .uxgh-cash{font-size:12px !important;letter-spacing:0 !important}
+#uxShiftSummary .uxss-bank{opacity:.85;font-size:.9em}
 /* Start shift on the map is the same button */
 #lbStartFab .mn-fi{background:var(--mn-bar) !important;color:var(--ui-accent) !important;border-right:var(--mn-bd)}
 </style>
@@ -44831,9 +44870,48 @@ html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):no
     [/^property boundaries & map detail/i, 'Property lines'],
     [/^cut imported kml routes/i, 'Cut KML to boundary']
   ];
-  function hdrRoom(){ var t = $('uxHdrTools'), b = $('mapRunColoredBox'); if (!t || !b) return; var w = Math.round(t.getBoundingClientRect().width) || 0; if (b._mnW !== w) { b._mnW = w; b.style.setProperty('--mn-tools-w', w + 'px'); } }
-  function tick(){ try { hdrRoom(); } catch (e) {} try { xs(); popups(); tiles(); if (document.body.classList.contains('lb-drawer-open')) sync(); } catch (e) {} }
-  new MutationObserver(function(){ try { xs(); popups(); tiles(); } catch (e) {} }).observe(document.body, { childList: true, subtree: true });
+  // Every panel and pop-up: the X closes it, the burger next to it goes back to the menu. (The menu itself only shows the
+  // burger while it is showing search results - there it means "back to the menu buttons".) Layers and Edit & settings
+  // also get the menu's search box across the top; tapping it opens the menu's search with the keyboard up.
+  var BURGER = SVG('<path d="M4 7h16M4 12h16M4 17h16"/>');
+  var XSEL = '#lbDrawerCloseBtn, #lbLayersCloseBtn, #lbSettingsCloseBtn, .modal-overlay .mn-head .mn-x, #lbHub .lbh-x, #uxStraySheet .uxs-x, #lbCouncilSheet .cr-x, #rbPw .rbpw-x, #lbRunMap .rm-bar [data-rm="close"]';   // (Service days keeps the map's own menu button above it)
+  function heads(){
+    var xsl = document.querySelectorAll(XSEL);
+    for (var n = 0; n < xsl.length; n++) {
+      var x = xsl[n], nx = x.nextElementSibling;
+      if (nx && nx.classList.contains('mn-burger')) continue;
+      var b = document.createElement('button'); b.type = 'button'; b.className = 'mn-burger'; b.setAttribute('aria-label', 'Menu'); b.title = 'Menu'; b.innerHTML = BURGER;
+      x.parentNode.insertBefore(b, x.nextSibling);
+    }
+    ['lbLayers', 'lbSettings'].forEach(function(id){
+      var hd = document.querySelector('#' + id + ' .lb-layers-head'); if (!hd || hd.querySelector('.mn-hsearch')) return;
+      var sb = document.createElement('button'); sb.type = 'button'; sb.className = 'mn-hsearch'; sb.setAttribute('aria-label', 'Search bin, address or street');
+      sb.innerHTML = OWN.search + '<span>Search bin, address or street</span>';
+      hd.appendChild(sb);
+    });
+    var dr = $('lbDrawer'), bd = $('lbDrawerBody');
+    if (dr && bd) dr.classList.toggle('mn-inmenu', !!$('lbMenuHub'));
+  }
+  function toMenu(focusSearch){
+    try { if (typeof window.lbOpenDrawer === 'function') window.lbOpenDrawer(); } catch (e) {}
+    var i = $('lbDrawerInput'); if (!i) return;
+    if (focusSearch) { try { i.focus(); } catch (e) {} }
+  }
+  document.addEventListener('click', function(ev){
+    var t = ev.target && ev.target.closest ? ev.target.closest('.mn-burger, .mn-hsearch') : null; if (!t) return;
+    ev.preventDefault(); ev.stopPropagation();
+    if (t.classList.contains('mn-hsearch')) { ['lbCloseLayers', 'lbCloseSettings'].forEach(function(f){ try { if (typeof window[f] === 'function') window[f](); } catch (e) {} }); toMenu(true); return; }
+    if (t.closest('#lbDrawer')) {          // in the menu: back from results (or a run picker) to the menu buttons
+      var i = $('lbDrawerInput'); if (i && i.value) { i.value = ''; try { i.dispatchEvent(new Event('input', { bubbles: true })); } catch (e) {} }
+      try { if (typeof window.lbDrawerBackToMenu === 'function') window.lbDrawerBackToMenu(); } catch (e) {}
+      return;
+    }
+    var x = t.previousElementSibling; try { if (x) x.click(); } catch (e) {}
+    setTimeout(function(){ toMenu(false); }, 140);
+  }, true);
+  function hdrRoom(){ var t = $('uxHdrTools'), b = $('mapRunColoredBox'); if (!t || !b) return; var cs = t.querySelector('.uxgh-cash'); t.classList.toggle('mn-long', !!cs && (cs.textContent || '').length > 7); var w = Math.round(t.getBoundingClientRect().width) || 0; if (b._mnW !== w) { b._mnW = w; b.style.setProperty('--mn-tools-w', w + 'px'); } }
+  function tick(){ try { hdrRoom(); } catch (e) {} try { heads(); } catch (e) {} try { xs(); popups(); tiles(); if (document.body.classList.contains('lb-drawer-open')) sync(); } catch (e) {} }
+  new MutationObserver(function(){ try { xs(); popups(); tiles(); heads(); } catch (e) {} }).observe(document.body, { childList: true, subtree: true });
   var bodyWatch = function(){ var b = $('lbDrawerBody'); if (!b) { setTimeout(bodyWatch, 500); return; }
     new MutationObserver(function(){ try { sync(); } catch (e) {} }).observe(b, { childList: true }); sync(); };
   bodyWatch();
