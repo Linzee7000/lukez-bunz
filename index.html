@@ -5138,7 +5138,7 @@ const STREET_LITTER_SERVICE_LEVELS = {"seasons":[{"key":"tourist1","label":"Tour
   // on: reversing now; init: the facing has been set at least once; stopped: stood still since the last move;
   // stopFacing/stopPos: the facing and position when it moved off; resumeN: fixes since moving off;
   // revMs: moving time spent reversing; fastN: fixes in a row at 14 km/h+
-  const lbReverseState = { on: false, init: false, stopped: false, stopFacing: 0, stopPos: null, resumeN: 0, revMs: 0, fastN: 0, lastT: 0 };
+  const lbReverseState = { on: false, init: false, stopped: false, stopFacing: 0, stopPos: null, resumeN: 0, revMs: 0, fastN: 0, lastT: 0, prov: 0, revM: 0, segM: 0, segs: 0 };
   // (A version learnt whether the phone's heading was the way it points or the way it moves, then always
   // believed it. The same phone does both - 1 Oct log: pointing where the truck faced reversing in Matthew St,
   // the way it moved reversing out of Augusta St minutes later - so it's judged afresh each time, and what
@@ -5215,7 +5215,8 @@ const STREET_LITTER_SERVICE_LEVELS = {"seasons":[{"key":"tourist1","label":"Tour
   // then the position caught up in 30-60 m leaps once it drove off. lbFrozenN counts fixes in a row at exactly
   // the same spot (a real fix always wobbles a little), and while it's frozen the phone is asked for a fresh
   // reading (see lbPokeFrozenGps).
-  let lbFrozenN = 0, lbJumpCand = null, lbSpeedReset = false;
+  let lbFrozenN = 0, lbJumpCand = null, lbSpeedReset = false, lbAbruptAt = 0;
+  window.lbGpsFrozeMoving = 0;
   function lbSpeedFromFix(pos) {
     const c = pos.coords, t = Number(pos.timestamp) || Date.now(), acc = Number(c.accuracy) || 30;
     const native = (c.speed !== null && c.speed !== undefined && !isNaN(c.speed) && c.speed >= 0) ? c.speed * 3.6 : null;
@@ -5224,6 +5225,22 @@ const STREET_LITTER_SERVICE_LEVELS = {"seasons":[{"key":"tourist1","label":"Tour
     const prev = fixes[fixes.length - 1];
     const wasFrozen = lbFrozenN >= 3;
     lbFrozenN = (prev && t > prev.t && prev.lat === c.latitude && prev.lng === c.longitude) ? lbFrozenN + 1 : 0;   // (a NEW fix at exactly the same spot)
+    // Frozen WHILE MOVING (7 Oct, two logs sent in as "I was reversing"): the truck was reversing at a steady
+    // 9-10 km/h, and the very next fix said speed 0, less than a metre on - then the exact same spot for 21 s and
+    // 85 s while it kept going, until the position caught up in 20-70 m leaps. A truck that really stops slows
+    // over a few fixes (8, 4, 1, 0 all through the same logs); one that goes from 7+ km/h to nothing within a metre
+    // and then sits on the exact same spot is the phone's GPS going to sleep, not the truck stopping. From then
+    // until the position moves again (4 minutes at most) lbGpsFrozeMoving is set (to when it began), and the
+    // "what's the hold-up?" pop-up, the long-stop list and the bins-per-hour pause all treat it as still driving.
+    // (Phones that give no speed of their own are left out: the worked-out speed lags, so it can't show this.)
+    if (prev && t > prev.t) {
+      const stepF = getDistanceMeters(prev.lat, prev.lng, c.latitude, c.longitude), still = native !== null && native < 1;
+      if (window.lbGpsFrozeMoving) {
+        if (stepF >= 1.5 || (native !== null && native >= 3) || t - window.lbGpsFrozeMoving > 240000) { window.lbGpsFrozeMoving = 0; lbAbruptAt = 0; }
+      } else if (lbSpeedLast.v >= 7 && still && stepF < 1 && t - prev.t <= 2500) lbAbruptAt = t;
+      else if (lbAbruptAt && (!still || stepF >= 1 || t - lbAbruptAt > 15000)) lbAbruptAt = 0;
+      else if (lbAbruptAt && lbFrozenN >= 3) window.lbGpsFrozeMoving = lbAbruptAt;
+    }
     let jump = false;
     lbSpeedReset = false;
     if (prev) {
@@ -17881,7 +17898,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     // "reversing" at 25 km/h+ for 3 fixes, or for over 3 minutes of moving, was really going forwards.
     if (!lbLastFixJumped) {
       const R = lbReverseState;
-      if (speedKmh < 1.5) { if (R.init) R.stopped = true; if (lbFrozenN >= 5) R.froze = true; }
+      if (speedKmh < 1.5) { if (R.init) R.stopped = true; if (lbFrozenN >= 5) R.froze = true; if (R.on && R.segM >= 8) R.segs++; R.segM = 0; }
       else if (speedKmh >= 3) {
         const native = (pos.coords.heading !== null && !isNaN(pos.coords.heading) && pos.coords.heading >= 0) ? pos.coords.heading : null;
         const off = (a, b) => Math.abs((a - b + 540) % 360 - 180);
@@ -17908,7 +17925,7 @@ window.addEventListener('DOMContentLoaded', async () => {
           // first fix, back after a long gap, or the phone catching up after the GPS froze (lbSpeedReset): the
           // truck has been somewhere unseen - 1 Oct, Augusta St: frozen 24 s while it went 37 m and turned
           // round, and the old facing made it "reverse" off at 22 km/h - so the phone's heading starts afresh
-          if (facing === null || lbSpeedReset || (gap > 20000 && speedKmh >= 10)) { next = native; R.on = moved !== null && off(moved, native) > 120; }
+          if (facing === null || lbSpeedReset || (gap > 20000 && speedKmh >= 10)) { next = native; R.on = moved !== null && off(moved, native) > 120; R.prov = 0; }   // (a facing taken on trust: unproven - see below)
           else if (swing <= (afterStop ? stopLimit : 100)) { next = native; R.on = moved !== null && off(moved, native) > 120; }
           else {
             R.on = true;
@@ -17955,6 +17972,24 @@ window.addEventListener('DOMContentLoaded', async () => {
           R.fastN = speedKmh >= 25 ? R.fastN + 1 : 0;
           R.revMs = R.on ? R.revMs + dtMs : 0;
           if (R.on && (R.fastN >= 3 || R.revMs > 180000)) { R.on = false; R.revMs = 0; R.stopPos = null; next = motion; }
+          // Two more ways a "reverse" is really the truck going forwards (7 Oct log: the GPS froze during a reverse
+          // and caught up 200 m on while the truck was STILL backing, so the phone's heading - the way it was
+          // moving - was taken as the way it faced; it stopped, drove off forwards, and that looked like an
+          // about-turn from a stop, i.e. reversing. It then "reversed" for 94 s through seven bin stops, sides
+          // swapped, until it passed 25 km/h):
+          //  - a facing taken on trust (first fix, or the GPS catching up) is UNPROVEN until the truck has gone
+          //    30 m that way or reached 20 km/h. While it is unproven, a "reverse" that goes further than the
+          //    truck ever went the trusted way (and at least 10 m) wins: that way is forwards.
+          //  - stop-start: a reverse is one move, perhaps with a pause. Moving off the same way a third time,
+          //    after two stops with 8 m or more driven before each, is collecting bins, not reversing.
+          const stepM = speedKmh / 3.6 * Math.min(dtMs, 1500) / 1000;
+          if (!R.on) { R.revM = 0; R.segM = 0; R.segs = 0; if (R.prov !== Infinity) { R.prov += stepM; if (R.prov >= 30 || speedKmh >= 20) R.prov = Infinity; } }
+          else {
+            R.revM += stepM; R.segM += stepM;
+            if ((R.prov !== Infinity && R.revM > Math.max(R.prov, 10)) || R.segs >= 2) {
+              R.on = false; R.revMs = 0; R.stopPos = null; next = motion; R.prov = R.segs >= 2 ? Infinity : R.revM; R.revM = 0; R.segM = 0; R.segs = 0;
+            }
+          }
           if (next !== null) { lastValidHeading = Math.round(next) % 360; R.init = true; }
         }
       }
@@ -17963,6 +17998,8 @@ window.addEventListener('DOMContentLoaded', async () => {
       // is only true while the truck is actually moving - 4 Oct: it stayed on through a 1-minute stop.
       const revNow = !!(R.on && Date.now() - (R.moveT || 0) < 6000);
       if (window.lbReversing !== revNow) { window.lbReversing = revNow; document.body.classList.toggle('lb-reversing', revNow); }
+      // (the latch itself: the truck last moved backwards and hasn't driven forwards since - see the stop pop-up)
+      window.lbRevLatched = !!R.on;
     }
     // If stopped or < 4 km/h, lastValidHeading remains locked to your last driving direction
     lbGpsLogAdd({ k: 'fix', t: fixT, lat: +pos.coords.latitude.toFixed(6), lng: +pos.coords.longitude.toFixed(6), acc: accuracy,
@@ -29812,7 +29849,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var dg = window.lbGpsDiag;
     if (dg && dg.at) {
       var ago = Math.round((Date.now() - dg.at) / 1000);
-      parts.push((ago > 2 ? 'last fix ' + ago + 's ago' : 'fix now') + ' · phone ' + (dg.ps == null ? '–' : Math.round(dg.ps)) + ' km/h' + (window.lbReversing ? ' · R' : ''));
+      parts.push((ago > 2 ? 'last fix ' + ago + 's ago' : 'fix now') + ' · phone ' + (dg.ps == null ? '–' : Math.round(dg.ps)) + ' km/h' + (window.lbReversing ? ' · R' : '') + (window.lbGpsFrozeMoving ? ' · GPS frozen' : ''));
     }
     try { if (typeof leafletMap !== 'undefined' && leafletMap && leafletMap.getZoom) parts.push('z' + leafletMap.getZoom()); } catch (e) {}
     el.textContent = parts.join('  ·  ');
@@ -31474,7 +31511,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       // when it isn't, and shouldn't pause the bins/hour clock either.
       if (curStop) {
         if (leg._pauseStopT0 !== curStop.t0) { leg._pauseStopT0 = curStop.t0; leg._pauseActivityAt = 0; leg._pauseBinsAtStart = SH.bins || 0; }
-        if (window.lbReversing || (SH.bins || 0) > leg._pauseBinsAtStart) { leg._pauseActivityAt = nowT; leg._pauseBinsAtStart = SH.bins || 0; }
+        if (window.lbReversing || window.lbGpsFrozeMoving || (SH.bins || 0) > leg._pauseBinsAtStart) { leg._pauseActivityAt = nowT; leg._pauseBinsAtStart = SH.bins || 0; }
       }
       var idleSince = curStop ? (leg._pauseActivityAt || curStop.t0) : null;
       if (curStop && (nowT - idleSince) > 60000) {
@@ -34676,23 +34713,55 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     armour: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2 4 5v6c0 5 3.4 9.4 8 11 4.6-1.6 8-6 8-11V5l-8-3z"/></svg>',
     pkg: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"><path d="M3 7.5 12 3l9 4.5v9L12 21l-9-4.5v-9z"/><path d="M3 7.5 12 12l9-4.5M12 12v9"/></svg>',
     item: '<b>?</b>',
+    warn: '<b>!</b>',
     heart: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 21s-7.5-4.6-9.5-9.3C1 8 3.4 4.5 7 4.5c2.1 0 3.6 1.2 5 3 1.4-1.8 2.9-3 5-3 3.6 0 6 3.5 4.5 7.2C19.5 16.4 12 21 12 21z"/></svg>'
   };
-  function feed(kind, html, colour){
-    var host = $('uxGtaFeed');
-    if (!host) { host = document.createElement('div'); host.id = 'uxGtaFeed'; host.setAttribute('aria-live', 'polite'); document.body.appendChild(host); }
-    var it = document.createElement('div');
-    it.className = 'uxgf'; if (colour) it.style.setProperty('--gf-c', colour);
-    it.innerHTML = '<span class="uxgp uxgp-' + (kind === 'heart' ? 'cash' : kind) + '">' + (ICON[kind] || '') + '</span><span>' + html + '</span>';
+  // ---- ONE card for every fine and reward ------------------------------------------------------------------
+  // There were four different pop-ups for money: lines in a feed (each skin drew them its own way, some with a
+  // background and some as bare text), a red "-$350" under the cash, a big splash across the map (Mission passed,
+  // Busted) and a sticker for hidden packages - all different sizes, and a fine often showed twice. Now every one is
+  // the same card, the same size, in the same place: the amount on a block at the left (green in, red out), what it
+  // was for beside it and the detail under that. Looks come from the skin's --mn-* tokens, like the menu tiles.
+  // Only diesel is different: it just ticks off the cash (see ticker()).
+  function card(o){
+    var host = $('lbCash');
+    if (!host) { host = document.createElement('div'); host.id = 'lbCash'; host.setAttribute('aria-live', 'polite'); document.body.appendChild(host); }
+    var it = document.createElement('div'), a = String(o.amt || '');
+    it.className = 'lbc ' + (o.neg ? 'neg' : 'pos') + (String(o.title || '').length > 20 ? ' long' : '');
+    it.innerHTML = '<span class="lbc-a' + (a.length > 8 ? ' xs' : a.length > 6 ? ' sm' : '') + '"></span><span class="lbc-b"><b class="lbc-t"></b><i class="lbc-d"></i></span>';
+    if (a) it.firstChild.textContent = a; else it.firstChild.innerHTML = o.icon || (o.neg ? ICON.warn : ICON.cash);
+    it.querySelector('.lbc-t').textContent = o.title || '';
+    if (o.detail) it.querySelector('.lbc-d').textContent = o.detail; else it.querySelector('.lbc-d').remove();
     host.appendChild(it);
     while (host.children.length > 3) host.removeChild(host.firstChild);
-    // start below the top bar, and below the stars / money stack when that's showing, so they don't overlap
+    placeCards(host);
+    setTimeout(function(){ it.classList.add('out'); setTimeout(function(){ if (it.parentNode) it.remove(); }, 400); }, o.ms || 7000);
+  }
+  // Under the title bar, in the middle of the map: below the wanted stars / diesel line when they are showing, and
+  // beside the side column (not over it) on a phone held sideways.
+  function placeCards(host){
     try {
-      var top = headerBottom() + 8, gs = $('uxGtaStack');
-      if (gs && document.body.classList.contains('ux-gta-game')) { var r = gs.getBoundingClientRect(); if (r.height > 4) top = Math.max(top, Math.round(r.bottom) + 8); }
+      var vw = window.innerWidth, left = 0, top = headerBottom() + 52, gs = $('uxGtaStack');
+      var hp = document.body.getAttribute('data-ux-screen') === 'map' ? document.querySelector('.map-header-panel') : null, r = hp && getComputedStyle(hp).display !== 'none' ? hp.getBoundingClientRect() : null;
+      if (r && r.width > 40 && r.width < vw * 0.7) { left = Math.round(r.right); top = 46; }
+      if (gs && document.body.classList.contains('ux-gta-game')) { var g2 = gs.getBoundingClientRect(); if (g2.height > 4 && g2.left < left + (vw - left) / 2 + 180) top = Math.max(top, Math.round(g2.bottom) + 8); }
       host.style.top = top + 'px';
+      host.style.left = Math.round(left + (vw - left) / 2) + 'px';
+      host.style.width = Math.min(340, vw - left - 24) + 'px';
     } catch (e) {}
-    setTimeout(function(){ if (it.parentNode) it.remove(); }, 7000);
+  }
+  // feed('cash', 'Found: couch <em>+$120</em> · detail') - the amount is the <em>, what it was for is the text before
+  // it, the detail is the text after. An <em> that is not money ("break done", "12 of 100") is part of the detail.
+  function feed(kind, html, colour){
+    var d = document.createElement('div'); d.innerHTML = html;
+    var em = d.querySelector('em'), amt = em ? (em.textContent || '').trim() : '', isMoney = /^[+\-\u2212]\s*\$?\d/.test(amt);
+    var before = '', after = '', node = d.firstChild;
+    while (node && node !== em) { before += node.textContent || ''; node = node.nextSibling; }
+    if (em) { node = em.nextSibling; while (node) { after += node.textContent || ''; node = node.nextSibling; } }
+    before = before.replace(/[\s:\-\u00b7]+$/, '').trim(); after = after.replace(/^[\s\u00b7\-]+/, '').trim();
+    if (em && !isMoney) { after = (amt + (after ? ' \u00b7 ' + after : '')).trim(); amt = ''; }
+    var neg = kind === 'miss' || /^[\-\u2212]/.test(amt) || /\bfine|fined\b/i.test(before);
+    card({ amt: amt, neg: neg, title: before, detail: after, icon: neg ? ICON.warn : (ICON[kind] || ICON.cash) });
   }
   function esc(s){ return String(s).replace(/[&<>"]/g, function(c){ return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
 
@@ -34841,8 +34910,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       S.armour = Math.min(100, S.armour + 25); logGot('armour', 'Body armour +25', 0); feed('armour', 'Body armour <em>+25</em>', '#3d8fd6'); play('armour');
     } else if (p.k === 'pkg') {
       S.pk = Math.min(100, S.pk + 1); addCash(100, 'pick'); logGot('pkg', 'Hidden package ' + S.pk + ' of 100', 100);
-      feed('pkg', 'Hidden package <em>' + S.pk + ' of 100</em>', '#f0c850');
-      if (S.pk % 10 === 0) big('Hidden packages', S.pk + ' of 100 found', 'gold', 'mission'); else play('pickup');
+      feed('pkg', 'Hidden package <em>+' + money(100) + '</em> \u00b7 ' + S.pk + ' of 100 found', '#f0c850');
+      play(S.pk % 10 === 0 ? 'mission' : 'pickup');
     } else {
       var name = JUNK[Math.floor(Math.random() * JUNK.length)], val = 20 + Math.floor(Math.random() * 29) * 10;
       S.found[name] = (S.found[name] || 0) + 1; addCash(val, 'pick'); logGot('item', name, val);
@@ -34870,12 +34939,12 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       var after = S.bins.length;
       if (Math.floor(after / 100) > Math.floor(before / 100)) {
         addCash(1000, 'bonus'); logGot('bonus', Math.floor(after / 100) * 100 + ' bins', 1000);
-        big(Math.floor(after / 100) * 100 + ' bins', 'Respect +  ' + money(1000), 'gold', 'mission');
+        card({ amt: '+' + money(1000), title: Math.floor(after / 100) * 100 + ' bins', detail: 'Respect +' }); play('mission');
       }
     }
     if (runKey && !S.done[runKey]) {
       S.done[runKey] = 1; addCash(2500, 'bonus'); logGot('bonus', 'Mission passed: run ' + HT.run, 2500);
-      setTimeout(function(){ big('Mission passed', HT.run + '  ' + money(2500), 'gold', 'mission'); }, added && Math.floor(S.bins.length / 100) > Math.floor(before / 100) ? 3600 : 0);
+      setTimeout(function(){ card({ amt: '+' + money(2500), title: 'Mission passed', detail: 'Run ' + HT.run + ' done' }); play('mission'); }, added && Math.floor(S.bins.length / 100) > Math.floor(before / 100) ? 3600 : 0);
     }
     if (added || runKey) save();
   }
@@ -34992,9 +35061,6 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     S.fuelKm = km; S.fuelL += litres; S.fuelCost += cost; S.cash -= cost;
     var Lg = led(); if (Lg) { Lg.diesel += cost; Lg.km += dk; Lg.litres += litres; Lg.rate = rate; Lg.price = S.price; Lg.modes = { stop: drv.byMode.stop, town: drv.byMode.town, cruise: drv.byMode.cruise, idleH: drv.idleH }; }
     ticker('fuel', cost, 'Diesel');
-    if (Math.floor(S.fuelCost / 100) > Math.floor(before / 100)) {
-      feed('cash', 'Diesel this shift <em style="color:#ff6b6b">-' + money(S.fuelCost) + '</em> · ' + Math.round(S.fuelL) + ' L', '#e05252');
-    }
     save();
   }
   function fuelInfo(){
@@ -35103,7 +35169,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var f = 20000; W.L = 0; W.ep = null; W.since = 0; W.under = 0; W.last = Date.now();
     S.cash -= f; S.fines = (S.fines || 0) + f;
     var Lf = led(); if (Lf) { Lf.fines += f; Lf.fineList.push({ t: Date.now(), busted: true, amt: f }); }
-    save(); ticker('fine', f, 'Busted', 8000); big('Busted', 'Fined ' + money(f) + ' - wanted level cleared', 'red', 'fine', 6000);
+    save(); card({ amt: '-' + money(f), neg: true, title: 'Busted', detail: 'Wanted level cleared', ms: 8000 }); play('fine');
   }
   function wantedTick(){
     var now = Date.now(), sp = +g('currentMapSpeedKmh') || 0, lim = limitNow();
@@ -35125,7 +35191,6 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
           S.cash -= f; S.fines = (S.fines || 0) + f;
           var Lf = led(); if (Lf) { Lf.fines += f; Lf.fineList.push({ t: Date.now(), over: Math.round(ep.max), lim: ep.lim, amt: f }); }
           save();
-          ticker('fine', f, 'Speeding fine', 6000);
           feed('cash', 'Speeding fine <em style="color:#ff6b6b">-' + money(f) + '</em> · ' + Math.round(ep.max) + ' km/h over in a ' + ep.lim, '#e05252');
           play('fine');
         }
@@ -35150,7 +35215,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
           var fm = 500, lm = 'Missed ' + W.missRun + ' bins';
           S.cash -= fm; S.fines = (S.fines || 0) + fm;
           var Lm = led(); if (Lm) { Lm.fines += fm; Lm.fineList.push({ t: Date.now(), over: 0, lim: 0, amt: fm }); }
-          save(); ticker('fine', fm, lm, 6000);
+          save();
           feed('miss', lm + ' <em style="color:#ff6b6b">-' + money(fm) + '</em>', '#e05252'); play('fine');
         } else feed('miss', 'Missed 10 bins', '#e05252'); }
     }
@@ -35246,16 +35311,17 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     } catch (e) {}
   }
   // a fine from elsewhere (the stopped-truck pop-up's "checking out the hotties")
-  window.uxGtaFine = function(amt, reason){
+  window.uxGtaFine = function(amt, reason, sub){
     if (!opts().game) return false;
     S.cash -= amt; S.fines = (S.fines || 0) + amt;
     var Lf = led(); if (Lf) { Lf.fines += amt; Lf.fineList.push({ t: Date.now(), reason: reason, amt: amt }); }
-    save(); ticker('fine', amt, reason, 8000); play('fine'); return true;
+    var hot = /hotties/i.test(reason || '');
+    save(); card({ amt: '-' + money(amt), neg: true, title: hot ? 'Get back to work!' : reason, detail: hot ? reason : (sub || ''), ms: 8000 }); play('fine'); return true;
   };
   window.uxGtaReward = function(amt, reason, sub){
     if (!opts().game) return false;
     addCash(amt, 'bonus'); logGot('bonus', reason, amt);
-    feed('cash', esc(reason) + ' <em>+' + money(amt) + '</em>' + (sub ? ' · ' + esc(sub) : ''), '#f0c850'); play('cash'); save(); return true;
+    card({ amt: '+' + money(amt), title: reason, detail: sub || '' }); play('cash'); save(); return true;
   };
   window.uxGtaLastSummary = function(){ if (S.led) shiftSummary(S.led); };
   window.uxGtaBreakdown = function(){
@@ -35286,7 +35352,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     if (H && H.mode === 'work' && H.overdue && S.wasted !== H.key) {
       // Wasted hangs about (8 s, the map drained of colour meanwhile, like the game) - it's the one that
       // matters: the break is overdue.
-      S.wasted = H.key; save(); big('Wasted', 'Break overdue - take your break', 'red', 'wasted', 8000);
+      S.wasted = H.key; save(); card({ neg: true, title: 'Wasted', detail: 'Break overdue - take your break', ms: 8000 }); play('wasted');
       document.body.classList.add('ux-gta-wasted'); setTimeout(function(){ document.body.classList.remove('ux-gta-wasted'); }, 8000);
     }
     if (H && H.mode === 'break' && H.full && S.healed !== H.key) {
@@ -35309,7 +35375,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     if (pos && live.length < 3 && now - lastSpawn > nextGap) spawn(pos);
   }
   setInterval(function(){ try { tick(); } catch (e) { console.warn('GTA mode:', e); } }, 1000);
-  window.uxGta = { stats: function(){ return JSON.parse(JSON.stringify(S)); }, big: big, feed: feed, play: play, _t: { wanted: function(){ return JSON.parse(JSON.stringify(W)); }, setWanted: function(o){ Object.assign(W, o); }, raise: function(n){ raise(n); }, drv: function(){ return drv; }, driveMode: driveMode, ticker: ticker, spawn: spawn, live: function(){ return live; }, health: health, fuelRate: fuelRate, fuelInfo: fuelInfo, resetRate: function(){ rateMemo = null; } } };
+  window.uxGta = { stats: function(){ return JSON.parse(JSON.stringify(S)); }, big: big, feed: feed, card: card, play: play, _t: { wanted: function(){ return JSON.parse(JSON.stringify(W)); }, setWanted: function(o){ Object.assign(W, o); }, raise: function(n){ raise(n); }, drv: function(){ return drv; }, driveMode: driveMode, ticker: ticker, spawn: spawn, live: function(){ return live; }, health: health, fuelRate: fuelRate, fuelInfo: fuelInfo, resetRate: function(){ rateMemo = null; } } };
 })();
 
 /* =====================================================================
@@ -36864,6 +36930,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var sh = window.uxShiftState ? window.uxShiftState() : null;
     if (!sh) { stop = null; return; }
     var sp = speed(), p = here(); if (sp == null || !p) return;
+    // the phone's GPS froze while the truck was moving (lbGpsFrozeMoving, main script): not a stop
+    if (window.lbGpsFrozeMoving) { stop = null; return; }
     walkTick(sp, p);
     if (!stop) { if (sp < STOP_KMH) stop = { t0: Date.now(), lat: p.lat, lng: p.lng, done0: doneCount(), shiftId: sh.id }; return; }
     if ((sp >= GO_KMH && Date.now() - stop.t0 < 60000) || metres(stop, p) > DRIFT_M) { var s0 = stop; stop = null; beginAway(s0, sp); finish(s0); }
@@ -37145,12 +37213,16 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     //  - working a block of units, moving only 1-2m between each bin, can look like one long stop
     //    even with 8 bins flipped one after another (2 Oct).
     var servicedNow = g('servicedBinSerials'), binsNow = servicedNow ? servicedNow.size : 0;
-    if (window.lbReversing || binsNow > binsAtStopStart) { lastActivityAt = Date.now(); binsAtStopStart = binsNow; }
+    if (window.lbReversing || window.lbGpsFrozeMoving || binsNow > binsAtStopStart) { lastActivityAt = Date.now(); binsAtStopStart = binsNow; }
     if (brk) { if (shown) hide(); return; }                   // already on a break: nothing to ask
     var ms = Date.now() - (lastActivityAt || cur.t0), p = { lat: cur.lat, lng: cur.lng }, place = placeAt(p);
     var issue = document.getElementById('uxIssue'), busy = issue && issue.classList.contains('open');
     if (ms >= REST_MS && place !== 'tip' && !waved[key + '|3'] && !busy) { if (shown !== 3) show(3, { t0: cur.t0 }); return; }
-    var stage = ms >= STAGE2_S * 1000 ? 2 : ms >= STAGE1_S * 1000 ? 1 : 0;
+    // Stopped straight out of a reverse (the truck last moved backwards and has not driven forwards since): a slow
+    // reverse is exactly when the phone's GPS stops reporting movement (7 Oct: a creeping reverse read as 68 s
+    // "stopped" and this came up while the truck was still backing). The one-minute question waits for the
+    // three-minute one then.
+    var stage = ms >= STAGE2_S * 1000 ? 2 : (ms >= STAGE1_S * 1000 && !window.lbRevLatched) ? 1 : 0;
     if (!stage || place) { if (shown) hide(); return; }
     if (waved[key + '|' + stage] || busy) { if (shown === stage) hide(); return; }
     if (shown === stage) return;
@@ -41605,9 +41677,7 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
     // a hidden package picked up (the game's count of them went up)
     if (!game()) { lastPk = null; return; }
     var pk = null; try { pk = window.uxGta.stats().pk; } catch (e) {}
-    if (pk != null && lastPk != null && pk > lastPk && popKind !== 'slow') {
-      pop('pkg', '<div class="rb-pop-in"><span class="rb-k">You found a</span><b class="rb-d">Hidden package</b><em>+$100</em><small>' + pk + ' of 100</small></div>', 4500);
-    }
+    // (a hidden package comes up as the same card as every other reward - the game mode block draws it)
     lastPk = pk;
   }
 
@@ -41963,41 +42033,28 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
       // week letter, and the day comes round on its own below
       runBase = cur.replace(/\s*·\s*[A-Za-z]{3}\s*$/, ''); runMine = null;
     }
-    var want = runBase;
+    var want = runBase, alt = false;
     if (on() && runBase && /\d/.test(runBase)) {
       var day = runDay().toLowerCase(), today = DAYS[new Date().getDay()];
-      if (day && DAYS.indexOf(day) >= 0 && day !== today && Math.floor(Date.now() / 2200) % 2 === 1) {
+      alt = !!day && DAYS.indexOf(day) >= 0 && day !== today;
+      if (alt && Math.floor(Date.now() / 2200) % 2 === 1) {
         var m = runBase.match(/^(<img[^>]*>|[^\w<\s]+)\s*/), nm = day.slice(0, 3).toUpperCase();
         want = (m ? m[1] + ' ' : '') + nm;
       }
     }
     if (want !== cur) { el.innerHTML = want; runMine = el.innerHTML; } else if (runMine !== null) runMine = cur;
+    // The run and the day are different widths ("220A" / "TUE"), so swapping them made the chip grow and shrink every
+    // couple of seconds and pushed the clock and cash beside it back and forth. The chip keeps the wider of the two.
+    if (runBase !== runWFor) { runWFor = runBase; runW = 0; el.style.removeProperty('min-width'); }
+    if (alt) { var w = Math.ceil(el.getBoundingClientRect().width); if (w > runW) runW = w; if (runW && el.style.minWidth !== runW + 'px') { el.style.setProperty('min-width', runW + 'px', 'important'); el.style.setProperty('justify-content', 'center', 'important'); } }
+    else if (el.style.minWidth) { el.style.removeProperty('min-width'); el.style.removeProperty('justify-content'); runW = 0; }
   }
+  var runW = 0, runWFor = null;
   setInterval(function(){ try { runChip(); } catch (e) {} }, 400);
 
-  // ---- fines and rewards from the stop questions come up as the same cards -----------------------------------
-  // uxGtaFine (the hotties fine, the slash fine) used to only run the money ticker, which is hidden in this skin
+  // ---- fines and rewards from the stop questions (uxGtaFine / uxGtaReward draw the card themselves now) ----------
   var SLASH_NEAR_M = 200, SLASH_REWARD = 25, SLASH_FINE = 300;
   function money(n){ return '$' + Math.round(n).toLocaleString('en-US'); }
-  function escH(v){ return String(v == null ? '' : v).replace(/[&<>"]/g, function(c){ return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
-  var fineWrapped = false;
-  setInterval(function(){
-    try {
-      if (fineWrapped || typeof window.uxGtaFine !== 'function') return;
-      var orig = window.uxGtaFine; fineWrapped = true;
-      window.uxGtaFine = function(amt, reason, sub){
-        var ok = orig.apply(this, arguments);
-        try {
-          if (ok && window.uxGta && window.uxGta.feed) {
-            var title = reason, det = sub || '';
-            if (/hotties/i.test(reason || '')) { title = 'Get back to work! \uD83D\uDE02'; det = reason; }
-            window.uxGta.feed('cash', escH(title) + ' <em style="color:#ff6b6b">-' + money(amt) + '</em>' + (det ? ' \u00b7 ' + escH(det) : ''), '#e05252');
-          }
-        } catch (e) {}
-        return ok;
-      };
-    } catch (e) {}
-  }, 500);
   // "Taking a slash": near a toilet it is a toilet break (a reward); nowhere near one, it's a fine. Needs the
   // toilets the app keeps from OpenStreetMap; with none to check against it returns false and the usual note shows.
   window.rbSlash = function(name){
@@ -44490,7 +44547,9 @@ html body.ux2 #uxMapMenuQuick{display:none !important}
 /* other add-ons drop their own rows next to ours (council requests, paperwork); we have tiles for those, so the strays stay hidden */
 #lbMenuHub .mn-grid>:not(.mn-tile),#lbMenuHub #rbDrawerPaper,#lbMenuHub #lbCouncilItem{display:none !important}
 #lbDrawerBody.mn-on>:not(#lbMenuHub):is(.lb-drawer-item,[id="lbCouncilItem"],[id="rbDrawerPaper"]){display:none !important}
-#lbMenuHub .mn-today{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:8px 0 2px}
+#lbMenuHub .mn-today{display:flex;align-items:center;gap:6px;flex-wrap:nowrap;margin:8px 0 2px}
+#lbMenuHub .mn-today .mn-wk{flex:none}
+#lbMenuHub .mn-today .mn-day{flex:1 1 auto;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #lbMenuHub .mn-today .mn-day{margin-right:auto;font-family:var(--mn-font);font-size:15px;font-weight:var(--mn-fw);text-transform:var(--mn-tr);color:var(--mn-text)}
 #lbMenuHub .mn-today .mn-wk{display:inline-flex;align-items:center;gap:5px;height:28px;padding:0 8px;border:2px solid #000;border-radius:6px;color:#000;font:800 15px/1 var(--mn-font)}
 #lbMenuHub .mn-today .mn-wk .mn-msk{display:block;width:18px;height:18px;background:#000;-webkit-mask:var(--m) center / contain no-repeat;mask:var(--m) center / contain no-repeat}
@@ -44695,6 +44754,8 @@ html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e) #uxSideLaye
 @media (orientation: landscape) and (max-width: 899px), (orientation: landscape) and (hover: none){
   /* the arrow is the menu button's twin: same size, right beside it, inside the title bar (which makes room for both) */
   html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e)[data-ux-screen="map"] #mnSideTog{display:inline-flex;position:fixed;z-index:4500;left:calc(50px + env(safe-area-inset-left,0px));top:calc(4px + var(--ux-safe-t,0px));width:40px;height:44px;margin:0;padding:0;box-sizing:border-box;align-items:center;justify-content:center;background:var(--mn-tile);color:var(--mn-text);border:var(--mn-bd);border-radius:var(--mn-rad);box-shadow:var(--mn-sh);cursor:pointer}
+  /* ...and it is the map's button: with the menu, Layers, Edit & settings or a pop-up open it goes away, or it sat on top of their X and search */
+  html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:is(.lb-drawer-open,.lb-layers-open,.lb-settings-open,.mn-pop-open):not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f)[data-ux-screen="map"] #mnSideTog{display:none}
   html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e)[data-ux-screen="map"] #mnSideTog svg{width:22px;height:22px}
   html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e)[data-ux-screen="map"] #uxNavBtn{width:40px !important;height:44px !important}
   html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e) #mapNormalTopBar{padding-left:calc(96px + env(safe-area-inset-left,0px)) !important;box-sizing:border-box !important;width:100% !important;max-width:100% !important;overflow:hidden !important}
@@ -44782,6 +44843,24 @@ html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c) #uxShift .sx .drv-li>button{grid-
 html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c) #uxShift .sx .drv-li>button svg{width:18px !important;height:18px !important;color:var(--ui-accent) !important}
 /* narrow phones (under 380 px): a slimmer icon block and slightly smaller words, so a long word like PAPERWORK is not cut */
 @media (max-width:379px){html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c) :is(#lbMenuHub,#lbLayersBody,#lbSettingsBody,#uxIssue,#uxHud,#lbHub,#lbDrawerBody,#uxShift) .mn-t>.mn-ic{flex:0 0 42px !important;width:42px !important;min-width:42px !important}html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c) :is(#lbMenuHub,#lbLayersBody,#lbSettingsBody,#uxIssue,#uxHud,#lbHub,#lbDrawerBody,#uxShift) .mn-t>:not(.mn-ic):not(.lb-check){padding:0 6px !important;font-size:11.5px !important}}
+/* ---- fines and rewards: one card, one size, one place, every skin (see card() in the game mode block) ---- */
+#lbCash{position:fixed;left:50%;top:120px;z-index:29000;width:min(340px,calc(100vw - 24px));transform:translateX(-50%);display:flex;flex-direction:column;gap:6px;pointer-events:none}
+body:not(.ux-gta-game) #lbCash{display:none}
+#uxGtaFeed{display:none !important}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c) #lbCash .lbc{display:flex !important;align-items:stretch !important;width:100% !important;height:60px !important;margin:0 !important;padding:0 !important;overflow:hidden !important;background:var(--mn-tile) !important;color:var(--mn-text) !important;border:var(--mn-bd) !important;border-radius:var(--mn-rad) !important;box-shadow:var(--mn-sh),0 10px 30px rgba(0,0,0,.45) !important;animation:lbcIn .22s ease-out;transition:opacity .35s ease}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c) #lbCash .lbc.out{opacity:0}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c) #lbCash .lbc.long .lbc-d{-webkit-line-clamp:1}
+@keyframes lbcIn{from{opacity:0;transform:translateY(-10px)}to{opacity:1;transform:none}}
+@media (prefers-reduced-motion: reduce){#lbCash .lbc{animation:none !important}}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c) #lbCash .lbc-a{flex:0 0 108px !important;width:108px !important;display:flex !important;align-items:center !important;justify-content:center !important;margin:0 !important;padding:0 6px !important;overflow:hidden !important;white-space:nowrap !important;font-family:var(--mn-font) !important;font-size:22px !important;font-weight:var(--mn-fw) !important;line-height:1 !important;letter-spacing:0 !important;font-style:normal !important;background:#2fd16a !important;color:#000 !important;border:0 !important;border-right:var(--mn-bd) !important;border-radius:0 !important;text-shadow:none !important}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c) #lbCash .lbc-a.sm{font-size:18px !important}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c) #lbCash .lbc-a.xs{font-size:15px !important}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c) #lbCash .lbc.neg .lbc-a{background:#e53935 !important;color:#fff !important}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c) #lbCash .lbc-a :is(svg){width:28px !important;height:28px !important;color:inherit !important}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c) #lbCash .lbc-a b{font:inherit !important;font-size:28px !important;color:inherit !important}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c) #lbCash .lbc-b{flex:1 1 auto !important;min-width:0 !important;display:flex !important;flex-direction:column !important;justify-content:center !important;gap:3px !important;margin:0 !important;padding:0 10px !important;text-align:left !important}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c) #lbCash .lbc-t{display:-webkit-box !important;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden !important;white-space:normal !important;font-family:var(--mn-font) !important;font-size:15px !important;font-weight:var(--mn-fw) !important;line-height:1.15 !important;letter-spacing:0 !important;font-style:normal !important;text-transform:var(--mn-tr) !important;color:var(--mn-text) !important;text-shadow:none !important}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c) #lbCash .lbc-d{display:-webkit-box !important;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden !important;font:600 12px/1.2 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif !important;font-style:normal !important;letter-spacing:0 !important;text-transform:none !important;color:var(--mn-text2) !important;text-shadow:none !important}
 </style>
 <script id="lb-menus-script">
 (function(){
@@ -44814,6 +44893,7 @@ html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c) #uxShift .sx .drv-li>button svg{w
   var lastSig = '';
   function fmt(ms){ ms = Math.max(0, Math.round(ms / 1000)); var h = Math.floor(ms / 3600), m = Math.floor(ms % 3600 / 60), s = ms % 60;
     return h ? h + 'h' + String(m).padStart(2, '0') : m + ':' + String(s).padStart(2, '0'); }
+  function fmtHm(ms){ var m = Math.max(0, Math.round(ms / 60000)); return Math.floor(m / 60) + ':' + String(m % 60).padStart(2, '0'); }   // 4:26 (hours:minutes), like the break clock
   var FALL = { shift: 'truck-garbage.png', explore: 'map.png', nearby: 'navigation.png', days: 'calendar.png', runmaps: 'route.png', layers: 'layers.png', edit: 'edit.png', search: 'search.png' };
   var SVG = function(p){ return '<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" aria-hidden="true">' + p + '</svg>'; };
   var OWN = {
@@ -44853,12 +44933,12 @@ html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c) #uxShift .sx .drv-li>button svg{w
     else {
       var v = st.v, bl = 'Break', cls = '';
       if (v && v.mode === 'break') { bl = 'Back to work'; cls = 'on'; }
-      else if (v && v.mode === 'working') { if (v.remaining <= 0) { bl = 'Break due'; cls = 'warn'; } else bl = 'Break ' + fmt(v.remaining); }
-      shift = [tile('data-mn="brk"', 'brk', bl, cls), tile('data-mn="changerun"', 'changerun', 'Change run'), tile('data-mn="end"', 'end', 'End')];
+      else if (v && v.mode === 'working') { if (v.remaining <= 0) { bl = 'Break due'; cls = 'warn'; } else bl = 'Break in ' + fmtHm(v.remaining); }
+      shift = [tile('data-mn="shift"', 'shiftclock', 'Shift'), tile('data-mn="brk"', 'brk', bl, cls), tile('data-mn="changerun"', 'changerun', 'Change run'), tile('data-mn="end"', 'end', 'End shift')];
     }
     var today = '';
     try {
-      var d0 = new Date(), dn = d0.toLocaleDateString(undefined, { weekday: 'long' }) + ', ' + d0.toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+      var d0 = new Date(), dn = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][d0.getDay()] + ' ' + d0.getDate() + ' ' + ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][d0.getMonth()];   // days are three letters everywhere
       var wk = function(sel){ var e = document.querySelector('#welcomeBody .welcome-today ' + sel + ' b'); return e ? (e.textContent || '').trim().slice(0, 1).toUpperCase() : ''; };
       var chip = function(col, png, t){ return '<span class="mn-wk" style="background:' + col + '"><i class="mn-msk" style="--m:url(' + png + ')"></i>' + (t ? '<b>' + t + '</b>' : '') + '</span>'; };
       today = '<div class="mn-today"><span class="mn-day">' + dn + '</span>' + chip('#ff4d3d', 'garbage.png', '') + chip('#ffd21f', 'recycle.png', wk('.pill-rec')) + chip('#2fd16a', 'fogo.png', wk('.pill-fog')) + '</div>';
@@ -44900,25 +44980,32 @@ html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c) #uxShift .sx .drv-li>button svg{w
     if (a === 'search') { var i = $('lbDrawerInput'); if (i) { i.value = ''; try { i.focus(); } catch (e) {} } return; }
     closeAll();
     if (a === 'hotload' && window.uxOpenIssue) window.uxOpenIssue('driver', {});
+    if (a === 'shift' && window.uxShiftOpen) window.uxShiftOpen();
     if (a === 'changerun' && window.uxShiftOpen) window.uxShiftOpen('changerun');
     if (a === 'end' && window.uxShiftOpen) window.uxShiftOpen('end');
   }, true);
   // X, not a chevron, at the left of every panel
-  function xs(){ ['lbDrawerCloseBtn', 'lbLayersCloseBtn', 'lbSettingsCloseBtn'].forEach(function(id){ var b = $(id); if (b && b.textContent !== '✕') { b.textContent = '✕'; b.setAttribute('aria-label', 'Close'); b.title = 'Close'; } }); }
+  // Done ONCE per button (data-mnx), never by comparing the text: the icon swapper turns the X into its own icon, so a
+  // "is it still an X?" test failed every frame and the two rewrote each other 60 times a second - which re-ran every
+  // observer in the app and made the title bar, the bins box and open pop-ups flicker.
+  function xs(){ ['lbDrawerCloseBtn', 'lbLayersCloseBtn', 'lbSettingsCloseBtn'].forEach(function(id){ var b = $(id); if (b && !b.getAttribute('data-mnx')) { b.setAttribute('data-mnx', '1'); b.textContent = '✕'; b.setAttribute('aria-label', 'Close'); b.title = 'Close'; } }); }
   // pop-ups: the X does the job of Cancel, so Cancel goes; the "Clear all" button is just Clear; the Go button reads as Go
   function popups(){
     document.querySelectorAll('.modal-overlay .modal-box').forEach(function(box){
       var hd = box.firstElementChild;
       var xb = box.querySelector('.modal-close-btn, button[class$="-x"], button[class*="-x "], button[data-a="close"]');
-      if (xb && hd && hd.contains(xb)) { hd.classList.add('mn-head'); xb.classList.add('mn-x'); }
-      box.querySelectorAll('[class*="acts"],[class*="actions"]').forEach(function(f){ if (f.querySelector('button')) f.classList.add('mn-foot'); });
+      // add() only when the class is missing: adding one that is already there still counts as a change to the page,
+      // and this runs every second on every pop-up
+      var add = function(el, c){ if (!el.classList.contains(c)) el.classList.add(c); };
+      if (xb && hd && hd.contains(xb)) { add(hd, 'mn-head'); add(xb, 'mn-x'); }
+      box.querySelectorAll('[class*="acts"],[class*="actions"]').forEach(function(f){ if (f.querySelector('button')) add(f, 'mn-foot'); });
       var hasX = !!xb; if (!hasX) return;
       box.querySelectorAll('.modal-actions button, .mn-foot button').forEach(function(b){
         var t = (b.textContent || '').trim();
-        if (/^(cancel|close|never mind)$/i.test(t)) b.classList.add('mn-hide');
+        if (/^(cancel|close|never mind)$/i.test(t)) add(b, 'mn-hide');
         if (/^clear all$/i.test(t)) b.textContent = 'Clear';
-        if (/^(apply|apply filters)$/i.test(t)) { b.textContent = 'Go'; b.classList.add('mn-go'); }
-        if (/^(apply|apply filters|done|ok|okay|confirm|save|save changes|add|send)$/i.test(t)) b.classList.add('mn-go');
+        if (/^(apply|apply filters)$/i.test(t)) { b.textContent = 'Go'; add(b, 'mn-go'); }
+        if (/^(apply|apply filters|done|ok|okay|confirm|save|save changes|add|send)$/i.test(t)) add(b, 'mn-go');
       });
     });
   }
