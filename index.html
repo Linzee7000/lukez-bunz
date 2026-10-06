@@ -4168,6 +4168,7 @@ body:not(.dark-mode) .welcome-go-wrap {
                 <button type="button" class="map-context-btn map-settings-opt-btn map-settings-action" onclick="loadKmzForCurrentRun()"><img class="icon-img" src="add.png" alt=""> Add</button>
                 <button type="button" class="map-context-btn map-settings-opt-btn map-settings-action" onclick="openKmlEditModal()"><img class="icon-img" src="edit.png" alt=""> Edit</button>
                 <button type="button" class="map-context-btn map-settings-opt-btn map-settings-action danger" onclick="openKmlEditModal()"><img class="icon-img" src="minus.png" alt=""> Delete</button>
+                <button type="button" id="btnKmzClip" class="map-context-btn map-settings-opt-btn map-settings-action" onclick="toggleKmzClip()">✂️ Cut KML to boundary: Off</button>
                 <!-- Snail trail pause/resume + clear: moved here from the
                      old press-and-hold side-control button (see
                      toggleSnailTrailPause / confirmClearSnailTrail). The
@@ -4194,6 +4195,9 @@ body:not(.dark-mode) .welcome-go-wrap {
                 <button type="button" id="btnKerbsideRouteHeatmap" class="map-context-btn map-settings-opt-btn map-settings-action" onclick="toggleKerbsideRouteHeatmap()">🎨 Kerbside Heatmap: On</button>
                 <button type="button" id="btnStreetLitterRouteArrows" class="map-context-btn map-settings-opt-btn map-settings-action" onclick="toggleStreetLitterRouteArrows()">➡️ Street Litter Arrows: Off</button>
                 <button type="button" id="btnStreetLitterRouteHeatmap" class="map-context-btn map-settings-opt-btn map-settings-action" onclick="toggleStreetLitterRouteHeatmap()">🎨 Street Litter Heatmap: Off</button>
+              </div>
+              <div class="map-settings-option-group" id="mapSettingsGroupHub" data-group="hub">
+                <button type="button" class="map-context-btn map-settings-opt-btn map-settings-action" onclick="lbOpenBoundaryHub()"><img class="icon-img" src="boundary.png" alt=""> Run boundaries, streets and collection points</button>
               </div>
               <div class="map-settings-option-group" id="mapSettingsGroupCustomize" data-group="customize">
                 <button type="button" class="map-context-btn map-settings-opt-btn map-settings-action" onclick="openRunStyleModal()">🎨 Colours</button>
@@ -5514,6 +5518,25 @@ const STREET_LITTER_SERVICE_LEVELS = {"seasons":[{"key":"tourist1","label":"Tour
   // The imported KML/KMZ truck routes: off unless switched on (Layers > KML routes > Show KMZ runs), and
   // remembered once they have been - a lot of lines on the map for a driver who hasn't asked for them.
   // Loading a KML for a run switches them on (see the import further down), or nothing would appear.
+  // Imported KML/KMZ routes used to be cut down to the run boundary (and to ground near the run's houses), so a boundary
+  // that was drawn wrong made the line vanish. Off by default until the boundaries are sorted: the whole recorded line
+  // between the first and last bin shows. Settings > KML / KMZ files > "Cut KML to boundary".
+  let kmzClipToBoundary = (function(){ try { return localStorage.getItem('lukezBunzKmzClip') === '1'; } catch (e) { return false; } })();
+  function toggleKmzClip(){
+    kmzClipToBoundary = !kmzClipToBoundary;
+    try { localStorage.setItem('lukezBunzKmzClip', kmzClipToBoundary ? '1' : '0'); } catch (e) {}
+    paintKmzClipBtn();
+    try { renderMapData(); } catch (e) {}
+  }
+  function paintKmzClipBtn(){
+    const b = document.getElementById('btnKmzClip'); if (!b) return;
+    b.classList.toggle('active', !!kmzClipToBoundary);
+    b.innerHTML = '\u2702\uFE0F Cut KML to boundary: ' + (kmzClipToBoundary ? 'On' : 'Off');
+  }
+  window.toggleKmzClip = toggleKmzClip;
+  window.lbKmzClipOn = function(){ return !!kmzClipToBoundary; };
+  window.lbPaintKmzClipBtn = paintKmzClipBtn;
+  document.addEventListener('DOMContentLoaded', paintKmzClipBtn);
   let kmzLayersVisible = (function(){ try { return localStorage.getItem('lukezBunzKmzLayers') === '1'; } catch (e) { return false; } })();
   let mapKmzRouteLayer = null;
   let mapKmzLiftLayer = null;
@@ -5968,7 +5991,10 @@ const STREET_LITTER_SERVICE_LEVELS = {"seasons":[{"key":"tourist1","label":"Tour
     const monday = new Date(d.setDate(diff));
     monday.setHours(0, 0, 0, 0);
 
-    const diffWeeks = Math.floor((monday - BASE_WEEK_DATE) / (7 * 24 * 60 * 60 * 1000));
+    // Math.round, not floor: two Mondays at local midnight are a whole number of weeks apart except across
+    // daylight saving, where one is an hour short. floor() read that as a week less, so when DST started
+    // (Sun 4 Oct 2026) every week from then on flipped A/B in the whole app.
+    const diffWeeks = Math.round((monday - BASE_WEEK_DATE) / (7 * 24 * 60 * 60 * 1000));
     const isEven = (Math.abs(diffWeeks) % 2 === 0);
     return isEven ? BASE_RECYCLE_WEEK : (BASE_RECYCLE_WEEK === 'A' ? 'B' : 'A');
   }
@@ -8101,8 +8127,9 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
   // with incomplete setup still shows its full line instead of nothing.
   function visibleRouteSegments(coords, run, lifts){
     if(coords.length<2) return [coords];
-    const polys=kmzBoundariesForRun(run);
-    const houses=kmzHousesForRun(run);
+    // (both cuts only when "Cut KML to boundary" is on - see kmzClipToBoundary)
+    const polys=kmzClipToBoundary ? kmzBoundariesForRun(run) : [];
+    const houses=kmzClipToBoundary ? kmzHousesForRun(run) : [];
     let lo=0, hi=coords.length-1;
     if(lifts && lifts.length>=2){
       lo=nearestCoordIndex(coords,lifts[0].lat,lifts[0].lng);
@@ -13702,6 +13729,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     const week = weekHint !== undefined ? clean(weekHint).toUpperCase() : clean(activeFilterWeek || '').toUpperCase();
     return [stream, day, week, mapKey(runVal)].filter(Boolean).join('#');
   }
+  window.lbBoundaryKeyFor = boundaryKeyFor;   // for the Boundaries & streets editor
   // Pulls the plain run number back out of a composite boundary key, for
   // display purposes (alerts, filenames) — the last '#'-separated part.
   function boundaryKeyRunName(key) {
@@ -14184,12 +14212,14 @@ window.addEventListener('DOMContentLoaded', async () => {
   function lbBoundaryBase() { try { return JSON.parse(localStorage.getItem(LB_BASE_KEY) || '{}') || {}; } catch (e) { return {}; } }
   window.lbMergeBoundaries = function(server) {
     const base = lbBoundaryBase(); let added = 0, updated = 0;
+    // boundaries deleted on this device (Boundaries & streets > Delete boundary) are not filled back in from the script
+    let dead = {}; try { dead = JSON.parse(localStorage.getItem('lbBoundaryDeleted') || '{}') || {}; } catch (e) {}
     Object.keys(server || {}).forEach(k => {
       const srv = server[k]; if (!Array.isArray(srv) || srv.length < 3) return;
       const local = customRunBorders[k];
       const hasLocal = Array.isArray(local) && local.length >= 3;
       if (hasLocal && lbBorderHash(local) !== base[k]) return;       // changed here since the last sync: ours wins
-      if (!hasLocal) { customRunBorders[k] = srv; added++; }
+      if (!hasLocal) { if (dead[k]) return; customRunBorders[k] = srv; added++; }
       else if (lbBorderHash(local) !== lbBorderHash(srv)) { customRunBorders[k] = srv; updated++; }
     });
     return { added, updated };
@@ -14580,6 +14610,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     try { saveToDB('lbBoundaryExtras', ex); } catch (e) {}
     return put;
   }
+  window.lbBackupBoundariesNow = function() { return lbBackupBoundaries(); };
   async function lbBackupBoundaries() { try { await saveToDB('customRunBordersBackup', JSON.parse(JSON.stringify(customRunBorders || {}))); } catch (e) {} }
   window.lbRebuildAllBoundaries = async function(onProgress) {
     await lbBackupBoundaries();
@@ -15184,6 +15215,19 @@ window.addEventListener('DOMContentLoaded', async () => {
     const totalRoutes = existing.files.reduce((n, f) => n + f.routes.length, 0);
     const totalLifts = existing.files.reduce((n, f) => n + f.lifts.length, 0);
     customAlert(`Imported ${imported.length} file(s) for ${existing.run}: ${totalRoutes} route(s), ${totalLifts} lift(s).`);
+  };
+
+  // The houses of the run on screen (strays with a wrong-looking pin left out) and the tight outline round them.
+  // Used by "Snap to houses" on one side of a boundary (Boundaries & streets editor).
+  window.lbRunHouseOutline = function() {
+    const snapSites = [];
+    getRecordsArray().forEach(site => {
+      if (siteMatchesAllActiveFilters(site) && site.lat && site.lng && Number(site.lat) !== 0 && Number(site.lng) !== 0) snapSites.push(site);
+    });
+    const strays = lbStraySites(snapSites), pts = [];
+    snapSites.forEach(site => { if (!strays.has(site)) pts.push({ lat: Number(site.lat), lng: Number(site.lng) }); });
+    if (pts.length < 3) return null;
+    return { ring: lbTightOutline(pts), houses: pts.length, strays: strays.size };
   };
 
   // Snap active boundary directly to houses
@@ -23196,15 +23240,14 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
      sub-options are lifted up into sections of their own instead. */
   const SECTIONS = [
     { title: 'Bins & houses',   sel: '#mapSettingsGroupEdit .map-settings-opt-btn',      drop: b => !!b.dataset.subcat },
-    { title: 'Run boundary',    sel: '#mapSettingsSubGroupBoundary .map-settings-opt-btn', lead: true },
+    // Everything about run boundaries, street modes (drive in / reverse in / one side) and collection points is in one place now
+    { title: 'Boundaries & streets', sel: '#mapSettingsGroupHub .map-settings-opt-btn' },
     { title: 'Geofences',       sel: '#mapSettingsSubGroupGeofence .map-settings-opt-btn', lead: true },
     // What the Layers panel SHOWS is over there; everything here changes data.
     { title: 'KML / KMZ files', sel: '#mapSettingsGroupKml .map-settings-opt-btn',
-      drop: b => !/loadKmzForCurrentRun|openKmlEditModal/.test(b.getAttribute('onclick') || '') },
+      drop: b => !/loadKmzForCurrentRun|openKmlEditModal|toggleKmzClip/.test(b.getAttribute('onclick') || '') },
     // Colours and icons are how things look, so they live in Customize now; the property boundary
     // tools (Vicmap lots, building run boundaries, map provider) are data, so they stay here.
-    { title: 'Property boundaries', sel: '#mapSettingsGroupCustomize .map-settings-opt-btn',
-      drop: b => /openRunStyleModal/.test(b.getAttribute('onclick') || '') },
     { title: 'Which side to collect', sel: '#mapSettingsGroupBins .map-settings-opt-btn' }
   ];
 
@@ -23231,6 +23274,7 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     if (!body) return;
     sources = [];
     let html = '';
+    try { if (window.lbPaintKmzClipBtn) window.lbPaintKmzClipBtn(); } catch (e) {}
     SECTIONS.forEach(sec => {
       if (sec.lead && !document.body.classList.contains('lb-lead')) return;
       const btns = Array.from(document.querySelectorAll(sec.sel))
@@ -43294,6 +43338,706 @@ document.addEventListener('click', function(ev){
     if (window.lbPaperwork) window.lbPaperwork.openDay();
   }, true);
   setInterval(inject, 600);
+})();
+</script>
+
+<!-- =====================================================================
+     BOUNDARIES & STREETS
+     One place (Edit & settings > Boundaries & streets) for everything that used to be spread over Edit >
+     Boundary, Select, Settings > Bling and the Property boundaries screen:
+       - Run boundary tab: edit the points, snap the whole boundary or just ONE SIDE of it to houses / roads (or leave a
+         side by hand), pick several points and delete them at once, delete a boundary, add / export as KML, property lines.
+       - Streets tab: add / edit / delete Drive in, Reverse in, One side collection streets (by street name and house
+         numbers) and Collection points.
+     The boundary point editor itself replaces window.enableBoundaryVertexHandles (the map's own drag / insert handles),
+     because only it can see the editor's handles. Everything else wraps or reads globals, like the other add-ons.
+     ================================================================== -->
+<style id="lb-boundary-hub-style">
+.poly-edit-handle.lbh-sel .poly-edit-handle-dot{background:#ef4444 !important;border-color:#fff !important;transform:scale(1.45)}
+.poly-edit-handle.lbh-pin .poly-edit-handle-dot{background:#22c55e !important;border-color:#fff !important;transform:scale(1.6)}
+.poly-edit-handle.lbh-in .poly-edit-handle-dot{background:#facc15 !important;border-color:#000 !important}
+#lbHub{display:none;position:fixed;inset:0;z-index:40400;flex-direction:column;background:var(--rb-ground,#1a1b1e);color:#fff;font:600 15px/1.3 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+#lbHub.on{display:flex}
+#lbHub *{box-sizing:border-box}
+#lbHub .lbh-top{flex:none;display:flex;align-items:center;gap:10px;padding:10px 12px;background:var(--rb-bar,#111214);border-bottom:3px solid #000}
+#lbHub .lbh-top b{flex:1;font-family:var(--rb-font,inherit);font-weight:400;font-size:19px}
+#lbHub .lbh-x{width:42px;height:42px;display:flex;align-items:center;justify-content:center;font-size:24px;background:var(--rb-slab,#2a2c31);color:#fff;border:3px solid #000;border-radius:8px;box-shadow:2px 2px 0 #000}
+#lbHub .lbh-tabs{flex:none;display:flex;gap:8px;padding:10px 12px 0}
+#lbHub .lbh-tab{flex:1;height:42px;border:3px solid #000;border-radius:8px;background:var(--rb-slab,#2a2c31);color:#fff;font-weight:800;box-shadow:2px 2px 0 #000}
+#lbHub .lbh-tab.on{background:var(--ux-accent,var(--rb-yel,#ffd21f));color:#000}
+#lbHub .lbh-body{flex:1;min-height:0;overflow:auto;padding:10px 12px 40px;-webkit-overflow-scrolling:touch}
+#lbHub .lbh-h{margin:16px 2px 8px;font-size:11px;font-weight:800;letter-spacing:.1em;text-transform:uppercase;color:var(--rb-k,#b9bdc4)}
+#lbHub .lbh-card{padding:10px 12px;margin-bottom:8px;background:var(--rb-slab,#2a2c31);border:3px solid #000;border-radius:8px;box-shadow:2px 2px 0 #000}
+#lbHub .lbh-card small{display:block;margin-top:2px;font-size:12.5px;font-weight:600;color:var(--rb-k,#b9bdc4)}
+#lbHub .lbh-row{display:flex;align-items:center;gap:10px;width:100%;margin-bottom:8px;padding:11px 12px;text-align:left;background:var(--rb-slab,#2a2c31);color:#fff;border:3px solid #000;border-radius:8px;box-shadow:2px 2px 0 #000;font:inherit;font-weight:800}
+#lbHub .lbh-row .i{width:22px;text-align:center;flex:none}
+#lbHub .lbh-row .t{flex:1;min-width:0}
+#lbHub .lbh-row .t small{display:block;margin-top:1px;font-size:12px;font-weight:600;color:var(--rb-k,#b9bdc4)}
+#lbHub .lbh-row.on{border-left:8px solid var(--ux-accent,var(--rb-yel,#ffd21f))}
+#lbHub .lbh-row.danger{color:#ff8a80}
+#lbHub .lbh-row[disabled]{opacity:.45}
+#lbHub .lbh-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+#lbHub .lbh-grid .lbh-row{margin:0}
+#lbHub .lbh-g{display:flex;align-items:center;gap:10px;margin-bottom:8px;padding:10px 12px;background:var(--rb-slab,#2a2c31);border:3px solid #000;border-radius:8px;box-shadow:2px 2px 0 #000}
+#lbHub .lbh-dot{flex:none;width:14px;height:14px;border:2px solid #000;border-radius:4px}
+#lbHub .lbh-g .t{flex:1;min-width:0}
+#lbHub .lbh-g .t b{display:block;font-size:15px}
+#lbHub .lbh-g .t small{display:block;font-size:12px;font-weight:600;color:var(--rb-k,#b9bdc4);overflow-wrap:anywhere}
+#lbHub .lbh-mini{flex:none;min-width:44px;height:40px;padding:0 10px;display:inline-flex;align-items:center;justify-content:center;background:var(--rb-bar,#111214);color:#fff;border:2px solid #000;border-radius:8px;font:inherit;font-size:13px;font-weight:800}
+#lbHub .lbh-mini.danger{color:#ff8a80}
+#lbHub label.lbh-f{display:block;margin:12px 2px 6px;font-size:11px;font-weight:800;letter-spacing:.1em;text-transform:uppercase;color:var(--rb-k,#b9bdc4)}
+#lbHub input[type=text]{width:100%;height:46px;padding:0 12px;background:var(--rb-bar,#111214);color:#fff;border:3px solid #000;border-radius:8px;font:inherit;font-size:16px}
+#lbHub .lbh-seg{display:flex;gap:8px}
+#lbHub .lbh-seg button{flex:1;min-height:46px;padding:6px 8px;background:var(--rb-slab,#2a2c31);color:#fff;border:3px solid #000;border-radius:8px;font:inherit;font-size:13.5px;font-weight:800}
+#lbHub .lbh-seg button.on{background:var(--ux-accent,var(--rb-yel,#ffd21f));color:#000}
+#lbHub .lbh-prev{margin-top:10px;padding:10px 12px;background:var(--rb-bar,#111214);border:2px dashed #555;border-radius:8px;font-size:13.5px;font-weight:600;overflow-wrap:anywhere}
+#lbHub .lbh-prev .bad{color:#ff8a80}
+#lbHub .lbh-save{display:flex;gap:8px;margin-top:14px}
+#lbHub .lbh-save button{flex:1;height:48px;border:3px solid #000;border-radius:8px;font:inherit;font-weight:800;background:var(--rb-slab,#2a2c31);color:#fff;box-shadow:2px 2px 0 #000}
+#lbHub .lbh-save button.go{background:var(--ux-accent,var(--rb-yel,#ffd21f));color:#000}
+#lbHub .lbh-empty{padding:18px 8px;text-align:center;color:var(--rb-k,#b9bdc4);font-weight:600}
+</style>
+
+<script id="lb-boundary-hub-script">
+(function(){
+  'use strict';
+  var GF = {};
+  function g(n){ try { return (GF[n] || (GF[n] = new Function('return typeof ' + n + ' === "undefined" ? undefined : ' + n)))(); } catch (e) { return undefined; } }
+  function $(id){ return document.getElementById(id); }
+  function esc(v){ return String(v == null ? '' : v).replace(/[&<>"']/g, function(c){ return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+  function lsGet(k, d){ try { var v = JSON.parse(localStorage.getItem(k)); return v == null ? d : v; } catch (e) { return d; } }
+  function lsSet(k, v){ try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
+  function records(){ var r = g('siteRecords'); return Array.isArray(r) ? r : []; }
+  function redraw(){ try { if (g('leafletMap') && window.renderMapData) window.renderMapData(); } catch (e) {} }
+  function title(s){ return String(s || '').toLowerCase().replace(/\b[a-z]/g, function(c){ return c.toUpperCase(); }); }
+  var LABELS = { 'drive-reverse-out': 'Drive in · reverse out', 'reverse-in-drive-out': 'Reverse in · drive out', 'one-side-collection': 'One side collection' };
+  var COLOURS = { 'drive-reverse-out': '#f97316', 'reverse-in-drive-out': '#2563eb', 'one-side-collection': '#a855f7' };
+
+  /* ---------- house addresses: number + street name + suburb ---------- */
+  var ABBR = { ct: 'court', st: 'street', rd: 'road', ave: 'avenue', av: 'avenue', dr: 'drive', cres: 'crescent', cr: 'crescent', pde: 'parade', pl: 'place', cl: 'close', ln: 'lane', blvd: 'boulevard', hwy: 'highway', tce: 'terrace', cct: 'circuit', esp: 'esplanade', gr: 'grove', wy: 'way' };
+  function normStreet(t){
+    return String(t || '').toLowerCase().replace(/[^a-z ]/g, ' ').split(/\s+/).filter(Boolean).map(function(w){ return ABBR[w] || w; }).join(' ');
+  }
+  var addrMemo = new WeakMap();
+  function addrOf(site){
+    var m = addrMemo.get(site); if (m) return m;
+    var raw = String(site.addressText || ''), first = raw.split(',')[0].trim(), sub = String(site.suburbLine || '').replace(/\b\d{4}\b/g, '').trim();
+    if (!sub) { var parts = raw.split(','); sub = (parts[1] || '').replace(/\b\d{4}\b|\bVIC\b/gi, '').trim(); }
+    var line = first.replace(/^(unit|u|flat|apt|shop|lot)\s*/i, '').replace(/^\d+\s*\/\s*/, '');
+    var mm = line.match(/^(\d+)\s*([A-Za-z]?)\s+(.+)$/), r;
+    if (mm) r = { num: parseInt(mm[1], 10), suf: mm[2].toUpperCase(), street: mm[3].trim() };
+    else r = { num: null, suf: '', street: line };
+    r.key = normStreet(r.street); r.sub = sub.toLowerCase(); r.subLabel = title(sub);
+    r.id = String(site.propId || site.siteId || '');
+    addrMemo.set(site, r); return r;
+  }
+  function houseStreetObj(){ return window.lbHouseStreetModesObj ? window.lbHouseStreetModesObj() : null; }
+  function cpObj(){ return window.lbCollectionPointsObj ? window.lbCollectionPointsObj() : null; }
+  function saveModes(){ var o = houseStreetObj(); if (o) try { localStorage.setItem('lukezBunzHouseStreetModes', JSON.stringify(o)); } catch (e) {} }
+  function saveCps(){ var o = cpObj(); if (o) try { localStorage.setItem('lukezBunzCollectionPoints', JSON.stringify(o)); } catch (e) {} }
+  function byId(){ var m = {}; records().forEach(function(s){ m[addrOf(s).id] = s; }); return m; }
+
+  // "17, 19, 22-30" -> [17, 19, 22, 24, 26, 28, 30]. A range of two odds or two evens counts every second number.
+  function parseNumbers(txt){
+    var out = [], seen = {};
+    String(txt || '').split(/[,;\s]+/).forEach(function(t){
+      var m = t.match(/^(\d+)\s*[-–to]+\s*(\d+)$/i), a, b;
+      if (m) { a = +m[1]; b = +m[2]; if (a > b) { var x = a; a = b; b = x; } var step = (a % 2 === b % 2) ? 2 : 1; for (var n = a; n <= b && out.length < 400; n += step) if (!seen[n]) { seen[n] = 1; out.push(n); } }
+      else if (/^\d+$/.test(t)) { var v = +t; if (!seen[v]) { seen[v] = 1; out.push(v); } }
+    });
+    return out;
+  }
+  // street text may carry the suburb after a comma: "Howard Street, Shoreham"
+  function findHouses(streetTxt, whole, nums){
+    var parts = String(streetTxt || '').split(','), key = normStreet(parts[0]), sub = String(parts[1] || '').trim().toLowerCase();
+    var hits = [], found = {}, subs = {};
+    if (!key) return { hits: hits, missing: [], subs: [] };
+    records().forEach(function(s){
+      var a = addrOf(s); if (a.key !== key) return;
+      if (sub && a.sub.indexOf(sub) < 0) return;
+      subs[a.subLabel] = 1;
+      if (whole || (a.num != null && nums.indexOf(a.num) >= 0)) { hits.push(s); if (a.num != null) found[a.num] = 1; }
+    });
+    var missing = whole ? [] : nums.filter(function(n){ return !found[n]; });
+    return { hits: hits, missing: missing, subs: Object.keys(subs) };
+  }
+
+  /* ---------- shared house modes seeded from data/house-modes.json (once per "generated") ----------
+     Used to hand a fleet-wide change to street modes to every phone: the modes are written into this phone's own
+     house modes (so they can be edited / deleted here like any other) and the house-access sync shares them on. */
+  var SEED_KEY = 'lbSeedModesVer';
+  function applySeed(){
+    if (!window.lbHouseStreetModesObj || !records().length || !window.lbBordersLoaded) return false;
+    fetch('data/house-modes.json', { cache: 'no-cache' }).then(function(r){ return r.ok ? r.json() : null; }).then(function(d){
+      if (!d || !Array.isArray(d.modes)) return;
+      var ver = String(d.generated || d.version || ''), seen = ''; try { seen = localStorage.getItem(SEED_KEY) || ''; } catch (e) {}
+      if (ver && seen === ver) return;
+      var o = houseStreetObj(), miss = [], n = 0;
+      d.modes.forEach(function(m){
+        var f = findHouses(m.street + (m.suburb ? ', ' + m.suburb : ''), !!m.all, m.numbers || []);
+        f.hits.forEach(function(s){ o[addrOf(s).id] = { type: m.type, label: LABELS[m.type] || m.type, runs: m.runs && m.runs.length ? m.runs : ['ALL'] }; n++; });
+        if (f.missing.length) miss.push(title(m.street) + ' ' + f.missing.join(', '));
+      });
+      saveModes(); try { localStorage.setItem(SEED_KEY, ver); } catch (e) {}
+      redraw();
+      if (miss.length && window.customAlert) window.customAlert('Street modes were added to ' + n + ' houses. These numbers are not in the property list, so they were skipped: ' + miss.join('; ') + '.');
+    }).catch(function(){});
+    return true;
+  }
+  (function seedWait(){ var tries = 0, t = setInterval(function(){ tries++; if (applySeed() || tries > 120) clearInterval(t); }, 2500); })();
+
+  /* ====================================================================================================
+     RUN BOUNDARY POINT EDITOR
+     tools: move (drag a point, tap the dot between two points to add one)
+            select (tap several points, then delete them all at once)
+            side (tap the first and the last point of one side of the run, then snap just that side to houses / roads,
+                  straighten it, or leave it to adjust by hand)
+     ================================================================================================== */
+  var tool = 'move', sel = {}, pick = null, side = null, ctxs = [], sideLayer = null, activeRuns = [];
+  function mk(v){ return String(v || '').trim().toLowerCase(); }
+  function ringPts(c){ return c.latlngs.map(function(p){ return { lat: p.lat, lng: p.lng }; }); }
+  function store(c){ var cb = g('customRunBorders'); if (!cb) return; cb[c.key] = c.latlngs.map(function(p){ return [p.lat, p.lng]; }); }
+  function persist(){ try { var sv = g('saveToDB'); if (sv) sv('customRunBorders', g('customRunBorders')); } catch (e) {} }
+  function selCount(){ var n = 0; Object.keys(sel).forEach(function(k){ n += Object.keys(sel[k]).length; }); return n; }
+  function clearTransient(){ sel = {}; pick = null; side = null; if (sideLayer) { try { sideLayer.remove(); } catch (e) {} sideLayer = null; } }
+
+  // distances in metres on a flat patch of ground
+  function kxy(lat){ return [111320 * Math.cos(lat * Math.PI / 180), 110540]; }
+  function lenOf(pts){ var d = 0; for (var i = 1; i < pts.length; i++) { var k = kxy(pts[i].lat); d += Math.hypot((pts[i].lng - pts[i - 1].lng) * k[0], (pts[i].lat - pts[i - 1].lat) * k[1]); } return d; }
+  function sidePath(c, a, b, dir){
+    var n = c.latlngs.length, out = [a], i = a, guard = 0;
+    while (i !== b && guard++ < n + 2) { i = (i + dir + n) % n; out.push(i); }
+    return out;
+  }
+  function densify(pts, step){
+    var out = [pts[0]];
+    for (var i = 1; i < pts.length; i++) {
+      var a = pts[i - 1], b = pts[i], k = kxy(a.lat), d = Math.hypot((b.lng - a.lng) * k[0], (b.lat - a.lat) * k[1]), n = Math.max(1, Math.ceil(d / step));
+      for (var j = 1; j <= n; j++) out.push({ lat: a.lat + (b.lat - a.lat) * j / n, lng: a.lng + (b.lng - a.lng) * j / n });
+    }
+    return out;
+  }
+  // nearest point on any of the lines [[lat,lng]...], within maxM, else null
+  function nearest(p, lines, maxM){
+    var k = kxy(p.lat), best = null, px = p.lng * k[0], py = p.lat * k[1];
+    for (var li = 0; li < lines.length; li++) {
+      var L = lines[li];
+      for (var i = 1; i < L.length; i++) {
+        var ax = L[i - 1][1] * k[0], ay = L[i - 1][0] * k[1], bx = L[i][1] * k[0], by = L[i][0] * k[1], dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy;
+        var t = l2 ? ((px - ax) * dx + (py - ay) * dy) / l2 : 0; t = Math.max(0, Math.min(1, t));
+        var qx = ax + t * dx, qy = ay + t * dy, d = Math.hypot(px - qx, py - qy);
+        if (d <= maxM && (!best || d < best.d)) best = { d: d, lat: qy / k[1], lng: qx / k[0] };
+      }
+    }
+    return best;
+  }
+  // Douglas-Peucker, tolerance in metres; the ends always stay
+  function simplify(pts, tolM){
+    if (pts.length < 3) return pts.slice();
+    var k = kxy(pts[0].lat), keep = new Array(pts.length).fill(false); keep[0] = keep[pts.length - 1] = true;
+    (function rec(lo, hi){
+      var ax = pts[lo].lng * k[0], ay = pts[lo].lat * k[1], bx = pts[hi].lng * k[0], by = pts[hi].lat * k[1], dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy, worst = -1, wi = -1;
+      for (var i = lo + 1; i < hi; i++) {
+        var px = pts[i].lng * k[0], py = pts[i].lat * k[1], t = l2 ? ((px - ax) * dx + (py - ay) * dy) / l2 : 0; t = Math.max(0, Math.min(1, t));
+        var d = Math.hypot(px - (ax + t * dx), py - (ay + t * dy)); if (d > worst) { worst = d; wi = i; }
+      }
+      if (worst > tolM) { keep[wi] = true; rec(lo, wi); rec(wi, hi); }
+    })(0, pts.length - 1);
+    return pts.filter(function(_, i){ return keep[i]; });
+  }
+  async function fetchRoads(b){
+    var q = '[out:json][timeout:25];way["highway"]["highway"!~"footway|path|steps|cycleway|pedestrian|bridleway|corridor|proposed|construction"](' + b.s + ',' + b.w + ',' + b.n + ',' + b.e + ');out geom;';
+    var urls = ['https://overpass-api.de/api/interpreter?data=', 'https://overpass.kumi.systems/api/interpreter?data='], lastErr;
+    for (var u = 0; u < urls.length; u++) {
+      var ctl = new AbortController(), to = setTimeout(function(){ ctl.abort(); }, 20000);
+      try {
+        var r = await fetch(urls[u] + encodeURIComponent(q), { signal: ctl.signal });
+        if (!r.ok) throw new Error('Overpass ' + r.status);
+        var d = await r.json();
+        return (d.elements || []).filter(function(e){ return e.geometry && e.geometry.length >= 2; }).map(function(e){ return e.geometry.map(function(p){ return [p.lat, p.lon]; }); });
+      } catch (e) { lastErr = e; } finally { clearTimeout(to); }
+    }
+    throw lastErr || new Error('no road data');
+  }
+
+  function paintSide(){
+    var map = g('leafletMap'); if (sideLayer) { try { sideLayer.remove(); } catch (e) {} sideLayer = null; }
+    if (!map || !side) return;
+    var pts = side.idx.map(function(i){ return [side.c.latlngs[i].lat, side.c.latlngs[i].lng]; });
+    sideLayer = L.layerGroup([L.polyline(pts, { color: '#000', weight: 10, opacity: .9, interactive: false }), L.polyline(pts, { color: '#22c55e', weight: 5, opacity: 1, interactive: false })]).addTo(map);
+  }
+  function chooseSide(c, a, b){
+    var n = c.latlngs.length, fw = sidePath(c, a, b, 1), bw = sidePath(c, a, b, -1);
+    var lf = lenOf(fw.map(function(i){ return c.latlngs[i]; })), lb = lenOf(bw.map(function(i){ return c.latlngs[i]; }));
+    side = { c: c, a: a, b: b, dir: lf <= lb ? 1 : -1 }; side.idx = sidePath(c, a, b, side.dir);
+    pick = null; paintSide(); paintHandles(); bar();
+  }
+  function flipSide(){ if (!side) return; side.dir = -side.dir; side.idx = sidePath(side.c, side.a, side.b, side.dir); paintSide(); paintHandles(); bar(); }
+
+  function replaceSide(newPts){
+    var c = side.c, n = c.latlngs.length, inSide = {}; side.idx.forEach(function(i){ inSide[i] = 1; });
+    // the points that are NOT on the side, in ring order starting just after the side's last point
+    var rest = [], i = side.b;
+    for (var s = 0; s < n; s++) { i = (i + side.dir + n) % n; if (inSide[i]) break; rest.push(c.latlngs[i]); }
+    var ring = rest.concat(newPts.map(function(p){ return L.latLng(p.lat, p.lng); }));
+    c.latlngs = ring; c.layer.setLatLngs([ring]); store(c);
+  }
+  async function snapSide(kind){
+    if (!side) return;
+    var c = side.c, path = side.idx.map(function(i){ return { lat: c.latlngs[i].lat, lng: c.latlngs[i].lng }; });
+    var lines, maxM, label;
+    try {
+      if (kind === 'roads') {
+        var lats = path.map(function(p){ return p.lat; }), lngs = path.map(function(p){ return p.lng; }), pad = 0.0008;
+        lines = await fetchRoads({ s: Math.min.apply(null, lats) - pad, w: Math.min.apply(null, lngs) - pad, n: Math.max.apply(null, lats) + pad, e: Math.max.apply(null, lngs) + pad });
+        if (!lines.length) { window.customAlert('No roads were found near that side. Try again in a moment, or adjust it by hand.'); return; }
+        maxM = 30; label = 'roads';
+      } else {
+        var h = window.lbRunHouseOutline ? window.lbRunHouseOutline() : null;
+        if (!h) { window.customAlert('Pick one run first (and make sure it has houses with locations) to snap a side to its houses.'); return; }
+        var ring = h.ring.map(function(p){ return [p.lat, p.lng]; }); ring.push(ring[0]);
+        lines = [ring]; maxM = 120; label = 'houses';
+      }
+    } catch (e) { window.customAlert('Could not get the ' + kind + ' to snap to: ' + (e && e.message || e) + '. Check the signal and try again.'); return; }
+    var dens = densify(path, 8), moved = 0;
+    var snapped = dens.map(function(p, i){
+      if (i === 0 || i === dens.length - 1) return p;      // the ends stay put so the side still joins the rest
+      var q = nearest(p, lines, maxM); if (q) { moved++; return { lat: q.lat, lng: q.lng }; } return p;
+    });
+    if (!moved) { clearTransient(); tool = 'move'; paintHandles(); bar(); window.customAlert('Nothing close enough to snap to on that side (the ' + label + ' were all more than ' + maxM + ' m away), so it was left as it was.'); return; }
+    var out = simplify(snapped, 1.5);
+    replaceSide(out); persist();
+    clearTransient(); tool = 'move'; paintHandles(); bar();
+    window.customAlert('That side now follows the ' + label + ' (' + moved + ' points moved). Drag any point to fine-tune it.');
+  }
+  function straightenSide(){
+    if (!side) return;
+    var c = side.c, a = c.latlngs[side.a], b = c.latlngs[side.b];
+    if (side.idx.length <= 2) { window.customAlert('That side has no points between its ends.'); return; }
+    if (c.latlngs.length - (side.idx.length - 2) < 3) { window.customAlert('A boundary needs at least 3 points.'); return; }
+    replaceSide([{ lat: a.lat, lng: a.lng }, { lat: b.lat, lng: b.lng }]); persist();
+    clearTransient(); tool = 'move'; paintHandles(); bar();
+  }
+  // Fewer points for the whole boundary (property-line boundaries have thousands). Keeps the shape to within a couple of metres.
+  function ringSimplify(pts, tolM){
+    if (pts.length < 8) return pts.slice();
+    var k = kxy(pts[0].lat), far = 0, fd = -1;
+    for (var i = 1; i < pts.length; i++) { var d = Math.hypot((pts[i].lng - pts[0].lng) * k[0], (pts[i].lat - pts[0].lat) * k[1]); if (d > fd) { fd = d; far = i; } }
+    var a = simplify(pts.slice(0, far + 1), tolM), b = simplify(pts.slice(far).concat([pts[0]]), tolM);
+    return a.concat(b.slice(1, -1));
+  }
+  async function fewerPoints(){
+    var tot = 0, after = 0;
+    ctxs.forEach(function(c){ tot += c.latlngs.length; });
+    if (!tot) return;
+    var ok = await window.customConfirm('Take out points that are not needed? The line keeps its shape to within about 2 m. This boundary has ' + (ctxs.length === 1 ? ctxs[0].latlngs.length : tot) + ' points.');
+    if (!ok) return;
+    ctxs.forEach(function(c){
+      var pts = ringSimplify(ringPts(c), 2); if (pts.length < 3) return;
+      c.latlngs = pts.map(function(p){ return L.latLng(p.lat, p.lng); }); c.layer.setLatLngs([c.latlngs]); store(c); after += c.latlngs.length;
+    });
+    persist(); clearTransient(); paintHandles(); bar();
+    window.customAlert('Now ' + after + ' points (was ' + tot + ').');
+  }
+  function deleteSelected(){
+    var total = 0, blocked = false;
+    ctxs.forEach(function(c, ci){
+      var s = sel[ci]; if (!s) return;
+      var idx = Object.keys(s).map(Number); if (!idx.length) return;
+      if (c.latlngs.length - idx.length < 3) { blocked = true; return; }
+      c.latlngs = c.latlngs.filter(function(_, i){ return !s[i]; }); c.layer.setLatLngs([c.latlngs]); store(c); total += idx.length;
+    });
+    if (blocked) window.customAlert('A run boundary needs at least 3 points left, so one boundary was not changed.');
+    if (!total) return;
+    persist(); sel = {}; paintHandles(); bar();
+  }
+
+  function tombstone(key){ var d = lsGet('lbBoundaryDeleted', {}); d[key] = Date.now(); lsSet('lbBoundaryDeleted', d); }
+  function onScreenBoundaries(){
+    var out = [], hulls = g('mapHullsLayer'), seen = {};
+    if (hulls) hulls.eachLayer(function(l){
+      if (l instanceof L.Polygon && l._runGroupKey && l._boundaryKey && !seen[l._boundaryKey]) {
+        seen[l._boundaryKey] = 1;
+        var cb = g('customRunBorders') || {}, has = Array.isArray(cb[l._boundaryKey]) && cb[l._boundaryKey].length >= 3;
+        out.push({ key: l._boundaryKey, run: l._runGroupKey, custom: has });
+      }
+    });
+    return out;
+  }
+  async function deleteBoundary(key, run){
+    var cb = g('customRunBorders') || {};
+    if (!(Array.isArray(cb[key]) && cb[key].length >= 3)) {
+      window.customAlert('Run ' + run + ' has no saved boundary: the outline on the map is drawn automatically round its houses, so there is nothing to delete. To change it, edit its points (that saves it as a boundary of its own).');
+      return false;
+    }
+    var ok = await window.customConfirm('Delete the boundary for run ' + run + '? The run goes back to the outline drawn automatically round its houses. This is on this phone only.');
+    if (!ok) return false;
+    try { if (window.lbBackupBoundariesNow) await window.lbBackupBoundariesNow(); } catch (e) {}
+    delete cb[key]; tombstone(key);
+    try { if (window.lbBoundaryExtras && window.lbBoundaryExtras[key]) { delete window.lbBoundaryExtras[key]; var sv = g('saveToDB'); if (sv) sv('lbBoundaryExtras', window.lbBoundaryExtras); } } catch (e) {}
+    persist(); redraw();
+    return true;
+  }
+
+  function setTool(t){ tool = t; pick = null; side = null; if (sideLayer) { try { sideLayer.remove(); } catch (e) {} sideLayer = null; } if (t !== 'select') sel = {}; paintHandles(); bar(); }
+  function bar(){
+    if (!g('isRoadSnapEditing') || !window.setMapTopBarContext) return;
+    var ttl, b = [], n = selCount();
+    var done = { label: 'Done', icon: '✔️', onClick: function(){ window.toggleRoadSnapEditing(); }, variant: 'primary', key: 'boundaryDone', row: 2 };
+    if (tool === 'select') {
+      ttl = n ? 'Chosen points · ' + n : 'Tap the points to delete';
+      b = [{ label: 'Delete ' + (n || ''), icon: '🗑️', onClick: deleteSelected, key: 'bhDel', row: 2 }, { label: 'Clear', icon: '↺', onClick: function(){ sel = {}; paintHandles(); bar(); }, key: 'bhClr', row: 2 }, { label: 'Back', icon: '◀', onClick: function(){ setTool('move'); }, key: 'bhBack', row: 2 }];
+    } else if (tool === 'side' && !side) {
+      ttl = pick ? 'Tap the LAST point of the side' : 'Tap the FIRST point of the side';
+      b = [{ label: 'Cancel', icon: '✖', onClick: function(){ setTool('move'); }, key: 'bhCancel', row: 2 }];
+    } else if (tool === 'side') {
+      ttl = 'Side chosen · ' + side.idx.length + ' points';
+      b = [
+        { label: 'To houses', icon: '🧲', onClick: function(){ snapSide('houses'); }, key: 'bhH', row: 2 },
+        { label: 'To roads', icon: '🛣️', onClick: function(){ snapSide('roads'); }, key: 'bhR', row: 2 },
+        { label: 'By hand', icon: '✋', onClick: function(){ setTool('move'); }, key: 'bhHand', row: 2 },
+        { label: 'Other way', icon: '🔁', onClick: flipSide, key: 'bhFlip', row: 2 },
+        { label: 'Straighten', icon: '📏', onClick: straightenSide, key: 'bhStr', row: 2 },
+        { label: 'Cancel', icon: '✖', onClick: function(){ setTool('move'); }, key: 'bhCancel', row: 2 }];
+    } else {
+      ttl = 'Editing run boundary';
+      b = [
+        { label: 'Pick points', icon: '☑️', onClick: function(){ setTool('select'); }, key: 'bhSel', row: 2 },
+        { label: 'One side', icon: '〰️', onClick: function(){ setTool('side'); }, key: 'bhSide', row: 2 },
+        { label: 'Snap all: houses', icon: '🧲', onClick: function(){ window.snapActiveBoundaryToRoads(); }, key: 'snapHouses', row: 2 },
+        { label: 'Snap all: roads', icon: '🛣️', onClick: function(){ window.snapBoundaryToRoads(); }, key: 'snapRoads', row: 2 },
+        { label: 'Match neighbour', icon: '🧷', onClick: function(){ window.snapBoundaryToNeighbor(); }, key: 'matchNeighbor', row: 2 },
+        { label: 'Fewer points', icon: '✂️', onClick: fewerPoints, key: 'bhFew', row: 2 },
+        { label: 'Delete boundary', icon: '🗑️', onClick: async function(){ var c = ctxs[0]; if (!c) return; if (await deleteBoundary(c.key, c.runName)) window.toggleRoadSnapEditing(); }, key: 'bhDelB', row: 2 }];
+    }
+    b.push(done);
+    curTitle = ttl; if (crowded) ttl += ' · zoom in to see points';
+    window.setMapTopBarContext(ttl, b, function(){ window.toggleRoadSnapEditing(); });
+    window.setMapContextBtnActive('bhSel', tool === 'select'); window.setMapContextBtnActive('bhSide', tool === 'side');
+  }
+
+  // A boundary built from property lines has ~2,000 points; a handle (and an insert dot) for every one of them froze the map.
+  // Only the points on screen get handles, and when more than MAXH are on screen none do until you zoom in.
+  var MAXH = 450, crowded = false, curTitle = '', repaintT = 0, hooked = null;
+  function repaintSoon(){ clearTimeout(repaintT); repaintT = setTimeout(function(){ if (g('isRoadSnapEditing')) paintHandles(); }, 160); }
+  function hookMap(on){
+    var map = g('leafletMap'); if (!map) return;
+    if (hooked && hooked !== map) { try { hooked.off('moveend', repaintSoon); } catch (e) {} hooked = null; }
+    if (on && !hooked) { map.on('moveend', repaintSoon); hooked = map; }
+    if (!on && hooked) { try { hooked.off('moveend', repaintSoon); } catch (e) {} hooked = null; }
+  }
+  function paintHandles(){
+    var layerG = g('mapEditHandlesLayer'); if (!layerG) return;
+    layerG.clearLayers();
+    var map = g('leafletMap'), vb = map ? map.getBounds().pad(0.25) : null, seen = 0;
+    ctxs.forEach(function(c){ c.latlngs.forEach(function(ll){ if (!vb || vb.contains(ll)) seen++; }); });
+    var wasCrowded = crowded; crowded = seen > MAXH;
+    if (crowded !== wasCrowded && window.updateMapTopBarContextTitle && curTitle) window.updateMapTopBarContextTitle(curTitle + (crowded ? ' · zoom in to see points' : ''));
+    ctxs.forEach(function(c, ci){
+      var inSide = {}; if (side && side.c === c) side.idx.forEach(function(i){ inSide[i] = 1; });
+      c.latlngs.forEach(function(latlng, idx){
+        var special = (sel[ci] && sel[ci][idx]) || (pick && pick.ci === ci && pick.i === idx) || (side && side.c === c && (idx === side.a || idx === side.b));
+        if (vb && !vb.contains(latlng) && !special) return;
+        if (crowded && !special) return;
+        var cls = 'poly-edit-handle';
+        if (sel[ci] && sel[ci][idx]) cls += ' lbh-sel';
+        else if (pick && pick.ci === ci && pick.i === idx) cls += ' lbh-pin';
+        else if (side && side.c === c && (idx === side.a || idx === side.b)) cls += ' lbh-pin';
+        else if (inSide[idx]) cls += ' lbh-in';
+        var m = L.marker(latlng, { draggable: tool === 'move', pane: 'lukez-handle-pane', icon: L.divIcon({ className: cls, html: '<div class="poly-edit-handle-dot"></div>', iconSize: [24, 24], iconAnchor: [12, 12] }) });
+        m.on('drag', function(e){ c.latlngs[idx] = e.target.getLatLng(); c.layer.setLatLngs([c.latlngs]); store(c); });
+        m.on('dragend', function(){ paintHandles(); });
+        m.on('click', function(){
+          if (tool === 'select') { sel[ci] = sel[ci] || {}; if (sel[ci][idx]) delete sel[ci][idx]; else sel[ci][idx] = 1; paintHandles(); bar(); }
+          else if (tool === 'side' && !side) {
+            if (!pick) { pick = { ci: ci, i: idx }; paintHandles(); bar(); }
+            else if (pick.ci !== ci) { pick = { ci: ci, i: idx }; paintHandles(); bar(); }
+            else if (pick.i !== idx) chooseSide(c, pick.i, idx);
+          }
+        });
+        layerG.addLayer(m);
+        if (tool === 'move' && !crowded) {
+          var nx = c.latlngs[(idx + 1) % c.latlngs.length], mlat = (latlng.lat + nx.lat) / 2, mlng = (latlng.lng + nx.lng) / 2;
+          var mid = L.marker([mlat, mlng], { pane: 'lukez-handle-pane', icon: L.divIcon({ className: 'poly-mid-handle', html: '<div class="poly-mid-handle-dot" title="Tap to add boundary handle"></div>', iconSize: [18, 18], iconAnchor: [9, 9] }) });
+          mid.on('click', function(){ c.latlngs.splice(idx + 1, 0, L.latLng(mlat, mlng)); c.layer.setLatLngs([c.latlngs]); store(c); paintHandles(); });
+          layerG.addLayer(mid);
+        }
+      });
+    });
+  }
+
+  // Replaces the map's own handle builder (same name, same job: draw the drag / insert handles for the runs being edited).
+  var origEnable = window.enableBoundaryVertexHandles;
+  window.enableBoundaryVertexHandles = function(){
+    var map = g('leafletMap'); if (!map) return;
+    if (!g('mapEditHandlesLayer')) { try { var mk2 = new Function('v', 'mapEditHandlesLayer = v;'); mk2(L.layerGroup({ pane: 'lukez-handle-pane' }).addTo(map)); } catch (e) { if (origEnable) return origEnable.apply(this, arguments); return; } }
+    var hulls = g('mapHullsLayer'); if (!hulls) return;
+    g('mapEditHandlesLayer').clearLayers();
+    if (typeof window.renderBoundaryRunSwitcher === 'function') window.renderBoundaryRunSwitcher();
+    var showing = (g('currentlyShowingRunKeys') || []).map(mk), multiple = new Set(showing).size > 1, old = ctxs;
+    ctxs = [];
+    hulls.eachLayer(function(layer){
+      if (!(layer instanceof L.Polygon) || !layer._runGroupKey) return;
+      var gk = layer._runGroupKey, active = !multiple || activeRuns.some(function(r){ return mk(r) === mk(gk); });
+      if (multiple) layer.setStyle(active ? { weight: 3, dashArray: null, fillOpacity: 0.12 } : { weight: 2, dashArray: '6,6', fillOpacity: 0.04 });
+      if (!active) return;
+      var key = layer._boundaryKey || (window.lbBoundaryKeyFor ? window.lbBoundaryKeyFor(gk) : gk);
+      ctxs.push({ layer: layer, key: key, runName: String(gk), latlngs: (layer.getLatLngs()[0] || []).slice() });
+    });
+    // a different ring (a snap rebuilt it) means the old picks no longer point at the same points
+    var same = old.length === ctxs.length && old.every(function(o, i){ return o.key === ctxs[i].key && o.latlngs.length === ctxs[i].latlngs.length; });
+    if (!same) clearTransient();
+    paintHandles();
+  };
+  // which runs' points can be dragged when two or more are showing (same rule as the map's own switcher)
+  var origSetActive = window.setActiveBoundaryEditRun;
+  window.setActiveBoundaryEditRun = function(runKey){
+    var idx = activeRuns.findIndex(function(r){ return mk(r) === mk(runKey); });
+    if (idx !== -1) { if (activeRuns.length > 1) activeRuns.splice(idx, 1); }
+    else if (activeRuns.length >= 2) activeRuns = [activeRuns[1], runKey];
+    else activeRuns.push(runKey);
+    if (origSetActive) { try { origSetActive.apply(this, arguments); return; } catch (e) {} }
+    window.enableBoundaryVertexHandles();
+  };
+  var origToggle = window.toggleRoadSnapEditing;
+  window.toggleRoadSnapEditing = async function(){
+    var entering = !g('isRoadSnapEditing');
+    if (entering) { var s0 = g('currentlyShowingRunKeys') || []; activeRuns = s0[0] ? [s0[0]] : []; tool = 'move'; clearTransient(); }
+    var r = origToggle.apply(this, arguments);
+    if (entering && g('isRoadSnapEditing')) { hookMap(true); bar(); paintHandles(); }
+    var res = await r;
+    if (!g('isRoadSnapEditing')) { hookMap(false); clearTransient(); ctxs = []; tool = 'move'; crowded = false; }
+    return res;
+  };
+  // Settings > Delete (old shortcut): straight into editing with the "pick points" tool
+  window.deleteBoundaryPointsShortcut = async function(){
+    if (!g('isRoadSnapEditing')) await window.toggleRoadSnapEditing();
+    setTool('select');
+  };
+
+  /* ====================================================================================================
+     THE HUB SCREEN
+     ================================================================================================== */
+  var tab = 'run', form = null;
+  function hub(){
+    var h = $('lbHub'); if (h) return h;
+    h = document.createElement('div'); h.id = 'lbHub'; h.setAttribute('role', 'dialog'); h.setAttribute('aria-label', 'Boundaries and streets');
+    h.innerHTML = '<div class="lbh-top"><b>Boundaries &amp; streets</b><button type="button" class="lbh-x" data-h="close" aria-label="Close">&times;</button></div>' +
+      '<div class="lbh-tabs"><button type="button" class="lbh-tab" data-h="tab" data-t="run">Run boundary</button><button type="button" class="lbh-tab" data-h="tab" data-t="streets">Streets &amp; collection points</button></div>' +
+      '<div class="lbh-body" id="lbHubBody"></div>';
+    document.body.appendChild(h);
+    h.addEventListener('click', onClick);
+    return h;
+  }
+  function closeHub(){ var h = $('lbHub'); if (h) h.classList.remove('on'); form = null; }
+  window.lbOpenBoundaryHub = function(which){
+    try { if (window.lbCloseSettings) window.lbCloseSettings(); } catch (e) {}
+    if (which) tab = which;
+    form = null; hub().classList.add('on'); paint();
+  };
+  window.lbCloseBoundaryHub = closeHub;
+
+  function runInfo(){
+    var sel2 = g('selectedRunsSet'), n = sel2 ? sel2.size : 0, st = g('activeFilterStream') || '', day = g('activeFilterDay') || '', wk = g('activeFilterWeek') || '';
+    if (n === 1) { var r = Array.from(sel2)[0]; return { one: true, text: [st, day, wk ? 'Week ' + String(wk).toUpperCase() : '', 'Run ' + String(r).toUpperCase()].filter(Boolean).join(' · ') }; }
+    return { one: false, text: n ? n + ' runs showing' : 'No run showing' };
+  }
+  function row(act, ico, text, sub, cls, extra){
+    return '<button type="button" class="lbh-row ' + (cls || '') + '" data-h="' + act + '"' + (extra || '') + '><span class="i">' + ico + '</span><span class="t">' + esc(text) + (sub ? '<small>' + esc(sub) + '</small>' : '') + '</span></button>';
+  }
+  function paint(){
+    var b = $('lbHubBody'); if (!b) return;
+    [].forEach.call(document.querySelectorAll('#lbHub .lbh-tab'), function(t){ t.classList.toggle('on', t.dataset.t === tab && !form); });
+    b.innerHTML = form ? formHtml() : tab === 'streets' ? streetsHtml() : runHtml();
+    if (form) updatePreview();
+  }
+
+  /* ---- run boundary tab ---- */
+  function runHtml(){
+    var lead = document.body.classList.contains('lb-lead'), info = runInfo(), bs = onScreenBoundaries(), h = '';
+    h += '<div class="lbh-card"><b>' + esc(info.text) + '</b><small>' + (info.one ? 'The boundary tools work on the run showing on the map.' : 'Choose one run on the map first, then come back here.') + '</small></div>';
+    if (!lead) { h += '<div class="lbh-card"><b>Leading hand mode needed</b><small>Changing run boundaries is switched on in leading hand mode. Everything below only shows what is on the map.</small></div>'; }
+    if (lead) {
+      h += '<div class="lbh-h">Edit</div>';
+      h += row('edit', '✏️', 'Edit the points', 'Drag, add, pick several and delete, or snap one side to houses / roads', '', info.one || bs.length ? '' : ' disabled');
+      h += row('snaph', '🧲', 'Snap the whole boundary to houses', 'Replaces the line with a tight outline round the run\'s houses', '', info.one ? '' : ' disabled');
+      h += row('snapr', '🛣️', 'Snap the whole boundary to roads', 'Moves the points onto the nearest road', '', info.one ? '' : ' disabled');
+      h += row('nbr', '🧷', 'Match the neighbouring run', 'Share the edge with the run next to it', '', info.one ? '' : ' disabled');
+      h += '<div class="lbh-h">Delete a boundary</div>';
+      if (!bs.length) h += '<div class="lbh-card"><small>No boundary is showing. Turn on "Run boundaries" below and pick a run.</small></div>';
+      bs.forEach(function(x, i){
+        h += row('delb', '🗑️', 'Delete boundary: run ' + String(x.run).toUpperCase(), x.custom ? 'Saved boundary. The run goes back to the automatic outline' : 'Nothing saved (the outline is automatic)', 'danger', ' data-i="' + i + '"');
+      });
+      h += '<div class="lbh-h">KML files</div>';
+      h += row('kmlin', '➕', 'Add a boundary from a KML file', 'Draw it on a computer and bring it in', '');
+      h += row('kmlout', '📤', 'Export boundaries as KML', '', '');
+      h += '<div class="lbh-h">Property lines</div>';
+      h += row('prop', '🏠', 'Property boundaries & map detail', 'Vicmap lots, build every run from property lines, map provider', '');
+    }
+    h += '<div class="lbh-h">Show on the map</div>';
+    h += row('tgl-bounds', '▭', 'Run boundaries', '', g('showRunBoundaries') ? 'on' : '');
+    h += row('tgl-prop', '▦', 'Property boundaries', '', g('showPropertyBoundaries') ? 'on' : '');
+    h += row('tgl-clip', '✂️', 'Cut imported KML routes to the boundary', (window.lbKmzClipOn && window.lbKmzClipOn()) ? 'On: parts outside the boundary or away from the run\'s houses are hidden' : 'Off: the whole recorded line shows. Turn on once the boundaries are right', (window.lbKmzClipOn && window.lbKmzClipOn()) ? 'on' : '');
+    return h;
+  }
+
+  /* ---- streets tab ---- */
+  function groups(){
+    var o = houseStreetObj() || {}, ids = byId(), map = {};
+    Object.keys(o).forEach(function(id){
+      var m = o[id], s = ids[id]; if (!m || !s) return;
+      var a = addrOf(s), runs = (m.runs && m.runs.length) ? m.runs : ['ALL'];
+      var k = [m.type, a.key, a.sub, runs.join(',')].join('|');
+      var G = map[k] || (map[k] = { type: m.type, street: a.street, key: a.key, sub: a.subLabel, runs: runs, ids: [], nums: [] });
+      G.ids.push(id); G.nums.push(a.num);
+    });
+    return Object.keys(map).map(function(k){ return map[k]; }).sort(function(x, y){ return x.street.localeCompare(y.street); });
+  }
+  function cpGroups(){
+    var o = cpObj() || {}, ids = byId(), map = {};
+    Object.keys(o).forEach(function(id){
+      var cp = o[id]; if (!cp) return;
+      var G = map[cp.id] || (map[cp.id] = { id: cp.id, runs: cp.runs && cp.runs.length ? cp.runs : ['ALL'], ids: [], lat: cp.lat, lng: cp.lng });
+      G.ids.push(id);
+    });
+    return Object.keys(map).map(function(k){
+      var G = map[k], ids2 = byId(), first = ids2[G.ids[0]];
+      G.street = first ? addrOf(first).street : ''; G.nums = G.ids.map(function(i){ var s = ids2[i]; return s ? addrOf(s).num : null; });
+      return G;
+    });
+  }
+  function numsText(nums){ var a = nums.filter(function(n){ return n != null; }).sort(function(x, y){ return x - y; }); return a.length ? a.join(', ') : ''; }
+  function runsText(r){ return (!r || !r.length || r.indexOf('ALL') >= 0) ? 'all runs' : 'run ' + r.map(function(x){ return String(x).toUpperCase(); }).join(', '); }
+  var gcache = [], cpcache = [];
+  function streetsHtml(){
+    gcache = groups(); cpcache = cpGroups();
+    var h = '<div class="lbh-h">Add</div><div class="lbh-grid">' +
+      row('add-drive-reverse-out', '⬆️', 'Drive in', 'reverse out') + row('add-reverse-in-drive-out', '⬇️', 'Reverse in', 'drive out') +
+      row('add-one-side-collection', '◧', 'One side', 'collection') + row('add-cp', '🏘️', 'Collection point', 'tap houses on the map') + '</div>';
+    h += '<div class="lbh-h">Streets set on this phone</div>';
+    if (!gcache.length) h += '<div class="lbh-empty">No drive in / reverse in / one side streets yet.</div>';
+    gcache.forEach(function(G, i){
+      h += '<div class="lbh-g"><span class="lbh-dot" style="background:' + (COLOURS[G.type] || '#888') + '"></span><div class="t"><b>' + esc(title(G.street)) + (G.sub ? ', ' + esc(G.sub) : '') + '</b><small>' + esc(LABELS[G.type] || G.type) + ' · ' + G.ids.length + ' house' + (G.ids.length === 1 ? '' : 's') + (numsText(G.nums) ? ' (' + esc(numsText(G.nums)) + ')' : '') + ' · ' + esc(runsText(G.runs)) + '</small></div>' +
+        '<button type="button" class="lbh-mini" data-h="show-g" data-i="' + i + '" title="Show on the map">Map</button><button type="button" class="lbh-mini" data-h="edit-g" data-i="' + i + '">Edit</button><button type="button" class="lbh-mini danger" data-h="del-g" data-i="' + i + '" aria-label="Delete">✕</button></div>';
+    });
+    h += '<div class="lbh-h">Collection points</div>';
+    if (!cpcache.length) h += '<div class="lbh-empty">No collection points yet.</div>';
+    cpcache.forEach(function(G, i){
+      h += '<div class="lbh-g"><span class="lbh-dot" style="background:#f59e0b"></span><div class="t"><b>Collection point' + (G.street ? ' · ' + esc(title(G.street)) : '') + '</b><small>' + G.ids.length + ' house' + (G.ids.length === 1 ? '' : 's') + (numsText(G.nums) ? ' (' + esc(numsText(G.nums)) + ')' : '') + ' · ' + esc(runsText(G.runs)) + '</small></div>' +
+        '<button type="button" class="lbh-mini" data-h="show-c" data-i="' + i + '">Map</button><button type="button" class="lbh-mini" data-h="runs-c" data-i="' + i + '">Runs</button><button type="button" class="lbh-mini danger" data-h="del-c" data-i="' + i + '" aria-label="Delete">✕</button></div>';
+    });
+    h += '<div class="lbh-h">Other</div>' + row('notes', '🏷️', 'Access notes', 'Notes on houses and gates');
+    return h;
+  }
+
+  /* ---- add / edit a street ---- */
+  function openForm(type, G){
+    form = { type: type, edit: G || null, street: G ? title(G.street) + (G.sub ? ', ' + G.sub : '') : '', whole: G ? false : true, nums: G ? numsText(G.nums) : '', runs: G ? G.runs.slice() : ['ALL'] };
+    if (!G) { var s = g('selectedRunsSet'); if (s && s.size) form.runs = Array.from(s).map(function(r){ return String(r); }); }
+    paint();
+  }
+  function streetOptions(){
+    var seen = {}; records().forEach(function(s){ var a = addrOf(s); if (!a.key) return; var k = a.key + '|' + a.sub; if (!seen[k]) seen[k] = title(a.street) + (a.subLabel ? ', ' + a.subLabel : ''); });
+    return Object.keys(seen).map(function(k){ return seen[k]; }).sort();
+  }
+  function formHtml(){
+    var f = form, h = '';
+    h += '<div class="lbh-h">' + (f.edit ? 'Edit street' : 'Add street') + '</div>';
+    h += '<label class="lbh-f">What the truck does</label><div class="lbh-seg">' + ['drive-reverse-out', 'reverse-in-drive-out', 'one-side-collection'].map(function(t){ return '<button type="button" data-h="ftype" data-t="' + t + '" class="' + (f.type === t ? 'on' : '') + '">' + esc(LABELS[t]) + '</button>'; }).join('') + '</div>';
+    h += '<label class="lbh-f" for="lbhStreet">Street</label><input type="text" id="lbhStreet" list="lbhStreets" autocomplete="off" autocapitalize="words" placeholder="Start typing, e.g. Howard Street" value="' + esc(f.street) + '">';
+    h += '<datalist id="lbhStreets"></datalist>';
+    h += '<label class="lbh-f">Which houses</label><div class="lbh-seg"><button type="button" data-h="fwhole" data-v="1" class="' + (f.whole ? 'on' : '') + '">Whole street</button><button type="button" data-h="fwhole" data-v="0" class="' + (f.whole ? '' : 'on') + '">Just these numbers</button></div>';
+    h += '<div id="lbhNumsWrap" style="' + (f.whole ? 'display:none' : '') + '"><label class="lbh-f" for="lbhNums">House numbers</label><input type="text" id="lbhNums" inputmode="text" autocomplete="off" placeholder="17, 19, 21, 22-30" value="' + esc(f.nums) + '"></div>';
+    h += '<label class="lbh-f">Runs</label><button type="button" class="lbh-row" data-h="fruns"><span class="i">🏷️</span><span class="t" id="lbhRuns">' + esc(runsText(f.runs)) + '<small>Tap to change</small></span></button>';
+    h += '<div class="lbh-prev" id="lbhPrev"></div>';
+    h += '<div class="lbh-save"><button type="button" data-h="fcancel">Cancel</button><button type="button" class="go" data-h="fsave">' + (f.edit ? 'Save changes' : 'Add') + '</button></div>';
+    return h;
+  }
+  var lastPrev = null;
+  function updatePreview(){
+    var f = form; if (!f) return;
+    var st = $('lbhStreet'), nm = $('lbhNums'); if (st) f.street = st.value; if (nm) f.nums = nm.value;
+    var dl = $('lbhStreets');
+    if (dl && !dl.children.length) dl.innerHTML = streetOptions().map(function(s){ return '<option value="' + esc(s) + '"></option>'; }).join('');
+    var nums = parseNumbers(f.nums), r = findHouses(f.street, f.whole, nums), p = $('lbhPrev');
+    lastPrev = r; if (!p) return;
+    if (!String(f.street).trim()) { p.textContent = 'Type a street name.'; return; }
+    if (!r.hits.length) { p.innerHTML = '<span class="bad">No houses found.</span> Check the street name' + (f.whole ? '' : ' and the numbers') + '.'; return; }
+    var msg = '<b>' + r.hits.length + ' house' + (r.hits.length === 1 ? '' : 'es') + '</b> found' + (r.subs.length > 1 ? ' in ' + esc(r.subs.join(' and ')) + ' (add the suburb after a comma to pick one)' : '') + '.';
+    if (r.missing.length) msg += ' <span class="bad">Not found: ' + esc(r.missing.join(', ')) + '</span>';
+    p.innerHTML = msg;
+  }
+  function saveForm(){
+    updatePreview(); var f = form, r = lastPrev;
+    if (!r || !r.hits.length) { window.customAlert('No houses match yet. Check the street name and numbers.'); return; }
+    var o = houseStreetObj(); if (!o) return;
+    if (f.edit) f.edit.ids.forEach(function(id){ delete o[id]; });
+    r.hits.forEach(function(s){ o[addrOf(s).id] = { type: f.type, label: LABELS[f.type], runs: f.runs && f.runs.length ? f.runs : ['ALL'] }; });
+    saveModes(); redraw();
+    var n = r.hits.length, miss = r.missing.length ? ' (not found: ' + r.missing.join(', ') + ')' : '';
+    form = null; tab = 'streets'; paint();
+    window.customAlert('Marked ' + n + ' house' + (n === 1 ? '' : 's') + ' as ' + LABELS[f.type] + miss + '.');
+  }
+  function showHouses(ids){
+    var m = byId(), pts = [];
+    ids.forEach(function(id){ var s = m[id]; if (s && +s.lat && +s.lng) pts.push([+s.lat, +s.lng]); });
+    if (!pts.length) return;
+    closeHub();
+    try { if (window.switchMainTab) window.switchMainTab('map'); } catch (e) {}
+    setTimeout(function(){ try { var map = g('leafletMap'); if (map) map.fitBounds(L.latLngBounds(pts).pad(0.6), { maxZoom: 19 }); } catch (e) {} }, 300);
+  }
+
+  /* ---- clicks ---- */
+  async function onClick(ev){
+    var t = ev.target.closest ? ev.target.closest('[data-h]') : null; if (!t || t.disabled || t.hasAttribute('disabled')) return;
+    var a = t.dataset.h, i = +t.dataset.i;
+    if (a === 'close') { closeHub(); return; }
+    if (a === 'tab') { tab = t.dataset.t; form = null; paint(); return; }
+    // run boundary tab
+    if (a === 'edit') { closeHub(); try { if (window.switchMainTab) window.switchMainTab('map'); } catch (e) {} setTimeout(function(){ if (!g('isRoadSnapEditing')) window.toggleRoadSnapEditing(); }, 250); return; }
+    if (a === 'snaph') { closeHub(); window.snapActiveBoundaryToRoads(); return; }
+    if (a === 'snapr') { closeHub(); window.snapBoundaryToRoads(); return; }
+    if (a === 'nbr') { closeHub(); window.snapBoundaryToNeighbor(); return; }
+    if (a === 'delb') { var bs = onScreenBoundaries(), x = bs[i]; if (x && await deleteBoundary(x.key, x.run)) paint(); return; }
+    if (a === 'kmlin') { closeHub(); window.importRunBoundaryKml(); return; }
+    if (a === 'kmlout') { closeHub(); window.exportRunBoundaryKml(); return; }
+    if (a === 'prop') { closeHub(); if (window.openBoundaryModal) window.openBoundaryModal(); return; }
+    if (a === 'tgl-bounds') { if (window.toggleRunBoundaries) window.toggleRunBoundaries(); setTimeout(paint, 60); return; }
+    if (a === 'tgl-prop') { if (window.togglePropertyBoundaries) window.togglePropertyBoundaries(); setTimeout(paint, 60); return; }
+    if (a === 'tgl-clip') { if (window.toggleKmzClip) window.toggleKmzClip(); paint(); return; }
+    // streets tab
+    if (a.indexOf('add-') === 0 && a !== 'add-cp') { openForm(a.slice(4)); return; }
+    if (a === 'add-cp') { closeHub(); try { if (window.switchMainTab) window.switchMainTab('map'); } catch (e) {} setTimeout(function(){ if (window.startBoundarySelectMode) window.startBoundarySelectMode(); window.customAlert('Tap the houses that share one collection point, then press "Collection" at the bottom and drop the pin.'); }, 300); return; }
+    if (a === 'edit-g') { openForm(gcache[i].type, gcache[i]); return; }
+    if (a === 'show-g') { showHouses(gcache[i].ids); return; }
+    if (a === 'del-g') {
+      var G = gcache[i]; if (!G || !(await window.customConfirm('Clear "' + (LABELS[G.type] || G.type) + '" from ' + G.ids.length + ' house(s) on ' + title(G.street) + '?'))) return;
+      var o = houseStreetObj(); G.ids.forEach(function(id){ delete o[id]; }); saveModes(); redraw(); paint(); return;
+    }
+    if (a === 'show-c') { showHouses(cpcache[i].ids); return; }
+    if (a === 'runs-c') {
+      var C = cpcache[i]; if (!C || !window.openRunPickerModal) return;
+      var runs = await window.openRunPickerModal('Which run(s) use this collection point?', C.runs); if (runs === null) return;
+      var oc = cpObj(); C.ids.forEach(function(id){ if (oc[id]) oc[id].runs = runs; }); saveCps(); redraw(); paint(); return;
+    }
+    if (a === 'del-c') {
+      var C2 = cpcache[i]; if (!C2 || !(await window.customConfirm('Delete this collection point? ' + C2.ids.length + ' house(s) will be collected one by one again.'))) return;
+      var oc2 = cpObj(); C2.ids.forEach(function(id){ delete oc2[id]; }); saveCps(); redraw(); paint(); return;
+    }
+    if (a === 'notes') { closeHub(); if (window.openAccessNotesModal) window.openAccessNotesModal(); return; }
+    // the form
+    if (a === 'ftype') { updatePreview(); form.type = t.dataset.t; paint(); return; }
+    if (a === 'fwhole') { updatePreview(); form.whole = t.dataset.v === '1'; paint(); return; }
+    if (a === 'fruns') {
+      updatePreview(); if (!window.openRunPickerModal) return;
+      var picked = await window.openRunPickerModal('Which run(s) is "' + LABELS[form.type] + '" for?', form.runs); if (picked !== null) form.runs = picked; paint(); return;
+    }
+    if (a === 'fcancel') { form = null; paint(); return; }
+    if (a === 'fsave') { saveForm(); return; }
+  }
+  document.addEventListener('input', function(ev){ if (ev.target && (ev.target.id === 'lbhStreet' || ev.target.id === 'lbhNums')) updatePreview(); });
+  document.addEventListener('keydown', function(ev){ if (ev.key === 'Escape' && $('lbHub') && $('lbHub').classList.contains('on')) closeHub(); });
+  window.lbBoundaryHub = { _t: { nearest: nearest, densify: densify, simplify: simplify, pickSide: function(ci, a, b){ setTool('side'); chooseSide(ctxs[ci], a, b); }, ctxs: function(){ return ctxs; }, findHouses: findHouses, parseNumbers: parseNumbers, addrOf: addrOf, groups: groups, deleteBoundary: deleteBoundary, applySeed: applySeed } };
 })();
 </script>
 
