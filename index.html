@@ -31381,6 +31381,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var list = Object.keys(streets).map(function(k){ return streets[k]; });
     return { run: r, total: total, left: left, pink: pink, houses: houses, noLoc: noLoc,
       streets: list.filter(function(x){ return x.left || x.pink; }).sort(function(a, b){ return (b.left + b.pink) - (a.left + a.pink); }),
+      doneStreets: list.filter(function(x){ return x.bins && !x.left && !x.pink; }).map(function(x){ return x.name; }),
       notDriven: list.filter(function(x){ return !x.driven && x.bins; }), hasTrail: Object.keys(grid).length > 0, streetKeys: Object.keys(streets) };
   }
   function st3x(v, l){ return '<div class="sx-stat"><b>' + esc(v) + '</b><span>' + esc(l) + '</span></div>'; }
@@ -32198,7 +32199,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     if (a === 'runcheck') { view = 'runcheck'; paint(); return; }
     if (a === 'todo') { view = 'todo'; todoAll = false; paint(); return; }
     if (a === 'todoall') { todoAll = !todoAll; paint(); return; }
-    if (a === 'todopdf') { closeSheet(); if (window.lbRunMapOpen) window.lbRunMapOpen(); return; }
+    if (a === 'todopdf') { var rc = runCheck(); closeSheet(); if (window.lbRunMapOpen) window.lbRunMapOpen(null, { done: rc ? rc.doneStreets : [] }); return; }
     if (a === 'todosend') {
       var tc2 = SH ? runCheck() : null; if (!tc2) { toast('No run to send'); return; }
       var tl2 = tc2.streets.slice().sort(function(x, y){ return (y.hs || 0) - (x.hs || 0); }), d2 = me(), loc2 = here();
@@ -35724,7 +35725,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   // ---- the same top on both panels: Menu | Layers tabs, a search box, and the screen buttons ----
   // (The menu and Layers had their own buttons on the edge of the map, easy to mix up. Now either panel can
   // switch to the other from its tabs, and both search and go to any screen the same way.)
-  var SEARCH_SVG = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="square" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 5 5"/></svg>';
+  var SEARCH_SVG = '<i class="lb-mag" aria-hidden="true"></i>';   // the grey magnifying glass (search-grey.png) - one look for every search box
   function tabsHtml(which){
     return '<button type="button" class="lbp-tab' + (which === 'menu' ? ' on' : '') + '" data-lbtab="menu"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="square" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg>Menu</button>' +
       '<button type="button" class="lbp-tab' + (which === 'layers' ? ' on' : '') + '" data-lbtab="layers"><img class="icon-img" src="layers.png" alt="">Layers</button>';
@@ -37707,6 +37708,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     }
     return best;
   }
+  var doneNames = null, DONE_COL = '#dc2626';
+  function normSt(n){ return String(n || '').toLowerCase().replace(/\bstreet\b/g, 'st').replace(/\broad\b/g, 'rd').replace(/\bavenue\b/g, 'ave').replace(/\bcourt\b/g, 'ct').replace(/\bdrive\b/g, 'dr').replace(/\bcrescent\b/g, 'cres').replace(/\bplace\b/g, 'pl').replace(/\bboulevard\b/g, 'bvd').replace(/[^a-z0-9]+/g, ''); }
   function draw(container, key, R, page, opts){
     opts = opts || {};
     var E = edits(key), mode = opts.edit ? opts.mode : '';
@@ -37729,7 +37732,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var all = []; R.lines.forEach(function(l){ all = all.concat(l.c); });
     // the route, each street piece in its section's colour (from the map, or as edited); removed pieces only in edit mode
     var used = {};
-    var shown = R.lines.map(function(l){ var ov = E.pieces[pid(l)]; return { l: l, col: ov && ov !== 'x' ? ov : (l.s || '#16a34a'), gone: ov === 'x' }; });
+    var shown = R.lines.map(function(l){ var ov = E.pieces[pid(l)]; return { l: l, col: ov && ov !== 'x' ? ov : (doneNames && l.n && doneNames.indexOf(normSt(l.n)) >= 0 ? DONE_COL : (l.s || '#16a34a')), gone: ov === 'x' }; });
     shown.forEach(function(x){ if (!x.gone) L.polyline(x.l.c, { color: '#fff', weight: 9, opacity: 1, interactive: false }).addTo(layers); });
     E.drawn.forEach(function(d){ L.polyline(d.c, { color: '#fff', weight: 9, opacity: 1, interactive: false }).addTo(layers); });
     shown.forEach(function(x){
@@ -37941,8 +37944,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   // the legend's route colours: just "Route" for a one-colour run; each section, with its name, when the run has several
   function legendSections(used, E){
     var cols = Object.keys(used).sort(function(a, b){ return used[b] - used[a]; });
-    if (cols.length <= 1) return '<div><i style="border-color:' + (cols[0] || '#16a34a') + '"></i>' + esc(E.names[cols[0]] || 'Route') + '</div>';
-    return cols.map(function(c){ return '<div><i style="border-color:' + c + '"></i>' + esc(E.names[c] || SECTION_NAMES[c] || 'Section') + '</div>'; }).join('');
+    if (cols.length <= 1) return '<div><i style="border-color:' + (cols[0] || '#16a34a') + '"></i>' + esc(doneNames && cols[0] === DONE_COL ? 'Done' : (E.names[cols[0]] || 'Route')) + '</div>';
+    return cols.map(function(c){ return '<div><i style="border-color:' + c + '"></i>' + esc(doneNames && c === DONE_COL ? 'Done' : (E.names[c] || SECTION_NAMES[c] || 'Section')) + '</div>'; }).join('');
   }
 
   /* ---- our own street names: along the street, never upside down, never on top of each other ---- */
@@ -38407,8 +38410,10 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     }
     if (o) show(keyOf(o));
   }
-  function open(key){
+  function open(key, o2){
     if (!window.L) return;
+    // From the shift's To Do list: streets already done are drawn red (names normalised the same way as street_ids below)
+    doneNames = o2 && o2.done && o2.done.length ? o2.done.map(normSt) : null;
     build(); el.style.display = '';
     load().then(function(){
       var k = key || currentKey();
@@ -41938,7 +41943,7 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
   }
 
   // ---- the Menu / Layers panels: one search box, and "Hide all" in each Layers section ------------------
-  var SEARCH_SVG = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="square" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 5 5"/></svg>';
+  var SEARCH_SVG = '<i class="lb-mag" aria-hidden="true"></i>';   // the grey magnifying glass (search-grey.png) - one look for every search box
   var EYE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true"><path d="M2 12s3.6-6.5 10-6.5S22 12 22 12s-3.6 6.5-10 6.5S2 12 2 12z"/><circle cx="12" cy="12" r="2.8"/>';
   // which layer switches each section's button owns, and what "Show all" turns on when nothing was remembered
   // (Recording, Satellite and the Next bin box are left alone: they are not layers, and a slip would lose the trail)
@@ -44698,9 +44703,9 @@ html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c) :is(#uxStraySheet .uxs-foot,#lbCo
 html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c) :is(#uxStraySheet .uxs-foot,#lbCouncilSheet .cr-foot,#rbPw .rbpw-body) button:not(.mn-t){flex:0 0 auto !important;display:inline-flex !important;align-items:center !important;justify-content:center !important;gap:6px !important;width:auto !important;min-width:0 !important;height:40px !important;min-height:0 !important;margin:0 6px 6px 0 !important;padding:0 12px !important;font-family:var(--mn-font) !important;font-size:13px !important;font-weight:var(--mn-fw) !important;text-transform:var(--mn-tr) !important;background:var(--mn-tile) !important;color:var(--mn-text) !important;border:var(--mn-bd) !important;border-radius:var(--mn-rad) !important;box-shadow:var(--mn-sh) !important}
 html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c) #rbPw .rbpw-body button.rbpw-go{height:48px !important;font-size:16px !important;background:var(--ui-accent) !important;color:var(--ui-accent-ink,#000) !important}
 html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c) #uxStraySheet .uxs-row{background:var(--mn-tile) !important;border:var(--mn-bd) !important;border-radius:var(--mn-rad) !important;margin:0 12px 6px !important;width:auto !important}
-body.lb-pc.ux2 #uxStraySheet .uxs-panel,body.lb-pc.ux2 #lbCouncilSheet .cr-panel{top:56px !important}
-body.lb-pc.ux2 .modal-overlay{padding-top:56px !important;padding-left:0 !important}
-body.lb-pc.ux2 #lbHub{top:56px !important}
+body.lb-pc.ux2 #uxStraySheet .uxs-panel,body.lb-pc.ux2 #lbCouncilSheet .cr-panel{top:var(--pc-bar-h,92px) !important}
+body.lb-pc.ux2 .modal-overlay{padding-top:var(--pc-bar-h,92px) !important;padding-left:0 !important}
+body.lb-pc.ux2 #lbHub{top:var(--pc-bar-h,92px) !important}
 /* week / day option chips fit their label */
 html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c) #mapRunPickerWeeks{display:flex !important;flex-wrap:wrap !important;gap:6px !important}
 html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c) #mapRunPickerWeeks .unified-filter-btn{flex:0 0 auto !important;width:auto !important;min-width:64px !important;padding:0 12px !important}
@@ -44993,7 +44998,7 @@ html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c) #mapContextButtons .boundary-run-
 /* WIDESCREEN: the top bar already carries the menu button, the run and the search, so a panel does not repeat them.
    One menu button (top left), one X (the panel's, or the mode bar's when no panel is open), one run chip, one search box. */
 html body.lb-pc.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f) .mn-burger{display:none !important}
-html body.lb-pc.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f) #lbDrawer .lb-drawer-search>:not(#lbDrawerCloseBtn){display:none !important}
+html body.lb-pc.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f) #lbDrawer .lb-drawer-search{display:none !important}
 html body.lb-pc.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f) #lbDrawer .lb-drawer-search{background:none !important;border:0 !important;box-shadow:none !important;padding:0 !important;flex:none !important;width:auto !important;min-width:0 !important}
 html body.lb-pc.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f) #lbHub .lbh-runcard{display:none !important}
 html body.lb-pc.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):is(.lb-panel,.lb-drawer-open,.lb-layers-open,.lb-settings-open) #mapContextCloseBtn{display:none !important}
@@ -45066,7 +45071,7 @@ html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f) 
 html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f) #lbDrawer[data-mntop] .lb-drawer-head{background:var(--mn-bar) !important;padding:0 10px 8px !important;border:0 !important}
 html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f) #lbDrawer[data-mntop] .lb-drawer-search{flex:1 1 auto !important;width:100% !important}
 /* widescreen: the top bar already has menu, layers and search - only back and close */
-html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f).lb-pc [data-mntop] :is(.mn-top-title,.mn-tb.r,.mn-tb.y,.mn-top-search,.lb-drawer-search){display:none !important}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f).lb-pc .mn-top{display:none !important}
 html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f).lb-pc .mn-top{flex-direction:row;justify-content:flex-end;padding:6px 10px}
 html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f) .mn-top-search input{border:0 !important;box-shadow:none !important;background:none !important;padding:0 !important;margin:0 !important;height:auto !important;width:auto !important;font-family:Roboto,system-ui,-apple-system,sans-serif !important;font-weight:400 !important;font-size:15px !important;text-transform:none !important;color:var(--mn-text) !important}
 html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f) .mn-top-search input::placeholder{font-family:var(--mn-font);font-weight:400;color:var(--mn-text2);opacity:1}
@@ -45084,6 +45089,23 @@ html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c) #uxShift .sx-icons{display:flex;g
 html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c) #uxShift .sx-ib{width:44px;height:44px;min-width:0;display:inline-flex;align-items:center;justify-content:center;padding:0;background:var(--mn-tile);border:var(--mn-bd);border-radius:var(--mn-rad);box-shadow:var(--mn-sh);color:var(--ui-accent);cursor:pointer}
 html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c) #uxShift .sx-ib.go{background:var(--ui-accent);color:var(--ui-accent-ink,#000)}
 html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c) #uxShift .sx-ib svg{width:20px;height:20px;stroke:currentColor;fill:none;stroke-width:2}
+
+/* ONE SEARCH BOX LOOK EVERYWHERE: the grey magnifying glass (search-grey.png, the same shape as search.png) and plain Roboto
+   text - never the bold heading font the skins use, which made the words look shouty and clipped. */
+.lb-mag{display:inline-block;flex:none;width:20px;height:20px;background:url(search-grey.png) center/contain no-repeat;pointer-events:none}
+html body.ux2 :is(#lbDrawer,#lbPcBar,.mn-top-search,.lbp-search,#uxiPick) .lb-mag{width:20px;height:20px}
+html body.ux2 :is(.mn-sico,.lbp-sico,.mn-top-search,.pc-search){color:#9ea3aa}
+html body.ux2 input[type="search"],html body.ux2 input[type="search"]::placeholder{font-family:Roboto,system-ui,-apple-system,"Segoe UI",sans-serif !important;font-weight:400 !important;text-transform:none !important;letter-spacing:0 !important;font-size:15px}
+html body.ux2 input[type="search"]::placeholder{color:#9ea3aa !important;opacity:1}
+
+/* the four top buttons first show the stream logos, then flip to menu / Layers / back / close (window.lbLogoIntro) */
+.mn-tb .lg,#lbPcBar .mn-tb .lg{display:none;width:22px;height:22px;object-fit:contain;flex:none}
+html body.ux2 .mn-tb.lgo svg{display:none !important}
+html body.ux2 .mn-tb.lgo .lg{display:block !important}
+html body.ux2 .mn-tb.lgo{background:var(--lgc,#fff) !important}
+html body.ux2 .mn-tb.r{--lgc:var(--ux-c-gar,#ff4b3e)} html body.ux2 .mn-tb.y{--lgc:var(--ux-c-rec,#ffd21f)} html body.ux2 .mn-tb.g{--lgc:var(--ux-c-fog,#2ecc62)} html body.ux2 .mn-tb.b{--lgc:#3b82f6}
+@keyframes mnflip{0%{transform:rotateY(90deg)}100%{transform:none}}
+html body.ux2 .mn-tb.flip{animation:mnflip .28s ease-out}
 </style>
 <script id="lb-menus-script">
 (function(){
@@ -45145,7 +45167,7 @@ html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c) #uxShift .sx-ib svg{width:20px;he
     paperwork: SVG('<path d="M6 3h9l4 4v14H6z"/><path d="M9 13l2 2 4-4"/>'),
     emerg: SVG('<circle cx="12" cy="12" r="9"/><path d="M12 7v10M7 12h10"/>'),
     hotload: SVG('<path d="M12 2c1 4 5 6 5 11a5 5 0 0 1-10 0c0-2 1-3 2-4 0 2 1 3 2 3 0-4-1-6 1-10z"/>'),
-    search: SVG('<circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 5 5"/>')
+    search: '<i class="lb-mag" aria-hidden="true"></i>'
   };
   function icon(k){
     if (OWN[k]) return OWN[k];
@@ -45341,6 +45363,26 @@ html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c) #uxShift .sx-ib svg{width:20px;he
      nothing else had to change). On a widescreen the top bar already has the menu, Layers and search, so there only back
      and close show. The "came from" trail is worked out by watching which panel is open. */
   var NAVS = [['lbDrawer', 'lbOpenDrawer', 'lbCloseDrawer'], ['lbLayers', 'lbOpenLayers', 'lbCloseLayers'], ['lbSettings', 'lbOpenSettings', 'lbCloseSettings'], ['lbHub', 'lbOpenBoundaryHub', 'lbCloseBoundaryHub'], ['uxShift', 'uxShiftOpen', null], ['uxIssue', 'uxOpenIssue', null]];
+  /* THE LOGO INTRO. Whenever the app loads, a screen changes or a panel opens, the four buttons first show the stream logos
+     (garbage, recycle, FOGO, street litter) and then flip, one after another, to what they really are: menu, Layers, back, close.
+     It works on the phone's panel tops and on the widescreen bar alike (both use .mn-tb with a colour class r / y / g / b). */
+  var LOGOS = { r: 'garbage.png', y: 'recycle.png', g: 'fogo.png', b: 'litter.png' }, introT = [], introAt = 0;
+  window.lbLogoIntro = function(){
+    var now = Date.now(); if (now - introAt < 500) return; introAt = now;
+    introT.forEach(clearTimeout); introT = [];
+    ['r', 'y', 'g', 'b'].forEach(function(c, i){
+      var all = function(){ return document.querySelectorAll('.mn-tb.' + c); };
+      [].forEach.call(all(), function(b){ b.classList.add('lgo'); b.classList.remove('flip'); });
+      introT.push(setTimeout(function(){ [].forEach.call(all(), function(b){ b.classList.remove('lgo'); b.classList.add('flip'); }); }, 1000 + i * 320));
+    });
+  };
+  // back = the panel you came from (used by the widescreen bar's green button; the phone tops call topGo)
+  window.lbNavBack = function(){
+    navWatch(); navStack.pop(); var prev = navStack[navStack.length - 1], n = null;
+    for (var k = 0; k < NAVS.length; k++) if (NAVS[k][0] === prev) n = NAVS[k];
+    try { if (typeof window.lbCloseAllPopups === 'function') window.lbCloseAllPopups(); } catch (e) {}
+    if (n && typeof window[n[1]] === 'function') { navBusy = 1; setTimeout(function(){ try { window[n[1]](); } catch (e) {} navBusy = 0; }, 160); }
+  };
   var navStack = [], navCur = '', navBusy = 0, navGone = 0; window.__nav = function(){ return [navStack.slice(), navCur]; };
   var ROOTS = '#lbDrawer, #lbLayers, #lbSettings, #lbHub, #uxStraySheet .uxs-panel, #lbCouncilSheet .cr-panel, .modal-overlay .modal-box';
   function panelOpen(id){
@@ -45358,7 +45400,7 @@ html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c) #uxShift .sx-ib svg{width:20px;he
       return;
     }
     navGone = 0;
-    if (cur === navCur) return; navCur = cur;
+    if (cur === navCur) return; navCur = cur; try { window.lbLogoIntro(); } catch (e) {}
     if (navStack[navStack.length - 1] !== cur) { navStack.push(cur); if (navStack.length > 8) navStack.shift(); }
   }
   function closeRoot(root){
@@ -45396,12 +45438,12 @@ html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c) #uxShift .sx-ib svg{width:20px;he
       if (!r.querySelector('#lbDrawerCloseBtn, #lbLayersCloseBtn, #lbSettingsCloseBtn, .mn-x, .lbh-x, .uxs-x, .cr-x, .modal-close-btn')) continue;
       r.setAttribute('data-mntop', '1');
       var t = document.createElement('div'); t.className = 'mn-top';
-      var bt = function(a, label, cls, path){ return '<button type="button" class="mn-tb ' + cls + '" data-mt="' + a + '" aria-label="' + label + '" title="' + label + '">' + SVG(path) + '</button>'; };
+      var bt = function(a, label, cls, path){ return '<button type="button" class="mn-tb ' + cls + '" data-mt="' + a + '" aria-label="' + label + '" title="' + label + '">' + SVG(path) + '<img class="lg" src="' + LOGOS[cls] + '" alt=""></button>'; };
       t.innerHTML = '<div class="mn-top-row"><b class="mn-top-title">Lukez Bunz</b>' +
         bt('menu', 'Menu', 'r', '<path d="M4 7h16M4 12h16M4 17h16"/>') + bt('layers', 'Layers', 'y', '<path d="M12 3l9 5-9 5-9-5 9-5z"/><path d="M3 13l9 5 9-5"/>') +
         bt('back', 'Back', 'g', '<path d="M19 12H5M11 6l-6 6 6 6"/>') + bt('close', 'Close', 'b', '<path d="M6 6l12 12M18 6L6 18"/>') + '</div>' +
         (r.id === 'lbDrawer' ? '' : '<label class="mn-top-search">' + OWN.search + '<input type="search" autocomplete="off" placeholder="Search bin, address or street"></label>');
-      r.insertBefore(t, r.firstChild);
+      r.insertBefore(t, r.firstChild); setTimeout(function(){ window.lbLogoIntro(); }, 30);
       (function(root, el){
         el.addEventListener('click', function(ev){ var b = ev.target.closest && ev.target.closest('[data-mt]'); if (!b) return; ev.preventDefault(); ev.stopPropagation(); topGo(b.getAttribute('data-mt'), root); });
         var si = el.querySelector('input');
@@ -45514,6 +45556,12 @@ html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c) #uxShift .sx-ib svg{width:20px;he
   } catch (e) {} }, 500);
   setInterval(tick, 1000);
   tick();
+  // the logo intro on every screen change and once the app has loaded
+  (function(){
+    var pt = window.lbNotifyTabChanged;
+    window.lbNotifyTabChanged = function(){ var out = typeof pt === 'function' ? pt.apply(this, arguments) : undefined; try { setTimeout(window.lbLogoIntro, 60); } catch (e) {} return out; };
+    setTimeout(function(){ try { window.lbLogoIntro(); } catch (e) {} }, 600);
+  })();
 })();
 </script>
 
@@ -45664,24 +45712,30 @@ html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c) #lbRunMap .rm-bar button[data-rm=
 <style id="lb-pc-style">
 /* ---------- PC mode (wide screen + mouse): a top menu bar, a big map, no driving furniture ---------- */
 #lbPcBar{display:none}
+body.lb-pc{--pc-bar-h:92px}
 @media (min-width:900px) and (hover:hover){
-  body.ux2 #lbPcBar{display:flex;position:fixed;left:0;right:0;top:0;height:56px;z-index:4400;align-items:center;gap:6px;padding:0 10px 0 62px;background:var(--mn-bar);border-bottom:var(--mn-bd);box-shadow:var(--mn-sh);font-family:var(--mn-font);overflow:hidden}
+  body.ux2 #lbPcBar{display:flex;position:fixed;left:0;right:0;top:0;height:var(--pc-bar-h,92px);z-index:4400;flex-direction:column;align-items:stretch;justify-content:center;gap:6px;padding:0 10px;background:var(--mn-bar);border-bottom:var(--mn-bd);box-shadow:var(--mn-sh);font-family:var(--mn-font);overflow:hidden}
   body.ux2 #lbPcBar button{flex:none;display:inline-flex;align-items:center;gap:7px;height:40px;min-height:0;padding:0 12px;margin:0;font-family:var(--mn-font);font-size:13px;font-weight:var(--mn-fw);text-transform:var(--mn-tr);white-space:nowrap;background:var(--mn-tile);color:var(--mn-text);border:var(--mn-bd);border-radius:var(--mn-rad);box-shadow:var(--mn-sh);cursor:pointer}
+  body.ux2 #lbPcBar .pc-r1,body.ux2 #lbPcBar .pc-r2{display:flex;align-items:center;gap:6px;min-width:0}
+  body.ux2 #lbPcBar .pc-r1{height:40px}
+  body.ux2 #lbPcBar .pc-r2{height:38px}
   body.ux2 #lbPcBar button:hover{filter:brightness(1.15)}
   body.ux2 #lbPcBar button.on{background:var(--ui-accent);color:var(--ui-accent-ink,#000)}
   body.ux2 #lbPcBar button svg{width:20px;height:20px;flex:none}
   body.ux2 #lbPcBar .pc-sep{flex:none;width:2px;height:28px;background:var(--mn-line);opacity:.7;margin:0 4px}
   body.ux2 #lbPcBar .pc-sp{flex:1 1 0;min-width:8px}
-  body.ux2 #lbPcBar .pc-search{flex:0 1 280px;min-width:160px;display:flex;align-items:center;gap:8px;height:40px;padding:0 10px;background:var(--mn-bg);border:var(--mn-bd);border-radius:var(--mn-rad);color:var(--ui-accent)}
+  body.ux2 #lbPcBar .pc-search{flex:0 1 460px;min-width:200px;display:flex;align-items:center;gap:8px;height:38px;padding:0 10px;background:var(--mn-bg);border:var(--mn-bd);border-radius:var(--mn-rad);color:var(--ui-accent)}
   body.ux2 #lbPcBar .pc-search svg{width:20px;height:20px;flex:none}
   body.ux2 #lbPcBar .pc-search input{flex:1;min-width:0;height:36px;padding:0;margin:0;background:none;border:0;outline:0;box-shadow:none;color:var(--mn-text);font-family:var(--mn-font);font-size:14px}
   body.ux2 #lbPcBar .pc-run{background:var(--ui-accent);color:var(--ui-accent-ink,#000)}
+  html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f) #lbPcBar .mn-tb{width:38px !important;height:38px !important;padding:0 !important;justify-content:center;border:0 !important}
+  body.ux2 #lbPcBar .mn-tb.on{outline:3px solid var(--mn-text);outline-offset:-3px}
   body.ux2 #lbPcBar .pc-run .icon-img{width:18px;height:18px}
   /* the driving furniture goes: top stats and cash, bin card stack, speed, run-here chip, the left rail */
   body.lb-pc #uxCardStack,body.lb-pc #lbSpeedBadge,body.lb-pc #uxRunHereChip,body.lb-pc #lbStartFab,body.lb-pc #uxHdrTools,body.lb-pc #rbClock,body.lb-pc .bottom-nav{display:none !important}
-  body.lb-pc.ux2 #mapScreen,body.lb-pc.ux2 #driverHudScreen,body.lb-pc.ux2 #searchScreen,body.lb-pc.ux2 #welcomeScreen{left:0 !important;width:auto !important;top:56px !important}
-  body.lb-pc.ux2 #uxNavBtn{top:8px !important;left:8px !important}
-  body.lb-pc.ux2 #lbDrawer,body.lb-pc.ux2 #lbLayers,body.lb-pc.ux2 #lbSettings{top:56px !important;height:calc(100% - 56px) !important}
+  body.lb-pc.ux2 #mapScreen,body.lb-pc.ux2 #driverHudScreen,body.lb-pc.ux2 #searchScreen,body.lb-pc.ux2 #welcomeScreen{left:0 !important;width:auto !important;top:var(--pc-bar-h,92px) !important}
+  body.lb-pc.ux2 #uxNavBtn,html body.lb-pc.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e) #uxNavBtn{display:none !important;visibility:hidden !important}
+  body.lb-pc.ux2 #lbDrawer,body.lb-pc.ux2 #lbLayers,body.lb-pc.ux2 #lbSettings{top:var(--pc-bar-h,92px) !important;height:calc(100% - var(--pc-bar-h,92px)) !important}
   body.lb-pc #mapNormalTopBar{display:none !important}
   /* the map's own header stays for the mode bars (boundary editing, geofences...) but takes no room when there is no mode on */
   html body.lb-pc.ux2:not(#mn-a):not(#mn-b):not(#mn-c) .map-header-panel{background:none !important;border:0 !important;box-shadow:none !important;padding:0 !important;min-height:0 !important;pointer-events:none}
@@ -45689,27 +45743,28 @@ html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c) #lbRunMap .rm-bar button[data-rm=
   html body.lb-pc.ux2:not(#mn-a):not(#mn-b):not(#mn-c) .map-header-panel::before,html body.lb-pc.ux2:not(#mn-a):not(#mn-b):not(#mn-c) .map-header-panel::after{display:none !important}
   body.lb-pc #lbStreetSides,body.lb-pc #mapStreetOverlay,body.lb-pc #areaRunsBar{display:none !important}
   body.lb-pc #uxhSpeedCell,body.lb-pc #uxMyRunChip{display:none !important}
-  html body.lb-pc.ux2:not(#mn-a):not(#mn-b):not(#mn-c) #mapFixedSideControls{top:68px !important;bottom:auto !important;right:8px !important;margin:0 !important;transform:none !important}
-  html body.lb-pc.ux2:not(#mn-a):not(#mn-b):not(#mn-c) #mapFixedLeftControls{top:68px !important;bottom:auto !important;left:8px !important;margin:0 !important;transform:none !important}
+  html body.lb-pc.ux2:not(#mn-a):not(#mn-b):not(#mn-c) #mapFixedSideControls{top:calc(var(--pc-bar-h,92px) + 12px) !important;bottom:auto !important;right:8px !important;margin:0 !important;transform:none !important}
+  html body.lb-pc.ux2:not(#mn-a):not(#mn-b):not(#mn-c) #mapFixedLeftControls{top:calc(var(--pc-bar-h,92px) + 12px) !important;bottom:auto !important;left:8px !important;margin:0 !important;transform:none !important}
   body.lb-pc,body.lb-pc.ux2{--ux-rail-w:0px !important}
   body.ux2 #lbPcBar .pc-title{flex:none;font-family:var(--mn-font);font-weight:var(--mn-fw);font-size:19px;line-height:1;letter-spacing:.01em;text-transform:uppercase;white-space:nowrap;color:var(--mn-text);padding:0 6px 0 2px;border-left:4px solid var(--ui-accent);padding-left:8px}
-  body.ux2 #lbPcBar .pc-search{flex:0 1 240px;min-width:110px}
   /* no dimming and no click-blocking on a PC: a pop-up is a panel at the left, the bar and the map stay usable beside it */
-  html body.lb-pc.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e) .modal-overlay:not(#customDialogOverlay){top:56px !important;padding-top:0 !important;background:none !important;pointer-events:none !important}
+  html body.lb-pc.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e) .modal-overlay:not(#customDialogOverlay){top:var(--pc-bar-h,92px) !important;padding-top:0 !important;background:none !important;pointer-events:none !important}
   html body.lb-pc.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e) .modal-overlay:not(#customDialogOverlay) .modal-box{pointer-events:auto !important}
   body.lb-pc #lbDrawerScrim,body.lb-pc #lbLayersScrim,body.lb-pc #lbSettingsScrim,body.lb-pc .lb-scrim{display:none !important}
   /* the map's own controls, the mode bar and its action row all start to the right of whatever panel is open */
-  html body.lb-pc.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e) #mapFixedLeftControls{left:calc(var(--pc-left,0px) + 8px) !important;top:68px !important}
-  html body.lb-pc.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e).lb-ctx #mapFixedLeftControls,html body.lb-pc.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e).lb-ctx #mapFixedSideControls{top:122px !important}
+  html body.lb-pc.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e) #mapFixedLeftControls{left:calc(var(--pc-left,0px) + 8px) !important;top:calc(var(--pc-bar-h,92px) + 12px) !important}
+  html body.lb-pc.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e).lb-ctx #mapFixedLeftControls,html body.lb-pc.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e).lb-ctx #mapFixedSideControls{top:calc(var(--pc-bar-h,92px) + 66px) !important}
   html body.lb-pc.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e) .map-header-panel{left:var(--pc-left,0px) !important;right:0 !important;width:auto !important}
   html body.lb-pc.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e) #mapContextBar{height:48px !important;min-height:0 !important;margin:0 !important;width:auto !important;padding:0 8px !important;gap:10px !important;display:flex;align-items:center !important;justify-content:flex-start !important;background:var(--mn-bar) !important;border-bottom:var(--mn-bd) !important}
   html body.lb-pc.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e) #mapContextBar #mapContextBox{flex:1 1 auto !important;min-width:0 !important;height:auto !important;background:none !important;border:0 !important;box-shadow:none !important;padding:0 !important;color:var(--mn-text) !important}
   html body.lb-pc.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e) #mapContextBar #mapContextTitle{font-family:var(--mn-font) !important;font-weight:var(--mn-fw) !important;font-size:16px !important;text-transform:var(--mn-tr) !important;color:var(--mn-text) !important}
-  html body.lb-pc.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e) #mapContextRow2.has-row2{left:var(--pc-left,0px) !important}
+  html body.lb-pc.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e) #mapContextRow2.has-row2{left:var(--pc-pl,0px) !important}
+  /* the boundary-editing tools (Pick points, One side, Snap, Match neighbour, Fewer points, Delete, Done) are a side panel beside the map, not a row along the bottom */
+  html body.lb-pc.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e) #mapContextRow2.has-row2{top:var(--pc-bar-h,92px) !important;bottom:0 !important;right:auto !important;width:200px !important;flex-direction:column !important;flex-wrap:nowrap !important;align-items:stretch !important;align-content:flex-start !important;overflow-y:auto !important;padding:10px !important;border:0 !important;border-right:var(--mn-bd) !important;box-shadow:var(--mn-sh) !important}
+  html body.lb-pc.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e) #mapContextRow2.has-row2 .map-context-btn{flex:none !important;width:100% !important;height:40px !important;justify-content:flex-start !important;text-align:left}
   html body.lb-pc.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e) #uxZoomNote,html body.lb-pc.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e) #uxStrayChip{margin-left:var(--pc-left,0px)}
   html body.lb-pc.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e) #mapContextBar #mapContextTitle{display:flex !important;align-items:center !important;height:100% !important;line-height:1 !important;white-space:nowrap !important}
-  html body.lb-pc.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e) #uxNavBtn{visibility:visible !important;display:inline-flex !important}
-  body.ux2 #lbPcBar{overflow:clip}
+    body.ux2 #lbPcBar{overflow:clip}
   body.ux2 #lbPcBar button .pc-s{display:none}
   html body.lb-pc.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e) #mapContextRow2 .map-context-btn{height:36px !important;padding:0 9px !important;font-size:12px !important}
   body.lb-pc #lbParcelPill{left:auto !important;right:64px !important;transform:none !important;bottom:8px !important}
@@ -45718,12 +45773,6 @@ html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c) #lbRunMap .rm-bar button[data-rm=
   @media (max-width:1640px){body.ux2 #lbPcBar button .pc-l{display:none} body.ux2 #lbPcBar button .pc-s{display:inline}}
   @media (max-width:1180px){body.ux2 #lbPcBar{gap:4px} body.ux2 #lbPcBar button{padding:0 7px;gap:4px;font-size:12px} body.ux2 #lbPcBar button svg{width:17px;height:17px} body.ux2 #lbPcBar .pc-title{font-size:16px;padding-right:2px} body.ux2 #lbPcBar .pc-sep{margin:0 1px}}
   @media (max-width:1100px){body.ux2 #lbPcBar [data-pc="find"]{display:none}}   /* the menu button and the search do Find's job */
-  @media (max-width:1340px){
-    body.ux2 #lbPcBar .pc-search{flex:0 0 40px;min-width:40px;width:40px;padding:0;justify-content:center;cursor:pointer}
-    body.ux2 #lbPcBar .pc-search input{width:0;flex:0 0 0;padding:0}
-    body.ux2 #lbPcBar .pc-search:focus-within{position:absolute;right:8px;top:8px;width:min(320px,60vw);flex:none;padding:0 10px;justify-content:flex-start;z-index:2;box-shadow:var(--mn-sh)}
-    body.ux2 #lbPcBar .pc-search:focus-within input{width:auto;flex:1}
-  }
   @media (max-width:960px){body.ux2 #lbPcBar .pc-title{display:none}}
   body.lb-pc.ux2 .container,body.lb-pc.ux2 #app{padding-left:0 !important;margin-left:0 !important}
 }
@@ -45783,6 +45832,13 @@ html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c) #lbRunMap .rm-bar button[data-rm=
     setup: function(){ closeAllPanels(); if (window.uxOpenCustomize) window.uxOpenCustomize(); },
     map: function(){ closeAllPanels(); if (typeof switchMainTab === 'function') switchMainTab('map'); },
     streets: function(){ closeAllPanels(); if (typeof switchMainTab === 'function') switchMainTab('hud'); },
+    tmenu: function(){
+      if (document.body.classList.contains('lb-drawer-open')) { var di = $('lbDrawerInput'); if (di && di.value) { di.value = ''; try { di.dispatchEvent(new Event('input', { bubbles: true })); } catch (e) {} } try { if (typeof window.lbDrawerBackToMenu === 'function') window.lbDrawerBackToMenu(); } catch (e) {} return; }
+      ACTS.find();
+    },
+    tlayers: function(){ if (!document.body.classList.contains('lb-layers-open')) ACTS.layers(); },
+    tback: function(){ if (typeof window.lbNavBack === 'function') window.lbNavBack(); else closeAllPanels(); },
+    tclose: function(){ closeAllPanels(); },
     run: function(){ closeAllPanels(); if (typeof window.openFilterDrawerModal === 'function') window.openFilterDrawerModal(); }
   };
   function build(){
@@ -45790,10 +45846,16 @@ html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c) #lbRunMap .rm-bar button[data-rm=
     bar = document.createElement('div'); bar.id = 'lbPcBar';
     var b = function(k, label, short){ return '<button type="button" data-pc="' + k + '" title="' + label.replace('&amp;', '&') + '">' + IC[k] + (short ? '<span class="pc-l">' + label + '</span><span class="pc-s">' + short + '</span>' : '<span>' + label + '</span>') + '</button>'; };
     // left to right the same as the phone's top bar: menu button, the run, then everything else
-    bar.innerHTML = '<b class="pc-title">Lukez Bunz</b><button type="button" class="pc-run" data-pc="run" id="lbPcRun"><span>Select run</span></button><span class="pc-sep"></span>' +
+    var tb = function(k, cls, label, path){ return '<button type="button" class="mn-tb ' + cls + '" data-pc="' + k + '" aria-label="' + label + '" title="' + label + '">' + SV(path) + '<img class="lg" src="' + ({ r: 'garbage.png', y: 'recycle.png', g: 'fogo.png', b: 'litter.png' })[cls] + '" alt=""></button>'; };
+    // Row 1 is the phone's top: LUKEZ BUNZ, the four buttons (red menu, yellow Layers, green back, blue close), then the run
+    // right beside the close button and the screens. Row 2 is the search box.
+    bar.innerHTML = '<div class="pc-r1"><b class="pc-title">Lukez Bunz</b>' +
+      tb('tmenu', 'r', 'Menu', '<path d="M4 7h16M4 12h16M4 17h16"/>') + tb('tlayers', 'y', 'Layers', '<path d="M12 3l9 5-9 5-9-5 9-5z"/><path d="M3 13l9 5 9-5"/>') +
+      tb('tback', 'g', 'Back', '<path d="M19 12H5M11 6l-6 6 6 6"/>') + tb('tclose', 'b', 'Close', '<path d="M6 6l12 12M18 6L6 18"/>') +
+      '<button type="button" class="pc-run" data-pc="run" id="lbPcRun"><span>Select run</span></button><span class="pc-sep"></span>' +
       b('map', 'Map') + b('streets', 'Streets') + '<span class="pc-sep"></span>' +
-      b('find', 'Find') + b('bnd', 'Boundaries &amp; streets', 'Boundaries') + b('bins', 'Bins &amp; houses', 'Bins') + b('data', 'Data') + b('layers', 'Layers') + b('setup', 'Set up') +
-      '<span class="pc-sp"></span><label class="pc-search">' + IC.find + '<input type="search" id="lbPcSearch" placeholder="Search bin, address or street" autocomplete="off"></label>';
+      b('bnd', 'Boundaries &amp; streets', 'Boundaries') + b('bins', 'Bins &amp; houses', 'Bins') + b('data', 'Data') + b('setup', 'Set up') + '</div>' +
+      '<div class="pc-r2"><label class="pc-search"><i class="lb-mag" aria-hidden="true"></i><input type="search" id="lbPcSearch" placeholder="Search bin, address or street" autocomplete="off"></label></div>';
     document.body.appendChild(bar);
     bar.addEventListener('click', function(ev){
       var t = ev.target.closest && ev.target.closest('[data-pc]'); if (!t) return;
@@ -45812,8 +45874,8 @@ html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c) #lbRunMap .rm-bar button[data-rm=
     if (!bar) return;
     var tab = ''; try { tab = typeof activeTab !== 'undefined' ? activeTab : ''; } catch (e) {}
     [].forEach.call(bar.querySelectorAll('[data-pc="map"],[data-pc="streets"]'), function(x){ x.classList.toggle('on', (x.getAttribute('data-pc') === 'map' && tab === 'map') || (x.getAttribute('data-pc') === 'streets' && tab === 'hud')); });
-    var panels = { find: 'lb-drawer-open', layers: 'lb-layers-open', bins: 'lb-settings-open', data: 'lb-settings-open' };
-    [].forEach.call(bar.querySelectorAll('[data-pc]'), function(x){ var c = panels[x.getAttribute('data-pc')]; if (c && x.getAttribute('data-pc') !== 'bins' && x.getAttribute('data-pc') !== 'data') x.classList.toggle('on', document.body.classList.contains(c)); });
+    var panels = { tmenu: 'lb-drawer-open', tlayers: 'lb-layers-open' };
+    [].forEach.call(bar.querySelectorAll('[data-pc]'), function(x){ var c = panels[x.getAttribute('data-pc')]; if (c) x.classList.toggle('on', document.body.classList.contains(c)); });
     // the run chip shows the run the way the rest of the app writes it (stream logo + 225A, never the word)
     var r = $('lbPcRun'), lab = '';
     try { lab = typeof mapRunLabel === 'function' ? mapRunLabel() : ''; } catch (e) {}
@@ -45826,10 +45888,14 @@ html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c) #lbRunMap .rm-bar button[data-rm=
     var b = document.body; if (!b.classList.contains('lb-pc')) { if (b._pcL) { b._pcL = 0; b.style.removeProperty('--pc-left'); } return; }
     var L = 0, list = document.querySelectorAll(LEFTS);
     for (var n = 0; n < list.length; n++) { var r = list[n].getBoundingClientRect(); if (r.width > 120 && r.height > 120 && r.left > -4 && r.left < 12 && r.right < window.innerWidth * 0.7 && getComputedStyle(list[n]).visibility !== 'hidden') L = Math.max(L, Math.round(r.right)); }
+    // the panels' own edge (--pc-pl) is where the boundary tools panel starts; the map's buttons start after both
+    if (b._pcP !== L) { b._pcP = L; b.style.setProperty('--pc-pl', L + 'px'); }
+    var r2 = $('mapContextRow2'), t2 = !!r2 && r2.classList.contains('has-row2') && r2.getBoundingClientRect().width > 0 && getComputedStyle(r2).display !== 'none';
+    if (t2) L += Math.round(r2.getBoundingClientRect().width);
     if (b._pcL !== L) { b._pcL = L; b.style.setProperty('--pc-left', L + 'px'); }
     var cb = $('mapContextBar'), on = !!cb && cb.getBoundingClientRect().height > 0 && getComputedStyle(cb).display !== 'none';
     if (b.classList.contains('lb-ctx') !== on) b.classList.toggle('lb-ctx', on);
-    if (b.classList.contains('lb-panel') !== (L > 0)) b.classList.toggle('lb-panel', L > 0);
+    var hasP = b._pcP > 0; if (b.classList.contains('lb-panel') !== hasP) b.classList.toggle('lb-panel', hasP);
   }
   function apply(){ document.body.classList.toggle('lb-pc', !!(mq && mq.matches)); }
   function init(){ build(); apply(); paint(); }
