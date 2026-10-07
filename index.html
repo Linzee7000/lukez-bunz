@@ -29719,7 +29719,6 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
           '<div class="ux-cz-field"><div class="ux-cz-fl">Layers button</div>' + seg('qside', [['menu', 'With menu'], ['zoom', 'With zoom']]) + '</div>' +
           '<div class="ux-cz-sec">Detail</div>' +
           '<div class="ux-nerd-card">' + sw('nerd', 'Nerd mode', 'Shows the extra numbers: side counts, zoom, heading, distances, bin counts, collection dates and a live GPS strip on the map.') + '</div>' +
-          '<div class="ux-cz-field"><div class="ux-cz-fl">GPS log (last 15 min)</div><button type="button" class="btn-cancel" onclick="window.lbSendGpsLog && window.lbSendGpsLog()">Send GPS log</button></div>' +
           '<div class="ux-cz-sec">Choose what shows</div>' +
           '<div class="ux-cz-hint">These switches override Nerd mode for that one item.</div>' +
           groups +
@@ -31881,6 +31880,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
         '<div class="sx-grid">' +
           (window.lbRunSheet ? T('rs:fuel', sv('<path d="M4 21V4h9v17M2 21h13M13 9h3l3 3v6a1.5 1.5 0 0 0 3 0v-6l-3-3"/><path d="M6.5 8h4"/>'), 'Fuel') + T('rs:adblue', sv('<path d="M12 3s6 6.5 6 11a6 6 0 0 1-12 0c0-4.5 6-11 6-11z"/>'), 'AdBlue') : '') +
           T('dashrep', I.warn, 'Dash warning') +
+          T('gpslog', sv('<path d="M12 21s-6-5.5-6-11a6 6 0 0 1 12 0c0 5.5-6 11-6 11z"/><circle cx="12" cy="10" r="2"/>'), 'Send GPS log') +
           T('newdef', sv('<path d="M14.5 5.5a4 4 0 0 0-5 5L3 17l4 4 6.5-6.5a4 4 0 0 0 5-5L16 12l-3-1-1-3z"/>'), 'Truck defect') +
           (hasBrakeGauge(SH.truck) ? T('brakes', sv('<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/>'), 'Brake wear', brakeDue() ? 'on' : '') : '') +
           T('changetruck', I.truck, 'Change truck') +
@@ -32147,6 +32147,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     }
     if (a === 'bnext') { brakeRes = null; if (pendingEnd) { pendingEnd = false; endDraft = { km: '', hrs: '', photo: null, note: '' }; view = 'end'; } else view = SH ? 'main' : 'truck'; paint(); return; }
     if (a === 'oosclear') { var tn = b.getAttribute('data-t'); confirmIt('Put ' + (tn || 'this truck') + ' back in service? Only do this once the brakes have been replaced.').then(function(ok){ if (!ok) return; lsSet('lbOOS', oosList().filter(function(o){ return tnorm(o.truck) !== tnorm(tn); })); toast((tn || 'Truck') + ' is back in service'); paint(); }); return; }
+    if (a === 'gpslog') { try { window.lbSendGpsLog && window.lbSendGpsLog(); } catch (e) {} return; }
     if (a === 'dashrep') { dashDraft = newDash(); view = 'dash'; paint(); return; }
     if (a === 'dashphoto') { takePhoto('dash-warning').then(function(id){ if (id && dashDraft) { dashDraft.media.push(id); paint(); } }); return; }
     if (a === 'dashvoice') { recordVoice('dash-warning').then(function(id){ if (id && dashDraft) { dashDraft.media.push(id); paint(); } }); return; }
@@ -44092,7 +44093,15 @@ document.addEventListener('click', function(ev){
   /* ---- run boundary tab ---- */
   function runHtml(){
     var lead = document.body.classList.contains('lb-lead'), info = runInfo(), bs = onScreenBoundaries(), h = '';
-    h += '<div class="lbh-card"><b>' + (info.html || esc(info.text)) + '</b><small>' + (info.one ? 'The boundary tools work on the run showing on the map.' : 'Choose one run on the map first, then come back here.') + '</small></div>';
+    if (info.one) h += '<div class="lbh-card lbh-runcard"><b>' + (info.html || esc(info.text)) + '</b><small>The boundary tools work on the run showing on the map.</small></div>';
+    else {
+      // Several runs are showing: the tools act on ONE run, so pick which here (it keeps the others off the map until you
+      // pick again - Match neighbour works from the run you pick against the saved boundaries of its neighbours).
+      var sel3 = g('selectedRunsSet'), st3 = g('activeFilterStream') || '', day3 = g('activeFilterDay') || '', wk3 = g('activeFilterWeek') || '';
+      h += '<div class="lbh-card"><b>Pick the run to work on</b><div class="lbh-runs">' +
+        Array.from(sel3 || []).map(function(r){ return '<button type="button" class="lbh-runpick" data-h="pickrun" data-r="' + esc(String(r)) + '">' + (window.lbRunLabel ? window.lbRunLabel(st3, r, wk3, day3) : esc(String(r).toUpperCase())) + '</button>'; }).join('') +
+        '</div></div>';
+    }
     if (!lead) { h += '<div class="lbh-card"><b>Leading hand mode needed</b><small>Changing run boundaries is switched on in leading hand mode. Everything below only shows what is on the map.</small></div>'; }
     if (lead) {
       h += '<div class="lbh-h">Edit</div>';
@@ -44230,6 +44239,7 @@ document.addEventListener('click', function(ev){
     var a = t.dataset.h, i = +t.dataset.i;
     if (a === 'close') { closeHub(); return; }
     if (a === 'tab') { tab = t.dataset.t; form = null; paint(); return; }
+    if (a === 'pickrun') { var set4 = g('selectedRunsSet'); if (set4) { set4.clear(); set4.add(String(t.dataset.r).toLowerCase()); try { g('triggerUniversalDataRefresh')(); } catch (e) {} setTimeout(paint, 250); } return; }
     // run boundary tab
     if (a === 'edit') { closeHub(); try { if (window.switchMainTab) window.switchMainTab('map'); } catch (e) {} setTimeout(function(){ if (!g('isRoadSnapEditing')) window.toggleRoadSnapEditing(); }, 250); return; }
     if (a === 'snaph') { closeHub(); window.snapActiveBoundaryToRoads(); return; }
@@ -44930,8 +44940,8 @@ html:not([data-ux-skin="rubbish"]):not([data-ux-skin="speedo"]) body.ux2:not(#mn
 html:not([data-ux-skin="rubbish"]):not([data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c) #uxShift .sx .rb-bcc .sec{margin-left:.12em !important;color:var(--mn-text2) !important}
 html:not([data-ux-skin="rubbish"]):not([data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c) #uxShift .sx .rb-bcc .sec .s{font-size:.7em !important}
 /* ---- title bar: run, clock and cash never sit on top of each other. hdrRoom() measures them and tightens in steps:
-   1 no tenths digit, 2 smaller type, 3 smaller again, 4 no seconds. (A 360 px phone with $1,916 in the bank had the cash over the seconds.) ---- */
-html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f)[data-hdr-tight] #rbClock .rb-sec i.t{display:none !important}
+   1 unchanged, 2 smaller type, 3 smaller again, 4 smaller still. Seconds and tenths always stay. (A 360 px phone with $1,916 in the bank had the cash over the seconds.) ---- */
+/* seconds AND the tenths digit are never hidden (Fox: the 3-digit seconds stay). Squeezing only ever shrinks the type. */
 html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):is([data-hdr-tight="2"],[data-hdr-tight="3"],[data-hdr-tight="4"]) #uxGtaHealth .uxgh-cash{font-size:14px !important;padding:4px 6px 3px !important}
 html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):is([data-hdr-tight="2"],[data-hdr-tight="3"],[data-hdr-tight="4"]) #mapRunTitleText{font-size:15px !important}
 html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):is([data-hdr-tight="2"],[data-hdr-tight="3"],[data-hdr-tight="4"]) #rbClock b{font-size:21px !important}
@@ -44939,11 +44949,26 @@ html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):no
 html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):is([data-hdr-tight="3"],[data-hdr-tight="4"]) #mapRunTitleText{font-size:14px !important;padding-left:5px !important;padding-right:5px !important}
 html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):is([data-hdr-tight="3"],[data-hdr-tight="4"]) #rbClock b{font-size:19px !important}
 html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):is([data-hdr-tight="3"],[data-hdr-tight="4"]) #mapRunColoredBox{gap:5px !important}
-html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f)[data-hdr-tight="4"] #rbClock .rb-sec{display:none !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f)[data-hdr-tight="4"] #rbClock b{font-size:17px !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f)[data-hdr-tight="4"] #uxGtaHealth .uxgh-cash{font-size:12px !important;padding:4px 4px 3px !important}
 /* ---- the street over the dash: smaller, and it shrinks to fit rather than being cut off (paintStreet) ---- */
 html[data-ux-skin="rubbish"] body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f) #uxCardStack > #rbSt{grid-template-columns:auto minmax(0,1fr) auto !important;column-gap:6px !important}
 html[data-ux-skin="rubbish"] body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f) #uxCardStack > #rbSt b{font-size:20px !important;font-weight:700 !important;line-height:1.1 !important;text-overflow:clip !important;text-shadow:-1.5px -1.5px 0 #000, 1.5px -1.5px 0 #000, -1.5px 1.5px 0 #000, 1.5px 1.5px 0 #000, 0 2px 0 #000 !important}
 html[data-ux-skin="rubbish"] body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f) #uxCardStack > #rbSt .rb-n{min-width:44px !important;box-sizing:border-box !important;font-size:16px !important;padding:3px 6px !important}
+
+/* hub run picker (several runs showing) and the in-edit run chips: the app's own tile look, never a hard-coded yellow */
+#lbHub .lbh-runs{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
+#lbHub .lbh-runpick{background:none;border:0;padding:0;cursor:pointer;font:inherit}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c) #mapContextButtons .boundary-run-chip{background:var(--mn-tile) !important;color:var(--mn-text) !important;border:var(--mn-bd) !important;font-family:var(--mn-font) !important;border-radius:var(--mn-rad) !important;opacity:.7}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c) #mapContextButtons .boundary-run-chip.active{background:var(--accent,#facc15) !important;color:#000 !important;opacity:1}
+
+/* WIDESCREEN: the top bar already carries the menu button, the run and the search, so a panel does not repeat them.
+   One menu button (top left), one X (the panel's, or the mode bar's when no panel is open), one run chip, one search box. */
+html body.lb-pc.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f) .mn-burger{display:none !important}
+html body.lb-pc.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f) #lbDrawer .lb-drawer-search>:not(#lbDrawerCloseBtn){display:none !important}
+html body.lb-pc.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f) #lbDrawer .lb-drawer-search{background:none !important;border:0 !important;box-shadow:none !important;padding:0 !important;flex:none !important;width:auto !important;min-width:0 !important}
+html body.lb-pc.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f) #lbHub .lbh-runcard{display:none !important}
+html body.lb-pc.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):is(.lb-panel,.lb-drawer-open,.lb-layers-open,.lb-settings-open) #mapContextCloseBtn{display:none !important}
 </style>
 <script id="lb-menus-script">
 (function(){
@@ -45261,7 +45286,7 @@ html[data-ux-skin="rubbish"] body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d
     var cs = t.querySelector('.uxgh-cash'); t.classList.toggle('mn-long', !!cs && (cs.textContent || '').length > 7);
     var w = Math.round(t.getBoundingClientRect().width) || 0; if (b._mnW !== w) { b._mnW = w; b.style.setProperty('--mn-tools-w', w + 'px'); }
     // The run chip, the clock and the cash share one bar, and the cash grows ("$0" ... "-$20,000"). When the clock would
-    // touch the cash it is tightened a step at a time (see the CSS: no tenths, smaller type, no seconds), and let out
+    // touch the cash it is tightened a step at a time (see the CSS: smaller type only - seconds and tenths always stay), and let out
     // again only when there is clearly room - so it settles and does not flip back and forth.
     var c = $('rbClock'), body = document.body, vis = function(e){ return e && e.getBoundingClientRect().width > 4 && getComputedStyle(e).visibility !== 'hidden'; };
     if (!vis(c) || !vis(cs)) { if (body.hasAttribute('data-hdr-tight')) body.removeAttribute('data-hdr-tight'); return; }
@@ -45605,6 +45630,7 @@ html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c) #lbRunMap .rm-bar button[data-rm=
     if (b._pcL !== L) { b._pcL = L; b.style.setProperty('--pc-left', L + 'px'); }
     var cb = $('mapContextBar'), on = !!cb && cb.getBoundingClientRect().height > 0 && getComputedStyle(cb).display !== 'none';
     if (b.classList.contains('lb-ctx') !== on) b.classList.toggle('lb-ctx', on);
+    if (b.classList.contains('lb-panel') !== (L > 0)) b.classList.toggle('lb-panel', L > 0);
   }
   function apply(){ document.body.classList.toggle('lb-pc', !!(mq && mq.matches)); }
   function init(){ build(); apply(); paint(); }
