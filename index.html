@@ -31362,9 +31362,9 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       for (var y = cy - 1; y <= cy + 1; y++) for (var x = cx - 1; x <= cx + 1; x++) { var a = grid[y + ':' + x]; if (a) for (var k = 0; k < a.length; k++) if (dist(la, ln, a[k][0], a[k][1]) <= 35) return true; }
       return false;
     };
-    var streets = {}, left = 0, pink = 0, total = 0, noLoc = 0, seen = {}, sc = g('sourceCoords'), ds = g('activeFilterDataSource');
+    var streets = {}, left = 0, pink = 0, houses = 0, total = 0, noLoc = 0, seen = {}, sc = g('sourceCoords'), ds = g('activeFilterDataSource');
     grp.sites.forEach(function(site){
-      var sk = skey ? skey(site) : '', st = streets[sk] || (streets[sk] = { key: sk, name: '', left: 0, pink: 0, bins: 0, driven: false });
+      var hl = false, sk = skey ? skey(site) : '', st = streets[sk] || (streets[sk] = { key: sk, name: '', left: 0, pink: 0, bins: 0, hs: 0, driven: false });
       if (!st.name) st.name = String(site.baseStreetLine || '').replace(/^[^A-Za-z]*\d+[A-Za-z]?\s+/, '').trim() || sk;
       // the same bins the map draws a dot for (same Solo / council choice); a bin with no location can't be ticked off by GPS
       [ds === 'council' ? null : site.soloStreams, ds === 'solo' ? null : site.councilStreams].forEach(function(obj){ ((obj || {})[stream] || []).forEach(function(b){
@@ -31372,16 +31372,18 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
         if (sc && !sc(site, b)) { noLoc++; return; }
         total++; st.bins++;
         if (done.has(id)) return;
-        if (missed.has(id)) { pink++; st.pink++; return; }
-        left++; st.left++;
+        if (missed.has(id)) { pink++; st.pink++; hl = true; return; }
+        left++; st.left++; hl = true;
       }); });
+      if (hl) { st.hs++; houses++; }
       if (!st.driven && site.lat && +site.lat && near(+site.lat, +site.lng)) st.driven = true;
     });
     var list = Object.keys(streets).map(function(k){ return streets[k]; });
-    return { run: r, total: total, left: left, pink: pink, noLoc: noLoc,
+    return { run: r, total: total, left: left, pink: pink, houses: houses, noLoc: noLoc,
       streets: list.filter(function(x){ return x.left || x.pink; }).sort(function(a, b){ return (b.left + b.pink) - (a.left + a.pink); }),
       notDriven: list.filter(function(x){ return !x.driven && x.bins; }), hasTrail: Object.keys(grid).length > 0, streetKeys: Object.keys(streets) };
   }
+  function st3x(v, l){ return '<div class="sx-stat"><b>' + esc(v) + '</b><span>' + esc(l) + '</span></div>'; }
   function runCheckLine(c){
     if (!c) return '';
     var bits = [];
@@ -31572,7 +31574,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   /* =====================================================================
      The shift sheet
      ===================================================================== */
-  var sheet = null, view = 'main', draft = null, defDraft = null, endDraft = null, lastRec = null, crDraft = null, truckDraft = null;
+  var sheet = null, view = 'main', todoAll = false, draft = null, defDraft = null, endDraft = null, lastRec = null, crDraft = null, truckDraft = null;
   function build(){
     if (sheet) return;
     sheet = document.createElement('div'); sheet.id = 'uxShift'; sheet.className = 'modal-overlay';
@@ -31769,6 +31771,21 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       title = 'Shift finished';
       var L0 = lastRec;
       h = L0 ? summaryHtml(L0) + '<div class="drv-foot"><button type="button" class="drv-btn" data-a="share" data-id="' + L0.id + '">' + I.share + 'Share summary</button>' + (L0.trail ? '<button type="button" class="drv-btn" data-a="trail" data-id="' + L0.trail + '" data-lbl="' + esc(dateStr(L0.start)) + '">' + I.route + 'Trail</button><button type="button" class="drv-btn" data-a="kml" data-id="' + L0.trail + '" data-lbl="' + esc(L0.start) + '">' + I.share + 'Trail KML</button>' : '') + (window.lbRunSheet ? '<button type="button" class="drv-btn" data-a="rs:main" data-id="' + L0.id + '">Run sheet</button>' : '') + (window.lbPaperwork ? '<button type="button" class="drv-btn" data-a="paper" data-id="' + L0.id + '">Check the paperwork</button>' : '') + '<button type="button" class="drv-btn drv-go" data-a="close">Done</button></div>' : '';
+    } else if (view === 'todo') {
+      title = 'To do';
+      var tc = SH ? runCheck() : null;
+      if (!tc) h = '<div class="drv-empty">This shift has no run picked, or the run’s houses aren’t loaded.</div>';
+      else {
+        var tl = tc.streets.slice().sort(function(x, y){ return (y.hs || 0) - (x.hs || 0); }), shown = todoAll ? tl : tl.slice(0, 3);
+        h = '<div class="sx-top">' + (window.lbRunChip ? window.lbRunChip(SH.stream, SH.run, SH.week, '') : esc(SH.run)) + '</div>' +
+          '<div class="sx-stats">' + st3x(tl.length, 'streets left') + st3x(tc.houses, 'houses left') + st3x(tc.left + tc.pink, 'bins left') + '</div>' +
+          (tl.length ? '<div class="sx-todo">' + shown.map(function(x){ return '<div class="sx-todo-li"><b>' + esc(x.name) + '</b><span class="sx-todo-n">' + (x.hs || 0) + ' house' + ((x.hs || 0) === 1 ? '' : 's') + '</span></div>'; }).join('') +
+            (tl.length > 3 ? '<button type="button" class="sx-todo-more" data-a="todoall">' + (todoAll ? 'Show fewer' : '+ ' + (tl.length - 3) + ' more street' + (tl.length - 3 === 1 ? '' : 's')) + '</button>' : '') + '</div>'
+            : '<div class="drv-okline">' + I.ok + 'Every bin on run ' + esc(SH.run) + ' is done.</div>') +
+          '<div class="sx-icons"><button type="button" class="sx-ib" data-a="todopdf" aria-label="PDF run map" title="PDF run map">' + SV + '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>' + '</button>' +
+          '<button type="button" class="sx-ib go" data-a="todosend" aria-label="Send to leading hand" title="Send to leading hand">' + I.share + '</button></div>';
+      }
+      h += '<div class="drv-foot"><button type="button" class="drv-btn" data-a="back">Back</button></div>';
     } else if (view === 'runcheck') {
       title = 'Run ' + ((SH && SH.run) || '') + ' check';
       h = runCheckHtml(SH ? runCheck() : null) + '<div class="drv-foot"><button type="button" class="drv-btn" data-a="back">Back</button></div>';
@@ -31869,7 +31886,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
         (rcLine ? '<div class="sx-note">' + esc(rcLine) + '</div>' : '') +
         '<div class="sx-grid">' +
           (window.lbRunSheet ? T('rs:tip', sv('<path d="M3 20h18M5 20V9l7-5 7 5v11"/><path d="M9 20v-6h6v6"/>'), 'At the tip') + T('rs:main', sv('<path d="M8 4h8v3H8zM6 6H5v15h14V6h-1"/><path d="M9 12h6M9 16h6"/>'), 'Run sheet') : '') +
-          (SH.run && !isStreet(SH.stream) ? T('runmap', sv('<path d="M3 6l6-2 6 2 6-2v14l-6 2-6-2-6 2z"/><path d="M9 4v14M15 6v14"/>'), 'Run map') + T('runcheck', sv('<path d="m3 6 2 2 3-4M3 15l2 2 3-4M12 6h9M12 15h9"/>'), 'Check my run') : '') +
+          (SH.run && !isStreet(SH.stream) ? T('runmap', sv('<path d="M3 6l6-2 6 2 6-2v14l-6 2-6-2-6 2z"/><path d="M9 4v14M15 6v14"/>'), 'Run map') + T('todo', sv('<path d="M9 6h11M9 12h11M9 18h11M4 6l1 1 2-2M4 12l1 1 2-2M4 18l1 1 2-2"/>'), 'To do') + T('runcheck', sv('<path d="m3 6 2 2 3-4M3 15l2 2 3-4M12 6h9M12 15h9"/>'), 'Check my run') : '') +
           (window.lbPaperwork ? T('paper', sv('<path d="M8 4h8v3H8zM6 6H5v15h14V6h-1"/><path d="m9 14 2 2 4-5"/>'), 'Check the paperwork', '', 'data-a="paper" data-id="' + SH.id + '"') : '') +
           T('issues', I.list, 'Issues (' + iss.length + ')') +
         '</div>' +
@@ -32179,6 +32196,17 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     }
     if (a === 'share') { var s = history().filter(function(x){ return x.id === b.getAttribute('data-id'); })[0]; if (s) shareText(summaryText(s), 'Shift ' + dateStr(s.start)); return; }
     if (a === 'runcheck') { view = 'runcheck'; paint(); return; }
+    if (a === 'todo') { view = 'todo'; todoAll = false; paint(); return; }
+    if (a === 'todoall') { todoAll = !todoAll; paint(); return; }
+    if (a === 'todopdf') { closeSheet(); if (window.lbRunMapOpen) window.lbRunMapOpen(); return; }
+    if (a === 'todosend') {
+      var tc2 = SH ? runCheck() : null; if (!tc2) { toast('No run to send'); return; }
+      var tl2 = tc2.streets.slice().sort(function(x, y){ return (y.hs || 0) - (x.hs || 0); }), d2 = me(), loc2 = here();
+      var subj2 = 'TO DO ON RUN ' + String(SH.run).toUpperCase() + ': ' + (d2.name || SH.driver || 'Driver');
+      var txt2 = subj2 + '\n' + tl2.length + ' streets, ' + tc2.houses + ' houses, ' + (tc2.left + tc2.pink) + ' bins left\n' + tl2.slice(0, 30).map(function(x){ return '- ' + x.name + ': ' + (x.hs || 0) + ' houses'; }).join('\n') + (tl2.length > 30 ? '\n+ ' + (tl2.length - 30) + ' more streets' : '') + (loc2 ? '\nhttps://maps.google.com/?q=' + loc2.lat.toFixed(6) + ',' + loc2.lng.toFixed(6) : '');
+      try { if (window.lbOutbox) window.lbOutbox.send({ rid: 't_' + uid(), kind: 'driver-todo', urgent: false, to: ['lead'], subject: subj2, text: txt2, data: { run: SH.run, streets: tl2.length, houses: tc2.houses, bins: tc2.left + tc2.pink, ts: Date.now() }, delayMs: 0 }); } catch (e) {}
+      toast('Sent to your leading hand'); return;
+    }
     if (a === 'runmap') { closeSheet(); if (window.lbRunMapOpen) window.lbRunMapOpen(); return; }
     if (a === 'rcstreet') { closeSheet(); try { if (typeof switchMainTab === 'function') switchMainTab('map'); if (window.showStreetOnMap) window.showStreetOnMap(b.getAttribute('data-k')); } catch (e) {} return; }
     if (a === 'kml') { trailKml(b.getAttribute('data-id'), +b.getAttribute('data-lbl')); return; }
@@ -45044,6 +45072,18 @@ html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f) 
 html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f) .mn-top-search input::placeholder{font-family:var(--mn-font);font-weight:400;color:var(--mn-text2);opacity:1}
 html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f) .mn-top-search input::placeholder{font-family:Roboto,system-ui,-apple-system,sans-serif !important;font-weight:400 !important;color:var(--mn-text2) !important;opacity:1 !important;text-transform:none !important;letter-spacing:0 !important}
 html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f) :is(#lbLayers,#lbSettings)[data-mntop] .lb-layers-head{display:none !important}
+
+/* To do page (Shift > To do): what is left on the run - three stat tiles, the streets with most houses left, icon-only PDF / send buttons */
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c) #uxShift .sx-top{display:flex;margin:0 0 8px}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c) #uxShift .sx-todo{display:flex;flex-direction:column;gap:6px;margin:8px 0}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c) #uxShift .sx-todo-li{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 10px;background:var(--mn-tile);border:var(--mn-bd);border-radius:var(--mn-rad);box-shadow:var(--mn-sh);font-family:var(--mn-font);color:var(--mn-text)}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c) #uxShift .sx-todo-li b{font-size:13px;font-weight:var(--mn-fw);min-width:0;overflow-wrap:anywhere}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c) #uxShift .sx-todo-n{flex:none;font:700 11px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;padding:4px 7px;border-radius:var(--mn-rad);background:var(--mn-bar);color:var(--mn-text2);text-transform:uppercase;letter-spacing:.04em}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c) #uxShift .sx-todo-more{align-self:center;background:none;border:0;color:var(--mn-text2);font:700 11px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;letter-spacing:.08em;text-transform:uppercase;padding:6px 8px;cursor:pointer}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c) #uxShift .sx-icons{display:flex;gap:8px;margin:10px 0 4px}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c) #uxShift .sx-ib{width:44px;height:44px;min-width:0;display:inline-flex;align-items:center;justify-content:center;padding:0;background:var(--mn-tile);border:var(--mn-bd);border-radius:var(--mn-rad);box-shadow:var(--mn-sh);color:var(--ui-accent);cursor:pointer}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c) #uxShift .sx-ib.go{background:var(--ui-accent);color:var(--ui-accent-ink,#000)}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c) #uxShift .sx-ib svg{width:20px;height:20px;stroke:currentColor;fill:none;stroke-width:2}
 </style>
 <script id="lb-menus-script">
 (function(){
