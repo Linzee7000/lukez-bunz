@@ -22886,7 +22886,7 @@ body.stream-slr .lb-layers-head .icon-img { filter: brightness(0); }
         <span class="lb-check">${on ? '✓' : ''}</span></button>`);
     });
 
-    body.innerHTML = timerHtml() + pieces.join('');
+    body.innerHTML = timerHtml() + '<div class="lb-hold-hint">Tap to turn on or off · hold to edit</div>' + pieces.join('');
     if (typeof window.lbCollapseSections === 'function') {
       window.lbCollapseSections(body, '.lb-layers-sect', 'lbSect:layers');
     }
@@ -22920,6 +22920,37 @@ body.stream-slr .lb-layers-head .icon-img { filter: brightness(0); }
     if (isAction) closeLayers();
     else setTimeout(renderLayers, 60);
   });
+
+
+  /* ---- HOLD A LAYER TO EDIT IT ----------------------------------------------------------------------------------------
+     In Layers, tapping a row turns it on or off (as before); pressing and holding it opens the place where that thing is
+     edited (its colours / symbols, its settings, its manager) so nobody has to hunt for it in the other menus. The click
+     that follows a hold is swallowed so the row does not also flip. */
+  var HOLD = {
+    toggleBinGpsDots: 'style', toggleHouseGpsDots: 'style', toggleProvisionalBins: 'style', togglePinRings: 'style', toggleStreetModes: 'style',
+    toggleKmzLayers: 'style', toggleKerbsideRouteArrows: 'style', toggleKerbsideRouteHeatmap: 'style', toggleStreetLitterRouteArrows: 'style', toggleStreetLitterRouteHeatmap: 'style',
+    toggleRunBoundaries: 'bounds', togglePropertyBoundaries: 'prop', toggleSatelliteView: 'prop', toggleGeofenceLayerVisibility: 'geo', toggleNextBinBox: 'cust'
+  };
+  var holdT = 0, holdBtn = null, held = 0;
+  function holdGo(kind){
+    var fn = { style: 'openRunStyleModal', bounds: 'lbOpenBoundaryHub', prop: 'openBoundaryModal', geo: 'openGeofenceModal', cust: 'uxOpenCustomize' }[kind];
+    if (typeof window[fn] !== 'function' && kind === 'style' && typeof openRunStyleModal === 'function') window[fn] = openRunStyleModal;
+    if (typeof window[fn] !== 'function') return;
+    try { if (navigator.vibrate) navigator.vibrate(25); } catch (e) {}
+    if (typeof window.lbCloseLayers === 'function') window.lbCloseLayers();
+    setTimeout(function(){ try { window[fn](); } catch (e) { console.error('layer edit failed:', fn, e); } }, 160);
+  }
+  document.addEventListener('pointerdown', function(ev){
+    var b = ev.target && ev.target.closest ? ev.target.closest('#lbLayersBody .lb-layer-btn[data-lbfn]') : null;
+    clearTimeout(holdT); holdBtn = null; if (!b || !HOLD[b.dataset.lbfn]) return;
+    holdBtn = b; b.classList.add('lb-holding');
+    holdT = setTimeout(function(){ held = Date.now(); b.classList.remove('lb-holding'); holdGo(HOLD[b.dataset.lbfn]); }, 550);
+  }, true);
+  ['pointerup', 'pointercancel', 'pointerleave', 'scroll'].forEach(function(n){ document.addEventListener(n, function(){ clearTimeout(holdT); if (holdBtn) holdBtn.classList.remove('lb-holding'); holdBtn = null; }, true); });
+  document.addEventListener('contextmenu', function(ev){ if (ev.target && ev.target.closest && ev.target.closest('#lbLayersBody .lb-layer-btn')) ev.preventDefault(); });
+  document.addEventListener('click', function(ev){
+    if (Date.now() - held < 700 && ev.target && ev.target.closest && ev.target.closest('#lbLayersBody .lb-layer-btn')) { ev.preventDefault(); ev.stopImmediatePropagation(); held = 0; }
+  }, true);
 
   // Esc closes whichever of the two is showing.
   document.addEventListener('keydown', function(ev) {
@@ -31384,6 +31415,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       doneStreets: list.filter(function(x){ return x.bins && !x.left && !x.pink; }).map(function(x){ return x.name; }),
       notDriven: list.filter(function(x){ return !x.driven && x.bins; }), hasTrail: Object.keys(grid).length > 0, streetKeys: Object.keys(streets) };
   }
+  window.lbRunCheck = runCheck;   // the run map asks it which streets of the shift's run are finished
   function st3x(v, l){ return '<div class="sx-stat"><b>' + esc(v) + '</b><span>' + esc(l) + '</span></div>'; }
   function runCheckLine(c){
     if (!c) return '';
@@ -32199,7 +32231,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     if (a === 'runcheck') { view = 'runcheck'; paint(); return; }
     if (a === 'todo') { view = 'todo'; todoAll = false; paint(); return; }
     if (a === 'todoall') { todoAll = !todoAll; paint(); return; }
-    if (a === 'todopdf') { var rc = runCheck(); closeSheet(); if (window.lbRunMapOpen) window.lbRunMapOpen(null, { done: rc ? rc.doneStreets : [] }); return; }
+    if (a === 'todopdf') { var rc = runCheck(); closeSheet(); if (window.lbRunMapOpen) window.lbRunMapOpen(null, { done: !!(rc && rc.doneStreets && rc.doneStreets.length) }); return; }
     if (a === 'todosend') {
       var tc2 = SH ? runCheck() : null; if (!tc2) { toast('No run to send'); return; }
       var tl2 = tc2.streets.slice().sort(function(x, y){ return (y.hs || 0) - (x.hs || 0); }), d2 = me(), loc2 = here();
@@ -37708,7 +37740,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     }
     return best;
   }
-  var doneNames = null, DONE_COL = '#dc2626';
+  var doneNames = null, DONE_COL = '#dc2626', doneAvail = null, doneOn = null, doneKey = '', clkT = 0;
   function normSt(n){ return String(n || '').toLowerCase().replace(/\bstreet\b/g, 'st').replace(/\broad\b/g, 'rd').replace(/\bavenue\b/g, 'ave').replace(/\bcourt\b/g, 'ct').replace(/\bdrive\b/g, 'dr').replace(/\bcrescent\b/g, 'cres').replace(/\bplace\b/g, 'pl').replace(/\bboulevard\b/g, 'bvd').replace(/[^a-z0-9]+/g, ''); }
   function draw(container, key, R, page, opts){
     opts = opts || {};
@@ -37821,7 +37853,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       nc.innerHTML = '<ol>' + pinned.map(function(p, i){ return '<li><b>' + (i + 1) + '</b><span>' + esc(p.text) + '</span></li>'; }).join('') + '</ol>';
       st.page.appendChild(nc);
     }
-    var ft = document.createElement('div'); ft.className = 'rm-foot'; ft.textContent = 'Lukez Bunz run map · ' + new Date().toLocaleDateString('en-AU') + ' · streets © OpenStreetMap contributors';
+    var ft = document.createElement('div'); ft.className = 'rm-foot'; ft.textContent = 'Lukez Bunz run map · ' + new Date().toLocaleDateString('en-AU') + ' ' + new Date().toLocaleTimeString('en-AU', { hour: '2-digit', minute: '2-digit', hour12: false }).replace(':', '') + ' · streets © OpenStreetMap contributors';
     st.page.appendChild(ft);
     // taps on the cards stay on the cards (they don't add a note or colour the street underneath)
     Array.prototype.forEach.call(st.page.querySelectorAll('.rm-card, .rm-foot'), function(c){ L.DomEvent.disableClickPropagation(c); });
@@ -38211,14 +38243,17 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   function build(){
     if (el) return;
     el = document.createElement('div'); el.id = 'lbRunMap';
-    el.innerHTML = '<div class="rm-head"><div class="rm-bar"><select id="rmStream"></select><select id="rmDay"></select><select id="rmRun"></select><span class="rm-sp"></span>' +
+    el.innerHTML = '<div class="rm-head"><div class="rm-bar"><b class="rm-ttl">Lukez Bunz</b><span class="rm-clk" id="rmClk"></span><span class="rm-brk"></span><select id="rmStream"></select><select id="rmDay"></select><select id="rmRun"></select><span class="rm-sp"></span>' +
       '<span class="rm-rot"><button type="button" data-rm="rotL" data-step="5" title="Turn the map 5\u00b0 left" aria-label="Turn the map 5 degrees left">\u21ba 5\u00b0</button><button type="button" class="rm-fine" data-rm="rotL" data-step="1" title="Turn the map 1\u00b0 left" aria-label="Turn the map 1 degree left">1\u00b0</button>' +
       '<button type="button" data-rm="rot0" title="North up">N</button>' +
       '<button type="button" class="rm-fine" data-rm="rotR" data-step="1" title="Turn the map 1\u00b0 right" aria-label="Turn the map 1 degree right">1\u00b0</button><button type="button" data-rm="rotR" data-step="5" title="Turn the map 5\u00b0 right" aria-label="Turn the map 5 degrees right">5\u00b0 \u21bb</button></span>' +
       '<select id="rmKey" title="Where the key goes (or drag the key on the map)"><option value="auto">Key: auto</option><option value="tl">Key: top left</option><option value="tr">Key: top right</option><option value="bl">Key: bottom left</option><option value="br">Key: bottom right</option><option value="drag" hidden>Key: where dragged</option></select>' +
-      '<button type="button" data-rm="fit" title="Show the whole run">Whole run</button><button type="button" data-rm="turn" title="Portrait / landscape">Turn page</button><button type="button" data-rm="edit">Edit</button><button type="button" data-rm="pages" title="Split the run over several printed pages">Pages</button><button type="button" data-rm="printview" title="Prints exactly what is on screen">Print</button><button type="button" data-rm="close">Close</button></div>' +
+      '<button type="button" data-rm="done" id="rmDone" hidden title="Draw the streets you have finished in red">Done streets</button><button type="button" data-rm="fit" title="Show the whole run">Whole run</button><button type="button" data-rm="turn" title="Portrait / landscape">Turn page</button><button type="button" data-rm="edit">Edit</button><button type="button" data-rm="pages" title="Split the run over several printed pages">Pages</button><button type="button" data-rm="printview" title="Prints exactly what is on screen">Print</button><button type="button" data-rm="close">Close</button></div>' +
       '<div id="rmTools" class="rm-tools"></div></div><div id="rmView"></div><div id="rmPrint"></div>';
     document.body.appendChild(el);
+    // the title bar's clock (hours in the accent colour, no colon) on this page too
+    function clk(){ var c = document.getElementById('rmClk'); if (!c || el.style.display === 'none' || typeof window.lbClk !== 'function') return; var d = new Date(); c.innerHTML = window.lbClk(d.getHours(), d.getMinutes(), d.getSeconds()); }
+    clk(); clkT = setInterval(clk, 1000);
     el.addEventListener('click', function(e){
       var b = e.target.closest && e.target.closest('[data-rm]'); if (!b || b.disabled) return;
       var a = b.getAttribute('data-rm');
@@ -38245,6 +38280,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       }
       if (a === 'pprint') printView(true);
       if (a === 'fit') renderView(false);
+      if (a === 'done') { doneOn = !doneOn; doneApply(); renderView(true); }
       if (a === 'turn') { var pg = pagesCache[curPage] || pagesCache[0]; orientOverride = ((orientOverride || pg.o) === 'land') ? 'port' : 'land'; renderView(true, true); }
       if (a === 'edit') { editing = !editing; if (editing) pagesMode = false; tool = 'paint'; renderView(true, true); }
       if (a === 'tool') { tool = b.getAttribute('data-v'); renderView(true); }
@@ -38318,8 +38354,24 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       redraw(); view.map.on('move zoom moveend zoomend', redraw);   // frames follow the map (setRot redraws them after a turn)
     }
   }
+  // Streets of the shift's run that are finished (every bin done): an option to draw them red. It starts ON when most of
+  // the run is already done (the page is then mostly "what's left"), OFF otherwise. Only the run being driven can know.
+  function doneApply(){
+    var b = document.getElementById('rmDone');
+    if (b) { b.hidden = !doneAvail; b.classList.toggle('on', !!(doneAvail && doneOn)); }
+    doneNames = doneAvail && doneOn ? doneAvail.map(normSt) : null;
+  }
+  function doneSync(key){
+    var rc = null; try { rc = (window.lbRunCheck && key === currentKey()) ? window.lbRunCheck() : null; } catch (e) {}
+    doneAvail = rc && rc.doneStreets && rc.doneStreets.length ? rc.doneStreets : null;
+    if (key !== doneKey) { doneKey = key; if (doneOn !== 'forced') doneOn = null; }
+    if (doneOn === 'forced') doneOn = true;
+    else if (doneOn === null) doneOn = !!(rc && rc.streetKeys && rc.streetKeys.length && doneAvail && doneAvail.length / rc.streetKeys.length >= 0.5);
+    doneApply();
+  }
   function show(key){
     curKey = key; curPage = 0; orientOverride = null; pageSize = null;
+    doneSync(key);
     fillPickers(parse(key));
     pagesCache = DATA[key] ? pagesFor(DATA[key]) : [];
     renderView();
@@ -38413,7 +38465,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   function open(key, o2){
     if (!window.L) return;
     // From the shift's To Do list: streets already done are drawn red (names normalised the same way as street_ids below)
-    doneNames = o2 && o2.done && o2.done.length ? o2.done.map(normSt) : null;
+    doneOn = o2 && o2.done ? 'forced' : null; doneKey = '';   // from the To Do list: finished streets start red
     build(); el.style.display = '';
     load().then(function(){
       var k = key || currentKey();
@@ -45212,6 +45264,19 @@ html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f) 
 html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f) :is(.run-style-modal-box,.modal-box) select{background:var(--mn-tile) !important;color:var(--mn-text) !important;border:var(--mn-bd) !important;border-radius:var(--mn-rad) !important;font-family:var(--mn-font) !important}
 html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f) .run-style-actions{background:var(--mn-bar) !important;border-top:var(--mn-bd) !important}
 html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f) .run-style-modal-header{background:var(--mn-bar) !important;border-bottom:var(--mn-bd) !important}
+
+/* run map page: readable small-print buttons, the title and clock, the Done streets option */
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f) #lbRunMap :is(.rm-bar,.rm-tools) :is(button:not([data-rm="close"]),select){font-family:Roboto,system-ui,sans-serif !important;font-weight:700 !important;text-transform:none !important;letter-spacing:0 !important;font-size:14px !important}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f) #lbRunMap .rm-bar #rmKey{max-width:none !important;width:auto !important}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f) #lbRunMap .rm-bar .rm-ttl{font-family:var(--mn-font);font-weight:var(--mn-fw);text-transform:uppercase;font-size:17px;color:var(--mn-text);margin:0 4px 0 2px;white-space:nowrap}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f) #lbRunMap .rm-bar .rm-clk{font-size:17px;color:var(--mn-text);margin-right:4px}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f) #lbRunMap .rm-bar .rm-brk{flex:0 0 100%;height:0}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f) #lbRunMap .rm-bar button[hidden]{display:none !important}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f) #lbRunMap .rm-bar #rmDone.on{background:#dc2626 !important;color:#fff !important}
+/* Layers: the hold hint and the row being held */
+.lb-hold-hint{padding:2px 4px 8px;font-size:12px;opacity:.7;font-weight:600}
+#lbLayersBody .lb-layer-btn.lb-holding{filter:brightness(1.25);outline:2px solid var(--ui-accent);outline-offset:-2px}
+#lbLayersBody .lb-layer-btn{-webkit-touch-callout:none;-webkit-user-select:none;user-select:none}
 </style>
 <script id="lb-menus-script">
 (function(){
@@ -45427,7 +45492,11 @@ html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f) 
       var b = list[n], f = b.firstElementChild;
       if (b.matches(MSEL) && !b.classList.contains('mn-t') && !b.classList.contains('mn-hide') && !b.classList.contains('modal-close-btn') && b.textContent.trim()) {
         var tm = b.textContent.replace(/^[\s\u2795+]+/, '').replace(/^(\p{Extended_Pictographic}\uFE0F?)\s*/u, '').trim();
-        if (/^(cancel|close|never mind)$/i.test(tm) && !b.matches('.btn-save, .mn-go')) { b.classList.add('mn-hide'); continue; }
+        // Cancel / Close go only where the panel has its own X (the top bar's X does the job). A small question box ("Name this
+        // geofence") has no X, so its Cancel must stay or there is no way out of it.
+        var bx = b.closest('.modal-box'), hasX = !!(bx && bx.querySelector('.modal-close-btn, .mn-x'));
+        if (!hasX) b.classList.remove('mn-hide');
+        else if (/^(cancel|close|never mind)$/i.test(tm) && !b.matches('.btn-save, .mn-go')) { b.classList.add('mn-hide'); continue; }
         // a leading icon element the app drew itself (svg / img) is kept; anything else (emoji, plain text) is replaced
         var keep = (f && /^(svg|img|i)$/i.test(f.tagName)) ? f.cloneNode(true) : null;
         b.innerHTML = '<span class="mn-ic"></span><span></span>';
