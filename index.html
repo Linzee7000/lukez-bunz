@@ -32583,6 +32583,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       var rme = {};
       Object.keys(r.places).forEach(function(k){ var p = r.places[k]; if (p && p.kind === 'runMapEdit' && p.key && p.edits && (!rme[p.key] || (p.ts || 0) > (rme[p.key].ts || 0))) rme[p.key] = Object.assign({}, p.edits, { ts: p.ts || p.edits.ts || 0 }); });
       lsSet('lbRunMapEditsFleet', rme);
+      // truck lines drawn on other phones: straight to the editor's own store (too big for localStorage)
+      try { if (window.lbTruckLines) window.lbTruckLines.fleet(Object.keys(r.places).map(function(k){ return r.places[k]; }).filter(function(p){ return p && p.kind === 'truckLine' && p.key; })); } catch (e) {}
       try { document.dispatchEvent(new CustomEvent('lb-house-access')); } catch (e) {}
     }).catch(function(){});
   }
@@ -44464,6 +44466,7 @@ document.addEventListener('click', function(ev){
     el.addEventListener('touchstart', boxDown, { capture: true, passive: false });
     el.addEventListener('mousedown', tapDown, true);
     el.addEventListener('click', tapPick, true);
+    el.addEventListener('click', tlTap, true);
   }
   function boxDown(ev){
     var touch = ev.type === 'touchstart';
@@ -44545,7 +44548,8 @@ document.addEventListener('click', function(ev){
     rect: '<path d="M4 6h16v12H4z"/>', undo: '<path d="M9 6 4 11l5 5M4 11h10a5 5 0 0 1 0 10h-3"/>', redo: '<path d="M15 6l5 5-5 5M20 11H10a5 5 0 0 0 0 10h3"/>',
     done: '<path d="M5 12l5 5 9-10"/>', up: '<path d="M12 20V5M6 11l6-6 6 6"/>', down: '<path d="M12 4v15M6 13l6 6 6-6"/>', oneside: '<path d="M12 3v18M12 6h7v12h-7"/>',
     eye: '<path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>', arrows: '<path d="M4 12h14M13 6l6 6-6 6"/>',
-    heat: '<path d="M12 3c3 4 5 6 5 10a5 5 0 0 1-10 0c0-2 1-3 2-4 0 2 1 3 2 3 0-3-1-5 1-9z"/>', dot: '<circle cx="12" cy="12" r="3.5"/>'
+    heat: '<path d="M12 3c3 4 5 6 5 10a5 5 0 0 1-10 0c0-2 1-3 2-4 0 2 1 3 2 3 0-3-1-5 1-9z"/>', dot: '<circle cx="12" cy="12" r="3.5"/>',
+    tturn: '<path d="M3 6h18M12 6v15"/><path d="M6 3 3 6l3 3M9 18l3 3 3-3"/>', eraser: '<path d="M4 15 13 6l6 6-7 7H8zM9 10l6 6M4 21h16"/>', files: '<path d="M6 3h9l4 4v14H6zM15 3v4h4M9 12h6M9 16h6"/>'
   };
   function svg(n){ return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" aria-hidden="true">' + (IC[n] || IC.dot) + '</svg>'; }
   // the app's own tile, already built (icon block + label), so nothing has to restyle or rename it afterwards
@@ -44571,6 +44575,7 @@ document.addEventListener('click', function(ev){
   function closeHub(){
     var h = $('lbHub'); if (h) h.classList.remove('on');
     document.body.classList.remove('lbe-open'); form = null; undoStack = []; redoStack = [];
+    tlStop(); tl.undo = []; tl.redo = []; tlPush(true);
     if (tab === 'route' && window.renderKmzEvidence) { try { window.renderKmzEvidence(); } catch (e) {} }     // the picked run's truck line goes with the panel
     syncMode();
   }
@@ -44729,8 +44734,8 @@ document.addEventListener('click', function(ev){
   function paintFoot(){
     var f = document.querySelector('#lbHub .lbe-foot'); if (!f) return;
     var u = f.querySelector('[data-h="undo"]'), r = f.querySelector('[data-h="redo"]');
-    var live = tab === 'boundary' && !form;                      // undo and redo are for boundary changes
-    if (u) u.disabled = !live || !undoStack.length; if (r) r.disabled = !live || !redoStack.length;
+    var live = tab === 'boundary' && !form, line = tab === 'route' && !form;   // undo and redo: boundary changes, or the truck line being drawn
+    if (u) u.disabled = line ? !tl.undo.length : (!live || !undoStack.length); if (r) r.disabled = line ? !tl.redo.length : (!live || !redoStack.length);
   }
   function paint(){
     var b = $('lbHubBody'), h = $('lbHub'); if (!b || !h) return;
@@ -44793,30 +44798,695 @@ document.addEventListener('click', function(ev){
     return h;
   }
 
-  /* ---- Truck line tab: the line the truck follows, kept under one run ---- */
+  /* ====================================================================================================
+     TRUCK LINES, the sums (no map, no page: plain numbers in, plain numbers out, so they can be tested alone)
+     - a road network made from OpenStreetMap ways, and the shortest way along it between two taps
+     - the kerb side: a truck keeps left, so its line is drawn to the left of the way it is going. Up a street and back
+       down it gives two lines, one each side of the road. Reversing keeps the truck in the lane it is facing along,
+       so a reversing stretch sits on the right of the way it is moving.
+     - a T-turn: left out of the end of the street, reverse back past the street, then left back into it
+     ================================================================================================== */
+  var TL = (function(){
+    var KY = 110540;
+    function kx(lat){ return 111320 * Math.cos(lat * Math.PI / 180); }
+    function dist(a, b){ var k = kx((a[0] + b[0]) / 2); return Math.hypot((a[1] - b[1]) * k, (a[0] - b[0]) * KY); }
+    function bearing(a, b){ var k = kx((a[0] + b[0]) / 2), dx = (b[1] - a[1]) * k, dy = (b[0] - a[0]) * KY; return (Math.atan2(dx, dy) * 180 / Math.PI + 360) % 360; }
+    function turn(b1, b2){ return ((b2 - b1 + 540) % 360) - 180; }          // + is a right turn, - is a left turn
+    function lenOf(pts){ var d = 0; for (var i = 1; i < pts.length; i++) d += dist(pts[i - 1], pts[i]); return d; }
+    function lerp(a, b, t){ return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]; }
+    function same(a, b){ return Math.abs(a[0] - b[0]) < 2e-7 && Math.abs(a[1] - b[1]) < 2e-7; }
+    function tidy(pts){ var out = []; pts.forEach(function(p){ if (!out.length || !same(out[out.length - 1], p)) out.push([p[0], p[1]]); }); return out; }
+    // the point d metres back from the end of a line (for "which way was it going")
+    function backFrom(pts, d){
+      for (var i = pts.length - 1; i > 0; i--) { var l = dist(pts[i], pts[i - 1]); if (l >= d) return lerp(pts[i], pts[i - 1], d / l); d -= l; }
+      return pts[0];
+    }
+
+    /* ---- a line as text: about 4 to 6 characters a point, to within 10 cm ---- */
+    function e1(v){ v = v < 0 ? (-v * 2 - 1) : v * 2; var s = ''; while (v >= 32) { s += String.fromCharCode((32 | (v % 32)) + 63); v = Math.floor(v / 32); } return s + String.fromCharCode(v + 63); }
+    function enc(pts){ var s = '', la = 0, lo = 0; pts.forEach(function(p){ var a = Math.round(p[0] * 1e6), b = Math.round(p[1] * 1e6); s += e1(a - la) + e1(b - lo); la = a; lo = b; }); return s; }
+    function dec(s){
+      var out = [], i = 0, la = 0, lo = 0, n = String(s || '').length;
+      function one(){ var v = 0, m = 1, c; do { c = s.charCodeAt(i++) - 63; v += (c % 32) * m; m *= 32; } while (c >= 32 && i < n); return (v % 2) ? -(v + 1) / 2 : v / 2; }
+      while (i < n) { la += one(); if (i >= n) break; lo += one(); out.push([la / 1e6, lo / 1e6]); }
+      return out;
+    }
+
+    /* ---- OpenStreetMap ways to roads ---- */
+    function parseWays(elements){
+      var out = [];
+      (elements || []).forEach(function(e){
+        if (!e || !e.geometry || e.geometry.length < 2) return;
+        var t = e.tags || {}; if (t.area === 'yes') return;
+        var ow = 0, o = String(t.oneway || '');
+        if (o === 'yes' || o === 'true' || o === '1') ow = 1; else if (o === '-1' || o === 'reverse') ow = -1;
+        else if (o !== 'no' && (t.junction === 'roundabout' || t.junction === 'circular' || t.highway === 'motorway')) ow = 1;
+        var cost = t.highway === 'service' ? (t.service === 'driveway' || t.service === 'parking_aisle' ? 1.6 : 1.3) : t.highway === 'track' ? 2 : 1;
+        out.push({ id: e.id, oneway: ow, cost: cost, name: t.name || '', pts: e.geometry.map(function(p){ return [p.lat, p.lon]; }) });
+      });
+      return out;
+    }
+
+    /* ---- the road network ---- */
+    var CELL = 0.001;                                                         // about 100 m
+    function mkGraph(ways){
+      var N = [], idx = {}, grid = {}, E = [];
+      function nid(p){ var k = Math.round(p[0] * 1e7) + ',' + Math.round(p[1] * 1e7), i = idx[k]; if (i == null) { i = idx[k] = N.length; N.push({ p: [p[0], p[1]], adj: [] }); } return i; }
+      (ways || []).forEach(function(w){
+        var c = w.cost || 1, ow = w.oneway || 0;
+        for (var i = 1; i < w.pts.length; i++) {
+          var a = nid(w.pts[i - 1]), b = nid(w.pts[i]); if (a === b) continue;
+          var len = dist(N[a].p, N[b].p); if (!(len > 0)) continue;
+          if (N[a].adj.some(function(x){ return x.to === b; })) continue;       // the same stretch twice (two downloads of one road)
+          N[a].adj.push({ to: b, len: len, c: c, ok: ow >= 0 });
+          N[b].adj.push({ to: a, len: len, c: c, ok: ow <= 0 });
+          var ei = E.length; E.push([a, b, len, c, ow]);
+          var y0 = Math.floor(Math.min(N[a].p[0], N[b].p[0]) / CELL), y1 = Math.floor(Math.max(N[a].p[0], N[b].p[0]) / CELL);
+          var x0 = Math.floor(Math.min(N[a].p[1], N[b].p[1]) / CELL), x1 = Math.floor(Math.max(N[a].p[1], N[b].p[1]) / CELL);
+          for (var y = y0; y <= y1; y++) for (var x = x0; x <= x1; x++) { var k = y + ',' + x; (grid[k] || (grid[k] = [])).push(ei); }
+        }
+      });
+      return { N: N, E: E, grid: grid };
+    }
+    function deg(G, n){ return G.N[n].adj.length; }
+    // the nearest spot on any road
+    function snap(G, p, maxM){
+      maxM = maxM || 60;
+      var k = kx(p[0]), ry = Math.ceil(maxM / KY / CELL), rx = Math.ceil(maxM / k / CELL), cy = Math.floor(p[0] / CELL), cx = Math.floor(p[1] / CELL), best = null, seen = {};
+      for (var y = cy - ry; y <= cy + ry; y++) for (var x = cx - rx; x <= cx + rx; x++) {
+        var list = G.grid[y + ',' + x]; if (!list) continue;
+        for (var i = 0; i < list.length; i++) {
+          var ei = list[i]; if (seen[ei]) continue; seen[ei] = 1;
+          var e = G.E[ei], A = G.N[e[0]].p, B = G.N[e[1]].p;
+          var ax = (A[1] - p[1]) * k, ay = (A[0] - p[0]) * KY, bx = (B[1] - p[1]) * k, by = (B[0] - p[0]) * KY, dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy;
+          var t = l2 ? Math.max(0, Math.min(1, -(ax * dx + ay * dy) / l2)) : 0, d = Math.hypot(ax + t * dx, ay + t * dy);
+          var score = d + (e[3] > 1 ? 4 : 0);                                   // a real street wins over a driveway that is about as close
+          if (d <= maxM && (!best || score < best.score)) best = { a: e[0], b: e[1], t: t, d: d, score: score, len: e[2], c: e[3], ow: e[4], pt: lerp(A, B, t) };
+        }
+      }
+      return best;
+    }
+
+    /* ---- the shortest way along the roads from one snapped spot to another ---- */
+    function Heap(){ this.h = []; }
+    Heap.prototype.push = function(c, v){ var h = this.h, i = h.length; h.push([c, v]); while (i > 0) { var p = (i - 1) >> 1; if (h[p][0] <= h[i][0]) break; var t = h[p]; h[p] = h[i]; h[i] = t; i = p; } };
+    Heap.prototype.pop = function(){
+      var h = this.h, top = h[0], last = h.pop();
+      if (h.length) { h[0] = last; var i = 0; for (;;) { var l = 2 * i + 1, r = l + 1, m = i; if (l < h.length && h[l][0] < h[m][0]) m = l; if (r < h.length && h[r][0] < h[m][0]) m = r; if (m === i) break; var t = h[m]; h[m] = h[i]; h[i] = t; i = m; } }
+      return top;
+    };
+    function route(G, s, e, o){
+      o = o || {};
+      var any = !!o.anyWay, maxCost = o.maxM || 20000, best = Infinity, bestEnd = -1;
+      var sameEdge = (s.a === e.a && s.b === e.b) || (s.a === e.b && s.b === e.a);
+      var et = s.a === e.a ? e.t : 1 - e.t;                                   // e's place along s's edge, measured the way s measures
+      if (sameEdge) {
+        var okDir = any || !s.ow || (s.ow > 0 ? et >= s.t : et <= s.t);
+        if (okDir) { best = Math.abs(et - s.t) * s.len * s.c; bestEnd = -2; }
+      }
+      var D = {}, P = {}, H = new Heap();
+      function relax(n, c, from){ if (c < (D[n] == null ? Infinity : D[n])) { D[n] = c; P[n] = from; H.push(c, n); } }
+      if (any || s.ow <= 0) relax(s.a, s.t * s.len * s.c, -1);                 // from the spot back to the a end
+      if (any || s.ow >= 0) relax(s.b, (1 - s.t) * s.len * s.c, -1);
+      while (H.h.length) {
+        var top = H.pop(), c = top[0], u = top[1];
+        if (c > D[u]) continue;
+        if (c >= best || c > maxCost) break;
+        if (u === e.a && (any || e.ow >= 0)) { var c1 = c + e.t * e.len * e.c; if (c1 < best) { best = c1; bestEnd = u; } }
+        if (u === e.b && (any || e.ow <= 0)) { var c2 = c + (1 - e.t) * e.len * e.c; if (c2 < best) { best = c2; bestEnd = u; } }
+        var adj = G.N[u].adj;
+        for (var i = 0; i < adj.length; i++) { var x = adj[i]; if (!any && !x.ok) continue; relax(x.to, c + x.len * x.c, u); }
+      }
+      if (bestEnd === -1) return null;
+      var pts = [e.pt];
+      if (bestEnd >= 0) { for (var n = bestEnd; n >= 0; n = P[n]) pts.push(G.N[n].p); }
+      pts.push(s.pt); pts.reverse();
+      pts = tidy(pts);
+      return { pts: pts, len: lenOf(pts) };
+    }
+
+    /* ---- along a road from a corner: n metres from node `from`, setting off towards its neighbour `to`, keeping straight on ---- */
+    function walk(G, from, to, d){
+      var pts = [G.N[from].p], prev = from, cur = to, left = d;
+      for (var guard = 0; guard < 200; guard++) {
+        var a = G.N[prev].p, b = G.N[cur].p, l = dist(a, b);
+        if (l >= left) { pts.push(lerp(a, b, left / l)); return { pts: pts, len: d, end: -1 }; }
+        pts.push(b); left -= l;
+        var inB = bearing(a, b), best = null, bt = 999;
+        G.N[cur].adj.forEach(function(x){ if (x.to === prev) return; var t = Math.abs(turn(inB, bearing(b, G.N[x.to].p))); if (t < bt) { bt = t; best = x.to; } });
+        if (best == null || bt > 60) return { pts: pts, len: d - left, end: cur };       // the road stops, or only turns off
+        prev = cur; cur = best;
+      }
+      return { pts: pts, len: d - left, end: cur };
+    }
+
+    /* ---- T-turn ----
+       pen: where the line has got to. prev: a spot a few metres back along it (says which way the truck is going).
+       Returns { legs: [{ p, r }], end, prev } or { err } with err one of: 'no-road', 'no-junction', 'no-left', 'no-right'. */
+    function tTurn(G, pen, prev, o){
+      o = o || {};
+      var fwd = o.fwd || 14, back = o.back || 14, exit = o.exit || 12, reach = o.reach || 90;
+      var s = snap(G, pen, 25); if (!s) return { err: 'no-road' };
+      var goB = Math.abs(turn(bearing(prev, pen), bearing(G.N[s.a].p, G.N[s.b].p))) < 90;
+      // the arms of a corner: the road to the left and the road to the right of the way the truck comes in
+      function arms(J, came, inB, minor){
+        var Jp = G.N[J].p, L = null, R = null, lb = 999, rb = 999;
+        G.N[J].adj.forEach(function(x){
+          if (x.to === came || (!minor && x.c >= 1.6)) return;
+          var w = walk(G, J, x.to, 8); if (w.len < 5) return;
+          var tn = turn(inB, bearing(Jp, w.pts[w.pts.length - 1]));
+          if (tn <= -30 && tn >= -150 && Math.abs(tn + 90) < lb) { lb = Math.abs(tn + 90); L = x.to; }
+          if (tn >= 30 && tn <= 150 && Math.abs(tn - 90) < rb) { rb = Math.abs(tn - 90); R = x.to; }
+        });
+        return { L: L, R: R };
+      }
+      // Forward along the street to the first corner with a road both sides. Driveways and car park lanes only count as
+      // roads (minor) when no proper corner turns up.
+      function find(minor){
+        var why = 'no-junction', approach = [s.pt], p0, cur, gone = 0, start = -1;
+        [s.a, s.b].forEach(function(n){ if (start < 0 && deg(G, n) >= 3 && dist(G.N[n].p, s.pt) < 4) start = n; });
+        if (start >= 0) {                                                       // standing on a corner already
+          var inB0 = bearing(prev, G.N[start].p), bo = 999; p0 = -1;
+          G.N[start].adj.forEach(function(x){ var t = Math.abs(turn((inB0 + 180) % 360, bearing(G.N[start].p, G.N[x.to].p))); if (t < bo) { bo = t; p0 = x.to; } });   // the road it came up
+          cur = start; approach = [G.N[start].p];
+        } else { p0 = goB ? s.a : s.b; cur = goB ? s.b : s.a; gone = dist(s.pt, G.N[cur].p); approach.push(G.N[cur].p); }
+        for (var guard = 0; guard < 300; guard++) {
+          var b = G.N[cur].p, inB = bearing(approach.length >= 2 ? backFrom(approach, 8) : prev, b);
+          if (deg(G, cur) >= 3) {
+            var ar = arms(cur, p0, inB, minor);
+            if (ar.L != null && ar.R != null) return { J: cur, came: p0, L: ar.L, R: ar.R, approach: approach };
+            why = ar.L == null ? 'no-left' : 'no-right';
+          }
+          var segB = bearing(G.N[p0].p, b), nx = null, bt = 999;
+          G.N[cur].adj.forEach(function(x){ if (x.to === p0) return; var t = Math.abs(turn(segB, bearing(b, G.N[x.to].p))); if (t < bt) { bt = t; nx = x.to; } });
+          if (nx == null || bt > 60) return { err: why };                       // the street stops here
+          gone += dist(b, G.N[nx].p); if (gone > reach) return { err: why };
+          approach.push(G.N[nx].p); p0 = cur; cur = nx;
+        }
+        return { err: why };
+      }
+      var f = find(false); if (f.err) { var f2 = find(true); if (!f2.err) f = f2; }
+      if (f.err) return { err: f.err };
+      var Jp = G.N[f.J].p, wl = walk(G, f.J, f.L, fwd), wr = walk(G, f.J, f.R, back), wo = walk(G, f.J, f.came, exit);
+      var leg1 = tidy(f.approach.concat(wl.pts)), leg2 = tidy(wl.pts.slice().reverse().concat(wr.pts)), leg3 = tidy(wr.pts.slice().reverse().concat(wo.pts));
+      return { legs: [{ p: leg1, r: 0 }, { p: leg2, r: 1 }, { p: leg3, r: 0 }], end: leg3[leg3.length - 1], at: Jp };
+    }
+
+    /* ---- the kerb side ----
+       pts: the way driven, down the middle of the road. st[i]: how the stretch from point i to point i + 1 is driven:
+       0 forwards, 1 in reverse, 2 a hand-drawn straight stretch (stays exactly where it was tapped), 3 the same in reverse.
+       Gives back the line moved `off` metres to the truck's left, as pieces: [{ pts, rev }] (a piece is all forwards or all reverse). */
+    function kerb(pts, st, off){
+      var P = [], S = [];
+      for (var i = 0; i < pts.length; i++) {
+        if (P.length && dist(P[P.length - 1], pts[i]) < 0.05) continue;
+        if (P.length) S.push(st ? (st[i - 1] | 0) : 0);
+        P.push(pts[i]);
+      }
+      if (P.length < 2) return [];
+      var k = kx(P[0][0]), la0 = P[0][0], lo0 = P[0][1];
+      var X = P.map(function(p){ return [(p[1] - lo0) * k, (p[0] - la0) * KY]; });
+      var Nn = [], M = [];
+      for (var j = 0; j + 1 < X.length; j++) {
+        var dx = X[j + 1][0] - X[j][0], dy = X[j + 1][1] - X[j][1], l = Math.hypot(dx, dy) || 1, sg = (S[j] & 1) ? -1 : 1;
+        Nn.push([-dy / l * sg, dx / l * sg]);                                   // left of the way it is moving; the other side when reversing
+        M.push((S[j] & 2) ? 0 : off);
+      }
+      function at(q, n, m){ return [la0 + (q[1] + n[1] * m) / KY, lo0 + (q[0] + n[0] * m) / k]; }
+      var V = [];
+      for (var v = 0; v < X.length; v++) {
+        var n1 = v > 0 ? Nn[v - 1] : null, n2 = v < Nn.length ? Nn[v] : null;
+        if (!n1) V.push([at(X[v], n2, M[v])]);
+        else if (!n2) V.push([at(X[v], n1, M[v - 1])]);
+        else if (M[v - 1] !== M[v]) V.push([at(X[v], n1, M[v - 1]), at(X[v], n2, M[v])]);   // a road stretch meets a hand-drawn one
+        else if (!M[v]) V.push([at(X[v], n1, 0)]);
+        else {
+          var mx = n1[0] + n2[0], my = n1[1] + n2[1], ml = Math.hypot(mx, my);
+          if (ml < 1e-6) V.push([at(X[v], n1, off), at(X[v], n2, off)]);        // straight back the way it came: across to the other kerb
+          else {
+            mx /= ml; my /= ml; var c = mx * n1[0] + my * n1[1];
+            if (c < 0.5) V.push([at(X[v], n1, off), at(X[v], n2, off)]);        // a hairpin: cut the corner square instead of a long spike
+            else V.push([at(X[v], [mx, my], off / c)]);
+          }
+        }
+      }
+      var out = [], cur = null;
+      for (var g2 = 0; g2 < Nn.length; g2++) {
+        var rv = S[g2] & 1;
+        if (!cur || cur.rev !== rv) { cur = { rev: rv, pts: [V[g2][V[g2].length - 1]] }; out.push(cur); }
+        V[g2 + 1].forEach(function(q){ cur.pts.push(q); });
+      }
+      return out;
+    }
+
+    /* ---- where is a spot nearest to a line, and how far (metres) ---- */
+    function nearLine(p, pts){
+      var k = kx(p[0]), best = Infinity;
+      for (var i = 1; i < pts.length; i++) {
+        var ax = (pts[i - 1][1] - p[1]) * k, ay = (pts[i - 1][0] - p[0]) * KY, bx = (pts[i][1] - p[1]) * k, by = (pts[i][0] - p[0]) * KY, dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy;
+        var t = l2 ? Math.max(0, Math.min(1, -(ax * dx + ay * dy) / l2)) : 0, d = Math.hypot(ax + t * dx, ay + t * dy);
+        if (d < best) best = d;
+      }
+      return best;
+    }
+    // arrow heads along a line: [{ p, b }] every `gap` metres, starting half a gap in
+    function arrows(pts, gap){
+      var out = [], want = gap / 2, run = 0;
+      for (var i = 1; i < pts.length; i++) {
+        var l = dist(pts[i - 1], pts[i]); if (!(l > 0)) continue;
+        while (want <= run + l) { out.push({ p: lerp(pts[i - 1], pts[i], (want - run) / l), b: bearing(pts[i - 1], pts[i]) }); want += gap; }
+        run += l;
+      }
+      return out;
+    }
+    // d metres from p on bearing b
+    function move(p, b, d){ var r = b * Math.PI / 180; return [p[0] + Math.cos(r) * d / KY, p[1] + Math.sin(r) * d / kx(p[0])]; }
+
+    return { dist: dist, bearing: bearing, turn: turn, lenOf: lenOf, lerp: lerp, same: same, tidy: tidy, backFrom: backFrom, enc: enc, dec: dec, parseWays: parseWays,
+      mkGraph: mkGraph, snap: snap, route: route, walk: walk, tTurn: tTurn, kerb: kerb, nearLine: nearLine, arrows: arrows, move: move, deg: deg };
+  })();
+
+  /* ---- Truck line tab: the line the truck follows, kept under one run ----
+     DRAWN TRUCK LINES. A leading hand taps along the way the truck goes; between taps the line follows the roads
+     (OpenStreetMap, fetched for the area and kept on the phone) and is drawn on the kerb side, so up a street and back
+     down it shows as two lines. A T-turn is one button. The line is kept as the way driven down the middle of the road
+     (TLD[run key].legs = [{ g: which press made it, r: 1 when reversing, s: 1 when hand-drawn straight, p: [[lat, lng]] }]);
+     the kerb side is worked out when it is drawn, so it can stay clear of the other side at any zoom.
+     Every phone gets the line: it travels as outbox "places" (kind 'truckLine', newest change wins), in parts small
+     enough for a sheet cell. Needs no Apps Script change. */
+  var TLD = {}, tlLoaded = false, tlSaveT = 0;
+  var tl = { draw: false, rub: false, rev: false, follow: lsGet('lbTruckLineFollow', true) !== false, pen: null, penKey: '', undo: [], redo: [], q: Promise.resolve(), busy: 0,
+    layer: null, arrows: null, penMark: null, map: null, opt: { interactive: false }, zT: 0, mT: 0, fetch: null, shown: [] };
+  function tlKey(run){ if (!run) return ''; var k = runMeta(run).key; if (!k && window.lbBoundaryKeyFor) { try { k = window.lbBoundaryKeyFor(run); } catch (e) {} } return k || ''; }
+  function tlRec(run){ var k = tlKey(run); return k && TLD[k] && Array.isArray(TLD[k].legs) ? TLD[k] : null; }
+  function tlKm(rec){ var d = 0; rec.legs.forEach(function(l){ d += TL.lenOf(l.p); }); return d / 1000; }
+  function tlSave(){ clearTimeout(tlSaveT); tlSaveT = setTimeout(function(){ try { var sv = g('saveToDB'); if (sv) sv('lbTruckLines', TLD); } catch (e) {} }, 400); }
+  function tlLoad(){
+    var ld = g('loadFromDB'); if (!ld) { tlLoaded = true; return Promise.resolve(); }
+    return Promise.resolve(ld('lbTruckLines')).then(function(v){
+      if (v && typeof v === 'object') Object.keys(v).forEach(function(k){ if (!TLD[k] || (v[k].ts || 0) > (TLD[k].ts || 0)) TLD[k] = v[k]; });
+      tlLoaded = true; tlFirstShow(); tlRender(); paintSoon();
+    }).catch(function(){ tlLoaded = true; });
+  }
+  // A phone that has never touched the "Truck lines" switch gets it on once a drawn line arrives: a line nobody sees is no use.
+  function tlFirstShow(){
+    try {
+      if (localStorage.getItem('lukezBunzKmzLayers') !== null) return;
+      if (!Object.keys(TLD).some(function(k){ return TLD[k] && TLD[k].legs && TLD[k].legs.length; })) return;
+      localStorage.setItem('lukezBunzKmzLayers', '1'); setLet('kmzLayersVisible', true);
+    } catch (e) {}
+  }
+
+  /* ---- the roads: fetched a square at a time, kept on the phone ---- */
+  var TS = 0.02, roadTiles = null, roadGraph = null, roadSig = '';
+  function tileKeys(s, w, n, e){ var out = []; for (var y = Math.floor(s / TS); y <= Math.floor(n / TS); y++) for (var x = Math.floor(w / TS); x <= Math.floor(e / TS); x++) out.push(y + ',' + x); return out; }
+  function roadsLoad(){
+    if (roadTiles) return Promise.resolve(roadTiles);
+    var ld = g('loadFromDB'); if (!ld) { roadTiles = {}; return Promise.resolve(roadTiles); }
+    return Promise.resolve(ld('lbRoadTiles')).then(function(v){ roadTiles = (v && typeof v === 'object') ? v : {}; return roadTiles; }).catch(function(){ roadTiles = {}; return roadTiles; });
+  }
+  async function roadsFetch(keys){
+    var q = '[out:json][timeout:25];(' + keys.map(function(k){
+      var p = k.split(','), s = +p[0] * TS, w = +p[1] * TS;
+      return 'way["highway"]["highway"!~"footway|path|steps|cycleway|pedestrian|bridleway|corridor|proposed|construction|platform|elevator"](' + s.toFixed(4) + ',' + w.toFixed(4) + ',' + (s + TS).toFixed(4) + ',' + (w + TS).toFixed(4) + ');';
+    }).join('') + ');out geom;';
+    if (tl.fetch) return tl.fetch(q, keys);                                    // tests hand the roads in
+    var urls = ['https://overpass-api.de/api/interpreter', 'https://overpass.kumi.systems/api/interpreter', 'https://overpass.private.coffee/api/interpreter'], lastErr;
+    for (var u = 0; u < urls.length; u++) {
+      var ctl = new AbortController(), to = setTimeout(function(){ ctl.abort(); }, 25000);
+      try {
+        var r = await fetch(urls[u] + '?data=' + encodeURIComponent(q), { signal: ctl.signal });
+        if (!r.ok) throw new Error('Overpass ' + r.status);
+        var d = await r.json(); return d.elements || [];
+      } catch (e) { lastErr = e; } finally { clearTimeout(to); }
+    }
+    throw lastErr || new Error('no road data');
+  }
+  // the road network for a box (south, west, north, east); fetches what is missing
+  async function roadsFor(s, w, n, e){
+    await roadsLoad();
+    var keys = tileKeys(s, w, n, e); if (keys.length > 16) throw new Error('too-far');
+    var miss = keys.filter(function(k){ return !roadTiles[k]; });
+    if (miss.length) {
+      var ways = TL.parseWays(await roadsFetch(miss)), now = Date.now();
+      miss.forEach(function(k){ roadTiles[k] = { ts: now, w: [] }; });
+      ways.forEach(function(wy){
+        var la0 = 90, la1 = -90, lo0 = 180, lo1 = -180;
+        wy.pts.forEach(function(p){ if (p[0] < la0) la0 = p[0]; if (p[0] > la1) la1 = p[0]; if (p[1] < lo0) lo0 = p[1]; if (p[1] > lo1) lo1 = p[1]; });
+        var rec = [wy.id, wy.oneway, wy.cost, TL.enc(wy.pts)];
+        tileKeys(la0, lo0, la1, lo1).forEach(function(k){ if (miss.indexOf(k) >= 0) roadTiles[k].w.push(rec); });
+      });
+      var all = Object.keys(roadTiles);                                        // keep the newest 60 squares (a square is about 2 km)
+      if (all.length > 60) all.sort(function(a, b){ return roadTiles[a].ts - roadTiles[b].ts; }).slice(0, all.length - 60).forEach(function(k){ if (keys.indexOf(k) < 0) delete roadTiles[k]; });
+      try { var sv = g('saveToDB'); if (sv) sv('lbRoadTiles', roadTiles); } catch (e2) {}
+      roadSig = '';
+    }
+    var sig = keys.slice().sort().join('|');
+    if (sig !== roadSig || !roadGraph) {
+      var seen = {}, list = [];
+      keys.forEach(function(k){ roadTiles[k].w.forEach(function(r){ if (seen[r[0]]) return; seen[r[0]] = 1; list.push({ id: r[0], oneway: r[1], cost: r[2], pts: TL.dec(r[3]) }); }); });
+      roadGraph = TL.mkGraph(list); roadSig = sig;
+    }
+    return roadGraph;
+  }
+  function roadsNear(a, b, padM){
+    var pad = (padM || 350) / 110540, padx = pad / Math.cos(a[0] * Math.PI / 180);
+    return roadsFor(Math.min(a[0], b[0]) - pad, Math.min(a[1], b[1]) - padx, Math.max(a[0], b[0]) + pad, Math.max(a[1], b[1]) + padx);
+  }
+  function roadsSorry(e){
+    if (e && e.message === 'too-far') say('That is a long way for one tap. Tap closer, a few streets at a time.');
+    else say(navigator.onLine === false ? 'No signal, so the roads can\'t be fetched. Turn Follow roads off to draw straight lines.' : 'The roads could not be fetched just now. Try again, or turn Follow roads off to draw straight lines.');
+  }
+
+  /* ---- drawing it on the map ---- */
+  function tlMpp(map){ var c = map.getCenter(); return 156543.03392 * Math.cos(c.lat * Math.PI / 180) / Math.pow(2, map.getZoom()); }
+  function tlOff(map){ return Math.max(3, Math.min(14, 2.4 * tlMpp(map))); }       // 3 m is the kerb; zoomed out it is widened so the two sides stay apart
+  // the legs as unbroken lines: [{ pts, st }] (st: how each stretch is driven, see TL.kerb)
+  function tlChains(legs){
+    var out = [], cur = null;
+    legs.forEach(function(l){
+      if (!l.p || l.p.length < 2) return;
+      var st = (l.r ? 1 : 0) + (l.s ? 2 : 0);
+      if (!cur || TL.dist(cur.pts[cur.pts.length - 1], l.p[0]) > 1.5) { cur = { pts: [l.p[0]], st: [] }; out.push(cur); }
+      for (var i = 1; i < l.p.length; i++) { cur.pts.push(l.p[i]); cur.st.push(st); }
+    });
+    return out;
+  }
+  function tlShowing(){
+    var out = [], seen = {}, list = [], set = g('selectedRunsSet');
+    if (g('kmzLayersVisible') && set) Array.from(set).forEach(function(r){ list.push(r); });
+    var a = hubOpen() && tab === 'route' ? activeName() : '';
+    if (a && !list.some(function(x){ return mk(x) === mk(a); })) list.push(a);       // on this tab the picked run's line always shows
+    list.forEach(function(r, i){ var k = tlKey(r); if (k && !seen[k] && TLD[k] && TLD[k].legs && TLD[k].legs.length) { seen[k] = 1; out.push({ key: k, run: r, i: i, n: list.length }); } });
+    return out;
+  }
+  function tlColour(x){
+    try { var one = g('kmzColorForActiveStream'), many = g('kmzColorForRun'); return x.n > 1 && many ? many(x.run, x.i) : (one ? one() : '#facc15'); } catch (e) { return '#facc15'; }
+  }
+  function tlRender(){
+    var map = g('leafletMap'); if (!map || typeof L === 'undefined') return;
+    if (tl.map !== map) {
+      tl.map = map; tl.layer = L.layerGroup().addTo(map); tl.arrows = L.layerGroup().addTo(map); tl.penMark = null; tl.opt = { interactive: false };
+      // its own sheet above the run boundaries, which lets every tap through to what is underneath
+      try {
+        var pn = map.getPane('lb-truckline-pane') || map.createPane('lb-truckline-pane'); pn.style.zIndex = 450; pn.style.pointerEvents = 'none';
+        tl.opt = { interactive: false, pane: 'lb-truckline-pane', renderer: L.canvas({ pane: 'lb-truckline-pane', padding: 0.2 }) };
+      } catch (e) {}
+      map.on('zoomend', function(){ clearTimeout(tl.zT); tl.zT = setTimeout(tlRender, 120); });
+      map.on('moveend', function(){ clearTimeout(tl.mT); tl.mT = setTimeout(tlArrows, 220); });
+    }
+    tl.layer.clearLayers(); tl.shown = [];
+    var off = tlOff(map);
+    tlShowing().forEach(function(x){
+      var col = tlColour(x), fw = [], rv = [];
+      tlChains(TLD[x.key].legs).forEach(function(c){ TL.kerb(c.pts, c.st, off).forEach(function(pc){ (pc.rev ? rv : fw).push(pc.pts); }); });
+      var both = fw.concat(rv);
+      if (!both.length) return;
+      L.polyline(both, Object.assign({ color: '#0b0d10', weight: 7, opacity: 0.55 }, tl.opt)).addTo(tl.layer);                     // a dark edge so it reads on any map
+      if (fw.length) L.polyline(fw, Object.assign({ color: col, weight: 3.5, opacity: 1 }, tl.opt)).addTo(tl.layer);
+      if (rv.length) L.polyline(rv, Object.assign({ color: col, weight: 3.5, opacity: 1 }, tl.opt)).addTo(tl.layer);
+      // Reversing: white dashes on top. In a T-turn the reversing stretch lies right under the forward ones, so a dashed
+      // line in the same colour would not show at all.
+      if (rv.length) L.polyline(rv, Object.assign({ color: '#ffffff', weight: 3.5, opacity: 1, dashArray: '7 7', lineCap: 'butt' }, tl.opt)).addTo(tl.layer);
+      tl.shown.push({ key: x.key, col: col, lines: both });
+    });
+    tlArrows(); tlPen(); tlBar();
+  }
+  function tlArrows(){
+    var map = tl.map; if (!map || !tl.arrows) return;
+    tl.arrows.clearLayers();
+    if (!tl.shown.length || map.getZoom() < 14) return;
+    var mpp = tlMpp(map), gap = Math.max(25, 120 * mpp), size = 6.5 * mpp, vb = map.getBounds().pad(0.2), heads = [];
+    tl.shown.forEach(function(s){
+      s.lines.forEach(function(pts){
+        TL.arrows(pts, gap).forEach(function(a){ if (heads.length < 3000 && vb.contains(a.p)) heads.push([TL.move(a.p, a.b + 150, size), a.p, TL.move(a.p, a.b - 150, size)]); });
+      });
+    });
+    if (!heads.length) return;
+    L.polyline(heads, Object.assign({ color: '#0b0d10', weight: 5, opacity: 0.6 }, tl.opt)).addTo(tl.arrows);
+    L.polyline(heads, Object.assign({ color: '#ffffff', weight: 2, opacity: 1 }, tl.opt)).addTo(tl.arrows);
+  }
+  function tlPen(){
+    var map = tl.map; if (!map) return;
+    if (tl.penMark) { try { map.removeLayer(tl.penMark); } catch (e) {} tl.penMark = null; }
+    if (!tl.draw || !tl.pen || !hubOpen() || tab !== 'route') return;
+    tl.penMark = L.circleMarker(tl.pen, Object.assign({ radius: 7, color: '#0b0d10', weight: 2, fillColor: '#ffffff', fillOpacity: 1 }, tl.opt)).addTo(map);
+  }
+
+  /* ---- drawing ---- */
+  function tlActive(){ var a = activeName(); return a ? { run: a, key: tlKey(a) } : null; }
+  function tlEnd(rec){ var l = rec && rec.legs.length ? rec.legs[rec.legs.length - 1] : null; return l ? l.p[l.p.length - 1].slice() : null; }
+  // where the pen is for the run being worked on (the end of its line, unless the pen was lifted)
+  function tlPenFor(){
+    var a = tlActive(); if (!a || !a.key) { tl.pen = null; tl.penKey = ''; return; }
+    if (tl.penKey !== a.key) { tl.penKey = a.key; tl.pen = tlEnd(TLD[a.key]); tl.undo = []; tl.redo = []; }
+  }
+  // a spot a few metres back along the line from the pen: says which way the truck is going
+  function tlBack(rec){
+    if (!rec || !tl.pen) return null;
+    var pts = [];
+    for (var i = rec.legs.length - 1; i >= 0 && TL.lenOf(pts) < 12; i--) {
+      var p = rec.legs[i].p; if (pts.length && TL.dist(p[p.length - 1], pts[0]) > 1.5) break;
+      pts = p.concat(pts);
+    }
+    if (pts.length < 2 || TL.dist(pts[pts.length - 1], tl.pen) > 1.5) return null;
+    var b = TL.backFrom(pts, 10); return TL.dist(b, tl.pen) > 1 ? b : null;
+  }
+  function tlCanTurn(){ var a = tlActive(); return !!(tl.draw && a && tl.pen && tlBack(TLD[a.key])); }
+  function tlSnap(){ return { pen: tl.pen ? tl.pen.slice() : null, key: tl.penKey, legs: TLD[tl.penKey] ? TLD[tl.penKey].legs : [] }; }
+  function tlPut(key, legs){
+    TLD[key] = { ts: Date.now(), by: tlDriver(), legs: legs, dirty: 1 };
+    tlFirstShow(); tlSave(); tlRender(); tlBar(); paintSoon();
+  }
+  function tlDriver(){ try { return (lsGet('lbDriver', {}) || {}).name || ''; } catch (e) { return ''; } }
+  function tlChange(key, legs, pen){ tl.undo.push(tlSnap()); if (tl.undo.length > 80) tl.undo.shift(); tl.redo = []; tl.pen = pen; tlPut(key, legs); }
+  function tlBackTo(s, other){
+    if (!s || s.key !== tl.penKey) return;
+    other.push(tlSnap()); tl.pen = s.pen;
+    var cur = TLD[s.key] ? TLD[s.key].legs : null;
+    if (cur === s.legs || (!cur && !s.legs.length)) { tlRender(); paintSoon(); return; }      // only the pen moved (a first tap, a lifted pen)
+    tlPut(s.key, s.legs);
+  }
+  function tlLift(){ if (!tl.pen) return; tl.undo.push(tlSnap()); tl.redo = []; tl.pen = null; tlRender(); paintSoon(); }
+  function tlUndo(){ tlBackTo(tl.undo.pop(), tl.redo); }
+  function tlRedo(){ tlBackTo(tl.redo.pop(), tl.undo); }
+  var tlGid = 0;
+  function tlNewG(){ return Date.now().toString(36) + (tlGid++).toString(36); }
+  function tlRound(pts){ return pts.map(function(p){ return [Math.round(p[0] * 1e6) / 1e6, Math.round(p[1] * 1e6) / 1e6]; }); }
+
+  async function tlTapAt(ll){
+    var a = tlActive(); if (!a || !a.key) { say('Pick a run first.'); return; }
+    tlPenFor();
+    var rec = TLD[a.key], legs = rec && rec.legs ? rec.legs : [];
+    if (tl.rub) { tlRubAt(ll, a.key, legs); return; }
+    if (!tl.draw) return;
+    if (!tl.pen) {                                                              // the first tap: where the line starts
+      var st = ll;
+      if (tl.follow) {
+        var G0; try { G0 = await roadsNear(ll, ll); } catch (e) { roadsSorry(e); return; }
+        var s0 = TL.snap(G0, ll, 60); if (!s0) { say('No road there. Tap on a road, or turn Follow roads off.'); return; }
+        st = s0.pt;
+      }
+      tl.undo.push(tlSnap()); tl.redo = []; tl.pen = tlRound([st])[0]; tlRender(); tlBar(); paintSoon(); return;
+    }
+    var pts;
+    if (tl.follow) {
+      if (TL.dist(tl.pen, ll) > 4000) { roadsSorry({ message: 'too-far' }); return; }
+      var G; try { G = await roadsNear(tl.pen, ll); } catch (e) { roadsSorry(e); return; }
+      var s = TL.snap(G, tl.pen, 40), e2 = TL.snap(G, ll, 60);
+      if (!e2) { say('No road there. Tap on a road, or turn Follow roads off.'); return; }
+      if (!s) { say('The line is not on a road here. Turn Follow roads off for this stretch, or press New start.'); return; }
+      var r = TL.route(G, s, e2) || TL.route(G, s, e2, { anyWay: true });
+      if (!r || r.pts.length < 2 || r.len < 0.5) { if (r) return; say('No way along the roads to there. Tap closer, or turn Follow roads off.'); return; }
+      pts = r.pts; if (TL.dist(pts[0], tl.pen) > 0.3) pts = [tl.pen].concat(pts);
+    } else {
+      if (TL.dist(tl.pen, ll) < 0.5) return;
+      pts = [tl.pen, ll];
+    }
+    pts = tlRound(pts);
+    var leg = { g: tlNewG(), r: tl.rev ? 1 : 0, p: pts }; if (!tl.follow) leg.s = 1;
+    tlChange(a.key, legs.concat([leg]), pts[pts.length - 1].slice());
+  }
+  async function tlTurn(){
+    var a = tlActive(); if (!a || !a.key || !tl.pen) return;
+    var rec = TLD[a.key], back = tlBack(rec); if (!back) { say('Draw up to the end of the street first, then press T-turn.'); return; }
+    var G; try { G = await roadsNear(tl.pen, tl.pen, 450); } catch (e) { roadsSorry(e); return; }
+    var t = TL.tTurn(G, tl.pen, back);
+    if (t.err) {
+      say({ 'no-road': 'The line is not on a road here.', 'no-junction': 'No corner ahead. Draw up to the end of the street, where it meets the next road, then press T-turn.',
+        'no-left': 'There is no road to turn left into at this corner.', 'no-right': 'There is no road to reverse back into at this corner. A T-turn needs a road going both ways.' }[t.err] || 'No T-turn here.');
+      return;
+    }
+    var gid = tlNewG(), add = t.legs.map(function(l){ return { g: gid, r: l.r, p: tlRound(l.p) }; });
+    if (TL.dist(add[0].p[0], tl.pen) > 0.3) add[0].p.unshift(tl.pen.slice());
+    tlChange(a.key, rec.legs.concat(add), add[2].p[add[2].p.length - 1].slice());
+  }
+  // rub out: the stretch nearest the tap (a T-turn goes as one)
+  function tlRubAt(ll, key, legs){
+    var map = tl.map; if (!map || !legs.length) return;
+    var off = tlOff(map), tol = Math.max(6, 16 * tlMpp(map)), best = -1, bd = Infinity;
+    legs.forEach(function(l, i){
+      var st = (l.r ? 1 : 0) + (l.s ? 2 : 0), d = Infinity;
+      TL.kerb(l.p, l.p.map(function(){ return st; }), off).forEach(function(pc){ d = Math.min(d, TL.nearLine(ll, pc.pts)); });
+      if (d < bd) { bd = d; best = i; }
+    });
+    if (best < 0 || bd > tol) { say('Tap right on the stretch of line to rub out.'); return; }
+    var gid = legs[best].g, left = legs.filter(function(l){ return l.g !== gid; });
+    tlChange(key, left, tlEnd({ legs: left }));
+  }
+  async function tlClear(){
+    var a = tlActive(), rec = a && TLD[a.key]; if (!rec || !rec.legs.length) return;
+    if (!(await window.customConfirm('Clear the whole truck line drawn for ' + runLabel(a.run) + '? It goes from every phone.'))) return;
+    tlPenFor(); tlChange(a.key, [], null);
+  }
+
+  /* ---- the mode: drawing or rubbing out takes the map's taps ---- */
+  function tlMode(){
+    var map = g('leafletMap'), on = (tl.draw || tl.rub) && hubOpen() && tab === 'route';
+    try { if (map) map.getContainer().classList.toggle('lbe-drawing', !!on); } catch (e) {}
+    if (on) { boxHook(); try { if (window.lbDisableGpsFollow) window.lbDisableGpsFollow(); } catch (e) {} }
+    tlBar(); tlPen();
+  }
+  function tlStopBar(){ tlStop(); }
+  function tlHint(){
+    var a = tlActive(), name = a ? runLabel(a.run) + ' · ' : '', small = window.innerWidth < 600;
+    if (tl.rub) return name + (small ? 'Tap a stretch to rub out' : 'Tap a stretch of the line to rub it out');
+    if (!a) return 'Pick the run the line is for';
+    if (!tl.pen) return name + (small ? 'Tap where it starts' : 'Tap where the truck starts');
+    return name + (tl.rev ? 'Reversing · ' : '') + (small ? 'Tap the next spot' : 'Tap the next spot along the way');
+  }
+  function tlBar(){
+    if (!window.setMapTopBarContext) return;
+    var on = (tl.draw || tl.rub) && hubOpen() && tab === 'route', cb = $('mapContextBar'), mine = !!cb && cb.style.display !== 'none' && window.__mapContextOnClose === tlStopBar;
+    if (!on) { if (mine) { try { window.clearMapTopBarContext(); } catch (e) {} } return; }
+    var t = tlHint();
+    if (mine) { var te = $('mapContextTitle'); if (te && te.textContent !== t) window.updateMapTopBarContextTitle(t); return; }
+    window.setMapTopBarContext(t, [], tlStopBar);
+  }
+  function tlStop(){
+    var was = tl.draw || tl.rub;
+    tl.draw = false; tl.rub = false; tl.rev = false; tlMode(); if (was) { tlPush(true); paintSoon(); }
+  }
+  function tlSetDraw(on){
+    if (on && !isLead()) return;
+    tl.draw = !!on; tl.rub = false; if (!on) tl.rev = false;
+    if (on) { tlPenFor(); var a = tlActive(); if (a && a.key && !tl.pen) tl.pen = tlEnd(TLD[a.key]); }      // carry on from the end of the line
+    tlMode(); tlRender(); paintSoon();
+    if (!on) tlPush(true);
+  }
+  // the tap itself: read off the page's own click, worked out on the screen so a turned map is no trouble
+  function tlTap(ev){
+    if (!(tl.draw || tl.rub) || !hubOpen() || tab !== 'route') return;
+    var t = ev.target; if (t && t.closest && t.closest('.leaflet-control, .leaflet-popup, button, a, input')) return;
+    ev.preventDefault(); ev.stopPropagation();                                  // a house or bin under the tap must not open its pop-up
+    if (downAt && Math.hypot(ev.clientX - downAt.x, ev.clientY - downAt.y) > 6) return;       // that was the map being dragged
+    var map = g('leafletMap'), el = map.getContainer(), rc = el.getBoundingClientRect(), cx = rc.left + rc.width / 2, cy = rc.top + rc.height / 2, m;
+    try { m = new DOMMatrix(getComputedStyle(el).transform); } catch (e) { m = { a: 1, b: 0, c: 0, d: 1 }; }
+    var det = m.a * m.d - m.b * m.c || 1, x = ev.clientX - cx, y = ev.clientY - cy;
+    var px = (m.d * x - m.c * y) / det + el.offsetWidth / 2, py = (-m.b * x + m.a * y) / det + el.offsetHeight / 2;
+    var ll = map.containerPointToLatLng([px, py]);
+    tlQueue(function(){ return tlTapAt([ll.lat, ll.lng]); });
+  }
+  function tlQueue(fn){
+    tl.busy++; paintSoon();
+    tl.q = tl.q.then(fn).catch(function(e){ try { console.warn('truck line', e); } catch (e2) {} }).then(function(){ tl.busy--; paintSoon(); });
+    return tl.q;
+  }
+
+  /* ---- every phone gets it ---- */
+  function tlParts(key, rec){
+    var rows = [], MAXC = 24000;
+    rec.legs.forEach(function(l){
+      var p = l.p, step = 1500;                                                // a very long stretch goes as several
+      for (var i = 0; i < p.length - 1; i += step) rows.push([l.g, (l.r ? 1 : 0) + (l.s ? 2 : 0), TL.enc(p.slice(i, i + step + 1))]);
+    });
+    var parts = [[]], size = 0;
+    rows.forEach(function(r){ var n = r[2].length + r[0].length + 12; if (size + n > MAXC && parts[parts.length - 1].length) { parts.push([]); size = 0; } parts[parts.length - 1].push(r); size += n; });
+    var id = String(key).replace(/[^A-Za-z0-9]+/g, '_');
+    return parts.map(function(legs, i){ return { id: 'tl_' + id + '_' + i, kind: 'truckLine', key: key, part: i, parts: parts.length, ts: rec.ts, by: rec.by || '', legs: legs }; });
+  }
+  function tlPush(force){
+    if (!window.lbOutbox || !window.lbOutbox.sendPlace) return;
+    var now = Date.now(), ch = false;
+    Object.keys(TLD).forEach(function(k){
+      var r = TLD[k]; if (!r || !r.dirty) return;
+      if (!force && now - (r.ts || 0) < 20000) return;                         // still being drawn: wait for a pause
+      try { tlParts(k, r).forEach(function(p){ window.lbOutbox.sendPlace(p); }); delete r.dirty; ch = true; } catch (e) {}
+    });
+    if (ch) tlSave();
+  }
+  // lines drawn on other phones (called after each places pull)
+  function tlFleet(list){
+    var by = {}, ch = false;
+    (list || []).forEach(function(p){ if (p && p.kind === 'truckLine' && p.key) (by[p.key] || (by[p.key] = [])).push(p); });
+    Object.keys(by).forEach(function(k){
+      var ts = 0; by[k].forEach(function(p){ if ((p.ts || 0) > ts) ts = p.ts || 0; });
+      var mine = TLD[k]; if (mine && (mine.ts || 0) >= ts) return;              // ours is as new or newer
+      var parts = by[k].filter(function(p){ return (p.ts || 0) === ts; }).sort(function(a, b){ return a.part - b.part; });
+      if (!parts.length || parts.length !== parts[0].parts || parts.some(function(p, i){ return p.part !== i; })) return;   // some parts still on their way
+      var legs = [];
+      parts.forEach(function(p){ (p.legs || []).forEach(function(r){
+        var pts = TL.dec(r[2]); if (pts.length < 2) return;
+        var last = legs[legs.length - 1], st = r[1] | 0;
+        if (last && last.g === r[0] && last._st === st && TL.dist(last.p[last.p.length - 1], pts[0]) < 0.2) { last.p = last.p.concat(pts.slice(1)); return; }   // one stretch sent in pieces
+        var leg = { g: r[0], r: st & 1, p: pts, _st: st }; if (st & 2) leg.s = 1; legs.push(leg);
+      }); });
+      legs.forEach(function(l){ delete l._st; });
+      TLD[k] = { ts: ts, by: parts[0].by || '', legs: legs }; ch = true;
+      if (k === tl.penKey) { tl.pen = tlEnd(TLD[k]); tl.undo = []; tl.redo = []; }
+    });
+    if (!ch) return;
+    tlSave(); tlFirstShow(); tlRender(); paintSoon();
+  }
+  var tlWait = [];
+  window.lbTruckLines = {
+    fleet: function(list){ if (tlLoaded) tlFleet(list); else tlWait.push(list); },
+    push: function(){ tlPush(true); }, render: function(){ tlRender(); },
+    _t: { TL: TL, data: function(){ return TLD; }, state: function(){ return tl; }, key: tlKey, tapAt: function(ll){ return tlQueue(function(){ return tlTapAt(ll); }); }, turn: function(){ return tlQueue(tlTurn); },
+      setDraw: tlSetDraw, undo: tlUndo, redo: tlRedo, parts: tlParts, fleetNow: tlFleet, chains: tlChains, roadsFor: roadsFor, setFetch: function(f){ tl.fetch = f; roadTiles = roadTiles || {}; },
+      wipeRoads: function(){ roadTiles = {}; roadGraph = null; roadSig = ''; }, canTurn: tlCanTurn, shown: function(){ return tl.shown; } }
+  };
+  setTimeout(function(){ tlLoad().then(function(){ tlWait.splice(0).forEach(tlFleet); }); }, 1500);
+  setInterval(function(){ try { tlPush(false); } catch (e) {} }, 15000);
+
   // The map only draws truck lines for runs chosen in the filter. On this tab the picked run's line shows as well, so a
-  // whole day's runs can stay on the map while one run's line is looked at.
+  // whole day's runs can stay on the map while one run's line is looked at. Drawn lines are put on after the imported ones.
   (function(){
     var orig = window.renderKmzEvidence; if (typeof orig !== 'function') return;
     window.renderKmzEvidence = function(){
-      var set = g('selectedRunsSet'), a = hubOpen() && tab === 'route' ? activeName() : '';
-      if (a && set && !set.size) return withOnlyRun(a, function(){ return orig(); });
-      return orig.apply(this, arguments);
+      var set = g('selectedRunsSet'), a = hubOpen() && tab === 'route' ? activeName() : '', r;
+      if (a && set && !set.size) r = withOnlyRun(a, function(){ return orig(); }); else r = orig.apply(this, arguments);
+      try { tlRender(); } catch (e) {}
+      return r;
     };
   })();
   function truckFiles(run){ try { var m = g('kmzDataByRun'), d = m && m.get ? m.get(mk(run)) : null; return d && d.files ? d.files.length : 0; } catch (e) { return 0; } }
   function routeHtml(){
-    var runs = uniqueShowing(), a = activeName(), h = '';
+    var runs = uniqueShowing(), a = activeName(), h = '', lead = isLead();
+    if ((tl.draw || tl.rub) && a) tlPenFor();
+    var rec = a ? tlRec(a) : null, n = rec ? rec.legs.length : 0, files = a ? truckFiles(a) : 0;
     h += head('Run') + runChips(runs, a ? [a] : []);
-    h += note(!runs.length ? 'No run is showing. Pick a run for the map first.' : a ? (truckFiles(a) ? truckFiles(a) + ' file' + (truckFiles(a) === 1 ? '' : 's') + ' loaded for run ' + runLabel(a) + '.' : 'No truck line loaded for run ' + runLabel(a) + ' yet.') : 'Tap the run the truck line belongs to.');
-    h += head(a ? 'Truck line ' + runLabel(a) : 'Truck line');
+    h += note(!runs.length ? 'No run is showing. Pick a run for the map first.' : !a ? 'Tap the run the truck line belongs to.' :
+      n ? tlKm(rec).toFixed(1) + ' km drawn for ' + runLabel(a) + '. Every phone gets it.' : 'No line drawn for ' + runLabel(a) + ' yet.' + (files ? ' ' + files + ' file' + (files === 1 ? '' : 's') + ' loaded.' : ''));
+    if (lead) {
+      h += head(a ? 'Draw the line ' + runLabel(a) : 'Draw the line');
+      h += note(tl.busy ? 'Working out the way along the roads…' : tl.draw ? 'Tap along the way the truck goes. Up a street and back down gives a line each side.' : 'Press Draw line, then tap along the way the truck goes.');
+      h += tile('r-draw', 'move', 'Draw line', { on: tl.draw, off: !a, tip: 'Tap the map along the way the truck goes' });
+      h += tile('r-follow', 'street', 'Follow roads', { on: tl.follow, tip: 'On: the line follows the roads between taps, on the kerb side. Off: a straight line to each tap.' });
+      h += tile('r-tturn', 'tturn', 'T-turn', { off: !tlCanTurn(), tip: 'At the end of the street: left, reverse back past the street, then left back into it' });
+      h += tile('r-rev', 'down', 'Reversing', { on: tl.rev, off: !tl.draw, tip: 'The next stretch is driven in reverse (drawn with white dashes)' });
+      h += tile('r-new', 'plus', 'New start', { off: !tl.draw || !tl.pen, tip: 'Lift the pen: the next tap starts a new piece of line somewhere else' });
+      h += tile('r-rub', 'eraser', 'Rub out', { on: tl.rub, off: !n, tip: 'Tap a stretch of the line to take it out' });
+      h += tile('r-clear', 'bin', 'Clear line', { off: !n, danger: true });
+    } else if (a && !n) h += '<div class="lbh-card"><b>Leading hand mode needed</b><small>Drawing a truck line is switched on in leading hand mode.</small></div>';
+    h += head('From a file');
     h += tile('r-add', 'kml', 'Add KML / KMZ', { off: !a, tip: 'Bring in the line from a KML or KMZ file' });
-    h += tile('r-edit', 'move', 'Edit or delete', { tip: 'The truck lines already loaded' });
+    h += tile('r-edit', 'files', 'Edit or delete', { tip: 'The KML / KMZ truck lines already loaded' });
     h += head('Show on the map');
     h += tile('r-show', 'eye', 'Truck lines', { on: !!g('kmzLayersVisible') });
-    h += tile('r-arrows', 'arrows', 'Arrows', { on: !!g('kerbsideRouteArrowsOn') });
+    h += tile('r-arrows', 'arrows', 'Arrows', { on: !!g('kerbsideRouteArrowsOn'), tip: 'Arrows on the KML / KMZ lines. A drawn line always has them.' });
     h += tile('r-heat', 'heat', 'Colour by time', { on: !!g('kerbsideRouteHeatmapOn') });
-    h += tile('tgl-clip', 'cut', 'Cut to boundary', { on: !!(window.lbKmzClipOn && window.lbKmzClipOn()), tip: 'Hide the parts of a truck line that are outside the run boundary' });
+    h += tile('tgl-clip', 'cut', 'Cut to boundary', { on: !!(window.lbKmzClipOn && window.lbKmzClipOn()), tip: 'Hide the parts of a KML / KMZ line that are outside the run boundary' });
     return h;
   }
 
@@ -44936,9 +45606,9 @@ document.addEventListener('click', function(ev){
     var t = ev.target.closest ? ev.target.closest('[data-h]') : null; if (!t || t.disabled || t.hasAttribute('disabled')) return;
     var a = t.dataset.h, i = +t.dataset.i;
     if (a === 'close' || a === 'done') { closeHub(); return; }
-    if (a === 'tab') { if (tab === t.dataset.t && !form) return; var was = tab; tab = t.dataset.t; form = null; paint(); await syncMode(); if ((tab === 'route' || was === 'route') && window.renderKmzEvidence) window.renderKmzEvidence(); return; }
-    if (a === 'undo') { undo(); return; }
-    if (a === 'redo') { redo(); return; }
+    if (a === 'tab') { if (tab === t.dataset.t && !form) return; var was = tab; if (was === 'route') tlStop(); tab = t.dataset.t; form = null; paint(); await syncMode(); if ((tab === 'route' || was === 'route') && window.renderKmzEvidence) window.renderKmzEvidence(); return; }
+    if (a === 'undo') { if (tab === 'route') tlUndo(); else undo(); return; }
+    if (a === 'redo') { if (tab === 'route') tlRedo(); else redo(); return; }
     if (a === 'pickrun') { if (g('isRoadSnapEditing')) setActive(t.dataset.r, true); else { activeRuns = [t.dataset.r]; paint(); if (tab === 'route' && window.renderKmzEvidence) window.renderKmzEvidence(); } return; }
     if (a === 'tool-move') { setTool('move'); if (houseMode) houseKeep(); return; }
     if (a === 'tool-box') { setTool(tool === 'box' ? 'move' : 'box'); if (houseMode) houseKeep(); return; }
@@ -44976,6 +45646,13 @@ document.addEventListener('click', function(ev){
     }
     if (a === 'h-bincheck') { if (window.openBinMismatchModal) window.openBinMismatchModal(); return; }
     // truck line tab
+    if (a === 'r-draw') { tlSetDraw(!tl.draw); return; }
+    if (a === 'r-follow') { tl.follow = !tl.follow; lsSet('lbTruckLineFollow', tl.follow); paint(); return; }
+    if (a === 'r-rev') { tl.rev = !tl.rev; tlBar(); paint(); return; }
+    if (a === 'r-new') { tlLift(); tlBar(); return; }
+    if (a === 'r-tturn') { tlQueue(tlTurn); return; }
+    if (a === 'r-rub') { if (!isLead()) return; tl.rub = !tl.rub; tl.draw = false; tl.rev = false; if (tl.rub) tlPenFor(); tlMode(); tlRender(); paint(); return; }
+    if (a === 'r-clear') { await tlClear(); return; }
     if (a === 'r-add') { var rn1 = activeName(), lk = g('loadKmzForCurrentRun'); if (rn1 && lk) withOnlyRun(rn1, lk); return; }
     if (a === 'r-edit') { if (window.openKmlEditModal) window.openKmlEditModal(); return; }
     if (a === 'r-show' || a === 'r-arrows' || a === 'r-heat') {
@@ -45021,13 +45698,17 @@ document.addEventListener('click', function(ev){
     if (ev.key === 'Escape') {
       var dlg = $('customDialogOverlay'); if ((dlg && dlg.style.display !== 'none') || document.querySelector('.modal-overlay.open')) return;   // a question or a pop-up is up: Esc is theirs
       if (box) { boxEnd(false); return; }
+      if (tl.draw || tl.rub) { tlStop(); return; }
       if (houseMode) { if (g('collectionPointMode') && window.cancelCollectionPointMode) { window.cancelCollectionPointMode(); return; } if (houseCount()) { houseClear(); return; } }
       if (selCount()) { clearPicked(); return; }
       if (form) { form = null; paint(); return; }
       closeHub(); return;
     }
-    if (typing || !g('isRoadSnapEditing')) return;
     var mod = ev.ctrlKey || ev.metaKey, k = String(ev.key || '').toLowerCase();
+    if (!typing && tab === 'route' && !form && mod && (k === 'z' || k === 'y')) {       // the truck line being drawn
+      ev.preventDefault(); if (k === 'z' && !ev.shiftKey) tlUndo(); else tlRedo(); return;
+    }
+    if (typing || !g('isRoadSnapEditing')) return;
     if (mod && k === 'z' && !ev.shiftKey) { ev.preventDefault(); undo(); }
     else if (mod && (k === 'y' || (k === 'z' && ev.shiftKey))) { ev.preventDefault(); redo(); }
     else if ((k === 'delete' || k === 'backspace') && selCount()) { ev.preventDefault(); deleteSelected(); }
@@ -46889,6 +47570,7 @@ html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):
 /* the box you drag round points or houses, and the points that sit on a line two runs share */
 #lbeBox{position:fixed;z-index:40390;pointer-events:none;box-sizing:border-box;border:2px dashed var(--ui-accent,#ffd21f);background:rgba(255,255,255,.14);box-shadow:0 0 0 1px #000}
 .leaflet-container.lbe-boxing,.leaflet-container.lbe-boxing .leaflet-interactive{cursor:crosshair !important}
+.leaflet-container.lbe-drawing,.leaflet-container.lbe-drawing .leaflet-interactive{cursor:crosshair !important}
 .poly-edit-handle.lbh-shared .poly-edit-handle-dot{border-color:var(--ui-accent,#ffd21f) !important;box-shadow:0 0 0 2px #000,0 2px 8px rgba(0,0,0,.6) !important}
 </style>
 </body>
