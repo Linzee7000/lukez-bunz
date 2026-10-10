@@ -23376,7 +23376,7 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
   const SECTIONS = [
     { title: 'Bins & houses',   sel: '#mapSettingsGroupEdit .map-settings-opt-btn',      drop: b => !!b.dataset.subcat },
     // Everything about run boundaries, street modes (drive in / reverse in / one side) and collection points is in one place now
-    { title: 'Boundaries & streets', sel: '#mapSettingsGroupHub .map-settings-opt-btn' },
+    { title: 'Edit the map', sel: '#mapSettingsGroupHub .map-settings-opt-btn' },
     { title: 'Geofences',       sel: '#mapSettingsSubGroupGeofence .map-settings-opt-btn', lead: true },
     // What the Layers panel SHOWS is over there; everything here changes data.
     { title: 'KML / KMZ files', sel: '#mapSettingsGroupKml .map-settings-opt-btn',
@@ -43665,15 +43665,17 @@ document.addEventListener('click', function(ev){
 </script>
 
 <!-- =====================================================================
-     BOUNDARIES & STREETS
-     One place (Edit & settings > Boundaries & streets) for everything that used to be spread over Edit >
-     Boundary, Select, Settings > Bling and the Property boundaries screen:
-       - Run boundary tab: edit the points, snap the whole boundary or just ONE SIDE of it to houses / roads (or leave a
-         side by hand), pick several points and delete them at once, delete a boundary, add / export as KML, property lines.
-       - Streets tab: add / edit / delete Drive in, Reverse in, One side collection streets (by street name and house
-         numbers) and Collection points.
-     The boundary point editor itself replaces window.enableBoundaryVertexHandles (the map's own drag / insert handles),
+     EDIT THE MAP  (was "Boundaries & streets")
+     One panel beside the map for everything that changes what is drawn on it, with four tabs:
+       - Boundary:   the run's points. Move them, drag a box round several and delete / straighten / snap that stretch,
+                     snap or thin the whole run, delete it, bring one in from KML. A line two runs share changes in both.
+       - Houses:     pick houses (tap or box), then collection point / drive in / reverse in / one side, notes, bin check.
+       - Truck line: the KML / KMZ line a run's truck follows, and how it is shown.
+       - Streets:    add / edit / delete Drive in, Reverse in, One side streets (by street name and house numbers)
+                     and collection points.
+     The boundary point editor replaces window.enableBoundaryVertexHandles (the map's own drag / insert handles),
      because only it can see the editor's handles. Everything else wraps or reads globals, like the other add-ons.
+     Its look is in <style id="lb-editmap-style"> at the very end of the file.
      ================================================================== -->
 <style id="lb-boundary-hub-style">
 .poly-edit-handle.lbh-sel .poly-edit-handle-dot{background:#ef4444 !important;border-color:#fff !important;transform:scale(1.45)}
@@ -43811,31 +43813,51 @@ document.addEventListener('click', function(ev){
 
   /* ====================================================================================================
      RUN BOUNDARY POINT EDITOR
-     tools: move (drag a point, tap the dot between two points to add one)
-            select (tap several points, then delete them all at once)
-            side (tap the first and the last point of one side of the run, then snap just that side to houses / roads,
-                  straighten it, or leave it to adjust by hand)
+     The tools are in the Edit the map panel (no second column of buttons, no sub-menus):
+       move  drag a point; tap the small dot between two points to add one; tap a point to pick it
+       box   drag a box round points to pick them (on a computer Shift + drag does the same with either tool)
+     Whatever is picked gets its buttons straight away in the panel: delete, straighten, snap that stretch to houses or
+     roads. Dragging a picked point moves every picked point together.
+
+     SHARED LINES. Where two runs meet they have the very same points (tools/boundaries makes it so). A point that is
+     also in another run's boundary is "shared": moving, adding or deleting it does the same in the other run, so the
+     two keep ONE line between them and no gap or overlap opens up. This covers every saved boundary of the same
+     stream / day / week, whether it is on the map or filtered off it. Automatic outlines (nothing saved) are left alone.
      ================================================================================================== */
-  var tool = 'move', sel = {}, pick = null, side = null, ctxs = [], sideLayer = null, activeRuns = [];
+  var tool = 'move', sel = {}, ctxs = [], rings = [], activeRuns = [], undoStack = [], redoStack = [], handleOf = {}, vidx = {}, drag = null;
+  var EPS = 0.3;                              // metres: two points this close are one and the same point
   function mk(v){ return String(v || '').trim().toLowerCase(); }
-  function ringPts(c){ return c.latlngs.map(function(p){ return { lat: p.lat, lng: p.lng }; }); }
-  function store(c){ var cb = g('customRunBorders'); if (!cb) return; cb[c.key] = c.latlngs.map(function(p){ return [p.lat, p.lng]; }); }
   function persist(){ try { var sv = g('saveToDB'); if (sv) sv('customRunBorders', g('customRunBorders')); } catch (e) {} }
   function selCount(){ var n = 0; Object.keys(sel).forEach(function(k){ n += Object.keys(sel[k]).length; }); return n; }
-  function clearTransient(){ sel = {}; pick = null; side = null; if (sideLayer) { try { sideLayer.remove(); } catch (e) {} sideLayer = null; } }
+  function say(m){ try { if (window.uxToast) { window.uxToast(m); return; } } catch (e) {} window.customAlert(m); }
+  function isLead(){ return document.body.classList.contains('lb-lead'); }
+  function setLet(name, v){ try { (new Function('v', name + ' = v;'))(v); } catch (e) {} }
+  // "Recycling#Wednesday#A#225" -> its parts (Garbage keys have no week; a key made with no filter can miss the day)
+  function keyParts(key){
+    var p = String(key || '').split('#'), o = { stream: '', day: '', week: '', run: p[p.length - 1] || '' };
+    for (var i = 0; i < p.length - 1; i++) {
+      if (/^[AB]$/.test(p[i])) o.week = p[i];
+      else if (/^(mon|tue|wed|thu|fri|sat|sun)/i.test(p[i])) o.day = p[i];
+      else if (!o.stream) o.stream = p[i];
+    }
+    return o;
+  }
+  function groupOf(key){ var p = String(key || '').split('#'); p.pop(); return p.join('#'); }
+  function runText(r){ var k = keyParts(r.key); return window.lbRunText ? window.lbRunText(k.run || r.runName, k.week, '', k.stream) : String(r.runName).toUpperCase(); }
+  function uniqueShowing(){
+    var seen = {}, out = [];
+    (g('currentlyShowingRunKeys') || []).forEach(function(r){ var k = mk(r); if (k && !seen[k]) { seen[k] = 1; out.push(String(r)); } });
+    return out.sort(function(a, b){ return a.localeCompare(b, undefined, { numeric: true }); });
+  }
 
   // distances in metres on a flat patch of ground
   function kxy(lat){ return [111320 * Math.cos(lat * Math.PI / 180), 110540]; }
-  function lenOf(pts){ var d = 0; for (var i = 1; i < pts.length; i++) { var k = kxy(pts[i].lat); d += Math.hypot((pts[i].lng - pts[i - 1].lng) * k[0], (pts[i].lat - pts[i - 1].lat) * k[1]); } return d; }
-  function sidePath(c, a, b, dir){
-    var n = c.latlngs.length, out = [a], i = a, guard = 0;
-    while (i !== b && guard++ < n + 2) { i = (i + dir + n) % n; out.push(i); }
-    return out;
-  }
+  function dM(a, b){ var k = kxy(a.lat); return Math.hypot((a.lng - b.lng) * k[0], (a.lat - b.lat) * k[1]); }
+  function lenOf(pts){ var d = 0; for (var i = 1; i < pts.length; i++) d += dM(pts[i], pts[i - 1]); return d; }
   function densify(pts, step){
     var out = [pts[0]];
     for (var i = 1; i < pts.length; i++) {
-      var a = pts[i - 1], b = pts[i], k = kxy(a.lat), d = Math.hypot((b.lng - a.lng) * k[0], (b.lat - a.lat) * k[1]), n = Math.max(1, Math.ceil(d / step));
+      var a = pts[i - 1], b = pts[i], n = Math.max(1, Math.ceil(dM(a, b) / step));
       for (var j = 1; j <= n; j++) out.push({ lat: a.lat + (b.lat - a.lat) * j / n, lng: a.lng + (b.lng - a.lng) * j / n });
     }
     return out;
@@ -43844,9 +43866,9 @@ document.addEventListener('click', function(ev){
   function nearest(p, lines, maxM){
     var k = kxy(p.lat), best = null, px = p.lng * k[0], py = p.lat * k[1];
     for (var li = 0; li < lines.length; li++) {
-      var L = lines[li];
-      for (var i = 1; i < L.length; i++) {
-        var ax = L[i - 1][1] * k[0], ay = L[i - 1][0] * k[1], bx = L[i][1] * k[0], by = L[i][0] * k[1], dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy;
+      var Ln = lines[li];
+      for (var i = 1; i < Ln.length; i++) {
+        var ax = Ln[i - 1][1] * k[0], ay = Ln[i - 1][0] * k[1], bx = Ln[i][1] * k[0], by = Ln[i][0] * k[1], dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy;
         var t = l2 ? ((px - ax) * dx + (py - ay) * dy) / l2 : 0; t = Math.max(0, Math.min(1, t));
         var qx = ax + t * dx, qy = ay + t * dy, d = Math.hypot(px - qx, py - qy);
         if (d <= maxM && (!best || d < best.d)) best = { d: d, lat: qy / k[1], lng: qx / k[0] };
@@ -43854,10 +43876,11 @@ document.addEventListener('click', function(ev){
     }
     return best;
   }
-  // Douglas-Peucker, tolerance in metres; the ends always stay
-  function simplify(pts, tolM){
-    if (pts.length < 3) return pts.slice();
-    var k = kxy(pts[0].lat), keep = new Array(pts.length).fill(false); keep[0] = keep[pts.length - 1] = true;
+  // Douglas-Peucker, tolerance in metres; the ends always stay. simplifyKeep says which points stay, simplify returns them.
+  function simplifyKeep(pts, tolM){
+    var keep = new Array(pts.length).fill(false); if (!pts.length) return keep;
+    keep[0] = keep[pts.length - 1] = true; if (pts.length < 3) return keep;
+    var k = kxy(pts[0].lat);
     (function rec(lo, hi){
       var ax = pts[lo].lng * k[0], ay = pts[lo].lat * k[1], bx = pts[hi].lng * k[0], by = pts[hi].lat * k[1], dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy, worst = -1, wi = -1;
       for (var i = lo + 1; i < hi; i++) {
@@ -43866,8 +43889,9 @@ document.addEventListener('click', function(ev){
       }
       if (worst > tolM) { keep[wi] = true; rec(lo, wi); rec(wi, hi); }
     })(0, pts.length - 1);
-    return pts.filter(function(_, i){ return keep[i]; });
+    return keep;
   }
+  function simplify(pts, tolM){ var keep = simplifyKeep(pts, tolM); return pts.filter(function(_, i){ return keep[i]; }); }
   async function fetchRoads(b){
     var q = '[out:json][timeout:25];way["highway"]["highway"!~"footway|path|steps|cycleway|pedestrian|bridleway|corridor|proposed|construction"](' + b.s + ',' + b.w + ',' + b.n + ',' + b.e + ');out geom;';
     var urls = ['https://overpass-api.de/api/interpreter?data=', 'https://overpass.kumi.systems/api/interpreter?data='], lastErr;
@@ -43883,99 +43907,790 @@ document.addEventListener('click', function(ev){
     throw lastErr || new Error('no road data');
   }
 
-  function paintSide(){
-    var map = g('leafletMap'); if (sideLayer) { try { sideLayer.remove(); } catch (e) {} sideLayer = null; }
-    if (!map || !side) return;
-    var pts = side.idx.map(function(i){ return [side.c.latlngs[i].lat, side.c.latlngs[i].lng]; });
-    sideLayer = L.layerGroup([L.polyline(pts, { color: '#000', weight: 10, opacity: .9, interactive: false }), L.polyline(pts, { color: '#22c55e', weight: 5, opacity: 1, interactive: false })]).addTo(map);
+  /* ---------- the rings: the run(s) being worked on and every saved neighbour ---------- */
+  function buildRings(){
+    var hulls = g('mapHullsLayer'), cb = g('customRunBorders') || {}, out = [], seen = {}, single = uniqueShowing().length <= 1;
+    if (hulls) hulls.eachLayer(function(layer){
+      if (!(layer instanceof L.Polygon) || !layer._runGroupKey) return;
+      var gk = layer._runGroupKey, key = layer._boundaryKey || (window.lbBoundaryKeyFor ? window.lbBoundaryKeyFor(gk) : gk);
+      if (seen[key]) return; seen[key] = 1;
+      out.push({ layer: layer, key: key, runName: String(gk), latlngs: (layer.getLatLngs()[0] || []).slice(), custom: Array.isArray(cb[key]) && cb[key].length >= 3,
+        active: single || activeRuns.some(function(r){ return mk(r) === mk(gk); }) });
+    });
+    // saved boundaries of the same stream / day / week that are filtered off the map: they still share lines with the run on it
+    var groups = {}; out.forEach(function(r){ if (r.active) groups[groupOf(r.key)] = 1; });
+    Object.keys(cb).forEach(function(k){
+      if (seen[k] || !groups[groupOf(k)] || !Array.isArray(cb[k]) || cb[k].length < 3) return;
+      out.push({ layer: null, key: k, runName: k.split('#').pop(), latlngs: cb[k].map(function(p){ return L.latLng(+p[0], +p[1]); }), custom: true, active: false });
+    });
+    return out;
   }
-  function chooseSide(c, a, b){
-    var n = c.latlngs.length, fw = sidePath(c, a, b, 1), bw = sidePath(c, a, b, -1);
-    var lf = lenOf(fw.map(function(i){ return c.latlngs[i]; })), lb = lenOf(bw.map(function(i){ return c.latlngs[i]; }));
-    side = { c: c, a: a, b: b, dir: lf <= lb ? 1 : -1 }; side.idx = sidePath(c, a, b, side.dir);
-    pick = null; paintSide(); paintHandles(); bar();
+  function cell(v){ return Math.round(v * 2e5); }                       // about half a metre
+  function buildIndex(){
+    vidx = {};
+    rings.forEach(function(r, ri){
+      if (!r.custom && !r.active) return;
+      for (var i = 0; i < r.latlngs.length; i++) { var k = cell(r.latlngs[i].lat) + ',' + cell(r.latlngs[i].lng); (vidx[k] || (vidx[k] = [])).push(ri, i); }
+    });
   }
-  function flipSide(){ if (!side) return; side.dir = -side.dir; side.idx = sidePath(side.c, side.a, side.b, side.dir); paintSide(); paintHandles(); bar(); }
+  // the same point in other runs' saved boundaries
+  function twins(r, i){
+    var p = r.latlngs[i], out = []; if (!p) return out;
+    var la = cell(p.lat), ln = cell(p.lng), grp = groupOf(r.key);
+    for (var a = -1; a <= 1; a++) for (var b = -1; b <= 1; b++) {
+      var hit = vidx[(la + a) + ',' + (ln + b)]; if (!hit) continue;
+      for (var n = 0; n < hit.length; n += 2) {
+        var o = rings[hit[n]], q = o && o.latlngs[hit[n + 1]];
+        if (!o || o === r || !o.custom || !q || groupOf(o.key) !== grp) continue;
+        if (dM(p, q) <= EPS) out.push({ r: o, i: hit[n + 1] });
+      }
+    }
+    return out;
+  }
+  // A point that sits ON a neighbour's line where the neighbour has no point of its own (a third run joins there):
+  // give the neighbour a point there, so dragging it keeps the two joined. Only for neighbours that are not being edited.
+  function twinOnEdge(r, i){
+    var p = r.latlngs[i], grp = groupOf(r.key), k = kxy(p.lat), px = p.lng * k[0], py = p.lat * k[1], added = false;
+    rings.forEach(function(o){
+      if (o === r || o.active || !o.custom || groupOf(o.key) !== grp) return;
+      var n = o.latlngs.length;
+      for (var j = 0; j < n; j++) {
+        var a = o.latlngs[j], b = o.latlngs[(j + 1) % n];
+        var ax = a.lng * k[0], ay = a.lat * k[1], bx = b.lng * k[0], by = b.lat * k[1], dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy; if (!l2) continue;
+        var t = ((px - ax) * dx + (py - ay) * dy) / l2; if (t <= 0 || t >= 1) continue;
+        if (Math.hypot(px - (ax + t * dx), py - (ay + t * dy)) > EPS) continue;
+        if (dM(p, a) <= EPS || dM(p, b) <= EPS) continue;                 // that is an ordinary shared point
+        o.latlngs.splice(j + 1, 0, L.latLng(p.lat, p.lng)); added = true; return;
+      }
+    });
+    return added;
+  }
+  function commit(list){
+    var cb = g('customRunBorders'), done = {};
+    list.forEach(function(r){
+      if (done[r.key]) return; done[r.key] = 1;
+      if (r.layer) { try { r.layer.setLatLngs([r.latlngs]); } catch (e) {} }
+      if (cb) cb[r.key] = r.latlngs.map(function(p){ return [p.lat, p.lng]; });
+      r.custom = true;
+    });
+  }
+  function ringInsert(q, pos, ll){
+    q.latlngs.splice(pos, 0, ll);
+    var s = sel[q.key]; if (!s) return;
+    var t = {}; Object.keys(s).forEach(function(i){ t[+i >= pos ? +i + 1 : +i] = 1; }); sel[q.key] = t;
+  }
+  function inRing(ll, pts){
+    var inside = false;
+    for (var i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+      var yi = pts[i].lat, xi = pts[i].lng, yj = pts[j].lat, xj = pts[j].lng;
+      if (((yi > ll.lat) !== (yj > ll.lat)) && (ll.lng < (xj - xi) * (ll.lat - yi) / (yj - yi) + xi)) inside = !inside;
+    }
+    return inside;
+  }
+  function ringArea(pts){ var a = 0; for (var i = 0, j = pts.length - 1; i < pts.length; j = i++) a += (pts[j].lng + pts[i].lng) * (pts[j].lat - pts[i].lat); return Math.abs(a / 2); }
+  function namesOf(list, not){ var o = {}; list.forEach(function(r){ if (r !== not && !r.active) o[runText(r)] = 1; }); return Object.keys(o); }
 
-  function replaceSide(newPts){
-    var c = side.c, n = c.latlngs.length, inSide = {}; side.idx.forEach(function(i){ inSide[i] = 1; });
-    // the points that are NOT on the side, in ring order starting just after the side's last point
-    var rest = [], i = side.b;
-    for (var s = 0; s < n; s++) { i = (i + side.dir + n) % n; if (inSide[i]) break; rest.push(c.latlngs[i]); }
-    var ring = rest.concat(newPts.map(function(p){ return L.latLng(p.lat, p.lng); }));
-    c.latlngs = ring; c.layer.setLatLngs([ring]); store(c);
+  /* ---------- undo / redo: the saved boundaries of the stream / day / week being worked on, as they were ---------- */
+  function snapshot(){
+    var cb = g('customRunBorders') || {}, groups = {}, s = {};
+    rings.forEach(function(r){ groups[groupOf(r.key)] = 1; });
+    Object.keys(cb).forEach(function(k){ if (groups[groupOf(k)]) s[k] = cb[k]; });     // a boundary is always replaced whole, never changed in place
+    rings.forEach(function(r){ if (!(r.key in s)) s[r.key] = null; });
+    return s;
   }
-  async function snapSide(kind){
-    if (!side) return;
-    var c = side.c, path = side.idx.map(function(i){ return { lat: c.latlngs[i].lat, lng: c.latlngs[i].lng }; });
-    var lines, maxM, label;
+  function changedSince(s){ var cb = g('customRunBorders') || {}; return Object.keys(s).some(function(k){ return (cb[k] || null) !== s[k]; }); }
+  function pushUndo(s){ undoStack.push(s || snapshot()); if (undoStack.length > 60) undoStack.shift(); redoStack = []; }
+  function restore(s){
+    var cb = g('customRunBorders'); if (!cb) return;
+    var dead = lsGet('lbBoundaryDeleted', {}), ch = false, hard = false;
+    Object.keys(s).forEach(function(k){
+      if (s[k]) { cb[k] = s[k]; if (dead[k]) { delete dead[k]; ch = true; } }
+      else { if (cb[k]) hard = true; delete cb[k]; }                 // back to the automatic outline: only the map can work that out
+    });
+    if (ch) lsSet('lbBoundaryDeleted', dead);
+    persist(); sel = {};
+    if (hard || !syncLayers(Object.keys(s))) redraw();
+    refresh();
+  }
+  // Put saved boundaries back on their outlines WITHOUT redrawing the whole map: a day's runs is 16,000 house and bin
+  // markers, and rebuilding those takes seconds. False when an outline could not be updated this way (then redraw).
+  function syncLayers(keys){
+    var hulls = g('mapHullsLayer'), cb = g('customRunBorders') || {}, byKey = {}, ok = true; if (!hulls) return false;
+    hulls.eachLayer(function(l){ if (l instanceof L.Polygon && l._boundaryKey) byKey[l._boundaryKey] = l; });
+    keys.forEach(function(k){
+      var l = byKey[k], v = cb[k]; if (!l) return;                  // not on the map: nothing to draw
+      if (!Array.isArray(v) || v.length < 3) { ok = false; return; }
+      try { l.setLatLngs([v.map(function(p){ return [+p[0], +p[1]]; })]); } catch (e) { ok = false; }
+    });
+    return ok;
+  }
+  function resetStyles(){
+    var hulls = g('mapHullsLayer'); if (!hulls) return;
+    hulls.eachLayer(function(l){ if (l instanceof L.Polygon && l.setStyle) { try { l.setStyle({ weight: 2, dashArray: null, fillOpacity: 0.1 }); } catch (e) {} } });
+  }
+  function undo(){ if (!undoStack.length) return; var now = snapshot(); restore(undoStack.pop()); redoStack.push(now); paintSoon(); }
+  function redo(){ if (!redoStack.length) return; var now = snapshot(); restore(redoStack.pop()); undoStack.push(now); paintSoon(); }
+  function refresh(){ if (g('isRoadSnapEditing')) window.enableBoundaryVertexHandles(); paintSoon(); }
+  function afterEdit(touched){ commit(touched); persist(); buildIndex(); paintHandles(); bar(); paintSoon(); }
+
+  /* ---------- moving: one point, or every picked point; shared points move in the other run too ---------- */
+  function startDrag(r, idx){
+    var snap = snapshot(), mem = [], sr = sel[r.key];
+    if (sr && sr[idx] && selCount() > 1) rings.forEach(function(q){ var s = sel[q.key]; if (s && q.active) Object.keys(s).forEach(function(i){ mem.push({ r: q, i: +i }); }); });
+    else mem.push({ r: r, i: idx });
+    if (mem.length <= 80) mem.forEach(function(m){ if (!twins(m.r, m.i).length && twinOnEdge(m.r, m.i)) buildIndex(); });
+    var all = [], seen = {};
+    function add(q, i){ var k = q.key + '|' + i; if (seen[k]) return; seen[k] = 1; all.push({ r: q, i: i, lat: q.latlngs[i].lat, lng: q.latlngs[i].lng }); }
+    mem.forEach(function(m){ add(m.r, m.i); twins(m.r, m.i).forEach(function(t){ add(t.r, t.i); }); });
+    drag = { r: r, i: idx, lat0: r.latlngs[idx].lat, lng0: r.latlngs[idx].lng, all: all, snap: snap, moved: false };
+  }
+  function doDrag(ll){
+    if (!drag) return;
+    var dLat = ll.lat - drag.lat0, dLng = ll.lng - drag.lng0, touched = {};
+    drag.moved = true;
+    drag.all.forEach(function(m){
+      m.r.latlngs[m.i] = L.latLng(m.lat + dLat, m.lng + dLng); touched[m.r.key] = m.r;
+      if (m.r === drag.r && m.i === drag.i) return;
+      var h = handleOf[m.r.key + '|' + m.i]; if (h) h.setLatLng(m.r.latlngs[m.i]);
+    });
+    Object.keys(touched).forEach(function(k){ var q = touched[k]; if (q.layer) q.layer.setLatLngs([q.latlngs]); });
+  }
+  function endDrag(){
+    var d = drag; drag = null; if (!d) return;
+    if (!d.moved) { paintHandles(); return; }
+    var touched = {}, list = []; d.all.forEach(function(m){ if (!touched[m.r.key]) { touched[m.r.key] = 1; list.push(m.r); } });
+    pushUndo(d.snap); afterEdit(list);
+    var off = list.filter(function(q){ return !q.active && !q.layer; }).map(runText);     // a neighbour that is not on the map moved too: say so
+    if (off.length) say('Also moved in ' + off.join(', ') + ' (shared line, not on the map just now).');
+  }
+  function insertAt(r, idx, ll){
+    pushUndo();
+    var n = r.latlngs.length, a = twins(r, idx), b = twins(r, (idx + 1) % n), touched = [r], did = {};
+    // the edge is shared when both its ends are, and they are next to each other in the other run too: it gets the point as well
+    a.forEach(function(ta){ b.forEach(function(tb){
+      if (ta.r !== tb.r || did[ta.r.key]) return;
+      var o = ta.r, m = o.latlngs.length;
+      if ((ta.i + 1) % m === tb.i) ringInsert(o, ta.i + 1, L.latLng(ll.lat, ll.lng));
+      else if ((tb.i + 1) % m === ta.i) ringInsert(o, tb.i + 1, L.latLng(ll.lat, ll.lng));
+      else return;
+      did[o.key] = 1; touched.push(o);
+    }); });
+    ringInsert(r, idx + 1, ll);
+    afterEdit(touched);
+  }
+  // want: { boundaryKey: { index: 1 } } on the runs being edited. keepJoins: leave any point alone where a run that is not
+  // part of the shared stretch has a corner (used by Fewer points, which must never open a gap by itself).
+  function deletePoints(want, keepJoins){
+    var byKey = {}, plan = {}, res = { touched: [], blocked: [], removed: 0, also: [] };
+    rings.forEach(function(q){ byKey[q.key] = q; });
+    Object.keys(want).forEach(function(k){
+      var r = byKey[k], idx = r ? Object.keys(want[k]).map(Number) : []; if (!r || !idx.length) return;
+      var n = r.latlngs.length, mine = {}, theirs = [];
+      idx.forEach(function(i){
+        var pv = r.latlngs[(i - 1 + n) % n], nx = r.latlngs[(i + 1) % n], ok = true, tw = [];
+        twins(r, i).forEach(function(t){
+          var o = t.r, m = o.latlngs.length, x = o.latlngs[(t.i - 1 + m) % m], y = o.latlngs[(t.i + 1) % m];
+          // inside a stretch the two runs share (the points either side are shared too) the other run loses the point as well;
+          // where the shared stretch ends the other run keeps its corner
+          if ((dM(x, pv) <= EPS && dM(y, nx) <= EPS) || (dM(x, nx) <= EPS && dM(y, pv) <= EPS)) tw.push(t); else ok = false;
+        });
+        if (keepJoins && !ok) return;
+        mine[i] = 1; tw.forEach(function(t){ theirs.push(t); });
+      });
+      var cnt = Object.keys(mine).length; if (!cnt) return;
+      if (n - cnt < 3) { res.blocked.push(runText(r)); return; }
+      plan[k] = plan[k] || {}; Object.keys(mine).forEach(function(i){ plan[k][i] = 1; }); res.removed += cnt;
+      theirs.forEach(function(t){ (plan[t.r.key] || (plan[t.r.key] = {}))[t.i] = 1; });
+    });
+    Object.keys(plan).forEach(function(k){
+      var q = byKey[k], cnt = Object.keys(plan[k]).length;
+      if (q.latlngs.length - cnt < 3) return;
+      q.latlngs = q.latlngs.filter(function(_, i){ return !plan[k][i]; }); res.touched.push(q);
+      if (!want[k]) res.also.push(runText(q));
+    });
+    return res;
+  }
+  function alsoText(list){ return list.length ? ' Also changed in ' + list.join(', ') + ' (shared line).' : ''; }
+  function deleteSelected(){
+    if (!selCount()) return;
+    var snap = snapshot(), res = deletePoints(sel);
+    if (res.blocked.length) window.customAlert('A run boundary needs at least 3 points left, so ' + res.blocked.join(', ') + ' was not changed.');
+    if (!res.touched.length) return;
+    pushUndo(snap); sel = {}; afterEdit(res.touched);
+    say('Deleted ' + res.removed + ' point' + (res.removed === 1 ? '' : 's') + '.' + alsoText(res.also));
+  }
+
+  /* ---------- the picked points as one stretch of the line ---------- */
+  // the picked points of a run when they are one unbroken stretch, in order round the boundary; else null
+  function stretchOf(r){
+    var s = sel[r.key]; if (!s) return null;
+    var n = r.latlngs.length, idx = Object.keys(s).map(Number), c = idx.length; if (c < 2 || c >= n) return null;
+    var starts = idx.filter(function(i){ return !s[(i - 1 + n) % n]; }); if (starts.length !== 1) return null;
+    var out = [], i = starts[0]; for (var k = 0; k < c; k++) { out.push(i); i = (i + 1) % n; }
+    return out;
+  }
+  function stretchInfo(){
+    var st = null, r = null;
+    ctxs.forEach(function(c){ var p = stretchOf(c); if (p && !st) { st = p; r = c; } });
+    var picked = ctxs.filter(function(c){ return sel[c.key] && Object.keys(sel[c.key]).length; }).length;
+    return { r: r, path: st, ok: !!st && picked === 1, inner: !!st && picked === 1 && st.length >= 3 };
+  }
+  function straighten(){
+    var si = stretchInfo(); if (!si.inner) { window.customAlert('Pick three or more points in a row (or two points, then Pick between) to straighten the line between the first and the last.'); return; }
+    var want = {}; want[si.r.key] = {}; si.path.slice(1, -1).forEach(function(i){ want[si.r.key][i] = 1; });
+    var snap = snapshot(), res = deletePoints(want);
+    if (res.blocked.length || !res.touched.length) { window.customAlert('A run boundary needs at least 3 points left.'); return; }
+    pushUndo(snap); sel = {}; afterEdit(res.touched);
+    say('Straightened.' + alsoText(res.also));
+  }
+  // Two or more picked points on a run: pick everything between them too (the shorter way round). Pressed again, the other way.
+  function pickBetween(){
+    var done = false;
+    ctxs.forEach(function(r){
+      var s = sel[r.key]; if (!s) return;
+      var n = r.latlngs.length, idx = Object.keys(s).map(Number).sort(function(a, b){ return a - b; }); if (idx.length < 2) return;
+      var path = stretchOf(r), t = {};
+      if (path) {                                   // already one stretch: turn it into the other way round, keeping the two ends
+        t[path[0]] = 1; t[path[path.length - 1]] = 1;
+        for (var i = (path[path.length - 1] + 1) % n; i !== path[0]; i = (i + 1) % n) t[i] = 1;
+      } else {                                      // fill every gap except the longest one
+        var worst = -1, wi = -1;
+        idx.forEach(function(a, j){
+          var b = idx[(j + 1) % idx.length], d = 0, p = a;
+          while (p !== b) { var q = (p + 1) % n; d += dM(r.latlngs[p], r.latlngs[q]); p = q; }
+          if (d > worst) { worst = d; wi = j; }
+        });
+        var from = idx[(wi + 1) % idx.length], to = idx[wi];
+        for (var k = from; ; k = (k + 1) % n) { t[k] = 1; if (k === to) break; }
+      }
+      sel[r.key] = t; done = true;
+    });
+    if (done) { paintHandles(); bar(); paintSoon(); }
+  }
+  function replaceArc(q, a, b, dir, pts){            // the points from a to b (going dir) become pts (which start at a and end at b)
+    var n = q.latlngs.length, rest = [], i = b;
+    for (var s = 0; s < n; s++) { i = (i + dir + n) % n; if (i === a) break; rest.push(q.latlngs[i]); }
+    q.latlngs = rest.concat(pts.map(function(p){ return L.latLng(p.lat, p.lng); }));
+  }
+  // every stretch of another run that is the very same line as this stretch, point for point
+  function sharedArcs(r, path){
+    var cand = {}, out = [], part = {};
+    twins(r, path[0]).forEach(function(t){ cand[t.r.key] = { o: t.r, at: [t.i] }; part[t.r.key] = t.r; });
+    for (var p = 1; p < path.length; p++) {
+      var tw = twins(r, path[p]);
+      tw.forEach(function(t){ part[t.r.key] = t.r; });
+      Object.keys(cand).forEach(function(k){
+        var c = cand[k], m = c.o.latlngs.length, last = c.at[c.at.length - 1];
+        var nxt = tw.filter(function(t){ return t.r === c.o && ((last + 1) % m === t.i || (t.i + 1) % m === last); })[0];
+        if (!nxt) { delete cand[k]; return; }
+        var dir = (last + 1) % m === nxt.i ? 1 : -1;
+        if (c.dir && c.dir !== dir) { delete cand[k]; return; }
+        c.dir = dir; c.at.push(nxt.i);
+      });
+    }
+    Object.keys(cand).forEach(function(k){ var c = cand[k]; if (c.dir) out.push({ o: c.o, a: c.at[0], b: c.at[c.at.length - 1], dir: c.dir }); delete part[k]; });
+    return { arcs: out, partly: Object.keys(part).map(function(k){ return part[k]; }) };
+  }
+  function houseOutline(r){ return withOnlyRing(r, function(){ return window.lbRunHouseOutline ? window.lbRunHouseOutline() : null; }); }
+  async function snapStretch(kind){
+    var si = stretchInfo(), r = si.r, path = si.path;
+    if (!si.ok) { window.customAlert('Pick two or more points in a row first (drag a box round them, or tap two and press Pick between). The line between the first and the last is what gets snapped.'); return; }
+    var pts = path.map(function(i){ return { lat: r.latlngs[i].lat, lng: r.latlngs[i].lng }; }), lines, maxM, label;
     try {
       if (kind === 'roads') {
-        var lats = path.map(function(p){ return p.lat; }), lngs = path.map(function(p){ return p.lng; }), pad = 0.0008;
+        var lats = pts.map(function(p){ return p.lat; }), lngs = pts.map(function(p){ return p.lng; }), pad = 0.0008;
         lines = await fetchRoads({ s: Math.min.apply(null, lats) - pad, w: Math.min.apply(null, lngs) - pad, n: Math.max.apply(null, lats) + pad, e: Math.max.apply(null, lngs) + pad });
-        if (!lines.length) { window.customAlert('No roads were found near that side. Try again in a moment, or adjust it by hand.'); return; }
+        if (!lines.length) { window.customAlert('No roads were found near those points. Try again in a moment, or move them by hand.'); return; }
         maxM = 30; label = 'roads';
       } else {
-        var h = window.lbRunHouseOutline ? window.lbRunHouseOutline() : null;
-        if (!h) { window.customAlert('Pick one run first (and make sure it has houses with locations) to snap a side to its houses.'); return; }
+        var h = houseOutline(r);
+        if (!h) { window.customAlert('Run ' + runText(r) + ' needs houses with locations to snap to.'); return; }
         var ring = h.ring.map(function(p){ return [p.lat, p.lng]; }); ring.push(ring[0]);
         lines = [ring]; maxM = 120; label = 'houses';
       }
     } catch (e) { window.customAlert('Could not get the ' + kind + ' to snap to: ' + (e && e.message || e) + '. Check the signal and try again.'); return; }
-    var dens = densify(path, 8), moved = 0;
+    var again = stretchInfo();                                                     // the map may have been redrawn while the roads were loading
+    if (!again.ok || again.r.key !== r.key || again.path.length !== path.length) { window.customAlert('The points changed while that was loading. Pick them again and retry.'); return; }
+    r = again.r; path = again.path;
+    var dens = densify(pts, 8), moved = 0;
     var snapped = dens.map(function(p, i){
-      if (i === 0 || i === dens.length - 1) return p;      // the ends stay put so the side still joins the rest
+      if (i === 0 || i === dens.length - 1) return p;                              // the ends stay put so the stretch still joins the rest
       var q = nearest(p, lines, maxM); if (q) { moved++; return { lat: q.lat, lng: q.lng }; } return p;
     });
-    if (!moved) { clearTransient(); tool = 'move'; paintHandles(); bar(); window.customAlert('Nothing close enough to snap to on that side (the ' + label + ' were all more than ' + maxM + ' m away), so it was left as it was.'); return; }
-    var out = simplify(snapped, 1.5);
-    replaceSide(out); persist();
-    clearTransient(); tool = 'move'; paintHandles(); bar();
-    window.customAlert('That side now follows the ' + label + ' (' + moved + ' points moved). Drag any point to fine-tune it.');
+    if (!moved) { window.customAlert('Nothing close enough to snap to (the ' + label + ' were all more than ' + maxM + ' m away), so the line was left as it was.'); return; }
+    var out = simplify(snapped, 1.5), sh = sharedArcs(r, path), touched = [r];
+    pushUndo();
+    sh.arcs.forEach(function(x){ replaceArc(x.o, x.a, x.b, x.dir, out); touched.push(x.o); });
+    replaceArc(r, path[0], path[path.length - 1], 1, out);
+    sel = {}; afterEdit(touched);
+    var left = namesOf(sh.partly);
+    say('That stretch now follows the ' + label + '.' + alsoText(namesOf(touched, r)) + (left.length ? ' ' + left.join(', ') + ' shares only part of it and was left as it was.' : ''));
   }
-  function straightenSide(){
-    if (!side) return;
-    var c = side.c, a = c.latlngs[side.a], b = c.latlngs[side.b];
-    if (side.idx.length <= 2) { window.customAlert('That side has no points between its ends.'); return; }
-    if (c.latlngs.length - (side.idx.length - 2) < 3) { window.customAlert('A boundary needs at least 3 points.'); return; }
-    replaceSide([{ lat: a.lat, lng: a.lng }, { lat: b.lat, lng: b.lng }]); persist();
-    clearTransient(); tool = 'move'; paintHandles(); bar();
+
+  /* ---------- the whole run ---------- */
+  function oneActive(what){
+    if (ctxs.length === 1) return ctxs[0];
+    window.customAlert(ctxs.length ? 'Pick one run to ' + what + '.' : 'Pick a run first (tap it on the map or in the panel).'); return null;
+  }
+  // run fn with the map's filter narrowed to exactly this run's stream / day / week / run, then put the filter back
+  function withOnlyRing(r, fn){
+    var set = g('selectedRunsSet'), k = keyParts(r.key); if (!set) return fn();
+    var keep = Array.from(set), was = { s: g('activeFilterStream'), d: g('activeFilterDay'), w: g('activeFilterWeek') };
+    set.clear(); set.add(mk(r.runName));
+    if (k.stream) setLet('activeFilterStream', k.stream); if (k.day) setLet('activeFilterDay', k.day); if (k.week) setLet('activeFilterWeek', k.week);
+    var back = function(){ set.clear(); keep.forEach(function(x){ set.add(x); }); setLet('activeFilterStream', was.s); setLet('activeFilterDay', was.d); setLet('activeFilterWeek', was.w); };
+    var out; try { out = fn(); } catch (e) { back(); throw e; }
+    if (out && typeof out.then === 'function') return out.then(function(v){ back(); return v; }, function(e){ back(); throw e; });
+    back(); return out;
+  }
+  async function wholeRun(kind){
+    var r = oneActive(kind === 'nbr' ? 'match to its neighbours' : 'snap'); if (!r) return;
+    var snap = snapshot();
+    if (kind === 'houses') {
+      var h = houseOutline(r);
+      if (!h) { window.customAlert('Not enough houses with locations on run ' + runText(r) + ' to build a boundary.'); return; }
+      r.latlngs = h.ring.map(function(p){ return L.latLng(p.lat, p.lng); });
+      pushUndo(snap); sel = {}; afterEdit([r]);
+      say('Run ' + runText(r) + ' now sits tightly round its ' + h.houses + ' houses.' + (h.strays ? ' ' + h.strays + ' with a wrong-looking location left out.' : ''));
+      return;
+    }
+    // The map's own snap redraws the whole map when it is done (with the filter narrowed to this one run, at that). Its
+    // redraw is held back and just this run's outline is updated instead.
+    var real = window.renderMapData, calls = 0, key = r.key;
+    window.renderMapData = function(){ calls++; };
+    try { await withOnlyRing(r, function(){ return kind === 'roads' ? window.snapBoundaryToRoads() : window.snapBoundaryToNeighbor(); }); } catch (e) {}
+    finally { window.renderMapData = real; }
+    var ch = changedSince(snap);
+    if (ch) pushUndo(snap);
+    sel = {};
+    if ((ch && !syncLayers([key])) || calls > (ch ? 1 : 0)) redraw();
+    refresh();
   }
   // Fewer points for the whole boundary (property-line boundaries have thousands). Keeps the shape to within a couple of metres.
-  function ringSimplify(pts, tolM){
-    if (pts.length < 8) return pts.slice();
-    var k = kxy(pts[0].lat), far = 0, fd = -1;
-    for (var i = 1; i < pts.length; i++) { var d = Math.hypot((pts[i].lng - pts[0].lng) * k[0], (pts[i].lat - pts[0].lat) * k[1]); if (d > fd) { fd = d; far = i; } }
-    var a = simplify(pts.slice(0, far + 1), tolM), b = simplify(pts.slice(far).concat([pts[0]]), tolM);
-    return a.concat(b.slice(1, -1));
-  }
   async function fewerPoints(){
-    var tot = 0, after = 0;
-    ctxs.forEach(function(c){ tot += c.latlngs.length; });
-    if (!tot) return;
-    var ok = await window.customConfirm('Take out points that are not needed? The line keeps its shape to within about 2 m. This boundary has ' + (ctxs.length === 1 ? ctxs[0].latlngs.length : tot) + ' points.');
-    if (!ok) return;
-    ctxs.forEach(function(c){
-      var pts = ringSimplify(ringPts(c), 2); if (pts.length < 3) return;
-      c.latlngs = pts.map(function(p){ return L.latLng(p.lat, p.lng); }); c.layer.setLatLngs([c.latlngs]); store(c); after += c.latlngs.length;
-    });
-    persist(); clearTransient(); paintHandles(); bar();
-    window.customAlert('Now ' + after + ' points (was ' + tot + ').');
-  }
-  function deleteSelected(){
-    var total = 0, blocked = false;
-    ctxs.forEach(function(c, ci){
-      var s = sel[ci]; if (!s) return;
-      var idx = Object.keys(s).map(Number); if (!idx.length) return;
-      if (c.latlngs.length - idx.length < 3) { blocked = true; return; }
-      c.latlngs = c.latlngs.filter(function(_, i){ return !s[i]; }); c.layer.setLatLngs([c.latlngs]); store(c); total += idx.length;
-    });
-    if (blocked) window.customAlert('A run boundary needs at least 3 points left, so one boundary was not changed.');
-    if (!total) return;
-    persist(); sel = {}; paintHandles(); bar();
+    var r = oneActive('thin out'); if (!r) return;
+    var pts = r.latlngs, n = pts.length;
+    if (n < 8) { say('Run ' + runText(r) + ' has only ' + n + ' points.'); return; }
+    var ok = await window.customConfirm('Take out points that are not needed? The line keeps its shape to within about 2 m. Run ' + runText(r) + ' has ' + n + ' points.');
+    if (!ok || rings.indexOf(r) < 0) return;
+    var far = 0, fd = -1; for (var i = 1; i < n; i++) { var d = dM(pts[i], pts[0]); if (d > fd) { fd = d; far = i; } }
+    var k1 = simplifyKeep(pts.slice(0, far + 1), 2), k2 = simplifyKeep(pts.slice(far).concat([pts[0]]), 2), want = {}; want[r.key] = {};
+    for (var a = 1; a < far; a++) if (!k1[a]) want[r.key][a] = 1;
+    for (var b = 1; b < k2.length - 1; b++) if (!k2[b]) want[r.key][far + b] = 1;
+    var snap = snapshot(), res = deletePoints(want, true);
+    if (!res.touched.length) { say('Nothing to take out: every point is needed.'); return; }
+    pushUndo(snap); sel = {}; afterEdit(res.touched);
+    say('Run ' + runText(r) + ': now ' + r.latlngs.length + ' points (was ' + n + ').' + alsoText(res.also));
   }
 
   function tombstone(key){ var d = lsGet('lbBoundaryDeleted', {}); d[key] = Date.now(); lsSet('lbBoundaryDeleted', d); }
+  async function deleteBoundary(key, run){
+    var cb = g('customRunBorders') || {};
+    if (!(Array.isArray(cb[key]) && cb[key].length >= 3)) {
+      window.customAlert('Run ' + run + ' has no saved boundary: the outline on the map is drawn automatically round its houses, so there is nothing to delete. To change it, move its points (that saves it as a boundary of its own).');
+      return false;
+    }
+    var ok = await window.customConfirm('Delete the boundary for run ' + run + '? The run goes back to the outline drawn automatically round its houses.');
+    if (!ok) return false;
+    var snap = snapshot();
+    try { if (window.lbBackupBoundariesNow) await window.lbBackupBoundariesNow(); } catch (e) {}
+    delete cb[key]; tombstone(key);
+    try { if (window.lbBoundaryExtras && window.lbBoundaryExtras[key]) { delete window.lbBoundaryExtras[key]; var sv = g('saveToDB'); if (sv) sv('lbBoundaryExtras', window.lbBoundaryExtras); } } catch (e) {}
+    pushUndo(snap); persist(); sel = {}; redraw(); refresh();
+    return true;
+  }
+
+  /* ---------- picking ---------- */
+  function setTool(t){
+    tool = t === 'box' ? 'box' : 'move';
+    var map = g('leafletMap');
+    if (map) {
+      try { if (tool === 'box') map.dragging.disable(); else map.dragging.enable(); } catch (e) {}
+      try { map.getContainer().style.touchAction = tool === 'box' ? 'none' : ''; map.getContainer().classList.toggle('lbe-boxing', tool === 'box'); } catch (e) {}
+    }
+    bar(); paintSoon();
+  }
+  function togglePick(r, idx){ var s = sel[r.key] || (sel[r.key] = {}); if (s[idx]) delete s[idx]; else s[idx] = 1; if (!Object.keys(s).length) delete sel[r.key]; paintHandles(); bar(); paintSoon(); }
+  function clearPicked(){ if (!selCount()) return; sel = {}; paintHandles(); bar(); paintSoon(); }
+  function setActive(run, fit){
+    activeRuns = [run]; sel = {};
+    if (g('isRoadSnapEditing')) { window.enableBoundaryVertexHandles(); if (fit) fitActive(); }
+    paintSoon();
+  }
+  // bring the run being worked on into the part of the map the panel is not covering, big enough to work on
+  function fitActive(){
+    var map = g('leafletMap'), pts = []; if (!map) return;
+    ctxs.forEach(function(c){ c.latlngs.forEach(function(p){ pts.push(p); }); }); if (pts.length < 3) return;
+    var h = $('lbHub'), mr = map.getContainer().getBoundingClientRect(), pl = 30, pb = 30;
+    if (h && h.classList.contains('on')) { var hr = h.getBoundingClientRect(); if (hr.height > mr.height * 0.7) pl += Math.max(0, hr.right - mr.left); else pb += Math.max(0, mr.bottom - hr.top); }
+    try {
+      var bb = L.latLngBounds(pts), a = map.latLngToContainerPoint(bb.getNorthWest()), b = map.latLngToContainerPoint(bb.getSouthEast());
+      var vw = mr.width - pl - 30, vh = mr.height - pb - 70, inView = a.x >= pl && b.x <= mr.width - 30 && a.y >= 70 && b.y <= mr.height - pb;
+      if (inView && Math.max((b.x - a.x) / vw, (b.y - a.y) / vh) >= 0.45) return;          // already in view and a decent size
+      map.fitBounds(bb, { paddingTopLeft: [pl, 70], paddingBottomRight: [30, pb], animate: false });
+    } catch (e) {}
+  }
+
+  /* the line over the map says what to do next; the buttons themselves are in the panel */
+  var ctxOn = false, crowded = false, MAXH = 450, repaintT = 0, hooked = null;
+  function hintText(){
+    var n = selCount(), t;
+    if (!ctxs.length) t = uniqueShowing().length ? 'Tap a run to work on it' : 'No run is showing';
+    else {
+      var name = ctxs.length === 1 ? runText(ctxs[0]) + ' · ' : '', small = window.innerWidth < 600;      // a phone's bar has room for a few words
+      if (n) t = name + n + ' picked' + (small ? '' : ' · drag one to move them all');
+      else if (tool === 'box') t = name + (small ? 'Box the points' : 'Drag a box round the points');
+      else t = name + (small ? 'Drag a point' : 'Drag a point to move it');
+      if (crowded) t += small ? ' · zoom in' : ' · zoom in to see the points';
+    }
+    return t;
+  }
+  function bar(){
+    if (!g('isRoadSnapEditing') || !window.setMapTopBarContext) return;
+    var t = hintText(), row = $('mapContextRow2');
+    if (ctxOn && !(row && row.classList.contains('has-row2')) && window.updateMapTopBarContextTitle) { window.updateMapTopBarContextTitle(t); return; }
+    window.setMapTopBarContext(t, [], function(){ window.toggleRoadSnapEditing(); }); ctxOn = true;
+  }
+
+  // A boundary built from property lines has ~2,000 points; a handle (and an insert dot) for every one of them froze the map.
+  // Only the points on screen get handles, and when more than MAXH are on screen none do until you zoom in.
+  function repaintSoon(){ clearTimeout(repaintT); repaintT = setTimeout(function(){ if (g('isRoadSnapEditing') && !drag) paintHandles(); }, 160); }
+  function hookMap(on){
+    var map = g('leafletMap'); if (!map) return;
+    if (hooked && (hooked !== map || !on)) { try { hooked.off('moveend', repaintSoon); } catch (e) {} hooked = null; }
+    if (on && !hooked) { map.on('moveend', repaintSoon); hooked = map; }
+    try { if (on) map.boxZoom.disable(); else map.boxZoom.enable(); } catch (e) {}
+    boxHook();
+  }
+  function paintHandles(){
+    var layerG = g('mapEditHandlesLayer'); if (!layerG) return;
+    layerG.clearLayers(); handleOf = {};
+    var map = g('leafletMap'), vb = map ? map.getBounds().pad(0.25) : null, seen = 0, npick = selCount();
+    ctxs.forEach(function(c){ c.latlngs.forEach(function(ll){ if (!vb || vb.contains(ll)) seen++; }); });
+    var was = crowded; crowded = seen > MAXH; if (crowded !== was) bar();
+    ctxs.forEach(function(c){
+      var s = sel[c.key] || {};
+      c.latlngs.forEach(function(latlng, idx){
+        var picked = !!s[idx];
+        if (vb && !vb.contains(latlng) && !picked) return;
+        if (crowded && (!picked || npick > MAXH)) return;
+        var cls = 'poly-edit-handle' + (picked ? ' lbh-sel' : '') + (twins(c, idx).length ? ' lbh-shared' : '');
+        var m = L.marker(latlng, { draggable: true, pane: 'lukez-handle-pane', icon: L.divIcon({ className: cls, html: '<div class="poly-edit-handle-dot"></div>', iconSize: [24, 24], iconAnchor: [12, 12] }) });
+        m.on('dragstart', function(){ startDrag(c, idx); });
+        m.on('drag', function(e){ doDrag(e.target.getLatLng()); });
+        m.on('dragend', endDrag);
+        m.on('click', function(){ togglePick(c, idx); });
+        layerG.addLayer(m); handleOf[c.key + '|' + idx] = m;
+        if (!crowded) {
+          var nx = c.latlngs[(idx + 1) % c.latlngs.length], mlat = (latlng.lat + nx.lat) / 2, mlng = (latlng.lng + nx.lng) / 2;
+          if (vb && !vb.contains([mlat, mlng])) return;
+          var mid = L.marker([mlat, mlng], { pane: 'lukez-handle-pane', icon: L.divIcon({ className: 'poly-mid-handle', html: '<div class="poly-mid-handle-dot" title="Tap to add a point"></div>', iconSize: [18, 18], iconAnchor: [9, 9] }) });
+          mid.on('click', function(){ insertAt(c, idx, L.latLng(mlat, mlng)); });
+          layerG.addLayer(mid);
+        }
+      });
+    });
+  }
+
+  // Replaces the map's own handle builder (same name, same job: draw the drag / insert handles for the runs being edited).
+  // The map calls it again after every redraw, which is also when the rings are read afresh.
+  var origEnable = window.enableBoundaryVertexHandles;
+  window.enableBoundaryVertexHandles = function(){
+    var map = g('leafletMap'); if (!map) return;
+    if (!g('mapEditHandlesLayer')) { try { var mk2 = new Function('v', 'mapEditHandlesLayer = v;'); mk2(L.layerGroup({ pane: 'lukez-handle-pane' }).addTo(map)); } catch (e) { if (origEnable) return origEnable.apply(this, arguments); return; } }
+    if (!g('mapHullsLayer')) return;
+    g('mapEditHandlesLayer').clearLayers();
+    var showing = uniqueShowing();
+    activeRuns = activeRuns.filter(function(r){ return showing.some(function(x){ return mk(x) === mk(r); }); });
+    if (showing.length === 1) activeRuns = [showing[0]];
+    var sig = function(){ return ctxs.map(function(c){ return c.key + ':' + c.latlngs.length; }).join('|'); }, old = sig();
+    rings = buildRings(); ctxs = rings.filter(function(r){ return r.active; });
+    var many = uniqueShowing().length > 1 && ctxs.length > 0;
+    rings.forEach(function(r){ if (r.layer && many) r.layer.setStyle(r.active ? { weight: 4, dashArray: null, fillOpacity: 0.14 } : { weight: 2, dashArray: '6,6', fillOpacity: 0.04 }); });
+    if (sig() !== old) sel = {};                    // a different ring (a snap rebuilt it): the old picks no longer point at the same points
+    buildIndex(); paintHandles(); bar(); paintSoon();
+  };
+  // the old chips across the top of the map: the runs are picked in the panel now
+  window.renderBoundaryRunSwitcher = function(){ var b = $('mapContextButtons'); if (b) b.innerHTML = ''; };
+  window.setActiveBoundaryEditRun = function(runKey){ setActive(runKey, true); };
+  var origToggle = window.toggleRoadSnapEditing;
+  async function rawToggle(){
+    var entering = !g('isRoadSnapEditing');
+    if (entering) { tool = 'move'; sel = {}; ctxOn = false; crowded = false; }
+    var r = origToggle.apply(window, arguments);
+    if (entering && g('isRoadSnapEditing')) { hookMap(true); ctxOn = false; bar(); }
+    var res = await r;
+    if (!g('isRoadSnapEditing')) { setTool('move'); hookMap(false); sel = {}; ctxs = []; rings = []; crowded = false; ctxOn = false; drag = null; resetStyles(); }
+    return res;
+  }
+  // Every way into boundary editing (Edit & settings, old shortcuts) lands on the panel, because that is where the tools are;
+  // leaving it (the X on the line over the map) puts the panel away too.
+  window.toggleRoadSnapEditing = async function(){
+    if (!g('isRoadSnapEditing')) { window.lbOpenBoundaryHub('boundary'); return; }
+    if (hubOpen() && tab === 'boundary') { closeHub(); return; }
+    return rawToggle();
+  };
+  window.deleteBoundaryPointsShortcut = async function(){ window.lbOpenBoundaryHub('boundary'); setTimeout(function(){ if (g('isRoadSnapEditing')) setTool('box'); }, 400); };
+
+  // Tap a run on the map to work on it. Read straight off the page's own click (not the map library's "click", which the
+  // property-line and route layers swallow before the map hears it), and worked out on the screen so a turned map is no trouble.
+  var downAt = null;
+  function tapDown(ev){ downAt = { x: ev.clientX, y: ev.clientY }; }
+  function tapPick(ev){
+    if (!g('isRoadSnapEditing') || tool === 'box' || drag || Date.now() - lastBoxAt < 400) return;
+    var t = ev.target; if (t && t.closest && t.closest('.leaflet-marker-icon, .leaflet-popup, .leaflet-control, button, a, input')) return;
+    if (downAt && Math.hypot(ev.clientX - downAt.x, ev.clientY - downAt.y) > 6) return;       // that was the map being dragged
+    var pr = projector(), hit = null, area = Infinity, inActive = false, pt = { lat: ev.clientY, lng: ev.clientX };
+    rings.forEach(function(r){
+      if (!r.layer) return;
+      var poly = r.latlngs.map(function(ll){ var q = pr(ll); return { lat: q.y, lng: q.x }; });
+      if (!inRing(pt, poly)) return;
+      if (r.active) { inActive = true; return; }
+      var a = ringArea(poly); if (a < area) { area = a; hit = r; }
+    });
+    if (hit && !inActive) setActive(hit.runName, false);
+  }
+
+  /* ---------- the box: drag it round points (or houses) to pick them ---------- */
+  var box = null, boxEl = null, lastBoxAt = 0, boxHooked = null;
+  function boxWanted(ev, touch){
+    if (!((g('isRoadSnapEditing') && ctxs.length) || houseMode)) return false;
+    return tool === 'box' || (!touch && ev.shiftKey);
+  }
+  function boxHook(){
+    var map = g('leafletMap'), el = map ? map.getContainer() : null; if (!el || boxHooked === el) return;
+    boxHooked = el;
+    el.addEventListener('mousedown', boxDown, true);
+    el.addEventListener('touchstart', boxDown, { capture: true, passive: false });
+    el.addEventListener('mousedown', tapDown, true);
+    el.addEventListener('click', tapPick, true);
+  }
+  function boxDown(ev){
+    var touch = ev.type === 'touchstart';
+    if (box || !boxWanted(ev, touch)) return;
+    if (touch ? ev.touches.length !== 1 : ev.button !== 0) return;
+    var t = ev.target; if (t && t.closest && t.closest('.leaflet-marker-icon, .leaflet-popup, .leaflet-control, button, a, input')) return;   // a point, a house: tap or drag it as usual
+    var p = touch ? ev.touches[0] : ev;
+    box = { x0: p.clientX, y0: p.clientY, x1: p.clientX, y1: p.clientY, touch: touch };
+    ev.preventDefault(); ev.stopImmediatePropagation();
+    document.addEventListener(touch ? 'touchmove' : 'mousemove', boxMove, { capture: true, passive: false });
+    document.addEventListener(touch ? 'touchend' : 'mouseup', boxUp, true);
+    if (touch) document.addEventListener('touchcancel', boxUp, true);
+  }
+  function boxMove(ev){
+    if (!box) return;
+    if (box.touch && ev.touches && ev.touches.length > 1) { boxEnd(false); return; }          // a second finger: that is a pinch
+    var p = box.touch ? (ev.touches && ev.touches[0]) : ev; if (!p) return;
+    box.x1 = p.clientX; box.y1 = p.clientY; ev.preventDefault();
+    if (!boxEl) { boxEl = document.createElement('div'); boxEl.id = 'lbeBox'; document.body.appendChild(boxEl); }
+    boxEl.style.left = Math.min(box.x0, box.x1) + 'px'; boxEl.style.top = Math.min(box.y0, box.y1) + 'px';
+    boxEl.style.width = Math.abs(box.x1 - box.x0) + 'px'; boxEl.style.height = Math.abs(box.y1 - box.y0) + 'px';
+  }
+  function boxUp(ev){ boxEnd(!ev || ev.type !== 'touchcancel'); }
+  function boxEnd(apply){
+    var b = box; box = null; lastBoxAt = Date.now();
+    document.removeEventListener('mousemove', boxMove, true); document.removeEventListener('touchmove', boxMove, true);
+    document.removeEventListener('mouseup', boxUp, true); document.removeEventListener('touchend', boxUp, true); document.removeEventListener('touchcancel', boxUp, true);
+    if (boxEl) { try { boxEl.remove(); } catch (e) {} boxEl = null; }
+    if (!b || !apply) return;
+    var x0 = Math.min(b.x0, b.x1), x1 = Math.max(b.x0, b.x1), y0 = Math.min(b.y0, b.y1), y1 = Math.max(b.y0, b.y1);
+    if (x1 - x0 < 6 && y1 - y0 < 6) { if (tool === 'box') { if (houseMode) houseClear(); else clearPicked(); } return; }   // a tap on the bare map: nothing picked any more
+    pickInBox(x0, y0, x1, y1);
+  }
+  // where a place on the map is on the screen, also when the map has been turned (Track-Up, a two-finger twist)
+  function projector(){
+    var map = g('leafletMap'), el = map.getContainer(), rc = el.getBoundingClientRect(), cx = rc.left + rc.width / 2, cy = rc.top + rc.height / 2;
+    var w = el.offsetWidth, h = el.offsetHeight, m; try { m = new DOMMatrix(getComputedStyle(el).transform); } catch (e) { m = { a: 1, b: 0, c: 0, d: 1 }; }
+    return function(ll){ var p = map.latLngToContainerPoint(ll), x = p.x - w / 2, y = p.y - h / 2; return { x: cx + m.a * x + m.c * y, y: cy + m.b * x + m.d * y }; };
+  }
+  function pickInBox(x0, y0, x1, y1){
+    var pr = projector(), n = 0;
+    var inside = function(ll){ var p = pr(ll); return p.x >= x0 && p.x <= x1 && p.y >= y0 && p.y <= y1; };
+    if (houseMode) {
+      var ids = g('selectedCollectionHouseIds'); if (!ids) return;
+      var got = [];
+      Object.keys(drawn).forEach(function(id){
+        var s = drawn[id].site, la = +s.lat, ln = +s.lng; if (!la || !ln || ids.has(id) || !inside(L.latLng(la, ln))) return;
+        ids.add(id); got.push(id);
+      });
+      if (got.length) { houseKeep(); redrawHouses(got); }
+      else say('No houses in that box. Zoom in until the houses show, then try again.');
+      paintSoon(); return;
+    }
+    ctxs.forEach(function(c){
+      c.latlngs.forEach(function(ll, i){ if (!inside(ll)) return; var s = sel[c.key] || (sel[c.key] = {}); if (!s[i]) { s[i] = 1; n++; } });
+    });
+    paintHandles(); bar(); paintSoon();
+  }
+
+  /* ====================================================================================================
+     THE PANEL: "Edit the map"
+     One panel beside the map (under it on a phone held upright) with four tabs: Boundary, Houses, Truck line, Streets.
+     It stays open while you work, the map is the other half of the screen, and every button is in it.
+     ================================================================================================== */
+  var tab = 'boundary', form = null, houseMode = false, paintT = 0;
+  var KINDS = [['boundary', 'Boundary', 'boundary'], ['houses', 'Houses', 'house'], ['route', 'Truck line', 'route'], ['streets', 'Streets', 'street']];
+  var IC = {
+    boundary: '<path d="M4 7l5-3 6 3 5-3v13l-5 3-6-3-5 3z"/>', house: '<path d="M4 11l8-7 8 7v9H4zM10 20v-6h4v6"/>',
+    route: '<path d="M5 19V9a4 4 0 0 1 8 0v6a3 3 0 0 0 6 0V5M16 8l3-3 3 3"/>', street: '<path d="M8 21 11 3M16 21 13 3M12 6v2M12 11v2M12 16v2"/>',
+    move: '<path d="M4 20l1-4L16 5l3 3L8 19l-4 1z"/>', box: '<path d="M4 8V4h4M16 4h4v4M20 16v4h-4M8 20H4v-4"/><circle cx="12" cy="12" r="2.5"/>',
+    magnet: '<path d="M6 4v8a6 6 0 0 0 12 0V4h-4v8a2 2 0 0 1-4 0V4z"/>', nbr: '<path d="M3 5h9v14H3zM12 9h9v10h-9"/>',
+    cut: '<circle cx="6" cy="6" r="2"/><circle cx="6" cy="18" r="2"/><path d="M7.5 7.5 20 18M7.5 16.5 20 6"/>',
+    bin: '<path d="M5 7h14M9 7V4h6v3M7 7l1 13h8l1-13"/>', bins: '<path d="M5 8h14l-1 12H6zM9 8V4h6v4"/>',
+    straight: '<circle cx="5" cy="19" r="2"/><circle cx="19" cy="5" r="2"/><path d="M6.5 17.5 17.5 6.5"/>',
+    between: '<circle cx="4.5" cy="12" r="2"/><circle cx="19.5" cy="12" r="2"/><path d="M9 12h.5M12 12h.5M15 12h.5"/>',
+    clear: '<path d="M6 6l12 12M18 6 6 18"/>', pin: '<path d="M12 21s-6-6-6-11a6 6 0 0 1 12 0c0 5-6 11-6 11z"/><circle cx="12" cy="10" r="2"/>',
+    note: '<path d="M5 4h14v12l-4 4H5zM15 20v-4h4M8 9h8M8 13h5"/>', kml: '<path d="M12 4v10M8 10l4 4 4-4M5 20h14"/>',
+    exportf: '<path d="M12 16V4M7 8l5-5 5 5M5 20h14"/>', plus: '<path d="M12 5v14M5 12h14"/>', grid: '<path d="M4 4h16v16H4zM4 12h16M12 4v16"/>',
+    rect: '<path d="M4 6h16v12H4z"/>', undo: '<path d="M9 6 4 11l5 5M4 11h10a5 5 0 0 1 0 10h-3"/>', redo: '<path d="M15 6l5 5-5 5M20 11H10a5 5 0 0 0 0 10h3"/>',
+    done: '<path d="M5 12l5 5 9-10"/>', up: '<path d="M12 20V5M6 11l6-6 6 6"/>', down: '<path d="M12 4v15M6 13l6 6 6-6"/>', oneside: '<path d="M12 3v18M12 6h7v12h-7"/>',
+    eye: '<path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>', arrows: '<path d="M4 12h14M13 6l6 6-6 6"/>',
+    heat: '<path d="M12 3c3 4 5 6 5 10a5 5 0 0 1-10 0c0-2 1-3 2-4 0 2 1 3 2 3 0-3-1-5 1-9z"/>', dot: '<circle cx="12" cy="12" r="3.5"/>'
+  };
+  function svg(n){ return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" aria-hidden="true">' + (IC[n] || IC.dot) + '</svg>'; }
+  // the app's own tile, already built (icon block + label), so nothing has to restyle or rename it afterwards
+  function tile(act, ic, label, o){
+    o = o || {};
+    return '<button type="button" class="lbh-row mn-t' + (o.on ? ' on' : '') + (o.danger ? ' lbe-danger' : '') + '" data-h="' + act + '"' + (o.off ? ' disabled' : '') +
+      (o.on != null ? ' aria-pressed="' + (!!o.on) + '"' : '') + (o.tip ? ' title="' + esc(o.tip) + '"' : '') + '><span class="mn-ic">' + svg(ic) + '</span><span class="t">' + esc(label) + '</span></button>';
+  }
+  function head(t){ return '<div class="lbh-h">' + esc(t) + '</div>'; }
+  function note(t){ return '<div class="lbe-note">' + esc(t) + '</div>'; }
+  function hubOpen(){ var h = $('lbHub'); return !!h && h.classList.contains('on'); }
+  function hub(){
+    var h = $('lbHub'); if (h) return h;
+    h = document.createElement('div'); h.id = 'lbHub'; h.setAttribute('role', 'dialog'); h.setAttribute('aria-label', 'Edit the map');
+    h.innerHTML = '<div class="lbh-top"><b>Edit the map</b><button type="button" class="lbh-x" data-h="close" aria-label="Close">&times;</button></div>' +
+      '<div class="lbh-tabs lbe-kinds">' + KINDS.map(function(k){ return '<button type="button" class="lbh-tab lbe-kind" data-h="tab" data-t="' + k[0] + '">' + svg(k[2]) + '<span>' + k[1] + '</span></button>'; }).join('') + '</div>' +
+      '<div class="lbh-body" id="lbHubBody"></div>' +
+      '<div class="lbe-foot">' + tile('undo', 'undo', 'Undo') + tile('redo', 'redo', 'Redo') + tile('done', 'done', 'Done', { on: true }) + '</div>';
+    document.body.appendChild(h);
+    h.addEventListener('click', onClick);
+    return h;
+  }
+  function closeHub(){
+    var h = $('lbHub'); if (h) h.classList.remove('on');
+    document.body.classList.remove('lbe-open'); form = null; undoStack = []; redoStack = [];
+    if (tab === 'route' && window.renderKmzEvidence) { try { window.renderKmzEvidence(); } catch (e) {} }     // the picked run's truck line goes with the panel
+    syncMode();
+  }
+  window.lbOpenBoundaryHub = function(which){
+    try { if (window.lbCloseSettings) window.lbCloseSettings(); } catch (e) {}
+    if (which) tab = ({ run: 'boundary' })[which] || which;
+    if (!KINDS.some(function(k){ return k[0] === tab; })) tab = 'boundary';
+    form = null;
+    try { if (window.switchMainTab && g('activeTab') !== 'map') window.switchMainTab('map'); } catch (e) {}
+    hub().classList.add('on'); document.body.classList.add('lbe-open'); paint(); syncMode();
+  };
+  window.lbCloseBoundaryHub = closeHub;
+
+  // the map follows the tab: Boundary = the run's points are live, Houses = tapping a house picks it
+  var syncing = false, syncAgain = false;
+  async function syncMode(){
+    if (syncing) { syncAgain = true; return; }
+    syncing = true;
+    try {
+      do {
+        syncAgain = false;
+        var open = hubOpen(), wantB = open && !form && tab === 'boundary' && isLead(), wantH = open && !form && tab === 'houses';
+        if (!wantH && houseMode) houseOff();
+        if (wantB !== !!g('isRoadSnapEditing')) { try { await rawToggle(); } catch (e) {} }
+        if (wantH && !houseMode) houseOn();
+      } while (syncAgain);
+    } finally { syncing = false; }
+    if (hubOpen()) { if (tab === 'boundary' && g('isRoadSnapEditing')) fitActive(); paintSoon(); }
+  }
+
+  /* ---- houses: the map's own "select houses" mode, with its buttons in the panel ---- */
+  function houseIds(){ return g('selectedCollectionHouseIds'); }
+  function houseCount(){ var s = houseIds(); return s ? s.size : 0; }
+  function houseTitle(){ var n = houseCount(); return n ? n + ' house' + (n === 1 ? '' : 's') + ' picked' : (tool === 'box' ? 'Drag a box round the houses' : 'Tap the houses to pick them'); }
+  function houseClose(){ if (hubOpen() && tab === 'houses') closeHub(); }
+  function houseBar(){
+    if (!window.setMapTopBarContext) return;
+    var cb = $('mapContextBar'), te = $('mapContextTitle'), t = houseTitle();
+    var on = !!cb && cb.style.display !== 'none' && window.__mapContextOnClose === houseClose;
+    if (on) { if (te && te.textContent !== t) window.updateMapTopBarContextTitle(t); return; }
+    window.setMapTopBarContext(t, [], houseClose);
+  }
+  // tapping a house picks it straight away (no pop-up first) for as long as the Houses tab is open
+  function houseKeep(){
+    if (!houseMode) return;
+    setLet('collectionSelectionActive', true); setLet('boundarySelectModeActive', true); setLet('mapEditingActive', true);
+    if (!g('collectionPointMode')) houseBar();
+  }
+  // Every house the map handed to its house drawer in its last redraw, with the marker it got (none while house dots are
+  // switched off). This is what lets ONE house be redrawn when it is picked. The map's own way is to redraw everything,
+  // which on a whole day's runs (16,000 markers) takes seconds per tap.
+  var drawn = {};
+  (function(){
+    var od = window.drawHouseTriangle, orr = window.renderMapData;
+    if (typeof od === 'function') window.drawHouseTriangle = function(site){
+      var id = site ? String(site.propId || site.siteId || '') : '', grp = id ? g('mapMarkersLayer') : null, got = null, own = grp && grp.addLayer;
+      if (own) grp.addLayer = function(l){ got = l; return own.apply(this, arguments); };
+      try { return od.apply(this, arguments); }
+      finally { if (own) { delete grp.addLayer; if (grp.addLayer !== own) grp.addLayer = own; } if (id) drawn[id] = { site: site, marker: got }; }
+    };
+    if (typeof orr === 'function') window.renderMapData = function(){ drawn = {}; return orr.apply(this, arguments); };
+  })();
+  function redrawHouses(list){
+    var grp = g('mapMarkersLayer'), ok = !!grp;
+    if (ok) list.forEach(function(id){
+      var d = drawn[id]; if (!d) { ok = false; return; }
+      if (d.marker) { try { grp.removeLayer(d.marker); } catch (e) {} d.marker = null; }
+      try { window.drawHouseTriangle(d.site); } catch (e) { ok = false; }
+    });
+    if (!ok) { redraw(); return; }
+    try { if (window.uxCullMarkers) window.uxCullMarkers(); } catch (e) {}
+  }
+  function houseOn(){
+    if (houseMode) return; houseMode = true; tool = 'move';
+    try { if (window.lbDisableGpsFollow) window.lbDisableGpsFollow(); } catch (e) {}
+    houseKeep(); boxHook();
+    try { var u = g('updateMapTelemetryVisibility'); if (u) u(); } catch (e) {}
+    if (!Object.keys(drawn).length) redraw(); else housesInView();
+    var map = g('leafletMap'); if (map && houseHooked !== map) { houseHooked = map; map.on('moveend', function(){ if (houseMode) { clearTimeout(houseT); houseT = setTimeout(housesInView, 200); } }); }
+  }
+  // House dots switched off in Layers: the houses are drawn for as long as this tab is open. Only the ones in view get a
+  // marker (a day's runs is thousands of houses), the rest as the map is moved; a view too crowded to tap in is skipped.
+  var houseHooked = null, houseT = 0;
+  function housesInView(){
+    var map = g('leafletMap'); if (!houseMode || !map) return;
+    var vb; try { if (map.getZoom() < 14) return; vb = map.getBounds().pad(0.35); } catch (e) { return; }
+    var need = [];
+    Object.keys(drawn).forEach(function(id){ var d = drawn[id], s = d.site; if (!d.marker && +s.lat && +s.lng && vb.contains([+s.lat, +s.lng])) need.push(id); });
+    if (need.length && need.length <= 1500) redrawHouses(need);
+  }
+  function houseOff(){
+    if (!houseMode) return; houseMode = false; setTool('move');
+    try { if (g('collectionPointMode') && window.cancelCollectionPointMode) window.cancelCollectionPointMode(); } catch (e) {}
+    var s = houseIds(), was = s ? Array.from(s) : [], grp = g('mapMarkersLayer');
+    if (s) s.clear();
+    setLet('collectionSelectionActive', false); setLet('boundarySelectModeActive', false); setLet('mapEditingActive', false);
+    try { var u = g('updateMapTelemetryVisibility'); if (u) u(); } catch (e) {}
+    try { window.clearMapTopBarContext(); } catch (e) {}
+    if (!g('showHouseGpsDots') && grp) Object.keys(drawn).forEach(function(id){ var d = drawn[id]; if (d.marker) { try { grp.removeLayer(d.marker); } catch (e) {} d.marker = null; } });
+    else if (was.length) redrawHouses(was);
+  }
+  function houseClear(){ var s = houseIds(); if (!s || !s.size) return; var was = Array.from(s); s.clear(); houseKeep(); redrawHouses(was); paintSoon(); }
+  (function(){
+    var orig = window.toggleCollectionHouse; if (typeof orig !== 'function') return;
+    window.toggleCollectionHouse = function(siteId){
+      if (!houseMode) return orig.apply(this, arguments);
+      var ids = houseIds(), id = String(siteId); if (!ids) return;
+      if (ids.has(id)) ids.delete(id); else ids.add(id);
+      houseKeep(); redrawHouses([id]); paintSoon();
+    };
+  })();
+  var lastHouseN = -1;
+  setInterval(function(){
+    if (!houseMode) return;
+    if (!hubOpen() || tab !== 'houses') { houseOff(); return; }
+    houseKeep();
+    var n = houseCount(); if (n !== lastHouseN) { lastHouseN = n; paintSoon(); }
+  }, 600);
+
+  /* ---- what is on the map ---- */
   function onScreenBoundaries(){
     var out = [], hulls = g('mapHullsLayer'), seen = {};
     if (hulls) hulls.eachLayer(function(l){
@@ -43987,228 +44702,121 @@ document.addEventListener('click', function(ev){
     });
     return out;
   }
-  async function deleteBoundary(key, run){
-    var cb = g('customRunBorders') || {};
-    if (!(Array.isArray(cb[key]) && cb[key].length >= 3)) {
-      window.customAlert('Run ' + run + ' has no saved boundary: the outline on the map is drawn automatically round its houses, so there is nothing to delete. To change it, edit its points (that saves it as a boundary of its own).');
-      return false;
-    }
-    var ok = await window.customConfirm('Delete the boundary for run ' + run + '? The run goes back to the outline drawn automatically round its houses. This is on this phone only.');
-    if (!ok) return false;
-    try { if (window.lbBackupBoundariesNow) await window.lbBackupBoundariesNow(); } catch (e) {}
-    delete cb[key]; tombstone(key);
-    try { if (window.lbBoundaryExtras && window.lbBoundaryExtras[key]) { delete window.lbBoundaryExtras[key]; var sv = g('saveToDB'); if (sv) sv('lbBoundaryExtras', window.lbBoundaryExtras); } } catch (e) {}
-    persist(); redraw();
-    return true;
+  function runMeta(run){
+    var key = ''; onScreenBoundaries().forEach(function(x){ if (!key && mk(x.run) === mk(run)) key = x.key; });
+    var k = keyParts(key);
+    return { key: key, stream: k.stream || g('activeFilterStream') || '', day: k.day || g('activeFilterDay') || '', week: k.week || g('activeFilterWeek') || '' };
   }
-
-  function setTool(t){ tool = t; pick = null; side = null; if (sideLayer) { try { sideLayer.remove(); } catch (e) {} sideLayer = null; } if (t !== 'select') sel = {}; paintHandles(); bar(); }
-  function bar(){
-    if (!g('isRoadSnapEditing') || !window.setMapTopBarContext) return;
-    var ttl, b = [], n = selCount();
-    var done = { label: 'Done', icon: '✔️', onClick: function(){ window.toggleRoadSnapEditing(); }, variant: 'primary', key: 'boundaryDone', row: 2 };
-    if (tool === 'select') {
-      ttl = n ? 'Chosen points · ' + n : 'Tap the points to delete';
-      b = [{ label: 'Delete ' + (n || ''), icon: '🗑️', onClick: deleteSelected, key: 'bhDel', row: 2 }, { label: 'Clear', icon: '↺', onClick: function(){ sel = {}; paintHandles(); bar(); }, key: 'bhClr', row: 2 }, { label: 'Back', icon: '◀', onClick: function(){ setTool('move'); }, key: 'bhBack', row: 2 }];
-    } else if (tool === 'side' && !side) {
-      ttl = pick ? 'Tap the LAST point of the side' : 'Tap the FIRST point of the side';
-      b = [{ label: 'Cancel', icon: '✖', onClick: function(){ setTool('move'); }, key: 'bhCancel', row: 2 }];
-    } else if (tool === 'side') {
-      ttl = 'Side chosen · ' + side.idx.length + ' points';
-      b = [
-        { label: 'To houses', icon: '🧲', onClick: function(){ snapSide('houses'); }, key: 'bhH', row: 2 },
-        { label: 'To roads', icon: '🛣️', onClick: function(){ snapSide('roads'); }, key: 'bhR', row: 2 },
-        { label: 'By hand', icon: '✋', onClick: function(){ setTool('move'); }, key: 'bhHand', row: 2 },
-        { label: 'Other way', icon: '🔁', onClick: flipSide, key: 'bhFlip', row: 2 },
-        { label: 'Straighten', icon: '📏', onClick: straightenSide, key: 'bhStr', row: 2 },
-        { label: 'Cancel', icon: '✖', onClick: function(){ setTool('move'); }, key: 'bhCancel', row: 2 }];
-    } else {
-      ttl = 'Editing run boundary';
-      b = [
-        { label: 'Pick points', icon: '☑️', onClick: function(){ setTool('select'); }, key: 'bhSel', row: 2 },
-        { label: 'One side', icon: '〰️', onClick: function(){ setTool('side'); }, key: 'bhSide', row: 2 },
-        { label: 'Snap all: houses', icon: '🧲', onClick: function(){ window.snapActiveBoundaryToRoads(); }, key: 'snapHouses', row: 2 },
-        { label: 'Snap all: roads', icon: '🛣️', onClick: function(){ window.snapBoundaryToRoads(); }, key: 'snapRoads', row: 2 },
-        { label: 'Match neighbour', icon: '🧷', onClick: function(){ window.snapBoundaryToNeighbor(); }, key: 'matchNeighbor', row: 2 },
-        { label: 'Fewer points', icon: '✂️', onClick: fewerPoints, key: 'bhFew', row: 2 },
-        { label: 'Delete boundary', icon: '🗑️', onClick: async function(){ var c = ctxs[0]; if (!c) return; if (await deleteBoundary(c.key, c.runName)) window.toggleRoadSnapEditing(); }, key: 'bhDelB', row: 2 }];
-    }
-    b.push(done);
-    curTitle = ttl; if (crowded) ttl += ' · zoom in to see points';
-    window.setMapTopBarContext(ttl, b, function(){ window.toggleRoadSnapEditing(); });
-    window.setMapContextBtnActive('bhSel', tool === 'select'); window.setMapContextBtnActive('bhSide', tool === 'side');
+  function runLabel(run){ var m = runMeta(run); return window.lbRunText ? window.lbRunText(run, m.week, '', m.stream) : String(run).toUpperCase(); }
+  // the run the tools act on: the one picked, or the only one showing
+  function activeName(){
+    var showing = uniqueShowing(); if (showing.length === 1) return showing[0];
+    var a = activeRuns.filter(function(r){ return showing.some(function(x){ return mk(x) === mk(r); }); });
+    return a.length === 1 ? a[0] : '';
   }
-
-  // A boundary built from property lines has ~2,000 points; a handle (and an insert dot) for every one of them froze the map.
-  // Only the points on screen get handles, and when more than MAXH are on screen none do until you zoom in.
-  var MAXH = 450, crowded = false, curTitle = '', repaintT = 0, hooked = null;
-  function repaintSoon(){ clearTimeout(repaintT); repaintT = setTimeout(function(){ if (g('isRoadSnapEditing')) paintHandles(); }, 160); }
-  function hookMap(on){
-    var map = g('leafletMap'); if (!map) return;
-    if (hooked && hooked !== map) { try { hooked.off('moveend', repaintSoon); } catch (e) {} hooked = null; }
-    if (on && !hooked) { map.on('moveend', repaintSoon); hooked = map; }
-    if (!on && hooked) { try { hooked.off('moveend', repaintSoon); } catch (e) {} hooked = null; }
-  }
-  function paintHandles(){
-    var layerG = g('mapEditHandlesLayer'); if (!layerG) return;
-    layerG.clearLayers();
-    var map = g('leafletMap'), vb = map ? map.getBounds().pad(0.25) : null, seen = 0;
-    ctxs.forEach(function(c){ c.latlngs.forEach(function(ll){ if (!vb || vb.contains(ll)) seen++; }); });
-    var wasCrowded = crowded; crowded = seen > MAXH;
-    if (crowded !== wasCrowded && window.updateMapTopBarContextTitle && curTitle) window.updateMapTopBarContextTitle(curTitle + (crowded ? ' · zoom in to see points' : ''));
-    ctxs.forEach(function(c, ci){
-      var inSide = {}; if (side && side.c === c) side.idx.forEach(function(i){ inSide[i] = 1; });
-      c.latlngs.forEach(function(latlng, idx){
-        var special = (sel[ci] && sel[ci][idx]) || (pick && pick.ci === ci && pick.i === idx) || (side && side.c === c && (idx === side.a || idx === side.b));
-        if (vb && !vb.contains(latlng) && !special) return;
-        if (crowded && !special) return;
-        var cls = 'poly-edit-handle';
-        if (sel[ci] && sel[ci][idx]) cls += ' lbh-sel';
-        else if (pick && pick.ci === ci && pick.i === idx) cls += ' lbh-pin';
-        else if (side && side.c === c && (idx === side.a || idx === side.b)) cls += ' lbh-pin';
-        else if (inSide[idx]) cls += ' lbh-in';
-        var m = L.marker(latlng, { draggable: tool === 'move', pane: 'lukez-handle-pane', icon: L.divIcon({ className: cls, html: '<div class="poly-edit-handle-dot"></div>', iconSize: [24, 24], iconAnchor: [12, 12] }) });
-        m.on('drag', function(e){ c.latlngs[idx] = e.target.getLatLng(); c.layer.setLatLngs([c.latlngs]); store(c); });
-        m.on('dragend', function(){ paintHandles(); });
-        m.on('click', function(){
-          if (tool === 'select') { sel[ci] = sel[ci] || {}; if (sel[ci][idx]) delete sel[ci][idx]; else sel[ci][idx] = 1; paintHandles(); bar(); }
-          else if (tool === 'side' && !side) {
-            if (!pick) { pick = { ci: ci, i: idx }; paintHandles(); bar(); }
-            else if (pick.ci !== ci) { pick = { ci: ci, i: idx }; paintHandles(); bar(); }
-            else if (pick.i !== idx) chooseSide(c, pick.i, idx);
-          }
-        });
-        layerG.addLayer(m);
-        if (tool === 'move' && !crowded) {
-          var nx = c.latlngs[(idx + 1) % c.latlngs.length], mlat = (latlng.lat + nx.lat) / 2, mlng = (latlng.lng + nx.lng) / 2;
-          var mid = L.marker([mlat, mlng], { pane: 'lukez-handle-pane', icon: L.divIcon({ className: 'poly-mid-handle', html: '<div class="poly-mid-handle-dot" title="Tap to add boundary handle"></div>', iconSize: [18, 18], iconAnchor: [9, 9] }) });
-          mid.on('click', function(){ c.latlngs.splice(idx + 1, 0, L.latLng(mlat, mlng)); c.layer.setLatLngs([c.latlngs]); store(c); paintHandles(); });
-          layerG.addLayer(mid);
-        }
-      });
-    });
-  }
-
-  // Replaces the map's own handle builder (same name, same job: draw the drag / insert handles for the runs being edited).
-  var origEnable = window.enableBoundaryVertexHandles;
-  window.enableBoundaryVertexHandles = function(){
-    var map = g('leafletMap'); if (!map) return;
-    if (!g('mapEditHandlesLayer')) { try { var mk2 = new Function('v', 'mapEditHandlesLayer = v;'); mk2(L.layerGroup({ pane: 'lukez-handle-pane' }).addTo(map)); } catch (e) { if (origEnable) return origEnable.apply(this, arguments); return; } }
-    var hulls = g('mapHullsLayer'); if (!hulls) return;
-    g('mapEditHandlesLayer').clearLayers();
-    if (typeof window.renderBoundaryRunSwitcher === 'function') window.renderBoundaryRunSwitcher();
-    var showing = (g('currentlyShowingRunKeys') || []).map(mk), multiple = new Set(showing).size > 1, old = ctxs;
-    ctxs = [];
-    hulls.eachLayer(function(layer){
-      if (!(layer instanceof L.Polygon) || !layer._runGroupKey) return;
-      var gk = layer._runGroupKey, active = !multiple || activeRuns.some(function(r){ return mk(r) === mk(gk); });
-      if (multiple) layer.setStyle(active ? { weight: 3, dashArray: null, fillOpacity: 0.12 } : { weight: 2, dashArray: '6,6', fillOpacity: 0.04 });
-      if (!active) return;
-      var key = layer._boundaryKey || (window.lbBoundaryKeyFor ? window.lbBoundaryKeyFor(gk) : gk);
-      ctxs.push({ layer: layer, key: key, runName: String(gk), latlngs: (layer.getLatLngs()[0] || []).slice() });
-    });
-    // a different ring (a snap rebuilt it) means the old picks no longer point at the same points
-    var same = old.length === ctxs.length && old.every(function(o, i){ return o.key === ctxs[i].key && o.latlngs.length === ctxs[i].latlngs.length; });
-    if (!same) clearTransient();
-    paintHandles();
-  };
-  // which runs' points can be dragged when two or more are showing (same rule as the map's own switcher)
-  var origSetActive = window.setActiveBoundaryEditRun;
-  window.setActiveBoundaryEditRun = function(runKey){
-    var idx = activeRuns.findIndex(function(r){ return mk(r) === mk(runKey); });
-    if (idx !== -1) { if (activeRuns.length > 1) activeRuns.splice(idx, 1); }
-    else if (activeRuns.length >= 2) activeRuns = [activeRuns[1], runKey];
-    else activeRuns.push(runKey);
-    if (origSetActive) { try { origSetActive.apply(this, arguments); return; } catch (e) {} }
-    window.enableBoundaryVertexHandles();
-  };
-  var origToggle = window.toggleRoadSnapEditing;
-  window.toggleRoadSnapEditing = async function(){
-    var entering = !g('isRoadSnapEditing');
-    if (entering) { var s0 = g('currentlyShowingRunKeys') || []; activeRuns = s0[0] ? [s0[0]] : []; tool = 'move'; clearTransient(); }
-    var r = origToggle.apply(this, arguments);
-    if (entering && g('isRoadSnapEditing')) { hookMap(true); bar(); paintHandles(); }
-    var res = await r;
-    if (!g('isRoadSnapEditing')) { hookMap(false); clearTransient(); ctxs = []; tool = 'move'; crowded = false; }
-    return res;
-  };
-  // Settings > Delete (old shortcut): straight into editing with the "pick points" tool
-  window.deleteBoundaryPointsShortcut = async function(){
-    if (!g('isRoadSnapEditing')) await window.toggleRoadSnapEditing();
-    setTool('select');
-  };
-
-  /* ====================================================================================================
-     THE HUB SCREEN
-     ================================================================================================== */
-  var tab = 'run', form = null;
-  function hub(){
-    var h = $('lbHub'); if (h) return h;
-    h = document.createElement('div'); h.id = 'lbHub'; h.setAttribute('role', 'dialog'); h.setAttribute('aria-label', 'Boundaries and streets');
-    h.innerHTML = '<div class="lbh-top"><b>Boundaries &amp; streets</b><button type="button" class="lbh-x" data-h="close" aria-label="Close">&times;</button></div>' +
-      '<div class="lbh-tabs"><button type="button" class="lbh-tab" data-h="tab" data-t="run">Run boundary</button><button type="button" class="lbh-tab" data-h="tab" data-t="streets">Streets &amp; points</button></div>' +
-      '<div class="lbh-body" id="lbHubBody"></div>';
-    document.body.appendChild(h);
-    h.addEventListener('click', onClick);
-    return h;
-  }
-  function closeHub(){ var h = $('lbHub'); if (h) h.classList.remove('on'); form = null; }
-  window.lbOpenBoundaryHub = function(which){
-    try { if (window.lbCloseSettings) window.lbCloseSettings(); } catch (e) {}
-    if (which) tab = which;
-    form = null; hub().classList.add('on'); paint();
-  };
-  window.lbCloseBoundaryHub = closeHub;
-
-  function runInfo(){
-    var sel2 = g('selectedRunsSet'), n = sel2 ? sel2.size : 0, st = g('activeFilterStream') || '', day = g('activeFilterDay') || '', wk = g('activeFilterWeek') || '';
-    if (n === 1) { var r = Array.from(sel2)[0]; return { one: true, text: String(r).toUpperCase(), html: (window.lbRunLabel ? window.lbRunLabel(st, r, wk, day) : esc(String(r).toUpperCase())) }; }
-    return { one: false, text: n ? n + ' runs showing' : 'No run showing' };
+  function runChips(runs, cur){
+    if (!runs.length) return '';
+    return '<div class="lbe-runs' + (cur.length ? '' : ' none') + '">' + runs.map(function(r){
+      var m = runMeta(r), on = cur.some(function(x){ return mk(x) === mk(r); });
+      return '<button type="button" class="lbe-run' + (on ? ' on' : '') + '" data-h="pickrun" data-r="' + esc(r) + '" aria-pressed="' + on + '">' +
+        (window.lbRunChip ? window.lbRunChip(m.stream, r, m.week, '') : esc(String(r).toUpperCase())) + '</button>';
+    }).join('') + '</div>';
   }
   function row(act, ico, text, sub, cls, extra){
     return '<button type="button" class="lbh-row ' + (cls || '') + '" data-h="' + act + '"' + (sub ? ' title="' + esc(sub) + '"' : '') + (extra || '') + '><span class="i">' + ico + '</span><span class="t">' + esc(text) + (sub ? '<small>' + esc(sub) + '</small>' : '') + '</span></button>';
   }
+  function paintSoon(){ if (paintT) return; paintT = setTimeout(function(){ paintT = 0; if (hubOpen() && !form && tab !== 'streets') paint(); else paintFoot(); }, 30); }
+  function paintFoot(){
+    var f = document.querySelector('#lbHub .lbe-foot'); if (!f) return;
+    var u = f.querySelector('[data-h="undo"]'), r = f.querySelector('[data-h="redo"]');
+    var live = tab === 'boundary' && !form;                      // undo and redo are for boundary changes
+    if (u) u.disabled = !live || !undoStack.length; if (r) r.disabled = !live || !redoStack.length;
+  }
   function paint(){
-    var b = $('lbHubBody'); if (!b) return;
-    [].forEach.call(document.querySelectorAll('#lbHub .lbh-tab'), function(t){ t.classList.toggle('on', t.dataset.t === tab && !form); });
-    b.innerHTML = form ? formHtml() : tab === 'streets' ? streetsHtml() : runHtml();
+    var b = $('lbHubBody'), h = $('lbHub'); if (!b || !h) return;
+    [].forEach.call(h.querySelectorAll('.lbh-tab'), function(t){ var on = t.dataset.t === tab; t.classList.toggle('on', on); t.setAttribute('aria-pressed', on); });
+    h.classList.toggle('lbe-tall', tab === 'streets' || !!form);     // lists and forms get the whole height on a phone
+    var keep = b.scrollTop;
+    b.innerHTML = form ? formHtml() : tab === 'streets' ? streetsHtml() : tab === 'houses' ? housesHtml() : tab === 'route' ? routeHtml() : boundaryHtml();
+    b.scrollTop = keep;
+    var rw = b.querySelector('.lbe-runs'), ro = rw && rw.querySelector('.lbe-run.on');        // a one-line strip of runs (phone): keep the picked one in view
+    if (rw && ro && rw.scrollWidth > rw.clientWidth + 4) rw.scrollLeft = Math.max(0, ro.offsetLeft - rw.offsetLeft - (rw.clientWidth - ro.offsetWidth) / 2);
     if (form) updatePreview();
+    paintFoot();
   }
 
-  /* ---- run boundary tab ---- */
-  function runHtml(){
-    var lead = document.body.classList.contains('lb-lead'), info = runInfo(), bs = onScreenBoundaries(), h = '';
-    if (info.one) h += '<div class="lbh-card lbh-runcard"><b>' + (info.html || esc(info.text)) + '</b><small>The boundary tools work on the run showing on the map.</small></div>';
-    else {
-      // Several runs are showing: the tools act on ONE run, so pick which here (it keeps the others off the map until you
-      // pick again - Match neighbour works from the run you pick against the saved boundaries of its neighbours).
-      var sel3 = g('selectedRunsSet'), st3 = g('activeFilterStream') || '', day3 = g('activeFilterDay') || '', wk3 = g('activeFilterWeek') || '';
-      h += '<div class="lbh-card"><b>Pick the run to work on</b><div class="lbh-runs">' +
-        Array.from(sel3 || []).map(function(r){ return '<button type="button" class="lbh-runpick" data-h="pickrun" data-r="' + esc(String(r)) + '">' + (window.lbRunLabel ? window.lbRunLabel(st3, r, wk3, day3) : esc(String(r).toUpperCase())) + '</button>'; }).join('') +
-        '</div></div>';
-    }
-    if (!lead) { h += '<div class="lbh-card"><b>Leading hand mode needed</b><small>Changing run boundaries is switched on in leading hand mode. Everything below only shows what is on the map.</small></div>'; }
-    if (lead) {
-      h += '<div class="lbh-h">Edit</div>';
-      h += row('edit', '✏️', 'Edit the points', 'Drag, add, pick several and delete, or snap one side to houses / roads', '', info.one || bs.length ? '' : ' disabled');
-      h += row('snaph', '🧲', 'Snap the whole boundary to houses', 'Replaces the line with a tight outline round the run\'s houses', '', info.one ? '' : ' disabled');
-      h += row('snapr', '🛣️', 'Snap the whole boundary to roads', 'Moves the points onto the nearest road', '', info.one ? '' : ' disabled');
-      h += row('nbr', '🧷', 'Match the neighbouring run', 'Share the edge with the run next to it', '', info.one ? '' : ' disabled');
-      h += '<div class="lbh-h">Delete a boundary</div>';
-      if (!bs.length) h += '<div class="lbh-card"><small>No boundary is showing. Turn on "Run boundaries" below and pick a run.</small></div>';
-      bs.forEach(function(x, i){
-        h += row('delb', '🗑️', 'Delete boundary: run ' + String(x.run).toUpperCase(), x.custom ? 'Saved boundary. The run goes back to the automatic outline' : 'Nothing saved (the outline is automatic)', 'danger', ' data-i="' + i + '"');
-      });
-      h += '<div class="lbh-h">KML files</div>';
-      h += row('kmlin', '➕', 'Add a boundary from a KML file', 'Draw it on a computer and bring it in', '');
-      h += row('kmlout', '📤', 'Export boundaries as KML', '', '');
-      h += '<div class="lbh-h">Property lines</div>';
-      h += row('prop', '🏠', 'Property boundaries & map detail', 'Vicmap lots, build every run from property lines, map provider', '');
-    }
-    h += '<div class="lbh-h">Show on the map</div>';
-    h += row('tgl-bounds', '▭', 'Run boundaries', '', g('showRunBoundaries') ? 'on' : '');
-    h += row('tgl-prop', '▦', 'Property boundaries', '', g('showPropertyBoundaries') ? 'on' : '');
-    h += row('tgl-clip', '✂️', 'Cut imported KML routes to the boundary', (window.lbKmzClipOn && window.lbKmzClipOn()) ? 'On: parts outside the boundary or away from the run\'s houses are hidden' : 'Off: the whole recorded line shows. Turn on once the boundaries are right', (window.lbKmzClipOn && window.lbKmzClipOn()) ? 'on' : '');
+  /* ---- Boundary tab ---- */
+  function showHtml(){
+    return head('Show on the map') + tile('tgl-bounds', 'rect', 'Run boundaries', { on: !!g('showRunBoundaries') }) + tile('tgl-prop', 'grid', 'Property boundaries', { on: !!g('showPropertyBoundaries') });
+  }
+  function boundaryHtml(){
+    if (!isLead()) return '<div class="lbh-card"><b>Leading hand mode needed</b><small>Changing run boundaries is switched on in leading hand mode.</small></div>' + showHtml();
+    var runs = uniqueShowing(), cur = ctxs.map(function(c){ return c.runName; }), has = ctxs.length > 0, one = ctxs.length === 1 ? ctxs[0] : null;
+    var n = selCount(), si = stretchInfo(), h = '';
+    h += head('Run') + runChips(runs, cur);
+    h += note(!runs.length ? 'No run is showing. Pick a run for the map first.' : !has ? 'Tap a run here, or tap it on the map.' : 'Yellow ring: shared with the next run. Both change.');
+    h += head('Points');
+    h += tile('tool-move', 'move', 'Move points', { on: has && tool === 'move', off: !has, tip: 'Drag a point. Tap the small dot between two points to add one.' });
+    h += tile('tool-box', 'box', 'Box select', { on: has && tool === 'box', off: !has, tip: 'Drag a box round points to pick them. On a computer, Shift + drag does the same.' });
+    h += head(n ? n + ' point' + (n === 1 ? '' : 's') + ' picked' : 'Picked points');
+    h += note(n ? 'Drag any picked point to move them all.' : 'Box some points or tap them. Their buttons are here.');
+    h += tile('sel-del', 'bin', n ? 'Delete ' + n : 'Delete', { off: !n, danger: true });
+    h += tile('sel-straight', 'straight', 'Straighten', { off: !si.inner, tip: 'A straight line from the first picked point to the last' });
+    h += tile('sel-houses', 'house', 'To houses', { off: !si.ok, tip: 'Pull the picked stretch in to the houses' });
+    h += tile('sel-roads', 'street', 'To roads', { off: !si.ok, tip: 'Put the picked stretch on the nearest road' });
+    h += tile('sel-between', 'between', 'Pick between', { off: n < 2, tip: 'Pick every point between the picked ones. Press again for the other way round.' });
+    h += tile('sel-clear', 'clear', 'Clear', { off: !n });
+    h += head(one ? 'Whole run ' + runText(one) : 'Whole run');
+    h += tile('run-houses', 'magnet', 'Snap to houses', { off: !one, tip: 'Redraw the boundary tightly round the run\'s houses' });
+    h += tile('run-roads', 'street', 'Snap to roads', { off: !one, tip: 'Move every point onto the nearest road' });
+    h += tile('run-nbr', 'nbr', 'Match neighbour', { off: !one, tip: 'Pull this run onto the edge of the runs next to it' });
+    h += tile('run-fewer', 'cut', 'Fewer points', { off: !one, tip: 'Take out points the line does not need' });
+    h += tile('run-del', 'bin', one ? 'Delete ' + runText(one) : 'Delete boundary', { off: !one, danger: true });
+    h += head('KML files and property lines');
+    h += tile('kmlin', 'plus', 'Add from KML', { off: !one, tip: 'Bring in a boundary drawn on a computer' }) + tile('kmlout', 'exportf', 'Export as KML', { off: !one }) + tile('prop', 'grid', 'Property lines', { tip: 'Vicmap lots, build every run from property lines, map provider' });
+    return h + showHtml();
+  }
+
+  /* ---- Houses tab ---- */
+  function housesHtml(){
+    var n = houseCount(), h = '';
+    h += head(n ? n + ' house' + (n === 1 ? '' : 's') + ' picked' : 'Pick houses');
+    h += note(n ? 'Tap a picked house again to drop it.' : 'Zoom in, then tap houses or drag a box round them.');
+    h += tile('tool-box', 'box', 'Box select', { on: tool === 'box' }) + tile('h-clear', 'clear', 'Clear', { off: !n });
+    h += head('Mark the picked houses');
+    h += tile('h-cp', 'pin', 'Collection point', { off: !n, tip: 'These houses put their bins out at one spot' });
+    h += tile('h-drive', 'up', 'Drive in', { off: !n, tip: 'Drive in, reverse out' });
+    h += tile('h-rev', 'down', 'Reverse in', { off: !n, tip: 'Reverse in, drive out' });
+    h += tile('h-side', 'oneside', 'One side', { off: !n, tip: 'Every bin goes on one side of the street' });
+    h += head('Notes and bins');
+    h += tile('notes', 'note', 'Access notes') + tile('h-bincheck', 'bins', 'Bin check');
+    return h;
+  }
+
+  /* ---- Truck line tab: the line the truck follows, kept under one run ---- */
+  // The map only draws truck lines for runs chosen in the filter. On this tab the picked run's line shows as well, so a
+  // whole day's runs can stay on the map while one run's line is looked at.
+  (function(){
+    var orig = window.renderKmzEvidence; if (typeof orig !== 'function') return;
+    window.renderKmzEvidence = function(){
+      var set = g('selectedRunsSet'), a = hubOpen() && tab === 'route' ? activeName() : '';
+      if (a && set && !set.size) return withOnlyRun(a, function(){ return orig(); });
+      return orig.apply(this, arguments);
+    };
+  })();
+  function truckFiles(run){ try { var m = g('kmzDataByRun'), d = m && m.get ? m.get(mk(run)) : null; return d && d.files ? d.files.length : 0; } catch (e) { return 0; } }
+  function routeHtml(){
+    var runs = uniqueShowing(), a = activeName(), h = '';
+    h += head('Run') + runChips(runs, a ? [a] : []);
+    h += note(!runs.length ? 'No run is showing. Pick a run for the map first.' : a ? (truckFiles(a) ? truckFiles(a) + ' file' + (truckFiles(a) === 1 ? '' : 's') + ' loaded for run ' + runLabel(a) + '.' : 'No truck line loaded for run ' + runLabel(a) + ' yet.') : 'Tap the run the truck line belongs to.');
+    h += head(a ? 'Truck line ' + runLabel(a) : 'Truck line');
+    h += tile('r-add', 'kml', 'Add KML / KMZ', { off: !a, tip: 'Bring in the line from a KML or KMZ file' });
+    h += tile('r-edit', 'move', 'Edit or delete', { tip: 'The truck lines already loaded' });
+    h += head('Show on the map');
+    h += tile('r-show', 'eye', 'Truck lines', { on: !!g('kmzLayersVisible') });
+    h += tile('r-arrows', 'arrows', 'Arrows', { on: !!g('kerbsideRouteArrowsOn') });
+    h += tile('r-heat', 'heat', 'Colour by time', { on: !!g('kerbsideRouteHeatmapOn') });
+    h += tile('tgl-clip', 'cut', 'Cut to boundary', { on: !!(window.lbKmzClipOn && window.lbKmzClipOn()), tip: 'Hide the parts of a truck line that are outside the run boundary' });
     return h;
   }
 
@@ -44319,27 +44927,64 @@ document.addEventListener('click', function(ev){
   }
 
   /* ---- clicks ---- */
+  function withOnlyRun(run, fn){
+    var set = g('selectedRunsSet'); if (!set) return fn();
+    var keep = Array.from(set); set.clear(); set.add(mk(run));
+    try { return fn(); } finally { set.clear(); keep.forEach(function(x){ set.add(x); }); }
+  }
   async function onClick(ev){
     var t = ev.target.closest ? ev.target.closest('[data-h]') : null; if (!t || t.disabled || t.hasAttribute('disabled')) return;
     var a = t.dataset.h, i = +t.dataset.i;
-    if (a === 'close') { closeHub(); return; }
-    if (a === 'tab') { tab = t.dataset.t; form = null; paint(); return; }
-    if (a === 'pickrun') { var set4 = g('selectedRunsSet'); if (set4) { set4.clear(); set4.add(String(t.dataset.r).toLowerCase()); try { g('triggerUniversalDataRefresh')(); } catch (e) {} setTimeout(paint, 250); } return; }
-    // run boundary tab
-    if (a === 'edit') { closeHub(); try { if (window.switchMainTab) window.switchMainTab('map'); } catch (e) {} setTimeout(function(){ if (!g('isRoadSnapEditing')) window.toggleRoadSnapEditing(); }, 250); return; }
-    if (a === 'snaph') { closeHub(); window.snapActiveBoundaryToRoads(); return; }
-    if (a === 'snapr') { closeHub(); window.snapBoundaryToRoads(); return; }
-    if (a === 'nbr') { closeHub(); window.snapBoundaryToNeighbor(); return; }
-    if (a === 'delb') { var bs = onScreenBoundaries(), x = bs[i]; if (x && await deleteBoundary(x.key, x.run)) paint(); return; }
-    if (a === 'kmlin') { closeHub(); window.importRunBoundaryKml(); return; }
-    if (a === 'kmlout') { closeHub(); window.exportRunBoundaryKml(); return; }
+    if (a === 'close' || a === 'done') { closeHub(); return; }
+    if (a === 'tab') { if (tab === t.dataset.t && !form) return; var was = tab; tab = t.dataset.t; form = null; paint(); await syncMode(); if ((tab === 'route' || was === 'route') && window.renderKmzEvidence) window.renderKmzEvidence(); return; }
+    if (a === 'undo') { undo(); return; }
+    if (a === 'redo') { redo(); return; }
+    if (a === 'pickrun') { if (g('isRoadSnapEditing')) setActive(t.dataset.r, true); else { activeRuns = [t.dataset.r]; paint(); if (tab === 'route' && window.renderKmzEvidence) window.renderKmzEvidence(); } return; }
+    if (a === 'tool-move') { setTool('move'); if (houseMode) houseKeep(); return; }
+    if (a === 'tool-box') { setTool(tool === 'box' ? 'move' : 'box'); if (houseMode) houseKeep(); return; }
+    // boundary tab
+    if (a === 'sel-del') { deleteSelected(); return; }
+    if (a === 'sel-straight') { straighten(); return; }
+    if (a === 'sel-houses') { snapStretch('houses'); return; }
+    if (a === 'sel-roads') { snapStretch('roads'); return; }
+    if (a === 'sel-between') { pickBetween(); return; }
+    if (a === 'sel-clear') { clearPicked(); return; }
+    if (a === 'run-houses') { wholeRun('houses'); return; }
+    if (a === 'run-roads') { wholeRun('roads'); return; }
+    if (a === 'run-nbr') { wholeRun('nbr'); return; }
+    if (a === 'run-fewer') { fewerPoints(); return; }
+    if (a === 'run-del') { var c1 = ctxs.length === 1 ? ctxs[0] : null; if (c1) await deleteBoundary(c1.key, runText(c1)); return; }
+    if (a === 'kmlin' || a === 'kmlout') {
+      var rn0 = activeName(); if (!rn0) { window.customAlert('Pick a run first.'); return; }
+      withOnlyRun(rn0, a === 'kmlin' ? window.importRunBoundaryKml : window.exportRunBoundaryKml); return;
+    }
     if (a === 'prop') { closeHub(); if (window.openBoundaryModal) window.openBoundaryModal(); return; }
     if (a === 'tgl-bounds') { if (window.toggleRunBoundaries) window.toggleRunBoundaries(); setTimeout(paint, 60); return; }
     if (a === 'tgl-prop') { if (window.togglePropertyBoundaries) window.togglePropertyBoundaries(); setTimeout(paint, 60); return; }
     if (a === 'tgl-clip') { if (window.toggleKmzClip) window.toggleKmzClip(); paint(); return; }
+    // houses tab
+    if (a === 'h-clear') { houseClear(); return; }
+    if (a === 'h-cp') {
+      var n1 = houseCount(), sc = g('startCollectionPointMode'); if (!n1 || !sc) return;
+      sc();
+      try { window.setMapTopBarContext('Tap the map where ' + (n1 === 1 ? 'this house puts' : 'these ' + n1 + ' houses put') + ' the bins out', [], function(){ if (window.cancelCollectionPointMode) window.cancelCollectionPointMode(); }); } catch (e) {}
+      return;
+    }
+    if (a === 'h-drive' || a === 'h-rev' || a === 'h-side') {
+      if (window.startRoadMode) await window.startRoadMode({ 'h-drive': 'drive-reverse-out', 'h-rev': 'reverse-in-drive-out', 'h-side': 'one-side-collection' }[a]);
+      houseKeep(); paint(); return;
+    }
+    if (a === 'h-bincheck') { if (window.openBinMismatchModal) window.openBinMismatchModal(); return; }
+    // truck line tab
+    if (a === 'r-add') { var rn1 = activeName(), lk = g('loadKmzForCurrentRun'); if (rn1 && lk) withOnlyRun(rn1, lk); return; }
+    if (a === 'r-edit') { if (window.openKmlEditModal) window.openKmlEditModal(); return; }
+    if (a === 'r-show' || a === 'r-arrows' || a === 'r-heat') {
+      var fn = g({ 'r-show': 'toggleKmzLayers', 'r-arrows': 'toggleKerbsideRouteArrows', 'r-heat': 'toggleKerbsideRouteHeatmap' }[a]); if (fn) fn();
+      paint(); return;
+    }
     // streets tab
     if (a.indexOf('add-') === 0 && a !== 'add-cp') { openForm(a.slice(4)); return; }
-    if (a === 'add-cp') { closeHub(); try { if (window.switchMainTab) window.switchMainTab('map'); } catch (e) {} setTimeout(function(){ if (window.startBoundarySelectMode) window.startBoundarySelectMode(); window.customAlert('Tap the houses that share one collection point, then press "Collection" at the bottom and drop the pin.'); }, 300); return; }
+    if (a === 'add-cp') { tab = 'houses'; form = null; paint(); syncMode(); say('Tap the houses that share one collection point (or drag a box round them), then press Collection point.'); return; }
     if (a === 'edit-g') { openForm(gcache[i].type, gcache[i]); return; }
     if (a === 'show-g') { showHouses(gcache[i].ids); return; }
     if (a === 'del-g') {
@@ -44356,7 +45001,7 @@ document.addEventListener('click', function(ev){
       var C2 = cpcache[i]; if (!C2 || !(await window.customConfirm('Delete this collection point? ' + C2.ids.length + ' house(s) will be collected one by one again.'))) return;
       var oc2 = cpObj(); C2.ids.forEach(function(id){ delete oc2[id]; }); saveCps(); redraw(); paint(); return;
     }
-    if (a === 'notes') { closeHub(); if (window.openAccessNotesModal) window.openAccessNotesModal(); return; }
+    if (a === 'notes') { if (window.openAccessNotesModal) window.openAccessNotesModal(); return; }
     // the form
     if (a === 'ftype') { updatePreview(); form.type = t.dataset.t; paint(); return; }
     if (a === 'fwhole') { updatePreview(); form.whole = t.dataset.v === '1'; paint(); return; }
@@ -44368,8 +45013,30 @@ document.addEventListener('click', function(ev){
     if (a === 'fsave') { saveForm(); return; }
   }
   document.addEventListener('input', function(ev){ if (ev.target && (ev.target.id === 'lbhStreet' || ev.target.id === 'lbhNums')) updatePreview(); });
-  document.addEventListener('keydown', function(ev){ if (ev.key === 'Escape' && $('lbHub') && $('lbHub').classList.contains('on')) closeHub(); });
-  window.lbBoundaryHub = { _t: { nearest: nearest, densify: densify, simplify: simplify, pickSide: function(ci, a, b){ setTool('side'); chooseSide(ctxs[ci], a, b); }, ctxs: function(){ return ctxs; }, findHouses: findHouses, parseNumbers: parseNumbers, addrOf: addrOf, groups: groups, deleteBoundary: deleteBoundary, applySeed: applySeed } };
+  // Esc lets go of the picked points, then puts the panel away. While a boundary is being worked on: Ctrl + Z / Ctrl + Y undo and
+  // redo, Delete removes the picked points.
+  document.addEventListener('keydown', function(ev){
+    if (!hubOpen()) return;
+    var tg = ev.target, typing = !!tg && (/^(input|textarea|select)$/i.test(tg.tagName || '') || tg.isContentEditable);
+    if (ev.key === 'Escape') {
+      var dlg = $('customDialogOverlay'); if ((dlg && dlg.style.display !== 'none') || document.querySelector('.modal-overlay.open')) return;   // a question or a pop-up is up: Esc is theirs
+      if (box) { boxEnd(false); return; }
+      if (houseMode) { if (g('collectionPointMode') && window.cancelCollectionPointMode) { window.cancelCollectionPointMode(); return; } if (houseCount()) { houseClear(); return; } }
+      if (selCount()) { clearPicked(); return; }
+      if (form) { form = null; paint(); return; }
+      closeHub(); return;
+    }
+    if (typing || !g('isRoadSnapEditing')) return;
+    var mod = ev.ctrlKey || ev.metaKey, k = String(ev.key || '').toLowerCase();
+    if (mod && k === 'z' && !ev.shiftKey) { ev.preventDefault(); undo(); }
+    else if (mod && (k === 'y' || (k === 'z' && ev.shiftKey))) { ev.preventDefault(); redo(); }
+    else if ((k === 'delete' || k === 'backspace') && selCount()) { ev.preventDefault(); deleteSelected(); }
+  });
+  window.lbBoundaryHub = { _t: { nearest: nearest, densify: densify, simplify: simplify, findHouses: findHouses, parseNumbers: parseNumbers, addrOf: addrOf, groups: groups, deleteBoundary: deleteBoundary, applySeed: applySeed,
+    ctxs: function(){ return ctxs; }, rings: function(){ return rings; }, twins: twins, sel: function(){ return sel; }, pick: function(key, idx){ var r = rings.filter(function(q){ return q.key === key; })[0]; if (r) togglePick(r, idx); },
+    setActive: setActive, setTool: setTool, tool: function(){ return tool; }, pickInBox: pickInBox, deleteSelected: deleteSelected, straighten: straighten, pickBetween: pickBetween, undo: undo, redo: redo,
+    stacks: function(){ return [undoStack.length, redoStack.length]; }, tab: function(){ return tab; }, houseMode: function(){ return houseMode; }, sharedArcs: sharedArcs, stretchInfo: stretchInfo, deletePoints: deletePoints, insertAt: insertAt,
+    drag: function(key, idx, dLat, dLng){ var r = rings.filter(function(q){ return q.key === key; })[0]; if (!r) return false; startDrag(r, idx); doDrag(L.latLng(drag.lat0 + dLat, drag.lng0 + dLng)); endDrag(); return true; } } };
 })();
 </script>
 
@@ -45551,7 +46218,7 @@ html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f) 
     [/^get run boundaries from the sync/i, 'Boundaries from sync'],
     [/^export run boundaries/i, 'Export boundaries'],
     [/^import run boundaries/i, 'Import boundaries', '<path d="M12 20V8M7 12l5-5 5 5M5 4h14"/>'],
-    [/^run boundaries, streets/i, 'Boundaries & streets'],
+    [/^run boundaries, streets/i, 'Edit the map'],
     [/^bin check$/i, '', '<rect x="4" y="4" width="16" height="16"/><path d="M8 12l3 3 5-6"/>'],
     [/^left side$/i, '', '<path d="M19 12H5M11 6l-6 6 6 6"/>'],
     [/^right side$/i, '', '<path d="M5 12h14M13 6l6 6-6 6"/>'],
@@ -46078,7 +46745,7 @@ body.lb-pc{--pc-bar-h:92px}
       tb('tback', 'g', 'Back', '<path d="M19 12H5M11 6l-6 6 6 6"/>') + tb('tclose', 'b', 'Close', '<path d="M6 6l12 12M18 6L6 18"/>') +
       '<button type="button" class="pc-run" data-pc="run" id="lbPcRun"><span>Select run</span></button><span class="pc-sep"></span>' +
       b('map', 'Map') + b('streets', 'Streets') + '<span class="pc-sep"></span>' +
-      b('bnd', 'Boundaries &amp; streets', 'Boundaries') + b('bins', 'Bins &amp; houses', 'Bins') + b('data', 'Data') + b('setup', 'Set up') + '</div>' +
+      b('bnd', 'Edit the map', 'Edit map') + b('bins', 'Bins &amp; houses', 'Bins') + b('data', 'Data') + b('setup', 'Set up') + '</div>' +
       '<div class="pc-r2"><label class="pc-search"><i class="lb-mag" aria-hidden="true"></i><input type="search" id="lbPcSearch" placeholder="Search bin, address or street" autocomplete="off"></label></div>';
     document.body.appendChild(bar);
     bar.addEventListener('click', function(ev){
@@ -46187,5 +46854,42 @@ html:not([data-ux-skin="rubbish"]):not([data-ux-skin="speedo"]) body.lb-zoomed-o
   setInterval(zoomClass, 1500);
 })();
 </script>
+
+<!-- =====================================================================
+     EDIT THE MAP: the look of the one panel for boundaries, houses, truck lines and streets
+     (the panel itself is lb-boundary-hub-script). Last in the file so it has the final say over the older hub rules.
+     ================================================================== -->
+<style id="lb-editmap-style">
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h) #lbHub .lbe-kinds{display:grid !important;grid-template-columns:repeat(4,minmax(0,1fr)) !important;gap:6px !important;padding:10px 16px 2px 12px !important;max-width:none !important;width:auto !important;margin:0 !important;flex:none !important}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h) #lbHub .lbe-kinds .lbe-kind{display:flex !important;flex-direction:column !important;align-items:center !important;justify-content:center !important;gap:4px !important;flex:none !important;width:100% !important;min-width:0 !important;max-width:none !important;height:56px !important;min-height:56px !important;padding:0 2px !important;margin:0 !important;background:var(--mn-tile) !important;color:var(--mn-text) !important;border:var(--mn-bd) !important;border-radius:var(--mn-rad) !important;box-shadow:var(--mn-sh) !important;font-family:inherit !important;font-size:11px !important;font-weight:800 !important;line-height:1.05 !important;letter-spacing:.02em !important;text-transform:var(--mn-tr) !important;cursor:pointer}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h) #lbHub .lbe-kinds .lbe-kind svg{width:22px;height:22px;flex:none}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h) #lbHub .lbe-kinds .lbe-kind.on{background:var(--ui-accent) !important;color:var(--ui-accent-ink,#000) !important}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h) #lbHub #lbHubBody{padding:8px 16px 16px 12px !important}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h) #lbHub .lbe-runs{display:flex !important;flex-wrap:wrap !important;gap:4px !important;max-height:128px;overflow-y:auto;padding:0 !important}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h) #lbHub .lbe-runs .lbe-run{flex:0 0 auto !important;display:inline-flex !important;width:auto !important;min-width:0 !important;height:auto !important;min-height:0 !important;padding:2px !important;margin:0 !important;background:none !important;border:3px solid transparent !important;border-radius:9px !important;box-shadow:none !important;font-size:16px !important;line-height:1 !important;cursor:pointer;opacity:.5}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h) #lbHub .lbe-runs .lbe-run.on{border-color:var(--mn-text) !important;opacity:1}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h) #lbHub .lbe-runs.none .lbe-run{opacity:1}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h) #lbHub .lbh-grid{display:grid !important;grid-template-columns:repeat(2,minmax(0,1fr)) !important;gap:6px !important;margin:0 !important}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h) #lbHub .lbe-note{font-size:12.5px;font-weight:600;line-height:1.3;color:var(--mn-text2);min-height:1.3em;padding:0 2px}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h) #lbHub .lbh-row.lbe-danger,html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h) #lbHub .lbh-row.lbe-danger>.mn-ic,html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h) #lbHub .lbh-row.lbe-danger>.mn-ic svg{color:#c62828 !important}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h).dark-mode #lbHub .lbh-row.lbe-danger,html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h).dark-mode #lbHub .lbh-row.lbe-danger>.mn-ic,html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h).dark-mode #lbHub .lbh-row.lbe-danger>.mn-ic svg{color:#ff9d94 !important}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h) #lbHub .lbh-row[disabled]{opacity:.4 !important;cursor:default}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h) #lbHub .lbe-foot{flex:none;display:grid !important;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;padding:8px 16px 12px 12px;background:var(--mn-bar);border-top:var(--mn-bd)}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h) #lbHub .lbe-foot .mn-t{height:44px !important;min-height:44px !important;max-height:44px !important}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h) #lbHub .lbe-foot .mn-t>.mn-ic{flex:0 0 38px !important;width:38px !important;min-width:38px !important}
+/* a phone held upright: the panel is the bottom half and the map stays in view above it (lists and forms still get the full height) */
+@media (max-width:899px) and (orientation:portrait){
+  html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h) #lbHub.on:not(.lbe-tall){inset:auto 0 var(--ux-dock-total,0px) 0 !important;width:100% !important;height:min(54vh,480px) !important;border-right:0 !important;border-top:var(--mn-bd) !important;box-shadow:none !important}
+  html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h) #lbHub.on:not(.lbe-tall) .mn-top,html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h) #lbHub.on:not(.lbe-tall) .lbh-top,html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h) #lbHub.on:not(.lbe-tall) .lbe-note{display:none !important}
+  html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h) #lbHub.on:not(.lbe-tall) .lbe-runs{flex-wrap:nowrap !important;overflow-x:auto;overflow-y:hidden;max-height:none;padding-bottom:2px !important}
+  html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h) #lbHub.on:not(.lbe-tall) #lbHubBody{padding-bottom:10px !important}
+  html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h) #lbHub.on:not(.lbe-tall) .lbe-kinds .lbe-kind{height:48px !important;min-height:48px !important}
+  body.lbe-open #lbStartFab{display:none !important}
+}
+/* the box you drag round points or houses, and the points that sit on a line two runs share */
+#lbeBox{position:fixed;z-index:40390;pointer-events:none;box-sizing:border-box;border:2px dashed var(--ui-accent,#ffd21f);background:rgba(255,255,255,.14);box-shadow:0 0 0 1px #000}
+.leaflet-container.lbe-boxing,.leaflet-container.lbe-boxing .leaflet-interactive{cursor:crosshair !important}
+.poly-edit-handle.lbh-shared .poly-edit-handle-dot{border-color:var(--ui-accent,#ffd21f) !important;box-shadow:0 0 0 2px #000,0 2px 8px rgba(0,0,0,.6) !important}
+</style>
 </body>
 </html>
