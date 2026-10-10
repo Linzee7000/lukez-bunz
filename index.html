@@ -18547,8 +18547,10 @@ window.addEventListener('DOMContentLoaded', async () => {
     const shouldDrawIndividualMarkers = (st !== '' || selected.size > 0 || activeFilterDay !== '' || totalMatchingSites <= 3500);
 
     [...groups.values()].forEach((g, i) => {
-      const runOutlineColor = mapColor(g.run, i);
       const borderKey = boundaryKeyFor(g.run, g.stream, g.day, g.week);
+      // The run's own colour: the one set for it in Edit the map, else a shade of its stream's colour that never changes.
+      // (It used to be picked by the run's place in the list, so the same run changed colour whenever the filter did.)
+      const runOutlineColor = window.lbColourOfKey ? window.lbColourOfKey(borderKey, g.stream, g.run) : mapColor(g.run, i);
       const customBorder = customRunBorders[borderKey];
       let pts = [];
 
@@ -18582,7 +18584,8 @@ window.addEventListener('DOMContentLoaded', async () => {
         if (customBorder) {
           ((window.lbParcels && window.lbParcels.extraRings ? window.lbParcels.extraRings(borderKey) : []).concat(window.lbExtraRings ? window.lbExtraRings(borderKey) : [])).forEach(ring => {
             if (!Array.isArray(ring) || ring.length < 3) return;
-            L.polygon(ring, { color: runOutlineColor, weight: 2, fillColor: runOutlineColor, fillOpacity: 0.1, lineJoin: 'round', interactive: false }).addTo(mapHullsLayer);
+            const extra = L.polygon(ring, { color: runOutlineColor, weight: 2, fillColor: runOutlineColor, fillOpacity: 0.1, lineJoin: 'round', interactive: false });
+            extra._lbExtraOf = borderKey; extra.addTo(mapHullsLayer);
           });
         }
       }
@@ -43826,8 +43829,14 @@ document.addEventListener('click', function(ev){
      two keep ONE line between them and no gap or overlap opens up. This covers every saved boundary of the same
      stream / day / week, whether it is on the map or filtered off it. Automatic outlines (nothing saved) are left alone.
      ================================================================================================== */
-  var tool = 'move', sel = {}, ctxs = [], rings = [], activeRuns = [], undoStack = [], redoStack = [], handleOf = {}, vidx = {}, drag = null;
+  // activeKeys: the boundaries being worked on, by their full key (stream # day # week # run). A run number alone is not
+  // enough: 219 is a different piece of ground on every day, and with no day chosen they are all on the map at once.
+  var tool = 'move', sel = {}, ctxs = [], rings = [], activeKeys = [], several = false, hereKeys = [], undoStack = [], redoStack = [], handleOf = {}, vidx = {}, drag = null;
   var EPS = 0.3;                              // metres: two points this close are one and the same point
+  // linkAll: a point shared with ANY other saved boundary moves with it (other streams, days and weeks use the very same
+  // lines). Off: only runs of the same stream / day / week. magnet: a dragged point jumps onto another run's point or line.
+  var linkAll = lsGet('lbBoundaryLinkAll', true) !== false, magnet = lsGet('lbBoundaryMagnet', true) !== false;
+  function linked(a, b){ return linkAll || groupOf(a) === groupOf(b); }
   function mk(v){ return String(v || '').trim().toLowerCase(); }
   function persist(){ try { var sv = g('saveToDB'); if (sv) sv('customRunBorders', g('customRunBorders')); } catch (e) {} }
   function selCount(){ var n = 0; Object.keys(sel).forEach(function(k){ n += Object.keys(sel[k]).length; }); return n; }
@@ -43845,7 +43854,7 @@ document.addEventListener('click', function(ev){
     return o;
   }
   function groupOf(key){ var p = String(key || '').split('#'); p.pop(); return p.join('#'); }
-  function runText(r){ var k = keyParts(r.key); return window.lbRunText ? window.lbRunText(k.run || r.runName, k.week, '', k.stream) : String(r.runName).toUpperCase(); }
+  function runText(r){ return labelOf(r.key); }
   function uniqueShowing(){
     var seen = {}, out = [];
     (g('currentlyShowingRunKeys') || []).forEach(function(r){ var k = mk(r); if (k && !seen[k]) { seen[k] = 1; out.push(String(r)); } });
@@ -43911,18 +43920,20 @@ document.addEventListener('click', function(ev){
 
   /* ---------- the rings: the run(s) being worked on and every saved neighbour ---------- */
   function buildRings(){
-    var hulls = g('mapHullsLayer'), cb = g('customRunBorders') || {}, out = [], seen = {}, single = uniqueShowing().length <= 1;
+    var hulls = g('mapHullsLayer'), cb = g('customRunBorders') || {}, out = [], seen = {};
     if (hulls) hulls.eachLayer(function(layer){
       if (!(layer instanceof L.Polygon) || !layer._runGroupKey) return;
       var gk = layer._runGroupKey, key = layer._boundaryKey || (window.lbBoundaryKeyFor ? window.lbBoundaryKeyFor(gk) : gk);
       if (seen[key]) return; seen[key] = 1;
       out.push({ layer: layer, key: key, runName: String(gk), latlngs: (layer.getLatLngs()[0] || []).slice(), custom: Array.isArray(cb[key]) && cb[key].length >= 3,
-        active: single || activeRuns.some(function(r){ return mk(r) === mk(gk); }) });
+        active: activeKeys.indexOf(key) >= 0 });
     });
-    // saved boundaries of the same stream / day / week that are filtered off the map: they still share lines with the run on it
-    var groups = {}; out.forEach(function(r){ if (r.active) groups[groupOf(r.key)] = 1; });
-    Object.keys(cb).forEach(function(k){
-      if (seen[k] || !groups[groupOf(k)] || !Array.isArray(cb[k]) || cb[k].length < 3) return;
+    if (out.length === 1) out[0].active = true;
+    // Saved boundaries that are filtered off the map still share lines with the run on it: every one of them when other
+    // streams are linked, else the ones of the same stream / day / week.
+    var groups = {}, any = false; out.forEach(function(r){ if (r.active) { groups[groupOf(r.key)] = 1; any = true; } });
+    if (any) Object.keys(cb).forEach(function(k){
+      if (seen[k] || !(linkAll || groups[groupOf(k)]) || !Array.isArray(cb[k]) || cb[k].length < 3) return;
       out.push({ layer: null, key: k, runName: k.split('#').pop(), latlngs: cb[k].map(function(p){ return L.latLng(+p[0], +p[1]); }), custom: true, active: false });
     });
     return out;
@@ -43938,23 +43949,24 @@ document.addEventListener('click', function(ev){
   // the same point in other runs' saved boundaries
   function twins(r, i){
     var p = r.latlngs[i], out = []; if (!p) return out;
-    var la = cell(p.lat), ln = cell(p.lng), grp = groupOf(r.key);
+    var la = cell(p.lat), ln = cell(p.lng);
     for (var a = -1; a <= 1; a++) for (var b = -1; b <= 1; b++) {
       var hit = vidx[(la + a) + ',' + (ln + b)]; if (!hit) continue;
       for (var n = 0; n < hit.length; n += 2) {
         var o = rings[hit[n]], q = o && o.latlngs[hit[n + 1]];
-        if (!o || o === r || !o.custom || !q || groupOf(o.key) !== grp) continue;
+        if (!o || o === r || !o.custom || !q || !linked(o.key, r.key)) continue;
         if (dM(p, q) <= EPS) out.push({ r: o, i: hit[n + 1] });
       }
     }
     return out;
   }
   // A point that sits ON a neighbour's line where the neighbour has no point of its own (a third run joins there):
-  // give the neighbour a point there, so dragging it keeps the two joined. Only for neighbours that are not being edited.
-  function twinOnEdge(r, i){
-    var p = r.latlngs[i], grp = groupOf(r.key), k = kxy(p.lat), px = p.lng * k[0], py = p.lat * k[1], added = false;
+  // give the neighbour a point there, so dragging it keeps the two joined. Gives back the runs that got a point.
+  // withActive: also runs that are being edited themselves (only once a drag is over, when no point numbers are held).
+  function twinOnEdge(r, i, withActive){
+    var p = r.latlngs[i], k = kxy(p.lat), px = p.lng * k[0], py = p.lat * k[1], added = [];
     rings.forEach(function(o){
-      if (o === r || o.active || !o.custom || groupOf(o.key) !== grp) return;
+      if (o === r || (o.active && !withActive) || !o.custom || !linked(o.key, r.key)) return;
       var n = o.latlngs.length;
       for (var j = 0; j < n; j++) {
         var a = o.latlngs[j], b = o.latlngs[(j + 1) % n];
@@ -43962,7 +43974,7 @@ document.addEventListener('click', function(ev){
         var t = ((px - ax) * dx + (py - ay) * dy) / l2; if (t <= 0 || t >= 1) continue;
         if (Math.hypot(px - (ax + t * dx), py - (ay + t * dy)) > EPS) continue;
         if (dM(p, a) <= EPS || dM(p, b) <= EPS) continue;                 // that is an ordinary shared point
-        o.latlngs.splice(j + 1, 0, L.latLng(p.lat, p.lng)); added = true; return;
+        ringInsert(o, j + 1, L.latLng(p.lat, p.lng)); added.push(o); return;
       }
     });
     return added;
@@ -43996,7 +44008,7 @@ document.addEventListener('click', function(ev){
   function snapshot(){
     var cb = g('customRunBorders') || {}, groups = {}, s = {};
     rings.forEach(function(r){ groups[groupOf(r.key)] = 1; });
-    Object.keys(cb).forEach(function(k){ if (groups[groupOf(k)]) s[k] = cb[k]; });     // a boundary is always replaced whole, never changed in place
+    Object.keys(cb).forEach(function(k){ if (linkAll || groups[groupOf(k)]) s[k] = cb[k]; });     // a boundary is always replaced whole, never changed in place
     rings.forEach(function(r){ if (!(r.key in s)) s[r.key] = null; });
     return s;
   }
@@ -44004,14 +44016,15 @@ document.addEventListener('click', function(ev){
   function pushUndo(s){ undoStack.push(s || snapshot()); if (undoStack.length > 60) undoStack.shift(); redoStack = []; }
   function restore(s){
     var cb = g('customRunBorders'); if (!cb) return;
-    var dead = lsGet('lbBoundaryDeleted', {}), ch = false, hard = false;
+    var dead = lsGet('lbBoundaryDeleted', {}), ch = false, hard = false, diff = [];
     Object.keys(s).forEach(function(k){
+      if ((cb[k] || null) !== s[k]) diff.push(k);
       if (s[k]) { cb[k] = s[k]; if (dead[k]) { delete dead[k]; ch = true; } }
       else { if (cb[k]) hard = true; delete cb[k]; }                 // back to the automatic outline: only the map can work that out
     });
     if (ch) lsSet('lbBoundaryDeleted', dead);
     persist(); sel = {};
-    if (hard || !syncLayers(Object.keys(s))) redraw();
+    if (hard || !syncLayers(diff)) redraw();
     refresh();
   }
   // Put saved boundaries back on their outlines WITHOUT redrawing the whole map: a day's runs is 16,000 house and bin
@@ -44040,14 +44053,52 @@ document.addEventListener('click', function(ev){
     var snap = snapshot(), mem = [], sr = sel[r.key];
     if (sr && sr[idx] && selCount() > 1) rings.forEach(function(q){ var s = sel[q.key]; if (s && q.active) Object.keys(s).forEach(function(i){ mem.push({ r: q, i: +i }); }); });
     else mem.push({ r: r, i: idx });
-    if (mem.length <= 80) mem.forEach(function(m){ if (!twins(m.r, m.i).length && twinOnEdge(m.r, m.i)) buildIndex(); });
+    // (also when the point is already shared: a third run's line can pass through the same spot)
+    if (mem.length <= 80) { var grew = false; mem.forEach(function(m){ if (twinOnEdge(m.r, m.i).length) grew = true; }); if (grew) buildIndex(); }
     var all = [], seen = {};
     function add(q, i){ var k = q.key + '|' + i; if (seen[k]) return; seen[k] = 1; all.push({ r: q, i: i, lat: q.latlngs[i].lat, lng: q.latlngs[i].lng }); }
     mem.forEach(function(m){ add(m.r, m.i); twins(m.r, m.i).forEach(function(t){ add(t.r, t.i); }); });
-    drag = { r: r, i: idx, lat0: r.latlngs[idx].lat, lng0: r.latlngs[idx].lng, all: all, snap: snap, moved: false };
+    var with0 = {}; twins(r, idx).forEach(function(t){ with0[t.r.key] = 1; });
+    drag = { r: r, i: idx, lat0: r.latlngs[idx].lat, lng0: r.latlngs[idx].lng, all: all, snap: snap, moved: false, with0: with0, mag: magnetTargets(r, all), on: null };
   }
+  // THE MAGNET. Getting two runs to meet used to mean landing a point within 30 cm of the other run's point by eye. Now a
+  // dragged point jumps onto another run's point (or anywhere along its line) once it is about a fingertip away, and lands
+  // on it exactly. Worked out on the screen, so "close" means the same at any zoom. Only the runs it could be joined to
+  // count: saved boundaries on the map that this point is not already moving with.
+  function magnetTargets(r, all){
+    var map = g('leafletMap'); if (!map || !magnet) return null;
+    var skip = {}, T = [], vb; all.forEach(function(m){ skip[m.r.key] = 1; });
+    try { vb = map.getBounds().pad(0.15); } catch (e) { return null; }
+    rings.forEach(function(o){
+      if (skip[o.key] || !o.layer || !o.custom || !linked(o.key, r.key)) return;
+      try { if (!o.layer.getBounds().intersects(vb)) return; } catch (e) { return; }
+      T.push({ o: o, P: o.latlngs.map(function(ll){ var p = map.latLngToContainerPoint(ll); return [p.x, p.y]; }) });
+    });
+    var coarse = false; try { coarse = window.matchMedia('(pointer:coarse)').matches; } catch (e) {}
+    return T.length ? { map: map, T: T, rv: coarse ? 20 : 14, re: coarse ? 14 : 10 } : null;
+  }
+  function magnetAt(ll){
+    var mg = drag && drag.mag; if (!mg) return null;
+    var p = mg.map.latLngToContainerPoint(ll), bv = null, dv = mg.rv, be = null, de = mg.re;
+    mg.T.forEach(function(t){
+      var P = t.P, n = P.length;
+      for (var i = 0; i < n; i++) {
+        var a = P[i], d = Math.hypot(a[0] - p.x, a[1] - p.y);
+        if (d < dv) { dv = d; bv = { o: t.o, i: i }; }
+        var b = P[(i + 1) % n], dx = b[0] - a[0], dy = b[1] - a[1], l2 = dx * dx + dy * dy; if (!l2) continue;
+        var u = ((p.x - a[0]) * dx + (p.y - a[1]) * dy) / l2; if (u <= 0 || u >= 1) continue;
+        var e = Math.hypot(a[0] + u * dx - p.x, a[1] + u * dy - p.y);
+        if (e < de) { de = e; be = { o: t.o, i: i, u: u }; }
+      }
+    });
+    if (bv) { var q = bv.o.latlngs[bv.i]; return { ll: L.latLng(q.lat, q.lng), o: bv.o }; }                 // a point of the other run: the very same spot
+    if (be) { var A = be.o.latlngs[be.i], B = be.o.latlngs[(be.i + 1) % be.o.latlngs.length]; return { ll: L.latLng(A.lat + (B.lat - A.lat) * be.u, A.lng + (B.lng - A.lng) * be.u), o: be.o }; }   // somewhere along its line
+    return null;
+  }
+  // gives back where the dragged point really went when the magnet moved it (the handle is put there too)
   function doDrag(ll){
-    if (!drag) return;
+    if (!drag) return null;
+    var hit = magnetAt(ll); if (hit) ll = hit.ll; drag.on = hit;
     var dLat = ll.lat - drag.lat0, dLng = ll.lng - drag.lng0, touched = {};
     drag.moved = true;
     drag.all.forEach(function(m){
@@ -44056,14 +44107,20 @@ document.addEventListener('click', function(ev){
       var h = handleOf[m.r.key + '|' + m.i]; if (h) h.setLatLng(m.r.latlngs[m.i]);
     });
     Object.keys(touched).forEach(function(k){ var q = touched[k]; if (q.layer) q.layer.setLatLngs([q.latlngs]); });
+    return hit ? ll : null;
   }
   function endDrag(){
     var d = drag; drag = null; if (!d) return;
     if (!d.moved) { paintHandles(); return; }
     var touched = {}, list = []; d.all.forEach(function(m){ if (!touched[m.r.key]) { touched[m.r.key] = 1; list.push(m.r); } });
+    // dropped on another run's line where that run has no point of its own: it gets one there, and the two are joined
+    buildIndex();
+    if (d.r.latlngs[d.i]) twinOnEdge(d.r, d.i, true).forEach(function(o){ if (!touched[o.key]) { touched[o.key] = 1; list.push(o); } });
     pushUndo(d.snap); afterEdit(list);
+    var joined = {}; twins(d.r, d.i).forEach(function(t){ if (!d.with0[t.r.key]) joined[runText(t.r)] = 1; });
     var off = list.filter(function(q){ return !q.active && !q.layer; }).map(runText);     // a neighbour that is not on the map moved too: say so
-    if (off.length) say('Also moved in ' + off.join(', ') + ' (shared line, not on the map just now).');
+    if (Object.keys(joined).length) say('Joined to ' + Object.keys(joined).slice(0, 4).join(', ') + (Object.keys(joined).length > 4 ? ' and ' + (Object.keys(joined).length - 4) + ' more' : '') + '.');
+    else if (off.length) say('Also moved in ' + off.slice(0, 4).join(', ') + (off.length > 4 ? ' and ' + (off.length - 4) + ' more' : '') + ' (shared line, not on the map just now).');
   }
   function insertAt(r, idx, ll){
     pushUndo();
@@ -44314,9 +44371,12 @@ document.addEventListener('click', function(ev){
   }
   function togglePick(r, idx){ var s = sel[r.key] || (sel[r.key] = {}); if (s[idx]) delete s[idx]; else s[idx] = 1; if (!Object.keys(s).length) delete sel[r.key]; paintHandles(); bar(); paintSoon(); }
   function clearPicked(){ if (!selCount()) return; sel = {}; paintHandles(); bar(); paintSoon(); }
-  function setActive(run, fit){
-    activeRuns = [run]; sel = {};
-    if (g('isRoadSnapEditing')) { window.enableBoundaryVertexHandles(); if (fit) fitActive(); }
+  // work on this boundary; with "Several runs" on it is added to (or taken out of) the ones being worked on
+  function setActive(key, fit){
+    var i = activeKeys.indexOf(key);
+    if (!several) activeKeys = [key]; else if (i >= 0) activeKeys.splice(i, 1); else activeKeys.push(key);
+    sel = {};
+    if (g('isRoadSnapEditing')) { window.enableBoundaryVertexHandles(); if (fit && (!several || i < 0)) fitActive(); }
     paintSoon();
   }
   // bring the run being worked on into the part of the map the panel is not covering, big enough to work on
@@ -44337,9 +44397,9 @@ document.addEventListener('click', function(ev){
   var ctxOn = false, crowded = false, MAXH = 450, repaintT = 0, hooked = null;
   function hintText(){
     var n = selCount(), t;
-    if (!ctxs.length) t = uniqueShowing().length ? 'Tap a run to work on it' : 'No run is showing';
+    if (!ctxs.length) t = onMap().length ? 'Tap a run to work on it' : 'No run is showing';
     else {
-      var name = ctxs.length === 1 ? runText(ctxs[0]) + ' · ' : '', small = window.innerWidth < 600;      // a phone's bar has room for a few words
+      var name = (ctxs.length === 1 ? runText(ctxs[0]) : ctxs.length + ' runs') + ' · ', small = window.innerWidth < 600;      // a phone's bar has room for a few words
       if (n) t = name + n + ' picked' + (small ? '' : ' · drag one to move them all');
       else if (tool === 'box') t = name + (small ? 'Box the points' : 'Drag a box round the points');
       else t = name + (small ? 'Drag a point' : 'Drag a point to move it');
@@ -44379,7 +44439,7 @@ document.addEventListener('click', function(ev){
         var cls = 'poly-edit-handle' + (picked ? ' lbh-sel' : '') + (twins(c, idx).length ? ' lbh-shared' : '');
         var m = L.marker(latlng, { draggable: true, pane: 'lukez-handle-pane', icon: L.divIcon({ className: cls, html: '<div class="poly-edit-handle-dot"></div>', iconSize: [24, 24], iconAnchor: [12, 12] }) });
         m.on('dragstart', function(){ startDrag(c, idx); });
-        m.on('drag', function(e){ doDrag(e.target.getLatLng()); });
+        m.on('drag', function(e){ var at = doDrag(e.target.getLatLng()), ic = e.target._icon; if (at) e.target.setLatLng(at); if (ic) ic.classList.toggle('lbh-snap', !!at); });
         m.on('dragend', endDrag);
         m.on('click', function(){ togglePick(c, idx); });
         layerG.addLayer(m); handleOf[c.key + '|' + idx] = m;
@@ -44402,19 +44462,19 @@ document.addEventListener('click', function(ev){
     if (!g('mapEditHandlesLayer')) { try { var mk2 = new Function('v', 'mapEditHandlesLayer = v;'); mk2(L.layerGroup({ pane: 'lukez-handle-pane' }).addTo(map)); } catch (e) { if (origEnable) return origEnable.apply(this, arguments); return; } }
     if (!g('mapHullsLayer')) return;
     g('mapEditHandlesLayer').clearLayers();
-    var showing = uniqueShowing();
-    activeRuns = activeRuns.filter(function(r){ return showing.some(function(x){ return mk(x) === mk(r); }); });
-    if (showing.length === 1) activeRuns = [showing[0]];
+    var showing = onMap();
+    activeKeys = activeKeys.filter(function(k){ return showing.some(function(x){ return x.key === k; }); });
+    if (showing.length === 1) activeKeys = [showing[0].key];
     var sig = function(){ return ctxs.map(function(c){ return c.key + ':' + c.latlngs.length; }).join('|'); }, old = sig();
     rings = buildRings(); ctxs = rings.filter(function(r){ return r.active; });
-    var many = uniqueShowing().length > 1 && ctxs.length > 0;
+    var many = showing.length > 1 && ctxs.length > 0;
     rings.forEach(function(r){ if (r.layer && many) r.layer.setStyle(r.active ? { weight: 4, dashArray: null, fillOpacity: 0.14 } : { weight: 2, dashArray: '6,6', fillOpacity: 0.04 }); });
     if (sig() !== old) sel = {};                    // a different ring (a snap rebuilt it): the old picks no longer point at the same points
     buildIndex(); paintHandles(); bar(); paintSoon();
   };
   // the old chips across the top of the map: the runs are picked in the panel now
   window.renderBoundaryRunSwitcher = function(){ var b = $('mapContextButtons'); if (b) b.innerHTML = ''; };
-  window.setActiveBoundaryEditRun = function(runKey){ setActive(runKey, true); };
+  window.setActiveBoundaryEditRun = function(run){ var hit = onMap().filter(function(x){ return x.key === run || mk(x.run) === mk(run); })[0]; if (hit) setActive(hit.key, true); };
   var origToggle = window.toggleRoadSnapEditing;
   async function rawToggle(){
     var entering = !g('isRoadSnapEditing');
@@ -44442,15 +44502,20 @@ document.addEventListener('click', function(ev){
     if (!g('isRoadSnapEditing') || tool === 'box' || drag || Date.now() - lastBoxAt < 400) return;
     var t = ev.target; if (t && t.closest && t.closest('.leaflet-marker-icon, .leaflet-popup, .leaflet-control, button, a, input')) return;
     if (downAt && Math.hypot(ev.clientX - downAt.x, ev.clientY - downAt.y) > 6) return;       // that was the map being dragged
-    var pr = projector(), hit = null, area = Infinity, inActive = false, pt = { lat: ev.clientY, lng: ev.clientX };
+    // Runs of different streams, days and weeks lie on top of each other, so one tap can be on several. The smallest one is
+    // worked on, unless the tap is inside a run already being worked on; either way every run under the tap is listed in
+    // the panel ("Runs where you tapped"), which is how the one underneath is reached.
+    var pr = projector(), hits = [], inActive = false, pt = { lat: ev.clientY, lng: ev.clientX };
     rings.forEach(function(r){
       if (!r.layer) return;
       var poly = r.latlngs.map(function(ll){ var q = pr(ll); return { lat: q.y, lng: q.x }; });
       if (!inRing(pt, poly)) return;
-      if (r.active) { inActive = true; return; }
-      var a = ringArea(poly); if (a < area) { area = a; hit = r; }
+      if (r.active) inActive = true;
+      hits.push({ r: r, a: ringArea(poly) });
     });
-    if (hit && !inActive) setActive(hit.runName, false);
+    hits.sort(function(x, y){ return x.a - y.a; });
+    hereKeys = hits.map(function(h){ return h.r.key; });
+    if (hits.length && !inActive) setActive(hits[0].r.key, false); else paintSoon();
   }
 
   /* ---------- the box: drag it round points (or houses) to pick them ---------- */
@@ -44538,6 +44603,7 @@ document.addEventListener('click', function(ev){
     route: '<path d="M5 19V9a4 4 0 0 1 8 0v6a3 3 0 0 0 6 0V5M16 8l3-3 3 3"/>', street: '<path d="M8 21 11 3M16 21 13 3M12 6v2M12 11v2M12 16v2"/>',
     move: '<path d="M4 20l1-4L16 5l3 3L8 19l-4 1z"/>', box: '<path d="M4 8V4h4M16 4h4v4M20 16v4h-4M8 20H4v-4"/><circle cx="12" cy="12" r="2.5"/>',
     magnet: '<path d="M6 4v8a6 6 0 0 0 12 0V4h-4v8a2 2 0 0 1-4 0V4z"/>', nbr: '<path d="M3 5h9v14H3zM12 9h9v10h-9"/>',
+    link: '<path d="M10 14a4 4 0 0 0 6 0l3-3a4 4 0 0 0-6-6l-1 1M14 10a4 4 0 0 0-6 0l-3 3a4 4 0 0 0 6 6l1-1"/>',
     cut: '<circle cx="6" cy="6" r="2"/><circle cx="6" cy="18" r="2"/><path d="M7.5 7.5 20 18M7.5 16.5 20 6"/>',
     bin: '<path d="M5 7h14M9 7V4h6v3M7 7l1 13h8l1-13"/>', bins: '<path d="M5 8h14l-1 12H6zM9 8V4h6v4"/>',
     straight: '<circle cx="5" cy="19" r="2"/><circle cx="19" cy="5" r="2"/><path d="M6.5 17.5 17.5 6.5"/>',
@@ -44695,42 +44761,144 @@ document.addEventListener('click', function(ev){
     var n = houseCount(); if (n !== lastHouseN) { lastHouseN = n; paintSoon(); }
   }, 600);
 
-  /* ---- what is on the map ---- */
-  function onScreenBoundaries(){
-    var out = [], hulls = g('mapHullsLayer'), seen = {};
+  /* ---- what is on the map ----
+     A run is one boundary: stream # day # week # run. The same run number is a different piece of ground on another day or
+     in the other week, and with no day chosen every one of them is on the map at once, so nothing here goes by the run
+     number alone (it used to, and "223" in the list could be any of five boundaries). */
+  var omCache = null;
+  var STREAM_ORDER = ['garbage', 'recycling', 'summerrecycling', 'fogo'], DAY_ORDER = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
+  function onMap(){
+    if (omCache) return omCache;
+    var out = [], hulls = g('mapHullsLayer'), seen = {}, cb = g('customRunBorders') || {};
+    function has(k){ return Array.isArray(cb[k]) && cb[k].length >= 3; }
     if (hulls) hulls.eachLayer(function(l){
-      if (l instanceof L.Polygon && l._runGroupKey && l._boundaryKey && !seen[l._boundaryKey]) {
-        seen[l._boundaryKey] = 1;
-        var cb = g('customRunBorders') || {}, has = Array.isArray(cb[l._boundaryKey]) && cb[l._boundaryKey].length >= 3;
-        out.push({ key: l._boundaryKey, run: l._runGroupKey, custom: has });
-      }
+      if (l instanceof L.Polygon && l._runGroupKey && l._boundaryKey && !seen[l._boundaryKey]) { seen[l._boundaryKey] = 1; out.push({ key: l._boundaryKey, run: String(l._runGroupKey), layer: l, custom: has(l._boundaryKey) }); }
+    });
+    // run boundaries switched off in Layers: the runs are still there to pick (for a truck line, say)
+    if (!out.length) uniqueShowing().forEach(function(r){
+      var k = ''; try { k = window.lbBoundaryKeyFor ? window.lbBoundaryKeyFor(r) : ''; } catch (e) {}
+      if (k && !seen[k]) { seen[k] = 1; out.push({ key: k, run: r, layer: null, custom: has(k) }); }
     });
     return out;
   }
-  function runMeta(run){
-    var key = ''; onScreenBoundaries().forEach(function(x){ if (!key && mk(x.run) === mk(run)) key = x.key; });
+  function metaOf(key){
     var k = keyParts(key);
-    return { key: key, stream: k.stream || g('activeFilterStream') || '', day: k.day || g('activeFilterDay') || '', week: k.week || g('activeFilterWeek') || '' };
+    return { key: key, run: k.run, stream: k.stream || g('activeFilterStream') || '', day: k.day || g('activeFilterDay') || '', week: k.week || g('activeFilterWeek') || '' };
   }
-  function runLabel(run){ var m = runMeta(run); return window.lbRunText ? window.lbRunText(run, m.week, '', m.stream) : String(run).toUpperCase(); }
-  // the run the tools act on: the one picked, or the only one showing
-  function activeName(){
-    var showing = uniqueShowing(); if (showing.length === 1) return showing[0];
-    var a = activeRuns.filter(function(r){ return showing.some(function(x){ return mk(x) === mk(r); }); });
-    return a.length === 1 ? a[0] : '';
+  function runOf(key){ var hit = onMap().filter(function(x){ return x.key === key; })[0]; return hit ? hit.run : keyParts(key).run; }
+  function dayOf(key){ var d = keyParts(key).day || ''; return d ? d.slice(0, 3).toUpperCase() : ''; }
+  function daysOnMap(){ var d = { n: 0 }; onMap().forEach(function(x){ var k = dayOf(x.key); if (!d[k]) { d[k] = 1; d.n++; } }); return d; }
+  // the day is part of the name whenever it is not the one day on the map
+  function dayFor(key){ var d = dayOf(key), ds = daysOnMap(); return d && (ds.n !== 1 || !ds[d]) ? d : ''; }
+  // 219A, or 219A MON
+  function labelOf(key){ var m = metaOf(key), t = window.lbRunText ? window.lbRunText(m.run, m.week, '', m.stream) : String(m.run).toUpperCase(), d = dayFor(key); return t + (d ? ' ' + d : ''); }
+  // the runs being worked on that are on the map; the only run on the map counts without being picked
+  function activeOnMap(){
+    var all = onMap(); if (all.length === 1) return [all[0].key];
+    return activeKeys.filter(function(k){ return all.some(function(x){ return x.key === k; }); });
   }
-  function runChips(runs, cur){
-    if (!runs.length) return '';
-    return '<div class="lbe-runs' + (cur.length ? '' : ' none') + '">' + runs.map(function(r){
-      var m = runMeta(r), on = cur.some(function(x){ return mk(x) === mk(r); });
-      return '<button type="button" class="lbe-run' + (on ? ' on' : '') + '" data-h="pickrun" data-r="' + esc(r) + '" aria-pressed="' + on + '">' +
-        (window.lbRunChip ? window.lbRunChip(m.stream, r, m.week, '') : esc(String(r).toUpperCase())) + '</button>';
-    }).join('') + '</div>';
+  function activeKey(){ var a = activeOnMap(); return a.length === 1 ? a[0] : ''; }
+  function activeName(){ var k = activeKey(); return k ? runOf(k) : ''; }
+  function cmpKeys(a, b){
+    var x = keyParts(a), y = keyParts(b);
+    return (STREAM_ORDER.indexOf(mk(x.stream)) - STREAM_ORDER.indexOf(mk(y.stream))) || String(x.run).localeCompare(String(y.run), undefined, { numeric: true }) ||
+      (DAY_ORDER.indexOf(mk(x.day).slice(0, 3)) - DAY_ORDER.indexOf(mk(y.day).slice(0, 3))) || String(x.week).localeCompare(String(y.week));
+  }
+  // the runs in the part of the map that is on screen
+  function viewKeys(){
+    var map = g('leafletMap'), vb = null; try { vb = map.getBounds(); } catch (e) {}
+    return onMap().filter(function(x){ if (!x.layer || !vb) return true; try { return x.layer.getBounds().intersects(vb); } catch (e) { return true; } }).map(function(x){ return x.key; }).sort(cmpKeys);
+  }
+
+  /* ---- a run's colour on the map ----
+     The colour set for it here, else a shade of its stream's colour (the colour of its chip) that depends only on the run
+     number, so a run is the same colour every time. Kept on this phone with the other map colours (runColorMap), under
+     the run's full key; an older colour saved under just the run number still counts unless it is one of the ten the map
+     used to hand out by position, which nobody chose. */
+  var STREAM_COL = { garbage: '#ff4d3d', recycling: '#ffd21f', summerrecycling: '#ffb020', fogo: '#2fd16a' };
+  var SWATCH = ['#ff4d3d', '#ff8a1f', '#ffd21f', '#2fd16a', '#22d3ee', '#3b82f6', '#8b5cf6', '#ffffff'];       // eight, so the row fits on one line; the last square is any colour
+  function toHsl(hex){
+    var m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex) || [0, '80', '80', '80'], r = parseInt(m[1], 16) / 255, gg = parseInt(m[2], 16) / 255, b = parseInt(m[3], 16) / 255;
+    var mx = Math.max(r, gg, b), mn = Math.min(r, gg, b), l = (mx + mn) / 2, d = mx - mn, h = 0, s = 0;
+    if (d) { s = d / (1 - Math.abs(2 * l - 1)); h = mx === r ? ((gg - b) / d) % 6 : mx === gg ? (b - r) / d + 2 : (r - gg) / d + 4; h *= 60; if (h < 0) h += 360; }
+    return [h, s * 100, l * 100];
+  }
+  function toHex(h, s, l){
+    h = ((h % 360) + 360) % 360; s /= 100; l /= 100;
+    var c = (1 - Math.abs(2 * l - 1)) * s, x = c * (1 - Math.abs((h / 60) % 2 - 1)), m = l - c / 2, r = 0, gg = 0, b = 0;
+    if (h < 60) { r = c; gg = x; } else if (h < 120) { r = x; gg = c; } else if (h < 180) { gg = c; b = x; } else if (h < 240) { gg = x; b = c; } else if (h < 300) { r = x; b = c; } else { r = c; b = x; }
+    return '#' + [r, gg, b].map(function(v){ var t = Math.round((v + m) * 255).toString(16); return t.length < 2 ? '0' + t : t; }).join('');
+  }
+  function autoColour(stream, run){
+    var st = mk(stream);
+    if (!STREAM_COL[st]) { try { var ks = g('kmzStreamForRun'); st = mk(ks ? ks(run) : ''); } catch (e) {} }
+    var base = STREAM_COL[st] || '#60a5fa', n = parseInt(String(run).replace(/\D/g, ''), 10) || 0, c = toHsl(base);
+    return toHex(c[0] + [0, 6, -6][n % 3], c[1], Math.max(34, Math.min(80, c[2] + [0, -10, 9, -5, 14][n % 5])));
+  }
+  function ownColour(key){
+    var map = g('runColorMap') || {}, v = map[mk(key)];
+    if (v === 'auto') return '';
+    if (v) return String(v);
+    v = map[mk(keyParts(key).run)];
+    var pre = g('PRESET_COLORS') || [];
+    return v && pre.indexOf(String(v).toLowerCase()) < 0 ? String(v) : '';
+  }
+  function colourOfKey(key, stream, run){ var k = keyParts(key); return ownColour(key) || autoColour(stream || k.stream, run || k.run); }
+  window.lbColourOfKey = colourOfKey;
+  function setColour(key, hex, quiet){
+    var map = g('runColorMap'); if (!map || !key) return;
+    var nm = map[mk(keyParts(key).run)], pre = g('PRESET_COLORS') || [];
+    if (hex) map[mk(key)] = String(hex).toLowerCase();
+    else if (nm && pre.indexOf(String(nm).toLowerCase()) < 0) map[mk(key)] = 'auto';     // else an older colour saved for the run number would show through
+    else delete map[mk(key)];
+    try { var sv = g('saveToDB'); if (sv) sv('runColorMap', map); } catch (e) {}
+    var c = colourOfKey(key), hulls = g('mapHullsLayer');
+    if (hulls) hulls.eachLayer(function(l){ if (l.setStyle && (l._boundaryKey === key || l._lbExtraOf === key)) { try { l.setStyle({ color: c, fillColor: c }); } catch (e) {} } });
+    if (!quiet) paintSoon();
+  }
+  function colourRow(key){
+    var own = ownColour(key).toLowerCase(), cur = colourOfKey(key).toLowerCase();
+    return '<div class="lbe-cols" role="group" aria-label="Colour on the map">' +
+      '<button type="button" class="lbe-col lbe-auto' + (own ? '' : ' on') + '" data-h="colour" data-c="" aria-pressed="' + !own + '" title="A shade of the stream\'s own colour">Auto</button>' +
+      SWATCH.map(function(c){ return '<button type="button" class="lbe-col' + (own === c ? ' on' : '') + '" data-h="colour" data-c="' + c + '" aria-pressed="' + (own === c) + '" aria-label="Colour ' + c + '" style="background:' + c + ' !important"></button>'; }).join('') +
+      '<label class="lbe-col lbe-pick' + (own && SWATCH.indexOf(own) < 0 ? ' on' : '') + '" title="Any colour"><input type="color" id="lbeColour" value="' + esc(/^#[0-9a-f]{6}$/.test(cur) ? cur : '#ffd21f') + '" aria-label="Any colour"></label></div>';
+  }
+
+  /* ---- the runs to pick from ---- */
+  function chip(key, on){
+    var m = metaOf(key), d = dayFor(key), c = window.lbRunChip ? window.lbRunChip(m.stream, m.run, m.week, '') : esc(String(m.run).toUpperCase());
+    if (d) c = c.indexOf('</b>') >= 0 ? c.replace('</b>', ' ' + d + '</b>') : c + ' ' + d;
+    return '<button type="button" class="lbe-run' + (on ? ' on' : '') + '" data-h="pickrun" data-k="' + esc(key) + '" aria-pressed="' + on + '" title="' + esc(labelOf(key)) + '">' +
+      '<i class="lbe-dot" style="background:' + esc(colourOfKey(key)) + '"></i>' + c + '</button>';
+  }
+  function chips(keys, cur, id){
+    return '<div class="lbe-runs' + (id === 'now' ? ' now' : '') + (cur.length ? '' : ' none') + '" data-s="' + id + '">' + keys.map(function(k){ return chip(k, cur.indexOf(k) >= 0); }).join('') + '</div>';
+  }
+  // Working on (always in sight, with its colour), the runs under the last tap, and the runs on screen
+  function runPickHtml(o){
+    var all = onMap(), act = activeOnMap(), h = '';
+    h += head('Working on');
+    if (act.length) { h += chips(act, act, 'now'); if (o.colour && act.length === 1) h += colourRow(act[0]); }
+    else h += note(all.length ? 'Tap a run on the map, or pick one below.' : 'No run is showing. Pick a run for the map first.');
+    var here = hereKeys.filter(function(k){ return all.some(function(x){ return x.key === k; }); });
+    if (o.here && here.length > 1) h += head(here.length + ' runs where you tapped') + chips(here, act, 'here');
+    if (all.length > 1) {
+      var view = viewKeys();
+      h += head(view.length + ' run' + (view.length === 1 ? '' : 's') + ' on screen');
+      h += view.length > 60 ? note('Too many to list. Zoom in, or tap a run on the map.') : chips(view, act, 'view');
+    }
+    return h;
   }
   function row(act, ico, text, sub, cls, extra){
     return '<button type="button" class="lbh-row ' + (cls || '') + '" data-h="' + act + '"' + (sub ? ' title="' + esc(sub) + '"' : '') + (extra || '') + '><span class="i">' + ico + '</span><span class="t">' + esc(text) + (sub ? '<small>' + esc(sub) + '</small>' : '') + '</span></button>';
   }
   function paintSoon(){ if (paintT) return; paintT = setTimeout(function(){ paintT = 0; if (hubOpen() && !form && tab !== 'streets') paint(); else paintFoot(); }, 30); }
+  // the list of runs on screen follows the map as it is moved
+  var viewHooked = null, viewT = 0;
+  function viewHook(){
+    var map = g('leafletMap'); if (!map || viewHooked === map) return; viewHooked = map;
+    map.on('moveend', function(){ clearTimeout(viewT); viewT = setTimeout(function(){ if (hubOpen() && !form && (tab === 'boundary' || tab === 'route') && !drag && !box) paintSoon(); }, 250); });
+  }
   function paintFoot(){
     var f = document.querySelector('#lbHub .lbe-foot'); if (!f) return;
     var u = f.querySelector('[data-h="undo"]'), r = f.querySelector('[data-h="redo"]');
@@ -44741,11 +44909,12 @@ document.addEventListener('click', function(ev){
     var b = $('lbHubBody'), h = $('lbHub'); if (!b || !h) return;
     [].forEach.call(h.querySelectorAll('.lbh-tab'), function(t){ var on = t.dataset.t === tab; t.classList.toggle('on', on); t.setAttribute('aria-pressed', on); });
     h.classList.toggle('lbe-tall', tab === 'streets' || !!form);     // lists and forms get the whole height on a phone
-    var keep = b.scrollTop;
-    b.innerHTML = form ? formHtml() : tab === 'streets' ? streetsHtml() : tab === 'houses' ? housesHtml() : tab === 'route' ? routeHtml() : boundaryHtml();
+    var keep = b.scrollTop, strips = {}; [].forEach.call(b.querySelectorAll('.lbe-runs[data-s]'), function(x){ strips[x.dataset.s] = [x.scrollTop, x.scrollLeft]; });
+    viewHook(); omCache = null; omCache = onMap();                                           // one look at the map per repaint
+    try { b.innerHTML = form ? formHtml() : tab === 'streets' ? streetsHtml() : tab === 'houses' ? housesHtml() : tab === 'route' ? routeHtml() : boundaryHtml(); }
+    finally { omCache = null; }
     b.scrollTop = keep;
-    var rw = b.querySelector('.lbe-runs'), ro = rw && rw.querySelector('.lbe-run.on');        // a one-line strip of runs (phone): keep the picked one in view
-    if (rw && ro && rw.scrollWidth > rw.clientWidth + 4) rw.scrollLeft = Math.max(0, ro.offsetLeft - rw.offsetLeft - (rw.clientWidth - ro.offsetWidth) / 2);
+    [].forEach.call(b.querySelectorAll('.lbe-runs[data-s]'), function(x){ var p = strips[x.dataset.s]; if (p) { x.scrollTop = p[0]; x.scrollLeft = p[1]; } });       // the lists of runs stay where they were scrolled to
     if (form) updatePreview();
     paintFoot();
   }
@@ -44756,13 +44925,16 @@ document.addEventListener('click', function(ev){
   }
   function boundaryHtml(){
     if (!isLead()) return '<div class="lbh-card"><b>Leading hand mode needed</b><small>Changing run boundaries is switched on in leading hand mode.</small></div>' + showHtml();
-    var runs = uniqueShowing(), cur = ctxs.map(function(c){ return c.runName; }), has = ctxs.length > 0, one = ctxs.length === 1 ? ctxs[0] : null;
+    var has = ctxs.length > 0, one = ctxs.length === 1 ? ctxs[0] : null;
     var n = selCount(), si = stretchInfo(), h = '';
-    h += head('Run') + runChips(runs, cur);
-    h += note(!runs.length ? 'No run is showing. Pick a run for the map first.' : !has ? 'Tap a run here, or tap it on the map.' : 'Yellow ring: shared with the next run. Both change.');
+    h += runPickHtml({ colour: true, here: true });
+    h += tile('several', 'nbr', 'Several runs', { on: several, off: onMap().length < 2, tip: 'On: tapping a run adds it to the ones being worked on, so their points can be moved together. Off: tapping a run swaps to it.' });
     h += head('Points');
+    h += note(has ? 'Yellow ring: joined to another run. Both change.' : 'Pick a run first.');
     h += tile('tool-move', 'move', 'Move points', { on: has && tool === 'move', off: !has, tip: 'Drag a point. Tap the small dot between two points to add one.' });
     h += tile('tool-box', 'box', 'Box select', { on: has && tool === 'box', off: !has, tip: 'Drag a box round points to pick them. On a computer, Shift + drag does the same.' });
+    h += tile('tgl-magnet', 'magnet', 'Magnet', { on: magnet, tip: 'On: drag a point close to another run\'s point or line and it jumps onto it, so the two runs join exactly' });
+    h += tile('tgl-link', 'link', 'All streams', { on: linkAll, tip: 'On: a point shared with another stream, day or week moves in every run that uses it. Off: only runs of the same stream, day and week.' });
     h += head(n ? n + ' point' + (n === 1 ? '' : 's') + ' picked' : 'Picked points');
     h += note(n ? 'Drag any picked point to move them all.' : 'Box some points or tap them. Their buttons are here.');
     h += tile('sel-del', 'bin', n ? 'Delete ' + n : 'Delete', { off: !n, danger: true });
@@ -45077,8 +45249,7 @@ document.addEventListener('click', function(ev){
   var TLD = {}, tlLoaded = false, tlSaveT = 0;
   var tl = { draw: false, rub: false, rev: false, follow: lsGet('lbTruckLineFollow', true) !== false, pen: null, penKey: '', undo: [], redo: [], q: Promise.resolve(), busy: 0,
     layer: null, arrows: null, penMark: null, map: null, opt: { interactive: false }, zT: 0, mT: 0, fetch: null, shown: [] };
-  function tlKey(run){ if (!run) return ''; var k = runMeta(run).key; if (!k && window.lbBoundaryKeyFor) { try { k = window.lbBoundaryKeyFor(run); } catch (e) {} } return k || ''; }
-  function tlRec(run){ var k = tlKey(run); return k && TLD[k] && Array.isArray(TLD[k].legs) ? TLD[k] : null; }
+  function tlKey(run){ if (!run) return ''; var k = '', hit = onMap().filter(function(x){ return mk(x.run) === mk(run); })[0]; if (hit) k = hit.key; if (!k && window.lbBoundaryKeyFor) { try { k = window.lbBoundaryKeyFor(run); } catch (e) {} } return k || ''; }
   function tlKm(rec){ var d = 0; rec.legs.forEach(function(l){ d += TL.lenOf(l.p); }); return d / 1000; }
   function tlSave(){ clearTimeout(tlSaveT); tlSaveT = setTimeout(function(){ try { var sv = g('saveToDB'); if (sv) sv('lbTruckLines', TLD); } catch (e) {} }, 400); }
   function tlLoad(){
@@ -45179,11 +45350,15 @@ document.addEventListener('click', function(ev){
     return out;
   }
   function tlShowing(){
-    var out = [], seen = {}, list = [], set = g('selectedRunsSet');
-    if (g('kmzLayersVisible') && set) Array.from(set).forEach(function(r){ list.push(r); });
-    var a = hubOpen() && tab === 'route' ? activeName() : '';
-    if (a && !list.some(function(x){ return mk(x) === mk(a); })) list.push(a);       // on this tab the picked run's line always shows
-    list.forEach(function(r, i){ var k = tlKey(r); if (k && !seen[k] && TLD[k] && TLD[k].legs && TLD[k].legs.length) { seen[k] = 1; out.push({ key: k, run: r, i: i, n: list.length }); } });
+    var out = [], seen = {}, list = [], set = g('selectedRunsSet'), all = onMap();
+    // the runs chosen in the filter: every day / week of them that is on the map
+    if (g('kmzLayersVisible') && set) Array.from(set).forEach(function(r){
+      var got = all.filter(function(x){ return mk(x.run) === mk(r); });
+      if (got.length) got.forEach(function(x){ list.push([x.key, x.run]); }); else { var k0 = tlKey(r); if (k0) list.push([k0, r]); }
+    });
+    var ak = hubOpen() && tab === 'route' ? activeKey() : '';
+    if (ak && !list.some(function(x){ return x[0] === ak; })) list.push([ak, runOf(ak)]);       // on this tab the picked run's line always shows
+    list.forEach(function(x, i){ var k = x[0]; if (k && !seen[k] && TLD[k] && TLD[k].legs && TLD[k].legs.length) { seen[k] = 1; out.push({ key: k, run: x[1], i: i, n: list.length }); } });
     return out;
   }
   function tlColour(x){
@@ -45240,7 +45415,7 @@ document.addEventListener('click', function(ev){
   }
 
   /* ---- drawing ---- */
-  function tlActive(){ var a = activeName(); return a ? { run: a, key: tlKey(a) } : null; }
+  function tlActive(){ var k = activeKey(); return k ? { run: runOf(k), key: k } : null; }
   function tlEnd(rec){ var l = rec && rec.legs.length ? rec.legs[rec.legs.length - 1] : null; return l ? l.p[l.p.length - 1].slice() : null; }
   // where the pen is for the run being worked on (the end of its line, unless the pen was lifted)
   function tlPenFor(){
@@ -45342,7 +45517,7 @@ document.addEventListener('click', function(ev){
   }
   async function tlClear(){
     var a = tlActive(), rec = a && TLD[a.key]; if (!rec || !rec.legs.length) return;
-    if (!(await window.customConfirm('Clear the whole truck line drawn for ' + runLabel(a.run) + '? It goes from every phone.'))) return;
+    if (!(await window.customConfirm('Clear the whole truck line drawn for ' + labelOf(a.key) + '? It goes from every phone.'))) return;
     tlPenFor(); tlChange(a.key, [], null);
   }
 
@@ -45355,7 +45530,7 @@ document.addEventListener('click', function(ev){
   }
   function tlStopBar(){ tlStop(); }
   function tlHint(){
-    var a = tlActive(), name = a ? runLabel(a.run) + ' · ' : '', small = window.innerWidth < 600;
+    var a = tlActive(), name = a ? labelOf(a.key) + ' · ' : '', small = window.innerWidth < 600;
     if (tl.rub) return name + (small ? 'Tap a stretch to rub out' : 'Tap a stretch of the line to rub it out');
     if (!a) return 'Pick the run the line is for';
     if (!tl.pen) return name + (small ? 'Tap where it starts' : 'Tap where the truck starts');
@@ -45471,14 +45646,13 @@ document.addEventListener('click', function(ev){
   })();
   function truckFiles(run){ try { var m = g('kmzDataByRun'), d = m && m.get ? m.get(mk(run)) : null; return d && d.files ? d.files.length : 0; } catch (e) { return 0; } }
   function routeHtml(){
-    var runs = uniqueShowing(), a = activeName(), h = '', lead = isLead();
+    var ak = activeKey(), a = ak ? runOf(ak) : '', h = '', lead = isLead(), nm = ak ? labelOf(ak) : '';
     if ((tl.draw || tl.rub) && a) tlPenFor();
-    var rec = a ? tlRec(a) : null, n = rec ? rec.legs.length : 0, files = a ? truckFiles(a) : 0;
-    h += head('Run') + runChips(runs, a ? [a] : []);
-    h += note(!runs.length ? 'No run is showing. Pick a run for the map first.' : !a ? 'Tap the run the truck line belongs to.' :
-      n ? tlKm(rec).toFixed(1) + ' km drawn for ' + runLabel(a) + '. Every phone gets it.' : 'No line drawn for ' + runLabel(a) + ' yet.' + (files ? ' ' + files + ' file' + (files === 1 ? '' : 's') + ' loaded.' : ''));
+    var rec = ak && TLD[ak] && Array.isArray(TLD[ak].legs) ? TLD[ak] : null, n = rec ? rec.legs.length : 0, files = a ? truckFiles(a) : 0;
+    h += runPickHtml({});
+    if (a) h += note(n ? tlKm(rec).toFixed(1) + ' km drawn for ' + nm + '. Every phone gets it.' : 'No line drawn for ' + nm + ' yet.' + (files ? ' ' + files + ' file' + (files === 1 ? '' : 's') + ' loaded.' : ''));
     if (lead) {
-      h += head(a ? 'Draw the line ' + runLabel(a) : 'Draw the line');
+      h += head(a ? 'Draw the line ' + nm : 'Draw the line');
       h += note(tl.busy ? 'Working out the way along the roads…' : tl.draw ? 'Tap along the way the truck goes. Up a street and back down gives a line each side.' : 'Press Draw line, then tap along the way the truck goes.');
       h += tile('r-draw', 'move', 'Draw line', { on: tl.draw, off: !a, tip: 'Tap the map along the way the truck goes' });
       h += tile('r-follow', 'street', 'Follow roads', { on: tl.follow, tip: 'On: the line follows the roads between taps, on the kerb side. Off: a straight line to each tap.' });
@@ -45606,6 +45780,19 @@ document.addEventListener('click', function(ev){
   }
 
   /* ---- clicks ---- */
+  // A boundary file is read after its file has been chosen, by which time the filter is back as it was. The run it was
+  // asked for is remembered, and the reading is done with the filter on that run again.
+  var kmlRing = null;
+  (function(){
+    var orig = window.handleRunBoundaryFile; if (typeof orig !== 'function') return;
+    window.handleRunBoundaryFile = function(){
+      var r = kmlRing, self = this, args = arguments; kmlRing = null;
+      if (!r || !hubOpen()) return orig.apply(self, args);
+      return withOnlyRing(r, function(){ return orig.apply(self, args); });
+    };
+  })();
+  document.addEventListener('input', function(ev){ if (ev.target && ev.target.id === 'lbeColour') { var k = activeKey(); if (k) setColour(k, ev.target.value, true); } });
+  document.addEventListener('change', function(ev){ if (ev.target && ev.target.id === 'lbeColour') paintSoon(); });
   function withOnlyRun(run, fn){
     var set = g('selectedRunsSet'); if (!set) return fn();
     var keep = Array.from(set); set.clear(); set.add(mk(run));
@@ -45618,7 +45805,15 @@ document.addEventListener('click', function(ev){
     if (a === 'tab') { if (tab === t.dataset.t && !form) return; var was = tab; if (was === 'route') tlStop(); tab = t.dataset.t; form = null; paint(); await syncMode(); if ((tab === 'route' || was === 'route') && window.renderKmzEvidence) window.renderKmzEvidence(); return; }
     if (a === 'undo') { if (tab === 'route') tlUndo(); else undo(); return; }
     if (a === 'redo') { if (tab === 'route') tlRedo(); else redo(); return; }
-    if (a === 'pickrun') { if (g('isRoadSnapEditing')) setActive(t.dataset.r, true); else { activeRuns = [t.dataset.r]; paint(); if (tab === 'route' && window.renderKmzEvidence) window.renderKmzEvidence(); } return; }
+    if (a === 'pickrun') {
+      if (g('isRoadSnapEditing')) setActive(t.dataset.k, true);
+      else { activeKeys = [t.dataset.k]; paint(); if (tab === 'route' && window.renderKmzEvidence) window.renderKmzEvidence(); }
+      return;
+    }
+    if (a === 'several') { several = !several; if (!several && activeKeys.length > 1) { activeKeys = [activeKeys[activeKeys.length - 1]]; sel = {}; if (g('isRoadSnapEditing')) window.enableBoundaryVertexHandles(); } paint(); return; }
+    if (a === 'tgl-magnet') { magnet = !magnet; lsSet('lbBoundaryMagnet', magnet); paint(); return; }
+    if (a === 'tgl-link') { linkAll = !linkAll; lsSet('lbBoundaryLinkAll', linkAll); undoStack = []; redoStack = []; if (g('isRoadSnapEditing')) window.enableBoundaryVertexHandles(); paint(); return; }
+    if (a === 'colour') { var ck = activeKey(); if (ck) setColour(ck, t.dataset.c || ''); return; }
     if (a === 'tool-move') { setTool('move'); if (houseMode) houseKeep(); return; }
     if (a === 'tool-box') { setTool(tool === 'box' ? 'move' : 'box'); if (houseMode) houseKeep(); return; }
     // boundary tab
@@ -45634,8 +45829,10 @@ document.addEventListener('click', function(ev){
     if (a === 'run-fewer') { fewerPoints(); return; }
     if (a === 'run-del') { var c1 = ctxs.length === 1 ? ctxs[0] : null; if (c1) await deleteBoundary(c1.key, runText(c1)); return; }
     if (a === 'kmlin' || a === 'kmlout') {
-      var rn0 = activeName(); if (!rn0) { window.customAlert('Pick a run first.'); return; }
-      withOnlyRun(rn0, a === 'kmlin' ? window.importRunBoundaryKml : window.exportRunBoundaryKml); return;
+      // the map's own import / export go by the run in the filter; they are pointed at this run's stream, day and week
+      var c0 = ctxs.length === 1 ? ctxs[0] : null; if (!c0) { window.customAlert('Pick one run first.'); return; }
+      if (a === 'kmlin') { kmlRing = c0; withOnlyRing(c0, window.importRunBoundaryKml); } else withOnlyRing(c0, window.exportRunBoundaryKml);
+      return;
     }
     if (a === 'prop') { closeHub(); if (window.openBoundaryModal) window.openBoundaryModal(); return; }
     if (a === 'tgl-bounds') { if (window.toggleRunBoundaries) window.toggleRunBoundaries(); setTimeout(paint, 60); return; }
@@ -45724,7 +45921,9 @@ document.addEventListener('click', function(ev){
   });
   window.lbBoundaryHub = { _t: { nearest: nearest, densify: densify, simplify: simplify, findHouses: findHouses, parseNumbers: parseNumbers, addrOf: addrOf, groups: groups, deleteBoundary: deleteBoundary, applySeed: applySeed,
     ctxs: function(){ return ctxs; }, rings: function(){ return rings; }, twins: twins, sel: function(){ return sel; }, pick: function(key, idx){ var r = rings.filter(function(q){ return q.key === key; })[0]; if (r) togglePick(r, idx); },
-    setActive: setActive, setTool: setTool, tool: function(){ return tool; }, pickInBox: pickInBox, deleteSelected: deleteSelected, straighten: straighten, pickBetween: pickBetween, undo: undo, redo: redo,
+    setActive: function(k){ var hit = onMap().filter(function(x){ return x.key === k || mk(x.run) === mk(k); })[0]; setActive(hit ? hit.key : k); }, active: function(){ return activeKeys.slice(); }, onMap: function(){ return onMap().map(function(x){ return x.key; }); }, viewKeys: viewKeys, here: function(){ return hereKeys.slice(); },
+    opts: function(o){ if (o) { if ('magnet' in o) magnet = !!o.magnet; if ('linkAll' in o) linkAll = !!o.linkAll; if ('several' in o) several = !!o.several; } return { magnet: magnet, linkAll: linkAll, several: several }; }, colourOf: colourOfKey, setColour: setColour, magnetAt: function(ll){ return magnetAt(ll); }, dragState: function(){ return drag; }, startDrag: function(key, idx){ var r = rings.filter(function(q){ return q.key === key; })[0]; if (r) startDrag(r, idx); return !!r; }, doDrag: function(lat, lng){ return doDrag(L.latLng(lat, lng)); }, endDrag: endDrag,
+    setTool: setTool, tool: function(){ return tool; }, pickInBox: pickInBox, deleteSelected: deleteSelected, straighten: straighten, pickBetween: pickBetween, undo: undo, redo: redo,
     stacks: function(){ return [undoStack.length, redoStack.length]; }, tab: function(){ return tab; }, houseMode: function(){ return houseMode; }, sharedArcs: sharedArcs, stretchInfo: stretchInfo, deletePoints: deletePoints, insertAt: insertAt,
     drag: function(key, idx, dLat, dLng){ var r = rings.filter(function(q){ return q.key === key; })[0]; if (!r) return false; startDrag(r, idx); doDrag(L.latLng(drag.lat0 + dLat, drag.lng0 + dLng)); endDrag(); return true; } } };
 })();
@@ -47581,6 +47780,18 @@ html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):
 .leaflet-container.lbe-boxing,.leaflet-container.lbe-boxing .leaflet-interactive{cursor:crosshair !important}
 .leaflet-container.lbe-drawing,.leaflet-container.lbe-drawing .leaflet-interactive{cursor:crosshair !important}
 .poly-edit-handle.lbh-shared .poly-edit-handle-dot{border-color:var(--ui-accent,#ffd21f) !important;box-shadow:0 0 0 2px #000,0 2px 8px rgba(0,0,0,.6) !important}
+/* a point the magnet has hold of while it is dragged */
+.poly-edit-handle.lbh-snap .poly-edit-handle-dot{border-color:var(--ui-accent,#ffd21f) !important;box-shadow:0 0 0 2px #000,0 0 0 6px color-mix(in srgb,var(--ui-accent,#ffd21f) 45%,transparent) !important;transform:scale(1.3)}
+/* the run being worked on, the colour of each run on the map, and the row that changes it */
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h) #lbHub .lbe-runs.now{max-height:none !important;overflow:visible !important}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h) #lbHub .lbe-runs .lbe-run{align-items:center !important;gap:3px !important}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h) #lbHub .lbe-runs .lbe-run .lbe-dot{flex:none;display:block;width:8px;height:20px;border-radius:2px;box-shadow:0 0 0 1px #000}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h) #lbHub .lbe-cols{display:flex !important;flex-wrap:wrap !important;align-items:center;gap:4px !important;margin:6px 0 0 !important;padding:0 !important}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h) #lbHub .lbe-cols .lbe-col{flex:0 0 auto !important;display:inline-flex !important;align-items:center;justify-content:center;position:relative;box-sizing:border-box !important;width:26px !important;min-width:26px !important;height:26px !important;min-height:26px !important;padding:0 !important;margin:0 !important;border:2px solid #000 !important;border-radius:4px !important;box-shadow:none !important;cursor:pointer;overflow:hidden;font-family:inherit !important;font-size:11px !important;font-weight:800 !important;line-height:1 !important;letter-spacing:.04em;text-transform:uppercase}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h) #lbHub .lbe-cols .lbe-col.on{outline:2px solid var(--mn-text) !important;outline-offset:1px}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h) #lbHub .lbe-cols .lbe-col.lbe-auto{width:auto !important;padding:0 7px !important;background:var(--mn-tile) !important;color:var(--mn-text) !important}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h) #lbHub .lbe-cols .lbe-col.lbe-pick{background:conic-gradient(#ff4d3d,#ffd21f,#2fd16a,#22d3ee,#3b82f6,#ec4899,#ff4d3d) !important}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h) #lbHub .lbe-cols .lbe-col.lbe-pick input{position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:pointer;padding:0;border:0}
 </style>
 </body>
 </html>
