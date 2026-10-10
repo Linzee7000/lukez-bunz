@@ -44286,6 +44286,121 @@ document.addEventListener('click', function(ev){
     say('That stretch now follows the ' + label + '.' + alsoText(namesOf(touched, r)) + (left.length ? ' ' + left.join(', ') + ' shares only part of it and was left as it was.' : ''));
   }
 
+  /* ---------- the picked points onto the next run's line ----------
+     "Match neighbour" for just the picked points: the stretch from the first picked point to the last is taken out and
+     the neighbour's own line between those two spots is put in its place, point for point, so the two runs share it
+     (and every point on it goes yellow). The rest of the boundary is left alone. */
+  // the picked points of a run as one stretch: the points in a row when they are, else the shortest way round that holds them all
+  function coverStretch(r){
+    var st = stretchOf(r); if (st) return st;
+    var s = sel[r.key]; if (!s) return null;
+    var n = r.latlngs.length, idx = Object.keys(s).map(Number).sort(function(a, b){ return a - b; }); if (idx.length < 2 || idx.length >= n) return null;
+    var worst = -1, wi = -1;
+    idx.forEach(function(a, j){
+      var b = idx[(j + 1) % idx.length], d = 0, p = a;
+      while (p !== b) { var q = (p + 1) % n; d += dM(r.latlngs[p], r.latlngs[q]); p = q; }
+      if (d > worst) { worst = d; wi = j; }
+    });
+    var out = []; for (var k = idx[(wi + 1) % idx.length]; ; k = (k + 1) % n) { out.push(k); if (k === idx[wi]) break; }
+    return out;
+  }
+  // the spot on a run's boundary nearest to a place: on the line from point j to point j + 1, t of the way along
+  function nearOnRing(p, o){
+    var k = kxy(p.lat), px = p.lng * k[0], py = p.lat * k[1], n = o.latlngs.length, best = null;
+    for (var j = 0; j < n; j++) {
+      var a = o.latlngs[j], b = o.latlngs[(j + 1) % n], ax = a.lng * k[0], ay = a.lat * k[1], dx = b.lng * k[0] - ax, dy = b.lat * k[1] - ay, l2 = dx * dx + dy * dy;
+      var t = l2 ? Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / l2)) : 0, d = Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+      if (!best || d < best.d) best = { j: j, t: t, d: d, ll: t <= 0 ? a : t >= 1 ? b : L.latLng(a.lat + (b.lat - a.lat) * t, a.lng + (b.lng - a.lng) * t) };
+    }
+    return best;
+  }
+  // a run's boundary from spot s to spot e, going round one way (dir 1) or the other (-1)
+  function ringArc(o, s, e, dir){
+    var n = o.latlngs.length, pts = [s.ll], i, c;
+    if (dir > 0) { if (!(s.j === e.j && e.t >= s.t)) for (i = (s.j + 1) % n, c = 0; c < n; c++, i = (i + 1) % n) { pts.push(o.latlngs[i]); if (i === e.j) break; } }
+    else if (!(s.j === e.j && e.t <= s.t)) for (i = s.j, c = 0; c < n; c++, i = (i - 1 + n) % n) { pts.push(o.latlngs[i]); if (i === (e.j + 1) % n) break; }
+    pts.push(e.ll);
+    var out = []; pts.forEach(function(p){ if (!out.length || dM(out[out.length - 1], p) > 0.05) out.push(p); });
+    return out;
+  }
+  function distToLine(p, pts){
+    var k = kxy(p.lat), px = p.lng * k[0], py = p.lat * k[1], best = Infinity;
+    for (var j = 0; j + 1 < pts.length; j++) {
+      var ax = pts[j].lng * k[0], ay = pts[j].lat * k[1], dx = pts[j + 1].lng * k[0] - ax, dy = pts[j + 1].lat * k[1] - ay, l2 = dx * dx + dy * dy;
+      var t = l2 ? Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / l2)) : 0, d = Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+      if (d < best) best = d;
+    }
+    return pts.length === 1 ? dM(p, pts[0]) : best;
+  }
+  function dropDoubles(q){
+    var out = []; q.latlngs.forEach(function(p){ if (!out.length || dM(out[out.length - 1], p) > 0.05) out.push(p); });
+    if (out.length > 3 && dM(out[0], out[out.length - 1]) <= 0.05) out.pop();
+    q.latlngs = out;
+  }
+  function sampleOf(r, path){ var step = Math.max(1, Math.floor(path.length / 30)); return path.filter(function(_, i){ return i % step === 0 || i === path.length - 1; }).map(function(i){ return r.latlngs[i]; }); }
+  function nbrPicked(){
+    var withPicks = ctxs.filter(function(c){ return sel[c.key] && Object.keys(sel[c.key]).length; });
+    if (withPicks.length !== 1) return null;
+    var r = withPicks[0], path = coverStretch(r);
+    return path && path.length >= 2 ? { r: r, path: path } : null;
+  }
+  // The runs whose line the picked stretch could sit on: saved boundaries on the map with most of the stretch within 80 m.
+  // Runs of the same stream, day and week come first (a run next door); other streams only when there is none.
+  function nbrCandidates(r, path){
+    var sample = sampleOf(r, path), out = [];
+    rings.forEach(function(o){
+      if (o === r || !o.custom || !o.layer) return;
+      var sum = 0, far = 0, on = 0;
+      for (var i = 0; i < sample.length; i++) { var d = nearOnRing(sample[i], o).d; sum += d; if (d > 80) far++; if (d <= EPS) on++; if (far > sample.length * 0.4) return; }
+      if (on === sample.length) return;                                         // already on that run's line
+      out.push({ o: o, d: sum / sample.length, same: groupOf(o.key) === groupOf(r.key) });
+    });
+    var same = out.filter(function(x){ return x.same; });
+    return (same.length ? same : out).sort(function(a, b){ return a.d - b.d; });
+  }
+  var nbrAsk = null;                                                            // more than one run it could be: the panel asks which
+  function nbrSig(p){ return p.r.key + ':' + p.path.length + ':' + p.path[0]; }
+  function matchPicked(toKey){
+    var p = nbrPicked();
+    if (!p) { window.customAlert('Pick the points to move first (two or more, on one run): drag a box round them.'); return; }
+    var c = nbrCandidates(p.r, p.path), o = null;
+    if (toKey) o = (c.filter(function(x){ return x.o.key === toKey; })[0] || {}).o;
+    else if (c.length === 1 || (c.length > 1 && c[1].d - c[0].d > 3)) o = c[0].o;      // only one it could be, or one clearly nearer than the rest
+    if (!o) {
+      if (!c.length) { window.customAlert('No other run\'s line is near those points. The run to match has to be on the map, with a saved boundary, and within about 80 m.'); return; }
+      nbrAsk = { sig: nbrSig(p), keys: c.slice(0, 6).map(function(x){ return x.o.key; }) }; paint(); return;
+    }
+    nbrAsk = null;
+    // Where the stretch starts and stops on the neighbour's line: at a point the neighbour already has when one is about
+    // as near as the line itself, so the join makes no extra point (these lines have plenty); else the nearest spot on it.
+    function endSpot(P){
+      var q = nearOnRing(P, o), m = o.latlngs.length, a = o.latlngs[q.j], b = o.latlngs[(q.j + 1) % m], da = dM(P, a), db = dM(P, b);
+      if (Math.min(da, db) <= q.d + 15) return da <= db ? { j: q.j, t: 0, d: da, ll: a } : { j: q.j, t: 1, d: db, ll: b };
+      return q;
+    }
+    var r = p.r, path = p.path, A = r.latlngs[path[0]], B = r.latlngs[path[path.length - 1]], s = endSpot(A), e = endSpot(B);
+    if (s.d > 95 || e.d > 95) {
+      window.customAlert('The ' + (s.d > 95 ? 'first' : 'last') + ' picked point is ' + Math.round(Math.max(s.d, e.d)) + ' m from ' + runText(o) + '\'s line. Pick only the points that should sit on that line.'); return;
+    }
+    var sample = sampleOf(r, path), f = ringArc(o, s, e, 1), b = ringArc(o, s, e, -1);
+    var mean = function(arc){ var t = 0; sample.forEach(function(q){ t += distToLine(q, arc); }); return t / sample.length; };
+    var use = mean(f) <= mean(b) ? f : b;
+    if (use.length < 2) { window.customAlert('Those points all sit at one spot on ' + runText(o) + '\'s line. Pick a longer stretch.'); return; }
+    if (r.latlngs.length - path.length + use.length < 3) { window.customAlert('A run boundary needs at least 3 points left.'); return; }
+    var snap = snapshot(), sh = sharedArcs(r, path), touched = [r], also = [];
+    // runs that had the very same stretch as this one (another stream on the same line) go with it
+    sh.arcs.forEach(function(x){ if (x.o === o) return; replaceArc(x.o, x.a, x.b, x.dir, use); touched.push(x.o); also.push(x.o); });
+    replaceArc(r, path[0], path[path.length - 1], 1, use);
+    touched.forEach(dropDoubles);                                               // an end that landed on the point next to it
+    // where an end lands between two of the neighbour's points, the neighbour gets a point there, so the join is exact
+    buildIndex();
+    [use[0], use[use.length - 1]].forEach(function(end){
+      for (var i = 0; i < r.latlngs.length; i++) if (dM(r.latlngs[i], end) <= 0.05) { twinOnEdge(r, i, true).forEach(function(q){ if (touched.indexOf(q) < 0) touched.push(q); }); break; }
+    });
+    pushUndo(snap); sel = {}; afterEdit(touched);
+    say('Those points now follow ' + runText(o) + '\'s line (' + use.length + ' point' + (use.length === 1 ? '' : 's') + ').' + alsoText(namesOf(also)));
+  }
+
   /* ---------- the whole run ---------- */
   function oneActive(what){
     if (ctxs.length === 1) return ctxs[0];
@@ -44865,14 +44980,14 @@ document.addEventListener('click', function(ev){
   }
 
   /* ---- the runs to pick from ---- */
-  function chip(key, on){
+  function chip(key, on, act){
     var m = metaOf(key), d = dayFor(key), c = window.lbRunChip ? window.lbRunChip(m.stream, m.run, m.week, '') : esc(String(m.run).toUpperCase());
     if (d) c = c.indexOf('</b>') >= 0 ? c.replace('</b>', ' ' + d + '</b>') : c + ' ' + d;
-    return '<button type="button" class="lbe-run' + (on ? ' on' : '') + '" data-h="pickrun" data-k="' + esc(key) + '" aria-pressed="' + on + '" title="' + esc(labelOf(key)) + '">' +
+    return '<button type="button" class="lbe-run' + (on ? ' on' : '') + '" data-h="' + (act || 'pickrun') + '" data-k="' + esc(key) + '" aria-pressed="' + on + '" title="' + esc(labelOf(key)) + '">' +
       '<i class="lbe-dot" style="background:' + esc(colourOfKey(key)) + '"></i>' + c + '</button>';
   }
-  function chips(keys, cur, id){
-    return '<div class="lbe-runs' + (id === 'now' ? ' now' : '') + (cur.length ? '' : ' none') + '" data-s="' + id + '">' + keys.map(function(k){ return chip(k, cur.indexOf(k) >= 0); }).join('') + '</div>';
+  function chips(keys, cur, id, act){
+    return '<div class="lbe-runs' + (id === 'now' ? ' now' : '') + (cur.length ? '' : ' none') + '" data-s="' + id + '">' + keys.map(function(k){ return chip(k, cur.indexOf(k) >= 0, act); }).join('') + '</div>';
   }
   // Working on (always in sight, with its colour), the runs under the last tap, and the runs on screen
   function runPickHtml(o){
@@ -44941,8 +45056,11 @@ document.addEventListener('click', function(ev){
     h += tile('sel-straight', 'straight', 'Straighten', { off: !si.inner, tip: 'A straight line from the first picked point to the last' });
     h += tile('sel-houses', 'house', 'To houses', { off: !si.ok, tip: 'Pull the picked stretch in to the houses' });
     h += tile('sel-roads', 'street', 'To roads', { off: !si.ok, tip: 'Put the picked stretch on the nearest road' });
+    var np = n >= 2 ? nbrPicked() : null;
+    h += tile('sel-nbr', 'nbr', 'To neighbour', { off: !np, tip: 'Put the picked points on the next run\'s line, so the two runs share it. Only the picked points move.' });
     h += tile('sel-between', 'between', 'Pick between', { off: n < 2, tip: 'Pick every point between the picked ones. Press again for the other way round.' });
     h += tile('sel-clear', 'clear', 'Clear', { off: !n });
+    if (nbrAsk && np && nbrAsk.sig === nbrSig(np)) h += head('Put them on which run\'s line?') + chips(nbrAsk.keys, [], 'nbr', 'nbr-go');
     h += head(one ? 'Whole run ' + runText(one) : 'Whole run');
     h += tile('run-houses', 'magnet', 'Snap to houses', { off: !one, tip: 'Redraw the boundary tightly round the run\'s houses' });
     h += tile('run-roads', 'street', 'Snap to roads', { off: !one, tip: 'Move every point onto the nearest road' });
@@ -45821,6 +45939,8 @@ document.addEventListener('click', function(ev){
     if (a === 'sel-straight') { straighten(); return; }
     if (a === 'sel-houses') { snapStretch('houses'); return; }
     if (a === 'sel-roads') { snapStretch('roads'); return; }
+    if (a === 'sel-nbr') { matchPicked(); return; }
+    if (a === 'nbr-go') { matchPicked(t.dataset.k); return; }
     if (a === 'sel-between') { pickBetween(); return; }
     if (a === 'sel-clear') { clearPicked(); return; }
     if (a === 'run-houses') { wholeRun('houses'); return; }
@@ -45924,7 +46044,7 @@ document.addEventListener('click', function(ev){
     setActive: function(k){ var hit = onMap().filter(function(x){ return x.key === k || mk(x.run) === mk(k); })[0]; setActive(hit ? hit.key : k); }, active: function(){ return activeKeys.slice(); }, onMap: function(){ return onMap().map(function(x){ return x.key; }); }, viewKeys: viewKeys, here: function(){ return hereKeys.slice(); },
     opts: function(o){ if (o) { if ('magnet' in o) magnet = !!o.magnet; if ('linkAll' in o) linkAll = !!o.linkAll; if ('several' in o) several = !!o.several; } return { magnet: magnet, linkAll: linkAll, several: several }; }, colourOf: colourOfKey, setColour: setColour, magnetAt: function(ll){ return magnetAt(ll); }, dragState: function(){ return drag; }, startDrag: function(key, idx){ var r = rings.filter(function(q){ return q.key === key; })[0]; if (r) startDrag(r, idx); return !!r; }, doDrag: function(lat, lng){ return doDrag(L.latLng(lat, lng)); }, endDrag: endDrag,
     setTool: setTool, tool: function(){ return tool; }, pickInBox: pickInBox, deleteSelected: deleteSelected, straighten: straighten, pickBetween: pickBetween, undo: undo, redo: redo,
-    stacks: function(){ return [undoStack.length, redoStack.length]; }, tab: function(){ return tab; }, houseMode: function(){ return houseMode; }, sharedArcs: sharedArcs, stretchInfo: stretchInfo, deletePoints: deletePoints, insertAt: insertAt,
+    stacks: function(){ return [undoStack.length, redoStack.length]; }, tab: function(){ return tab; }, houseMode: function(){ return houseMode; }, sharedArcs: sharedArcs, stretchInfo: stretchInfo, matchPicked: matchPicked, nbrCandidates: function(){ var p = nbrPicked(); return p ? nbrCandidates(p.r, p.path).map(function(x){ return [x.o.key, Math.round(x.d * 10) / 10]; }) : null; }, nbrAsk: function(){ return nbrAsk; }, deletePoints: deletePoints, insertAt: insertAt,
     drag: function(key, idx, dLat, dLng){ var r = rings.filter(function(q){ return q.key === key; })[0]; if (!r) return false; startDrag(r, idx); doDrag(L.latLng(drag.lat0 + dLat, drag.lng0 + dLng)); endDrag(); return true; } } };
 })();
 </script>
