@@ -44401,6 +44401,84 @@ document.addEventListener('click', function(ev){
     say('Those points now follow ' + runText(o) + '\'s line (' + use.length + ' point' + (use.length === 1 ? '' : 's') + ').' + alsoText(namesOf(also)));
   }
 
+  /* ---------- several runs being worked on: make the others match one of them ----------
+     "Match 227A": two (or more) picked dots mark a section. Every other run being worked on gets 227A's own line between
+     those dots in place of its own, point for point, whatever stream it is and whether or not the two were neighbours
+     there. The dots can be picked on any of the runs: it is where they are that counts. */
+  // the picked dots, wherever they were picked
+  function pickedSpots(){
+    var out = [];
+    ctxs.forEach(function(c){ var s = sel[c.key]; if (s) Object.keys(s).forEach(function(i){ if (c.latlngs[+i]) out.push(c.latlngs[+i]); }); });
+    return out;
+  }
+  function posOf(q){ return q.j + q.t; }
+  // metres round a run's boundary from spot a forward to spot b
+  function alongRing(o, a, b){ return lenOf(ringArc(o, a, b, 1)); }
+  // a spot on run o for a place: a point o already has when one is about as near as its line, else the nearest spot on the line
+  function spotOn(P, o){
+    var q = nearOnRing(P, o), m = o.latlngs.length, a = o.latlngs[q.j], b = o.latlngs[(q.j + 1) % m], da = dM(P, a), db = dM(P, b);
+    if (Math.min(da, db) <= q.d + 15) return da <= db ? { j: q.j, t: 0, d: da, ll: a } : { j: q.j, t: 1, d: db, ll: b };
+    return q;
+  }
+  // The stretch of run T that the picked dots mark: the shortest way round T that passes every dot.
+  function sectionOn(T, spots){
+    var qs = spots.map(function(P){ return spotOn(P, T); }).sort(function(x, y){ return posOf(x) - posOf(y); }), uniq = [];
+    qs.forEach(function(q){ if (!uniq.length || dM(uniq[uniq.length - 1].ll, q.ll) > 0.05) uniq.push(q); });
+    if (uniq.length > 1 && dM(uniq[0].ll, uniq[uniq.length - 1].ll) <= 0.05) uniq.pop();
+    if (uniq.length < 2) return null;
+    var worst = -1, wi = 0;
+    uniq.forEach(function(q, i){ var d = alongRing(T, q, uniq[(i + 1) % uniq.length]); if (d > worst) { worst = d; wi = i; } });
+    var s = uniq[(wi + 1) % uniq.length], e = uniq[wi];
+    return { s: s, e: e, pts: ringArc(T, s, e, 1), far: Math.max.apply(null, qs.map(function(q){ return q.d; })) };
+  }
+  // run R with everything from spot a forward to spot b taken out and pts put there instead
+  function swapStretch(R, a, b, pts){
+    var n = R.latlngs.length, pa = posOf(a), L = ((posOf(b) - pa) % n + n) % n, first = Math.ceil(pa - 1e-9), count = Math.max(0, Math.min(n, Math.floor(pa + L + 1e-9) - first + 1));
+    var inside = [], rest = [];
+    for (var m = 0; m < n; m++) (m < count ? inside : rest).push(((first + m) % n + n) % n);
+    return { inside: inside, ring: pts.map(function(p){ return L2(p); }).concat(rest.map(function(i){ return R.latlngs[i]; })) };
+  }
+  function L2(p){ return L.latLng(p.lat, p.lng); }
+  function meanTo(pts, line){
+    var sm = [], t = 0; pts.forEach(function(p, i){ sm.push(p); if (i + 1 < pts.length) sm.push(L.latLng((p.lat + pts[i + 1].lat) / 2, (p.lng + pts[i + 1].lng) / 2)); });
+    sm.forEach(function(p){ t += distToLine(p, line); }); return sm.length ? t / sm.length : Infinity;
+  }
+  function matchRun(toKey){
+    var T = ctxs.filter(function(c){ return c.key === toKey; })[0], others = ctxs.filter(function(c){ return c.key !== toKey; }), spots = pickedSpots();
+    if (!T || !others.length) { window.customAlert('Work on two runs at once first (Several runs), then pick two dots to mark the section.'); return; }
+    if (spots.length < 2) { window.customAlert('Pick two dots to mark the section: one at each end of it.'); return; }
+    var sec = sectionOn(T, spots);
+    if (!sec || sec.pts.length < 2) { window.customAlert('The picked dots are at one spot on ' + runText(T) + '\'s line. Pick one at each end of the section.'); return; }
+    if (sec.far > 95) { window.customAlert('A picked dot is ' + Math.round(sec.far) + ' m from ' + runText(T) + '\'s line. Pick the two dots at the ends of the section, on or near that line.'); return; }
+    var snap = snapshot(), touched = [], also = [], done = [], skipped = [], busy = {};
+    ctxs.forEach(function(c){ busy[c.key] = 1; });
+    others.forEach(function(R){
+      buildIndex();
+      var A = sec.pts[0], B = sec.pts[sec.pts.length - 1], a = spotOn(A, R), b = spotOn(B, R);
+      if (a.d > 95 || b.d > 95 || dM(a.ll, b.ll) <= 0.05) { skipped.push(runText(R)); return; }
+      // R goes two ways round between those spots too: the way that lies nearer the section is the one replaced
+      var fw = ringArc(R, a, b, 1), bk = ringArc(R, b, a, 1), useFw = meanTo(fw, sec.pts) <= meanTo(bk, sec.pts);
+      var sw = useFw ? swapStretch(R, a, b, sec.pts) : swapStretch(R, b, a, sec.pts.slice().reverse());
+      if (sw.ring.length < 3) { skipped.push(runText(R)); return; }
+      // runs that had the very same stretch as R (and are not being worked on) go with it
+      var sh = sw.inside.length >= 2 ? sharedArcs(R, sw.inside) : { arcs: [] }, pts = useFw ? sec.pts : sec.pts.slice().reverse();
+      sh.arcs.forEach(function(x){ if (busy[x.o.key]) return; replaceArc(x.o, x.a, x.b, x.dir, pts); if (touched.indexOf(x.o) < 0) touched.push(x.o); also.push(x.o); });
+      R.latlngs = sw.ring; touched.push(R); done.push(runText(R));
+    });
+    if (!done.length) { window.customAlert(skipped.join(', ') + ' is not near that section, so nothing was changed.'); return; }
+    touched.forEach(dropDoubles);
+    // where the section starts or stops between two of a run's points, that run gets a point there, so the join is exact
+    buildIndex();
+    others.forEach(function(R){
+      if (touched.indexOf(R) < 0) return;
+      [sec.pts[0], sec.pts[sec.pts.length - 1]].forEach(function(end){
+        for (var i = 0; i < R.latlngs.length; i++) if (dM(R.latlngs[i], end) <= 0.05) { twinOnEdge(R, i, true).forEach(function(q){ if (touched.indexOf(q) < 0) touched.push(q); }); break; }
+      });
+    });
+    pushUndo(snap); sel = {}; afterEdit(touched);
+    say(done.join(', ') + ' now follow' + (done.length === 1 ? 's ' : ' ') + runText(T) + '\'s line there (' + sec.pts.length + ' points).' + alsoText(namesOf(also)) + (skipped.length ? ' ' + skipped.join(', ') + ' is not near it and was left alone.' : ''));
+  }
+
   /* ---------- the whole run ---------- */
   function oneActive(what){
     if (ctxs.length === 1) return ctxs[0];
@@ -44495,7 +44573,7 @@ document.addEventListener('click', function(ev){
     paintSoon();
   }
   // bring the run being worked on into the part of the map the panel is not covering, big enough to work on
-  function fitActive(){
+  function fitActive(force){
     var map = g('leafletMap'), pts = []; if (!map) return;
     ctxs.forEach(function(c){ c.latlngs.forEach(function(p){ pts.push(p); }); }); if (pts.length < 3) return;
     var h = $('lbHub'), mr = map.getContainer().getBoundingClientRect(), pl = 30, pb = 30;
@@ -44503,7 +44581,7 @@ document.addEventListener('click', function(ev){
     try {
       var bb = L.latLngBounds(pts), a = map.latLngToContainerPoint(bb.getNorthWest()), b = map.latLngToContainerPoint(bb.getSouthEast());
       var vw = mr.width - pl - 30, vh = mr.height - pb - 70, inView = a.x >= pl && b.x <= mr.width - 30 && a.y >= 70 && b.y <= mr.height - pb;
-      if (inView && Math.max((b.x - a.x) / vw, (b.y - a.y) / vh) >= 0.45) return;          // already in view and a decent size
+      if (!force && inView && Math.max((b.x - a.x) / vw, (b.y - a.y) / vh) >= 0.45) return;          // already in view and a decent size
       map.fitBounds(bb, { paddingTopLeft: [pl, 70], paddingBottomRight: [30, pb], animate: false });
     } catch (e) {}
   }
@@ -44719,6 +44797,7 @@ document.addEventListener('click', function(ev){
     move: '<path d="M4 20l1-4L16 5l3 3L8 19l-4 1z"/>', box: '<path d="M4 8V4h4M16 4h4v4M20 16v4h-4M8 20H4v-4"/><circle cx="12" cy="12" r="2.5"/>',
     magnet: '<path d="M6 4v8a6 6 0 0 0 12 0V4h-4v8a2 2 0 0 1-4 0V4z"/>', nbr: '<path d="M3 5h9v14H3zM12 9h9v10h-9"/>',
     link: '<path d="M10 14a4 4 0 0 0 6 0l3-3a4 4 0 0 0-6-6l-1 1M14 10a4 4 0 0 0-6 0l-3 3a4 4 0 0 0 6 6l1-1"/>',
+    fit: '<path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/><path d="M9 9h6v6H9z"/>', same: '<path d="M4 8h16M4 16h16"/><path d="M8 4v8M16 12v8"/>',
     cut: '<circle cx="6" cy="6" r="2"/><circle cx="6" cy="18" r="2"/><path d="M7.5 7.5 20 18M7.5 16.5 20 6"/>',
     bin: '<path d="M5 7h14M9 7V4h6v3M7 7l1 13h8l1-13"/>', bins: '<path d="M5 8h14l-1 12H6zM9 8V4h6v4"/>',
     straight: '<circle cx="5" cy="19" r="2"/><circle cx="19" cy="5" r="2"/><path d="M6.5 17.5 17.5 6.5"/>',
@@ -44736,7 +44815,7 @@ document.addEventListener('click', function(ev){
   // the app's own tile, already built (icon block + label), so nothing has to restyle or rename it afterwards
   function tile(act, ic, label, o){
     o = o || {};
-    return '<button type="button" class="lbh-row mn-t' + (o.on ? ' on' : '') + (o.danger ? ' lbe-danger' : '') + '" data-h="' + act + '"' + (o.off ? ' disabled' : '') +
+    return '<button type="button" class="lbh-row mn-t' + (o.on ? ' on' : '') + (o.danger ? ' lbe-danger' : '') + '" data-h="' + act + '"' + (o.k ? ' data-k="' + esc(o.k) + '"' : '') + (o.off ? ' disabled' : '') +
       (o.on != null ? ' aria-pressed="' + (!!o.on) + '"' : '') + (o.tip ? ' title="' + esc(o.tip) + '"' : '') + '><span class="mn-ic">' + svg(ic) + '</span><span class="t">' + esc(label) + '</span></button>';
   }
   function head(t){ return '<div class="lbh-h">' + esc(t) + '</div>'; }
@@ -44784,7 +44863,8 @@ document.addEventListener('click', function(ev){
         if (wantH && !houseMode) houseOn();
       } while (syncAgain);
     } finally { syncing = false; }
-    if (hubOpen()) { if (tab === 'boundary' && g('isRoadSnapEditing')) fitActive(); paintSoon(); }
+    // the one run on the map is brought out from under the panel; with more than one, the map stays where it was put
+    if (hubOpen()) { if (tab === 'boundary' && g('isRoadSnapEditing') && onMap().length === 1) fitActive(); paintSoon(); }
   }
 
   /* ---- houses: the map's own "select houses" mode, with its buttons in the panel ---- */
@@ -45043,6 +45123,7 @@ document.addEventListener('click', function(ev){
     var has = ctxs.length > 0, one = ctxs.length === 1 ? ctxs[0] : null;
     var n = selCount(), si = stretchInfo(), h = '';
     h += runPickHtml({ colour: true, here: true });
+    h += tile('fit', 'fit', 'Zoom to run', { off: !has, tip: 'Move the map to show the whole of the run' + (ctxs.length > 1 ? 's' : '') + ' being worked on' });
     h += tile('several', 'nbr', 'Several runs', { on: several, off: onMap().length < 2, tip: 'On: tapping a run adds it to the ones being worked on, so their points can be moved together. Off: tapping a run swaps to it.' });
     h += head('Points');
     h += note(has ? 'Yellow ring: joined to another run. Both change.' : 'Pick a run first.');
@@ -45060,6 +45141,11 @@ document.addEventListener('click', function(ev){
     h += tile('sel-nbr', 'nbr', 'To neighbour', { off: !np, tip: 'Put the picked points on the next run\'s line, so the two runs share it. Only the picked points move.' });
     h += tile('sel-between', 'between', 'Pick between', { off: n < 2, tip: 'Pick every point between the picked ones. Press again for the other way round.' });
     h += tile('sel-clear', 'clear', 'Clear', { off: !n });
+    if (ctxs.length > 1) {                                                      // several runs: make the others match one of them between the picked dots
+      h += head('Between the picked dots');
+      h += note(n >= 2 ? 'The other run' + (ctxs.length > 2 ? 's take' : ' takes') + ' this run\'s line between the dots.' : 'Pick two dots to mark a section, one at each end.');
+      ctxs.forEach(function(c){ h += tile('sel-match', 'same', 'Match ' + runText(c), { k: c.key, off: n < 2, tip: 'Between the picked dots, the other run' + (ctxs.length > 2 ? 's get ' : ' gets ') + runText(c) + '\'s line' }); });
+    }
     if (nbrAsk && np && nbrAsk.sig === nbrSig(np)) h += head('Put them on which run\'s line?') + chips(nbrAsk.keys, [], 'nbr', 'nbr-go');
     h += head(one ? 'Whole run ' + runText(one) : 'Whole run');
     h += tile('run-houses', 'magnet', 'Snap to houses', { off: !one, tip: 'Redraw the boundary tightly round the run\'s houses' });
@@ -45924,7 +46010,7 @@ document.addEventListener('click', function(ev){
     if (a === 'undo') { if (tab === 'route') tlUndo(); else undo(); return; }
     if (a === 'redo') { if (tab === 'route') tlRedo(); else redo(); return; }
     if (a === 'pickrun') {
-      if (g('isRoadSnapEditing')) setActive(t.dataset.k, true);
+      if (g('isRoadSnapEditing')) setActive(t.dataset.k, false);          // the map stays where it is: Zoom to run goes to it
       else { activeKeys = [t.dataset.k]; paint(); if (tab === 'route' && window.renderKmzEvidence) window.renderKmzEvidence(); }
       return;
     }
@@ -45941,6 +46027,8 @@ document.addEventListener('click', function(ev){
     if (a === 'sel-roads') { snapStretch('roads'); return; }
     if (a === 'sel-nbr') { matchPicked(); return; }
     if (a === 'nbr-go') { matchPicked(t.dataset.k); return; }
+    if (a === 'sel-match') { matchRun(t.dataset.k); return; }
+    if (a === 'fit') { fitActive(true); return; }
     if (a === 'sel-between') { pickBetween(); return; }
     if (a === 'sel-clear') { clearPicked(); return; }
     if (a === 'run-houses') { wholeRun('houses'); return; }
@@ -46044,7 +46132,7 @@ document.addEventListener('click', function(ev){
     setActive: function(k){ var hit = onMap().filter(function(x){ return x.key === k || mk(x.run) === mk(k); })[0]; setActive(hit ? hit.key : k); }, active: function(){ return activeKeys.slice(); }, onMap: function(){ return onMap().map(function(x){ return x.key; }); }, viewKeys: viewKeys, here: function(){ return hereKeys.slice(); },
     opts: function(o){ if (o) { if ('magnet' in o) magnet = !!o.magnet; if ('linkAll' in o) linkAll = !!o.linkAll; if ('several' in o) several = !!o.several; } return { magnet: magnet, linkAll: linkAll, several: several }; }, colourOf: colourOfKey, setColour: setColour, magnetAt: function(ll){ return magnetAt(ll); }, dragState: function(){ return drag; }, startDrag: function(key, idx){ var r = rings.filter(function(q){ return q.key === key; })[0]; if (r) startDrag(r, idx); return !!r; }, doDrag: function(lat, lng){ return doDrag(L.latLng(lat, lng)); }, endDrag: endDrag,
     setTool: setTool, tool: function(){ return tool; }, pickInBox: pickInBox, deleteSelected: deleteSelected, straighten: straighten, pickBetween: pickBetween, undo: undo, redo: redo,
-    stacks: function(){ return [undoStack.length, redoStack.length]; }, tab: function(){ return tab; }, houseMode: function(){ return houseMode; }, sharedArcs: sharedArcs, stretchInfo: stretchInfo, matchPicked: matchPicked, nbrCandidates: function(){ var p = nbrPicked(); return p ? nbrCandidates(p.r, p.path).map(function(x){ return [x.o.key, Math.round(x.d * 10) / 10]; }) : null; }, nbrAsk: function(){ return nbrAsk; }, deletePoints: deletePoints, insertAt: insertAt,
+    stacks: function(){ return [undoStack.length, redoStack.length]; }, tab: function(){ return tab; }, houseMode: function(){ return houseMode; }, sharedArcs: sharedArcs, stretchInfo: stretchInfo, matchPicked: matchPicked, matchRun: matchRun, nbrCandidates: function(){ var p = nbrPicked(); return p ? nbrCandidates(p.r, p.path).map(function(x){ return [x.o.key, Math.round(x.d * 10) / 10]; }) : null; }, nbrAsk: function(){ return nbrAsk; }, deletePoints: deletePoints, insertAt: insertAt,
     drag: function(key, idx, dLat, dLng){ var r = rings.filter(function(q){ return q.key === key; })[0]; if (!r) return false; startDrag(r, idx); doDrag(L.latLng(drag.lat0 + dLat, drag.lng0 + dLng)); endDrag(); return true; } } };
 })();
 </script>
