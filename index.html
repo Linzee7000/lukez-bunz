@@ -45111,8 +45111,11 @@ document.addEventListener('click', function(ev){
       return 'way["highway"]["highway"!~"footway|path|steps|cycleway|pedestrian|bridleway|corridor|proposed|construction|platform|elevator"](' + s.toFixed(4) + ',' + w.toFixed(4) + ',' + (s + TS).toFixed(4) + ',' + (w + TS).toFixed(4) + ');';
     }).join('') + ');out geom;';
     if (tl.fetch) return tl.fetch(q, keys);                                    // tests hand the roads in
-    var urls = ['https://overpass-api.de/api/interpreter', 'https://overpass.kumi.systems/api/interpreter', 'https://overpass.private.coffee/api/interpreter'], lastErr;
+    // The main server turns a request away when it is busy, and is fine a moment later: it gets a second go after the mirrors.
+    var urls = ['https://overpass-api.de/api/interpreter', 'https://overpass.kumi.systems/api/interpreter', 'https://overpass.private.coffee/api/interpreter', 'https://overpass-api.de/api/interpreter'], lastErr;
+    say('Getting the roads for this area…');
     for (var u = 0; u < urls.length; u++) {
+      if (u === 3) await new Promise(function(res){ setTimeout(res, 2500); });
       var ctl = new AbortController(), to = setTimeout(function(){ ctl.abort(); }, 25000);
       try {
         var r = await fetch(urls[u] + '?data=' + encodeURIComponent(q), { signal: ctl.signal });
@@ -45122,8 +45125,11 @@ document.addEventListener('click', function(ev){
     }
     throw lastErr || new Error('no road data');
   }
-  // the road network for a box (south, west, north, east); fetches what is missing
-  async function roadsFor(s, w, n, e){
+  // the road network for a box (south, west, north, east); fetches what is missing. One request at a time: the road
+  // server refuses two at once.
+  var roadsQ = Promise.resolve();
+  function roadsFor(s, w, n, e){ var p = roadsQ.then(function(){ return roadsFor0(s, w, n, e); }); roadsQ = p.catch(function(){}); return p; }
+  async function roadsFor0(s, w, n, e){
     await roadsLoad();
     var keys = tileKeys(s, w, n, e); if (keys.length > 16) throw new Error('too-far');
     var miss = keys.filter(function(k){ return !roadTiles[k]; });
@@ -45373,6 +45379,9 @@ document.addEventListener('click', function(ev){
     if (on) { tlPenFor(); var a = tlActive(); if (a && a.key && !tl.pen) tl.pen = tlEnd(TLD[a.key]); }      // carry on from the end of the line
     tlMode(); tlRender(); paintSoon();
     if (!on) tlPush(true);
+    else if (tl.follow) {                                                       // fetch the roads in view now, so the first tap does not wait for them
+      try { var map = g('leafletMap'), vb = map && map.getZoom() >= 15 ? map.getBounds() : null; if (vb) roadsFor(vb.getSouth(), vb.getWest(), vb.getNorth(), vb.getEast()).catch(function(){}); } catch (e) {}
+    }
   }
   // the tap itself: read off the page's own click, worked out on the screen so a turned map is no trouble
   function tlTap(ev){
