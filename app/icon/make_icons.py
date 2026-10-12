@@ -45,7 +45,11 @@ def circle(img):
 
 # Android adaptive icon: the whole 108dp foreground is the grid (the launcher cuts its own shape out of it);
 # logos pulled in toward the middle so they stay inside the 66dp safe zone
-fg = grid(1296, 36, 0.20, 300)
+# Android shows only the middle 72 of the 108 dp (and cuts its own corners off that), so the 2x2 grid sits in
+# the middle 62 dp on black, with its own rounded corners, and nothing important gets trimmed
+fg = Image.new('RGBA', (1296, 1296), '#000000')
+_g = rounded(grid(744, 22, 0.04, 230), 90)
+fg.alpha_composite(_g, ((1296 - 744) // 2, (1296 - 744) // 2))
 # legacy square / round icons (old launchers): the grid edge to edge, logos at their squares' centres
 sq = grid(1024, 28, 0.04, 330)
 rd = grid(1024, 28, 0.20, 270)
