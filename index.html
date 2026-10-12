@@ -8,6 +8,111 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="theme-color" content="#0a0e13">
   <title>Lukez Bunz</title>
+  <!-- Native app (Capacitor): send all GPS through the background-location plugin, so tracking keeps
+       going with the screen off or another app open. In a normal browser this does nothing. -->
+  <script>
+  (function () {
+    var cap = window.Capacitor;
+    if (!cap || typeof cap.isNativePlatform !== 'function' || !cap.isNativePlatform() || typeof cap.nativeCallback !== 'function') return;
+    if (cap.PluginHeaders && !cap.PluginHeaders.some(function (h) { return h && h.name === 'BackgroundGeolocation'; })) return;
+    window.lbNativeGps = true;
+    var subs = {}, waiters = [], nextId = 1, last = null, nativeId = null, starting = false, askedSettings = false, idleTimer = null;
+    function toPos(l) {
+      return {
+        coords: {
+          latitude: l.latitude, longitude: l.longitude, accuracy: l.accuracy,
+          altitude: l.altitude == null ? null : l.altitude,
+          altitudeAccuracy: l.altitudeAccuracy == null ? null : l.altitudeAccuracy,
+          heading: (l.bearing == null || l.bearing < 0) ? null : l.bearing,
+          speed: (l.speed == null || l.speed < 0) ? null : l.speed
+        },
+        timestamp: Number(l.time) || Date.now()
+      };
+    }
+    function geoErr(code, msg) { return { code: code, message: msg || '', PERMISSION_DENIED: 1, POSITION_UNAVAILABLE: 2, TIMEOUT: 3 }; }
+    function onFix(loc, err) {
+      if (err) {
+        var denied = err.code === 'NOT_AUTHORIZED';
+        var e = geoErr(denied ? 1 : 2, err.message || String(err.code || err));
+        Object.keys(subs).forEach(function (k) { try { subs[k].err && subs[k].err(e); } catch (x) {} });
+        waiters.splice(0).forEach(function (w) { clearTimeout(w.t); try { w.err && w.err(e); } catch (x) {} });
+        if (denied) {
+          stopNative();
+          if (!askedSettings) {
+            askedSettings = true;
+            var msg = 'Lukez Bunz needs location to track the run.\n\nOpen settings to allow it?';
+            var open = function (yes) { if (yes) { try { cap.nativePromise('BackgroundGeolocation', 'openSettings', {}); } catch (x) {} } };
+            if (typeof window.customConfirm === 'function') Promise.resolve(window.customConfirm(msg)).then(open, function () {});
+            else open(window.confirm(msg));
+          }
+        }
+        return;
+      }
+      if (!loc) return;
+      last = toPos(loc);
+      Object.keys(subs).forEach(function (k) { try { subs[k].ok(last); } catch (x) {} });
+      waiters.splice(0).forEach(function (w) { clearTimeout(w.t); try { w.ok(last); } catch (x) {} });
+    }
+    function startNative() {
+      clearTimeout(idleTimer); idleTimer = null;
+      if (nativeId !== null || starting) return;
+      starting = true;
+      // Android 13+ hides the "tracking" notification without this; ask first so the two prompts don't collide.
+      var ask = Promise.resolve();
+      try { ask = cap.nativePromise('LocalNotifications', 'requestPermissions', {}).catch(function () {}); } catch (x) {}
+      ask.then(function () {
+        try {
+          nativeId = cap.nativeCallback('BackgroundGeolocation', 'addWatcher', {
+            backgroundTitle: 'Lukez Bunz',
+            backgroundMessage: 'Tracking the run',
+            requestPermissions: true,
+            stale: false,
+            distanceFilter: 0
+          }, onFix);
+        } catch (x) { nativeId = null; }
+        starting = false;
+      });
+    }
+    function stopNative() {
+      if (nativeId === null) return;
+      try { cap.nativePromise('BackgroundGeolocation', 'removeWatcher', { id: nativeId }); } catch (x) {}
+      nativeId = null;
+    }
+    function maybeIdle() {
+      // the page drops and re-adds its watch all the time; only stop the native GPS if nothing is watching for 2 min
+      if (Object.keys(subs).length) return;
+      clearTimeout(idleTimer);
+      idleTimer = setTimeout(function () { if (!Object.keys(subs).length) stopNative(); }, 120000);
+    }
+    var geo = navigator.geolocation || {};
+    var shim = {
+      watchPosition: function (ok, err) {
+        var id = nextId++;
+        subs[id] = { ok: ok, err: err };
+        startNative();
+        if (last && Date.now() - last.timestamp < 5000) { var p = last; setTimeout(function () { if (subs[id]) ok(p); }, 0); }
+        return id;
+      },
+      clearWatch: function (id) { delete subs[id]; maybeIdle(); },
+      getCurrentPosition: function (ok, err, opts) {
+        opts = opts || {};
+        var maxAge = Number(opts.maximumAge) || 0;
+        if (maxAge > 0 && last && Date.now() - last.timestamp <= maxAge) { var p = last; setTimeout(function () { ok(p); }, 0); return; }
+        startNative();
+        var w = { ok: ok, err: err };
+        var timeout = opts.timeout == null ? 30000 : Number(opts.timeout);
+        if (isFinite(timeout)) w.t = setTimeout(function () {
+          var i = waiters.indexOf(w); if (i >= 0) waiters.splice(i, 1);
+          try { err && err(geoErr(3, 'Timeout')); } catch (x) {}
+          maybeIdle();
+        }, timeout);
+        waiters.push(w);
+      }
+    };
+    try { Object.defineProperty(navigator, 'geolocation', { configurable: true, get: function () { return shim; } }); }
+    catch (x) { try { geo.watchPosition = shim.watchPosition; geo.clearWatch = shim.clearWatch; geo.getCurrentPosition = shim.getCurrentPosition; } catch (y) {} }
+  })();
+  </script>
   
   <!-- Leaflet Map CSS -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
@@ -9374,7 +9479,8 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
       // Screen off / app backgrounded: don't draw a line connecting
       // wherever the truck was to wherever it ends up once GPS resumes -
       // start a fresh trail segment on the next fix instead.
-      gpsTrailPendingBreak = true;
+      // (The phone app keeps recording in the background, so its trail carries on unbroken.)
+      if (!window.lbNativeGps) gpsTrailPendingBreak = true;
       // Also drop the temporary "live tip" segment (see
       // updateGpsTrailLiveTip) - it was stretching to a live position that
       // is now stale, and leaving it on the map would visually bridge
