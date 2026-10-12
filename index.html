@@ -5312,7 +5312,9 @@ const STREET_LITTER_SERVICE_LEVELS = {"seasons":[{"key":"tourist1","label":"Tour
   }
   const lbSpeedFixes = [];
   let lbSpeedLast = { v: 0, t: 0 };
-  let lbLastFixJumped = false;   // this fix leapt further than the truck could have driven (ignored for heading)
+  let lbLastFixJumped = false;
+  let lbStopSince = 0;   // when the truck last came to a stop (see the bin flip below)
+  try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (e) {}   // keep the saved data: don't let the phone clear it when space is short   // this fix leapt further than the truck could have driven (ignored for heading)
   window.lbGpsJumpAt = 0;
   // Frozen GPS. The driver's Android stops reading the GPS when it decides the phone is standing still - and a
   // slow, smooth reverse fools it: on the 1 Oct log the same position, speed 0, came back for 67 s, 73 s and
@@ -12236,9 +12238,29 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
     }
   });
 
+  // Placeholder bins: thousands of houses carry a made-up bin named after the property ("R27133" = Recycling,
+  // property 27133; "G..." for Garbage) from before their real bin was recorded, and kept it after - so the house had
+  // two bins, the run's bin count was nearly double, and the placeholder's dot stayed on the map. A placeholder is
+  // dropped whenever that stream at that house has a real bin as well; a house with only the placeholder keeps it.
+  function lbDropPlaceholderBins(records) {
+    let n = 0;
+    (records || []).forEach(site => {
+      const st = site && site.soloStreams; if (!st) return;
+      const ids = [site.propId, site.siteId].filter(Boolean).map(x => String(x).replace(/^0+/, ''));
+      if (!ids.length) return;
+      Object.keys(st).forEach(k => {
+        const l = st[k]; if (!Array.isArray(l) || l.length < 2) return;
+        const isPh = b => { const m = /^[A-Za-z]{1,3}0*(\d+)$/.exec(String((b && b.serial) || '').trim()); return !!m && ids.includes(m[1]); };
+        const keep = l.filter(b => !isPh(b));
+        if (keep.length && keep.length < l.length) { n += l.length - keep.length; st[k] = keep; }
+      });
+    });
+    window.lbPlaceholderBinsDropped = n;
+    return records;
+  }
   function mergeEditsIntoRecords(records, edits) {
     lbApplyBinFixes(records);
-    if (!edits || edits.length === 0) return records;
+    if (!edits || edits.length === 0) return lbDropPlaceholderBins(records);
 
     edits.forEach(ed => {
       const site = records.find(s => String(s.propId || s.siteId) === String(ed.propId || ed.siteId));
@@ -12281,7 +12303,7 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
       }
     });
 
-    return records;
+    return lbDropPlaceholderBins(records);
   }
 
 let siteReminders = JSON.parse(localStorage.getItem('siteReminders') || '{}');
@@ -14827,8 +14849,11 @@ window.addEventListener('DOMContentLoaded', async () => {
       const f = await r.json();
       if (!f || typeof f.boundaries !== 'object') return { none: true };
       const ver = String(f.generated || f.version || '');
+      // Which version this phone already has is kept in localStorage AND IndexedDB: on the phone app the localStorage
+      // copy was being lost, so every start re-applied the whole set and said "Run boundaries updated (226 changed)".
       let seen = ''; try { seen = localStorage.getItem(LB_SHARED_VER) || ''; } catch (e) {}
-      if (!opts.force && ver && seen === ver) return { same: true, version: ver };
+      if (!seen || seen !== ver) { try { const v2 = await loadFromDB('lbSharedBoundaryVer'); if (v2) seen = String(v2); } catch (e) {} }
+      if (!opts.force && ver && seen === ver) { try { localStorage.setItem(LB_SHARED_VER, ver); } catch (e) {} return { same: true, version: ver }; }
       const al = f.aliases || {}, valid = { boundaries: {}, aliases: {}, extras: (f.extras && typeof f.extras === 'object') ? f.extras : {} };
       Object.keys(f.boundaries).forEach(k => { const v = f.boundaries[k]; if (Array.isArray(v) && v.length >= 3) valid.boundaries[k] = v; });
       Object.keys(al).forEach(k => { if (valid.boundaries[al[k]]) valid.aliases[k] = al[k]; });
@@ -14841,7 +14866,11 @@ window.addEventListener('DOMContentLoaded', async () => {
         try { if (typeof activeTab !== 'undefined' && activeTab === 'map') renderMapData(); } catch (e) {}
       } else { lbPutBoundaries(valid); }
       try { localStorage.setItem(LB_SHARED_VER, ver); } catch (e) {}
-      return { applied: diff.length, runs: Object.keys(valid.boundaries).length, version: ver };
+      try { await saveToDB('lbSharedBoundaryVer', ver); } catch (e) {}
+      // (the message only once per version, even if both copies were lost)
+      let told = ''; try { told = (await loadFromDB('lbSharedBoundaryTold')) || ''; } catch (e) {}
+      try { await saveToDB('lbSharedBoundaryTold', ver); } catch (e) {}
+      return { applied: told === ver ? 0 : diff.length, runs: Object.keys(valid.boundaries).length, version: ver };
     } catch (e) { return null; }
     finally { lbSharedBusy = false; }
   };
@@ -18196,6 +18225,10 @@ window.addEventListener('DOMContentLoaded', async () => {
     // will never be recoloured or removed, regardless of how close the
     // truck gets to them.
     // (not from a fix that leapt further than the truck could have driven - the truck was never there)
+    // A bin is only flipped when the truck has STOPPED (Fox, Oct 2026): rolling slowly from bin to bin is under 6 km/h
+    // too, so "slow" flipped every bin crawled past. Stopped = 2 km/h or less (GPS never reads a clean 0) held for 1.5 s.
+    if (speedKmh <= 2) { if (!lbStopSince) lbStopSince = Date.now(); } else lbStopSince = 0;
+    const lbStopped = !!lbStopSince && Date.now() - lbStopSince >= 1500;
     if (!lbLastFixJumped) activeMapCircleMarkers.forEach((markerObj, markerKey) => {
       const binId = markerObj.serial || markerKey;
       if (servicedBinSerials.has(binId)) return;
@@ -18222,13 +18255,13 @@ window.addEventListener('DOMContentLoaded', async () => {
       if (travelMode === 'right' && !isRight) return;
       if (travelMode === 'all' && !(isLeft || isRight)) return;
 
-      if (speedKmh <= 6) {
+      if (lbStopped) {
         servicedBinSerials.add(binId);
         if (markerObj.provisional) confirmProvisionalBinLocation(markerObj, userCurrentLocation);
         if (mapMarkersLayer && markerObj.layer) mapMarkersLayer.removeLayer(markerObj.layer);
         updateFlippedBinCount();
         saveRunProgress();
-      } else if (!markerObj.provisional && d <= 9 && !missedBinSerials.has(binId)) {
+      } else if (speedKmh > 6 && !markerObj.provisional && d <= 9 && !missedBinSerials.has(binId)) {
         // Not for a provisional dot - its position is only an approximation, so driving past it
         // too fast to tell isn't good evidence of a genuinely missed bin.
         missedBinSerials.add(binId);

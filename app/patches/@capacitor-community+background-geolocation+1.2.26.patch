@@ -1,0 +1,108 @@
+diff --git a/node_modules/@capacitor-community/background-geolocation/android/src/main/java/com/equimaps/capacitor_background_geolocation/BackgroundGeolocationService.java b/node_modules/@capacitor-community/background-geolocation/android/src/main/java/com/equimaps/capacitor_background_geolocation/BackgroundGeolocationService.java
+index fafbb86..683cbac 100644
+--- a/node_modules/@capacitor-community/background-geolocation/android/src/main/java/com/equimaps/capacitor_background_geolocation/BackgroundGeolocationService.java
++++ b/node_modules/@capacitor-community/background-geolocation/android/src/main/java/com/equimaps/capacitor_background_geolocation/BackgroundGeolocationService.java
+@@ -5,6 +5,11 @@ import android.app.Service;
+ import android.content.Intent;
+ import android.content.pm.ServiceInfo;
+ import android.location.Location;
++import android.location.LocationListener;
++import android.location.LocationManager;
++import android.os.Bundle;
++import android.os.Looper;
++import android.os.SystemClock;
+ import android.os.Binder;
+ import android.os.Build;
+ import android.os.IBinder;
+@@ -39,6 +44,24 @@ public class BackgroundGeolocationService extends Service {
+         public LocationRequest locationRequest;
+         public LocationCallback locationCallback;
+         public Notification backgroundNotification;
++        // Lukez Bunz: raw GPS as well as the fused provider. The fused provider decides a phone is standing still and
++        // holds the last position - for minutes while a garbage truck reverses slowly up a street. Raw GPS keeps
++        // reporting. Fused fixes are only passed on while raw GPS has been quiet for 5 s (indoors, no sky).
++        public LocationManager locationManager;
++        public LocationListener gpsListener;
++        public long lastGpsAt = 0;
++    }
++
++    private void lbStartGps(final Watcher watcher) {
++        try {
++            if (watcher.locationManager == null) return;
++            watcher.locationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000, 0, watcher.gpsListener, Looper.getMainLooper());
++        } catch (SecurityException ignore) {
++        } catch (Exception e) { Logger.error("GPS provider failed", e); }
++    }
++
++    private void lbStopGps(Watcher watcher) {
++        try { if (watcher.locationManager != null && watcher.gpsListener != null) watcher.locationManager.removeUpdates(watcher.gpsListener); } catch (Exception ignore) {}
+     }
+     private HashSet<Watcher> watchers = new HashSet<Watcher>();
+ 
+@@ -55,6 +78,7 @@ public class BackgroundGeolocationService extends Service {
+     public boolean onUnbind(Intent intent) {
+         for (Watcher watcher : watchers) {
+             watcher.client.removeLocationUpdates(watcher.locationCallback);
++            lbStopGps(watcher);
+         }
+         watchers = new HashSet<Watcher>();
+         stopSelf();
+@@ -86,9 +110,11 @@ public class BackgroundGeolocationService extends Service {
+             locationRequest.setPriority(LocationRequest.PRIORITY_HIGH_ACCURACY);
+             locationRequest.setSmallestDisplacement(distanceFilter);
+ 
++            final Watcher watcher = new Watcher();
+             LocationCallback callback = new LocationCallback(){
+                 @Override
+                 public void onLocationResult(LocationResult locationResult) {
++                    if (SystemClock.elapsedRealtime() - watcher.lastGpsAt < 5000) return;   // raw GPS is reporting
+                     Location location = locationResult.getLastLocation();
+                     Intent intent = new Intent(ACTION_BROADCAST);
+                     intent.putExtra("location", location);
+@@ -105,7 +131,20 @@ public class BackgroundGeolocationService extends Service {
+                 }
+             };
+ 
+-            Watcher watcher = new Watcher();
++            watcher.locationManager = (LocationManager) getSystemService(LOCATION_SERVICE);
++            watcher.gpsListener = new LocationListener() {
++                @Override
++                public void onLocationChanged(Location location) {
++                    watcher.lastGpsAt = SystemClock.elapsedRealtime();
++                    Intent intent = new Intent(ACTION_BROADCAST);
++                    intent.putExtra("location", location);
++                    intent.putExtra("id", id);
++                    LocalBroadcastManager.getInstance(getApplicationContext()).sendBroadcast(intent);
++                }
++                @Override public void onStatusChanged(String provider, int status, Bundle extras) {}
++                @Override public void onProviderEnabled(String provider) {}
++                @Override public void onProviderDisabled(String provider) {}
++            };
+             watcher.id = id;
+             watcher.client = client;
+             watcher.locationRequest = locationRequest;
+@@ -123,6 +162,7 @@ public class BackgroundGeolocationService extends Service {
+                         null
+                 );
+             } catch (SecurityException ignore) {}
++            lbStartGps(watcher);
+ 
+             // Promote the service to the foreground if necessary.
+             // Ideally we would only call 'startForeground' if the service is not already
+@@ -146,6 +186,7 @@ public class BackgroundGeolocationService extends Service {
+             for (Watcher watcher : watchers) {
+                 if (watcher.id.equals(id)) {
+                     watcher.client.removeLocationUpdates(watcher.locationCallback);
++                    lbStopGps(watcher);
+                     watchers.remove(watcher);
+                     if (getNotification() == null) {
+                         stopForeground(true);
+@@ -165,6 +206,8 @@ public class BackgroundGeolocationService extends Service {
+                         watcher.locationCallback,
+                         null
+                 );
++                lbStopGps(watcher);
++                lbStartGps(watcher);
+             }
+         }
+ 
