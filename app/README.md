@@ -21,8 +21,9 @@ in the browser before switching a phone over.
 ## Android
 
 The GitHub Actions workflow "Android app" builds an APK whenever `app/` changes
-(or from the Actions tab: Run workflow). Download `lukez-bunz-android` from the
-run's Artifacts, then install it or push it out with Scalefusion.
+(or from the Actions tab: Run workflow). The latest APK is always at
+https://github.com/Linzee7000/lukez-bunz/releases/tag/android-latest (download
+`lukez-bunz.apk`), then install it or push it out with Scalefusion.
 
 To build on the Mac instead: install Android Studio, then
 
