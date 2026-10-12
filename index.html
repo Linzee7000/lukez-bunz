@@ -30080,7 +30080,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       ['blocked', 'Blocked access', 'ban'], ['trees', 'Trees / overhang', 'tree'], ['vehicle', 'Vehicle in the way', 'car'],
       ['gate', 'Locked gate', 'lockk'], ['dog', 'Dog / unsafe', 'dog'], ['moved', 'Bins wrong place', 'pin'] ] },
     truck: { title: 'Truck', act: 1, items: [
-      ['accident', 'Accident', 'siren'], ['brakes', 'Brake Wear', 'clock'], ['defect', 'Defect', 'wrench'], ['dash', 'Fault Light', 'zap'] ] },
+      ['accident', 'Accident', 'siren'], ['brakes', 'Brake Wear', 'clock'], ['defect', 'Defect', 'wrench'], ['dash', 'Fault Light', 'zap'], ['gpslog', 'GPS log', 'pin'] ] },
     driver: { title: 'Driver', act: 1, items: [
       ['accident', 'Accident', 'siren'], ['hotload', 'Hot load', 'zap'], ['help', 'Help', 'phone'], ['incident', 'Incident', 'alert'], ['injury', 'Injury', 'heart'], ['sick', 'Sick', 'help'] ] },
     street: { title: 'Street', items: [
@@ -30421,11 +30421,13 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var d = drvInfo(), sh = null; try { sh = window.uxShiftState ? window.uxShiftState() : null; } catch (e) {}
     var truck = (sh && sh.truck) || d.truck || '', rego = ''; try { rego = window.lbFleetRego ? window.lbFleetRego(truck) : ''; } catch (e) {}
     if (cur.scope === 'truck' || act === 'accident') {
+      var note0 = clean(($('uxiNote') || {}).value);
       closeIssue();
       if (act === 'accident') { if (window.uxAccidentOpen) window.uxAccidentOpen(); }
       else if (act === 'brakes') { if (window.uxShiftBrakes) window.uxShiftBrakes(); }
       else if (act === 'defect') { if (window.uxShiftDefect) window.uxShiftDefect(''); }
       else if (act === 'dash') { if (window.uxShiftDash) window.uxShiftDash(); }
+      else if (act === 'gpslog') { if (window.lbUploadGpsLog) window.lbUploadGpsLog(note0); }
       return;
     }
     var loc = null; try { loc = userCurrentLocation; } catch (e) {}
@@ -32483,7 +32485,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   function b64(blob){
     return new Promise(function(res, rej){ var fr = new FileReader(); fr.onload = function(){ res(String(fr.result).split(',')[1] || ''); }; fr.onerror = function(){ rej(fr.error); }; fr.readAsDataURL(blob); });
   }
-  function extOf(t){ return /png/.test(t) ? 'png' : /webm/.test(t) ? 'webm' : /mp4|m4a|aac/.test(t) ? 'm4a' : /ogg/.test(t) ? 'ogg' : 'jpg'; }
+  function extOf(t){ return /csv/.test(t) ? 'csv' : /png/.test(t) ? 'png' : /webm/.test(t) ? 'webm' : /mp4|m4a|aac/.test(t) ? 'm4a' : /ogg/.test(t) ? 'ogg' : 'jpg'; }
 
   /* ---- what the script said ---- */
   function readStatus(e){
@@ -36291,6 +36293,28 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     } catch (e) { if (e && e.name === 'AbortError') return; }
     try { await navigator.clipboard.writeText(text); customAlert('GPS log copied (' + n + ' readings) - paste it into a message.'); }
     catch (e) { customAlert("Couldn't share or copy the GPS log on this phone."); }
+  };
+  // Report an issue > Truck > GPS log: the same CSV, sent through the outbox like a report with a photo, so it lands
+  // in the reports' Drive folder (Lukez Bunz Reports / <date> gps-log <id> / gps-log-1.csv) and a line goes on the
+  // Reports tab - no share sheet, and it waits and retries with no signal. Needs nothing new in the Apps Script: the
+  // photo step stores whatever file type it is handed.
+  window.lbUploadGpsLog = async function(note){
+    var n = (window.lbGpsLog || []).length;
+    if (!n) { customAlert('No GPS readings recorded yet - drive with the app open, then try again.'); return; }
+    if (!window.lbMedia || !window.lbOutbox) { window.lbSendGpsLog(note); return; }
+    var text = (note ? '# note: ' + String(note).replace(/\n/g, ' ') + '\n' : '') + csv();
+    var d = {}; try { d = JSON.parse(localStorage.getItem('lbDriver') || '{}') || {}; } catch (e) {}
+    var sh = null; try { sh = window.uxShiftState ? window.uxShiftState() : null; } catch (e) {}
+    var truck = (sh && sh.truck) || d.truck || '', loc = null; try { loc = userCurrentLocation; } catch (e) {}
+    var id = 'gps_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
+    try {
+      await window.lbMedia.put({ id: id, kind: 'file', type: 'text/csv', blob: new Blob([text], { type: 'text/csv' }), ts: Date.now(), ref: 'gps-log', synced: false });
+      var who = (d.name || 'Driver') + (truck ? ' · truck ' + truck : '');
+      window.lbOutbox.send({ rid: 'g_' + id, kind: 'gps-log', to: ['lead'], subject: 'GPS log: ' + who,
+        text: 'GPS log from ' + who + ' - ' + n + ' readings (last 15 minutes).' + (note ? '\n' + note : '') + '\nThe CSV is in the Drive folder.',
+        data: { driver: d.name || '', truck: truck, readings: n, lat: loc && loc.lat, lng: loc && loc.lng, ts: Date.now() }, media: [id] });
+      customAlert('GPS log sent (' + n + ' readings). It goes into the Lukez Bunz Reports folder in Google Drive.');
+    } catch (e) { window.lbSendGpsLog(note); }
   };
 })();
 
@@ -48115,7 +48139,6 @@ html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):
    - the clock follows the run, and the cash follows the clock (it was pinned to the far right)
    - the cash sits in the bar under the phone's status bar - in the app it was up in the notification bar,
      because it was placed 5 px from the very top of the screen instead of below the status bar */
-html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #uxHdrTools{top:calc(5px + var(--ux-safe-t,0px)) !important}
 @media (orientation: portrait){
   html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g)[data-ux-screen="map"] #uxNavBtn{left:8px !important;width:44px !important;min-width:44px !important;height:44px !important;border-top-right-radius:0 !important;border-bottom-right-radius:0 !important;border-right:0 !important}
   html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #mapNormalTopBar{justify-content:flex-start !important}
@@ -48123,8 +48146,8 @@ html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):no
   html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #mapRunColoredBox > #mapRunTitleText{height:44px !important;min-height:44px !important;box-sizing:border-box !important;margin-top:var(--lb-combo-t,0px) !important;border-top-left-radius:0 !important;border-bottom-left-radius:0 !important}
   html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #mapRunColoredBox > #rbClock{margin:0 0 0 10px !important}
   html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #uxHdrTools{position:static !important;right:auto !important;top:auto !important;margin:0 0 0 10px !important;align-self:center !important;flex:none !important}
-  /* the report-a-problem button: down at the bottom left, just above the street name */
-  html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g)[data-ux-screen="map"] #uxHazardBtn.lb-haz-low{position:fixed !important;left:calc(8px + env(safe-area-inset-left,0px)) !important;top:auto !important;bottom:var(--lb-haz-b,220px) !important;z-index:1200 !important;margin:0 !important}
+  /* the report-a-problem button: down at the bottom right, just above the street name */
+  html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g)[data-ux-screen="map"] #uxHazardBtn.lb-haz-low{position:fixed !important;left:auto !important;right:calc(6px + env(safe-area-inset-right,0px)) !important;top:auto !important;bottom:var(--lb-haz-b,220px) !important;z-index:1200 !important;margin:0 !important}
 }
 /* the street over the dash: bigger (it still shrinks to fit a long name - paintStreet) */
 html[data-ux-skin="rubbish"] body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #uxCardStack > #rbSt b{font-size:30px !important}
@@ -48167,6 +48190,176 @@ html[data-ux-skin="rubbish"] body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d
   setInterval(tick, 400);
   window.addEventListener('resize', tick);
   window.addEventListener('orientationchange', function(){ setTimeout(tick, 300); });
+  tick();
+})();
+</script>
+<style id="lb-pop-fix-style">
+/* ============ Oct 2026 (Fox):
+   - every pop-up's top (Lukez Bunz + menu / layers / back / close, search under) is the same as the menu's: it runs
+     edge to edge (it sat inside the pop-up's padding, so it looked smaller) and sits under the phone's status bar
+     instead of behind it (lbPopTops, below)
+   - Report an issue: a label that doesn't fit goes onto two lines instead of being cut off
+   - map buttons: the location buttons (fit, follow) are on the left under the compass, the zoom on the right as three
+     separate boxes, + / the zoom level / -, and the zoom level box is a quiet Layers button */
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #uxIssue .uxi-grid button > span{white-space:normal !important;overflow:hidden !important;text-overflow:clip !important;display:-webkit-box !important;-webkit-line-clamp:2 !important;-webkit-box-orient:vertical !important;line-height:1.12 !important;font-size:13px !important;overflow-wrap:normal !important;word-break:normal !important;text-align:left !important;min-width:0 !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #mapFixedSideControls > button[title="Zoom In"]{margin:0 0 6px !important;border-radius:var(--ux-rad) !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #mapFixedSideControls > button[title="Zoom Out"]{margin:0 0 6px !important;border-radius:var(--ux-rad) !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #mapZoomLevelDisplay{width:42px !important;height:42px !important;margin:0 0 6px !important;border-radius:var(--ux-rad) !important;pointer-events:auto !important;cursor:pointer;font-size:17px !important}
+html[data-ux-skin="speedo"] body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) :is(#mapFixedSideControls > button[title="Zoom In"],#mapFixedSideControls > button[title="Zoom Out"],#mapZoomLevelDisplay){border-radius:50% !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #mapZoomLevelDisplay:active{transform:var(--rb-press, scale(.96))}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #mapFixedLeftControls .lb-mask-ico, html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #mapFixedLeftControls .icon-img{width:20px !important;height:20px !important}
+/* Add bin: on the map's property pop-up and the property page; the stream is picked by its logo */
+.lb-addbin-pick{position:fixed;inset:0;z-index:99990;display:flex;align-items:center;justify-content:center;background:var(--ux-scrim,rgba(0,0,0,.55))}
+.lb-addbin-card{display:flex;align-items:center;gap:10px;padding:12px;background:var(--mn-tile,#1b1c20);border:var(--mn-bd,3px solid #000);border-radius:var(--mn-rad,10px);box-shadow:var(--mn-sh,0 6px 0 #000)}
+.lb-addbin-card button{width:64px;height:64px;display:inline-flex;align-items:center;justify-content:center;padding:0;margin:0;border:var(--mn-bd,3px solid #000);border-radius:var(--mn-rad,10px);box-shadow:var(--mn-sh,none);cursor:pointer}
+.lb-addbin-card button img{width:34px;height:34px}
+.lb-addbin-card button[data-s="Garbage"]{background:var(--ux-c-gar,#ff4d3d)}
+.lb-addbin-card button[data-s="Garbage"] img{filter:brightness(0) invert(1)}
+.lb-addbin-card button[data-s="Recycling"]{background:var(--ux-c-rec,#ffd21f)}
+.lb-addbin-card button[data-s="FOGO"]{background:var(--ux-c-fog,#2fd16a)}
+.lb-addbin-card button:is([data-s="Recycling"],[data-s="FOGO"]) img{filter:brightness(0)}
+.lb-addbin-card button.x{width:44px;height:44px;background:#f28c38;color:#000}
+.lb-addbin-card button.x svg{width:22px;height:22px}
+.leaflet-popup .map-popup-actions:has(.lb-addbin-btn){display:flex !important;flex-wrap:wrap;gap:6px}
+</style>
+<script>
+(function(){
+  var $ = function(id){ return document.getElementById(id); };
+  var SVG = function(p){ return '<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="square" aria-hidden="true">' + p + '</svg>'; };
+  var PLUS = '<path d="M12 5v14M5 12h14"/>', X = '<path d="M6 6l12 12M18 6L6 18"/>';
+  var probe = null;
+  function safeTop(){
+    if (!probe) { probe = document.createElement('div'); probe.style.cssText = 'position:fixed;left:-99px;top:0;width:1px;height:var(--ux-safe-t,env(safe-area-inset-top,0px));visibility:hidden;pointer-events:none'; document.body.appendChild(probe); }
+    return Math.round(probe.getBoundingClientRect().height) || 0;
+  }
+  function vis(e){ return e && e.offsetParent !== null && e.getBoundingClientRect().width > 4; }
+
+  // ---- pop-up tops: edge to edge, and below the status bar ----
+  window.lbPopTops = function(){
+    var st = safeTop();
+    document.querySelectorAll('.modal-overlay').forEach(function(ov){
+      if (getComputedStyle(ov).display === 'none') return;
+      var box = ov.querySelector('.modal-box'); if (!box || !vis(box)) return;
+      var cs = getComputedStyle(box), top = box.querySelector(':scope > .mn-top');
+      if (top) {
+        var pt = parseFloat(cs.paddingTop) || 0, pl = parseFloat(cs.paddingLeft) || 0, pr = parseFloat(cs.paddingRight) || 0;
+        var want = [pt, pl, pr].join(',');
+        if (top._lbPad !== want) {
+          top._lbPad = want;
+          top.style.setProperty('margin-top', -pt + 'px', 'important');
+          top.style.setProperty('margin-left', -pl + 'px', 'important');
+          top.style.setProperty('margin-right', -pr + 'px', 'important');
+          top.style.setProperty('width', 'auto', 'important');
+          top.style.setProperty('top', -pt + 'px', 'important');
+        }
+        var r = box.getBoundingClientRect(), pad = (8 + Math.max(0, st - Math.max(0, r.top))) + 'px';
+        if (top.style.paddingTop !== pad) top.style.setProperty('padding-top', pad, 'important');
+      } else {
+        // a pop-up with no top bar (the OK / Cancel dialogs): just keep it out from under the status bar
+        if (box._lbPt == null) box._lbPt = parseFloat(cs.paddingTop) || 0;
+        var r2 = box.getBoundingClientRect(), pad2 = (box._lbPt + Math.max(0, st - Math.max(0, r2.top))) + 'px';
+        if (box.style.paddingTop !== pad2) box.style.setProperty('padding-top', pad2, 'important');
+      }
+    });
+    // the other sheets that carry the same top (Report an issue and the like)
+    document.querySelectorAll('.mn-top').forEach(function(t){
+      if (t.closest('.modal-overlay') || !vis(t)) return;
+      // (padding doesn't move the bar's own top edge, so measuring it each time can't creep)
+      var pad = (8 + Math.max(0, st - Math.max(0, t.getBoundingClientRect().top))) + 'px';
+      if (t.style.paddingTop !== pad) t.style.setProperty('padding-top', pad, 'important');
+    });
+  };
+
+  // ---- map buttons ----
+  function mapButtons(){
+    var sk = document.documentElement.getAttribute('data-ux-skin');
+    if (sk !== 'rubbish' && sk !== 'speedo') return;
+    var left = $('mapFixedLeftControls'), side = $('mapFixedSideControls'); if (!left || !side) return;
+    var bearing = $('rbBearing'), after = bearing && bearing.parentNode === left ? bearing : null;
+    ['btnFitMapView', 'btnTruckFollowTarget'].forEach(function(id){
+      var b = $(id); if (!b) return;
+      if (b.parentNode !== left) {
+        if (after && after.nextSibling) left.insertBefore(b, after.nextSibling); else if (after) left.appendChild(b); else left.insertBefore(b, left.firstChild);
+      }
+      after = b;
+      // (its icon is a masked glyph so it takes the skin's colour - the side column did that for it)
+      b.querySelectorAll('img.icon-img').forEach(function(img){
+        var src = img.getAttribute('src'); if (!src) return;
+        var sp = document.createElement('span'); sp.className = 'lb-mask-ico'; sp.dataset.src = src;
+        sp.style.webkitMaskImage = 'url("' + src + '")'; sp.style.maskImage = 'url("' + src + '")'; img.replaceWith(sp);
+      });
+    });
+    var z = $('mapZoomLevelDisplay');
+    if (z && !z._lbLayers) {
+      z._lbLayers = 1; z.setAttribute('role', 'button');
+      z.addEventListener('click', function(ev){ ev.preventDefault(); ev.stopPropagation(); try { if (typeof window.uxOpenPanel === 'function') window.uxOpenPanel('layers'); } catch (e) {} });
+    }
+  }
+
+  // ---- Add bin ----
+  function pickStream(propId){
+    var old = document.querySelector('.lb-addbin-pick'); if (old) old.remove();
+    var w = document.createElement('div'); w.className = 'lb-addbin-pick';
+    w.innerHTML = '<div class="lb-addbin-card" role="dialog" aria-label="Add a bin">' +
+      '<button type="button" class="x" aria-label="Close">' + SVG(X) + '</button>' +
+      [['Garbage', 'garbage.png'], ['Recycling', 'recycle.png'], ['FOGO', 'fogo.png']].map(function(x){
+        return '<button type="button" data-s="' + x[0] + '" aria-label="Add a ' + x[0] + ' bin" title="' + x[0] + '"><img src="' + x[1] + '" alt=""></button>'; }).join('') + '</div>';
+    w.addEventListener('click', function(ev){
+      var b = ev.target.closest && ev.target.closest('button');
+      if (!b && ev.target !== w) return;
+      w.remove();
+      var s = b && b.getAttribute('data-s'); if (!s) return;
+      try { if (typeof leafletMap !== 'undefined' && leafletMap && leafletMap.closePopup) leafletMap.closePopup(); } catch (e) {}
+      try { promptAddCouncilBin(propId, s, '', ''); } catch (e) {}
+    });
+    document.body.appendChild(w);
+  }
+  window.lbAddBinPick = pickStream;
+  function addBinButtons(){
+    // the map's property pop-up: beside Property
+    document.querySelectorAll('.leaflet-popup .map-popup-actions').forEach(function(a){
+      if (a.querySelector('.lb-addbin-btn')) return;
+      var pb = a.querySelector('button[onclick*="openPropertyInspectModal"]'); if (!pb) return;
+      var m = /openPropertyInspectModal\('([^']+)'/.exec(pb.getAttribute('onclick') || ''); if (!m) return;
+      var b = document.createElement('button'); b.type = 'button'; b.className = 'map-popup-btn mn-t lb-addbin-btn';
+      b.innerHTML = '<span class="mn-ic">' + SVG(PLUS) + '</span><span>Add bin</span>'; b.setAttribute('data-prop', m[1]);
+      pb.parentNode.insertBefore(b, pb.nextSibling);
+    });
+    // the property page: beside Save changes
+    var pm = $('propInspectModal');
+    if (pm && getComputedStyle(pm).display !== 'none') {
+      var foot = pm.querySelector('.modal-actions');
+      var sv = foot && foot.querySelector('.btn-save[onclick*="saveUPropSettings"]');   // the property's own Save, not a bin's
+      if (sv && !foot.querySelector('.lb-addbin-btn') && window.__uPropId) {
+        var b2 = document.createElement('button'); b2.type = 'button';
+        b2.className = 'btn-cancel mn-go mn-t lb-addbin-btn'; b2.setAttribute('data-prop', 'cur');
+        b2.innerHTML = '<span class="mn-ic">' + SVG(PLUS) + '</span><span>Add bin</span>';
+        if (sv && sv.nextSibling) foot.insertBefore(b2, sv.nextSibling); else foot.appendChild(b2);
+      }
+    }
+  }
+  document.addEventListener('click', function(ev){
+    var b = ev.target.closest && ev.target.closest('.lb-addbin-btn'); if (!b) return;
+    ev.preventDefault(); ev.stopPropagation();
+    var id = b.getAttribute('data-prop'); if (id === 'cur') id = window.__uPropId;
+    if (id) pickStream(String(id));
+  }, true);
+
+  // a report label with one word too long for its line ("CONTAMINATED") gets smaller lettering rather than being split
+  function fitIssueLabels(){
+    var sh = $('uxIssue'); if (!sh || !sh.classList.contains('open')) return;
+    sh.querySelectorAll('.uxi-grid button > span').forEach(function(sp){
+      if (!sp.clientWidth) return;
+      var key = sp.textContent + '|' + sp.clientWidth; if (sp._fk === key) return; sp._fk = key;
+      sp.style.removeProperty('font-size');
+      var fs = parseFloat(getComputedStyle(sp).fontSize) || 13;
+      // (a word wider than the line shows up as the label being wider than its box)
+      while (sp.scrollWidth > sp.clientWidth + 1 && fs > 10) { fs -= 0.5; sp.style.setProperty('font-size', fs + 'px', 'important'); }
+    });
+  }
+  function tick(){ try { window.lbPopTops(); } catch (e) {} try { mapButtons(); } catch (e) {} try { addBinButtons(); } catch (e) {} try { fitIssueLabels(); } catch (e) {} }
+  setInterval(tick, 300);
+  var mq = 0; new MutationObserver(function(){ if (mq) return; mq = 1; requestAnimationFrame(function(){ mq = 0; try { addBinButtons(); mapButtons(); window.lbPopTops(); } catch (e) {} }); }).observe(document.body, { childList: true, subtree: true });
   tick();
 })();
 </script>
