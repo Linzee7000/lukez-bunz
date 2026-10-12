@@ -43,22 +43,31 @@ def circle(img):
     m = Image.new('L', img.size, 0); ImageDraw.Draw(m).ellipse([0, 0, img.width - 1, img.height - 1], fill=255)
     out = img.copy(); out.putalpha(m); return out
 
-# Android adaptive icon: the whole 108dp foreground is the grid (the launcher cuts its own shape out of it);
-# logos pulled in toward the middle so they stay inside the 66dp safe zone
-# Android shows only the middle 72 of the 108 dp (and cuts its own corners off that), so the 2x2 grid sits in
-# the middle 62 dp on black, with its own rounded corners, and nothing important gets trimmed
-fg = Image.new('RGBA', (1296, 1296), '#000000')
-_g = rounded(grid(744, 22, 0.04, 230), 90)
-fg.alpha_composite(_g, ((1296 - 744) // 2, (1296 - 744) // 2))
-# legacy square / round icons (old launchers): the grid edge to edge, logos at their squares' centres
-sq = grid(1024, 28, 0.04, 330)
-rd = grid(1024, 28, 0.20, 270)
+def tiles(N, frac, gap, logo, rad):
+    """N px square on black: four separate rounded squares (stream colour + logo) in a 2x2, together `frac` of N
+    wide, `gap` px apart - space between them and all round them."""
+    img = Image.new('RGBA', (N, N), '#000000')
+    total = int(N * frac); t = (total - gap) // 2; x0 = (N - total) // 2
+    for i, (bg, f, fg) in enumerate(TILES):
+        x = x0 + (i % 2) * (t + gap); y = x0 + (i // 2) * (t + gap)
+        sq = Image.new('RGBA', (t, t), bg)
+        g = glyph(f, fg, int(t * logo))
+        sq.alpha_composite(g, ((t - g.width) // 2, (t - g.height) // 2))
+        img.alpha_composite(rounded(sq, rad), (x, y))
+    return img
+
+# Android adaptive icon: the launcher shows only the middle 72 of the 108 dp and cuts its own shape from that, so the
+# squares take up about the middle 50 dp with black space between them and round them
+fg = tiles(1296, 0.47, 48, 0.62, 56)
+# legacy square / round icons (old launchers) and iOS: the same squares, a little bigger as nothing is cut off
+sq = tiles(1024, 0.80, 40, 0.62, 52)
+rd = tiles(1024, 0.66, 34, 0.62, 44)
 DPI = {'mdpi': 1, 'hdpi': 1.5, 'xhdpi': 2, 'xxhdpi': 3, 'xxxhdpi': 4}
-for k, s in DPI.items():
+for k, sc in DPI.items():
     d = os.path.join(RES, 'mipmap-' + k)
-    fg.resize((int(108 * s),) * 2, Image.LANCZOS).save(os.path.join(d, 'ic_launcher_foreground.png'))
-    rounded(sq, 150).resize((int(48 * s),) * 2, Image.LANCZOS).save(os.path.join(d, 'ic_launcher.png'))
-    circle(rd).resize((int(48 * s),) * 2, Image.LANCZOS).save(os.path.join(d, 'ic_launcher_round.png'))
+    fg.resize((int(108 * sc),) * 2, Image.LANCZOS).save(os.path.join(d, 'ic_launcher_foreground.png'))
+    rounded(sq, 150).resize((int(48 * sc),) * 2, Image.LANCZOS).save(os.path.join(d, 'ic_launcher.png'))
+    circle(rd).resize((int(48 * sc),) * 2, Image.LANCZOS).save(os.path.join(d, 'ic_launcher_round.png'))
 
 # iOS: one 1024 square, no transparency (iOS rounds the corners itself)
 sq.convert('RGB').save(os.path.join(IOS, 'AppIcon.appiconset', 'AppIcon-512@2x.png'))
