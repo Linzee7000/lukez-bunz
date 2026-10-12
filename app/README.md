@@ -23,7 +23,9 @@ in the browser before switching a phone over.
 The GitHub Actions workflow "Android app" builds an APK whenever `app/` changes
 (or from the Actions tab: Run workflow). The latest APK is always at
 https://github.com/Linzee7000/lukez-bunz/releases/tag/android-latest (download
-`lukez-bunz.apk`), then install it or push it out with Scalefusion.
+`lukez-bunz-v1.N.apk`; the number goes up every build), then install it or push it out with Scalefusion.
+Every build is signed with the same key (`android/lukez-bunz.keystore`), so a new APK installs over the
+old one as an update.
 
 To build on the Mac instead: install Android Studio, then
 
@@ -33,8 +35,9 @@ npm install
 npm run android      # copies the web app, syncs, opens Android Studio
 ```
 
-Samsung tip: set the app's battery use to **Unrestricted** (Settings > Apps >
-Lukez Bunz > Battery), or Samsung may still stop it in the background.
+Battery: the app asks to be left out of battery optimisation every time it opens until it is
+allowed (on Samsung that is battery use **Unrestricted**). On the managed tablets, grant it in
+Scalefusion instead so drivers never see the question.
 Location permission "Allow only while using the app" is enough.
 
 ## iOS (needs the Mac + Xcode)
