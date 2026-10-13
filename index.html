@@ -21011,6 +21011,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   // the map centred on the truck. Track-up stays off - this is a
   // look-around, not a drive.
   function goNearby() {
+    if (typeof window.lbCloseDrawer === 'function') window.lbCloseDrawer();   // (from the menu: the menu goes, so the map shows)
     applyFilters('', [], '', '');
     switchMainTab('map');
     setTimeout(() => {
@@ -21888,7 +21889,7 @@ body.lb-on-welcome #lbDrawerTab { display: none; }
       if (typeof activeTab !== 'undefined' && activeTab !== 'map') { switchMainTab('map'); setTimeout(goDays, 700); } else goDays();
       return;
     }
-    if (act === 'nearby')     { if (typeof window.lbGoNearby === 'function') window.lbGoNearby(); return; }
+    if (act === 'nearby')     { if (typeof window.lbCloseDrawer === 'function') window.lbCloseDrawer(); if (typeof window.lbGoNearby === 'function') window.lbGoNearby(); return; }
     if (act === 'go-map')     { switchMainTab('map'); return; }
     if (act === 'go-hud')     { switchMainTab('hud'); return; }
     if (act === 'go-search')  { switchMainTab('search'); return; }
@@ -41570,7 +41571,8 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
     var cells = c.querySelectorAll('.rb-sec i'), str = two(d.getSeconds()) + Math.floor(ms / 100);
     for (var i = 0; i < cells.length; i++) txt(cells[i], str.charAt(i));
   }
-  setInterval(function(){ if (on() && !document.hidden && onMap()) clockText(); }, 50);
+  // (not while a panel covers the map: 20 redraws a second behind the menu made the menus slow to answer a tap on a phone)
+  setInterval(function(){ var c = document.body.classList; if (on() && !document.hidden && onMap() && !c.contains('lb-drawer-open') && !c.contains('lb-layers-open') && !c.contains('lb-settings-open')) clockText(); }, 50);
   function paintClock(){
     var box = $('mapRunColoredBox'); if (!box) return;
     var c = $('rbClock');
@@ -48387,7 +48389,7 @@ html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):no
     });
     // the property page: beside Save changes
     var pm = $('propInspectModal');
-    if (pm && getComputedStyle(pm).display !== 'none') {
+    if (pm && pm.classList.contains('open')) {          // (a class check: getComputedStyle here, on every change to the page, made the whole app slow)
       var foot = pm.querySelector('.modal-actions');
       var sv = foot && foot.querySelector('.btn-save[onclick*="saveUPropSettings"]');   // the property's own Save, not a bin's
       if (sv && !foot.querySelector('.lb-addbin-btn') && window.__uPropId) {
@@ -48419,7 +48421,11 @@ html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):no
   }
   function tick(){ try { window.lbPopTops(); } catch (e) {} try { mapButtons(); } catch (e) {} try { addBinButtons(); } catch (e) {} try { fitIssueLabels(); } catch (e) {} }
   setInterval(tick, 300);
-  var mq = 0; new MutationObserver(function(){ if (mq) return; mq = 1; requestAnimationFrame(function(){ mq = 0; try { addBinButtons(); mapButtons(); window.lbPopTops(); } catch (e) {} }); }).observe(document.body, { childList: true, subtree: true });
+  // Straight away when a map pop-up or a pop-up window opens. (This used to watch every change anywhere on the page -
+  // markers, the clock... - and measure every pop-up each time, which made the menus slow and unresponsive on a phone.)
+  var mq = 0, soon = function(){ if (mq) return; mq = 1; requestAnimationFrame(function(){ mq = 0; try { addBinButtons(); mapButtons(); window.lbPopTops(); } catch (e) {} }); };
+  (function hook(){ try { var m = (new Function('return typeof leafletMap !== "undefined" ? leafletMap : null'))(); if (m && m.on) { m.on('popupopen', soon); return; } } catch (e) {} setTimeout(hook, 1000); })();
+  new MutationObserver(function(ms){ for (var i = 0; i < ms.length; i++) { var t = ms[i].target; if (t.classList && (t.classList.contains('modal-overlay') || t.classList.contains('modal-box'))) { soon(); return; } } }).observe(document.body, { attributes: true, attributeFilter: ['class'], subtree: true });
   tick();
 })();
 </script>
@@ -48756,6 +48762,18 @@ html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):
 html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g).lb-ctx-on #mapContextBox{flex:1 1 auto !important;min-width:0 !important;margin-left:0 !important;padding-left:12px !important}
 html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g).lb-ctx-on #mapContextTitle{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;display:flex !important;align-items:center !important;line-height:1.1 !important}
 html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g).lb-ctx-on #mapContextBar{padding-left:4px !important}
+/* Run maps and Service days: the same top as every panel - title on the left, the four coloured buttons on the right -
+   instead of their own orange X and menu button (on Run maps those sat on the title, under the phone's status bar) */
+#lbRunMap .lb-rm-top{margin:0 0 0 0}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #lbRunMap:has(.lb-rm-top) .rm-bar :is(.rm-ttl,.rm-clk,[data-rm="close"],.mn-burger){display:none !important}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #lbRunMap:has(.lb-rm-top) .rm-bar{border-top:0 !important;padding-top:8px !important}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #uxDaysBar .uxd-top:has(.lb-ctx-tbs){flex-wrap:wrap !important;align-items:center !important;row-gap:4px !important}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #uxDaysBar .uxd-top:has(.lb-ctx-tbs) .uxd-x{display:none !important}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #uxDaysBar .uxd-top:has(.lb-ctx-tbs) > b{order:0 !important;flex:1 1 auto;min-width:0}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #uxDaysBar .uxd-top .lb-ctx-tbs{order:1;display:flex;gap:6px;flex:none;margin-left:auto}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #uxDaysBar .uxd-top:has(.lb-ctx-tbs) .uxd-sub{order:2 !important;flex:1 0 100% !important;margin:0 !important}
+/* a map chip ("Toilets - tap one for directions") or a toast never sits over an open panel or takes its taps */
+body:is(.lb-drawer-open,.lb-layers-open,.lb-settings-open) :is(#uxplChip,#uxsToast){display:none !important}
 /* break countdown: hours / minutes / seconds */
 html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #uxGtaHealth .lb-brk i.m{color:#fff !important;-webkit-text-stroke:.6px #000;paint-order:stroke fill}
 html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #uxGtaHealth .lb-brk i.s{font-size:.68em !important;color:#1b1c20 !important;opacity:.8;align-self:flex-end;margin-bottom:1px}
@@ -48817,6 +48835,51 @@ html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):no
   setInterval(sync, 250);
   var cb0 = function(){ var cb = $('mapContextBar'); if (!cb) { setTimeout(cb0, 500); return; } new MutationObserver(sync).observe(cb, { attributes: true, attributeFilter: ['style', 'class'] }); sync(); };
   cb0();
+
+  // ---- Run maps and Service days get the same four buttons ----
+  var FOUR = function(){ return tb('menu', 'r', 'Menu', '<path d="M4 7h16M4 12h16M4 17h16"/>') + tb('layers', 'y', 'Layers', '<path d="M12 3l9 5-9 5-9-5 9-5z"/><path d="M3 13l9 5 9-5"/>') +
+    tb('back', 'g', 'Back', '<path d="M19 12H5M11 6l-6 6 6 6"/>') + tb('close', 'b', 'Close', '<path d="M6 6l12 12M18 6L6 18"/>'); };
+  function go(a, shut){
+    try { shut(); } catch (e) {}
+    if (a === 'menu' || a === 'back') { try { window.lbOpenDrawer(); } catch (e) {} }      // (both came from the menu)
+    if (a === 'layers') { try { window.lbOpenLayers(); } catch (e) {} }
+  }
+  function otherTops(){
+    var rm = $('lbRunMap'), head = rm && rm.querySelector('.rm-head');
+    if (head && !head.querySelector('.lb-rm-top')) {
+      var t = document.createElement('div'); t.className = 'mn-top lb-rm-top';
+      t.innerHTML = '<div class="mn-top-row"><b class="mn-top-title">Lukez Bunz</b>' + FOUR() + '</div>';
+      head.insertBefore(t, head.firstChild);
+      t.addEventListener('click', function(ev){
+        var b = ev.target.closest && ev.target.closest('[data-ctx]'); if (!b) return; ev.preventDefault(); ev.stopPropagation();
+        var a = b.getAttribute('data-ctx');
+        go(a, function(){ var x = rm.querySelector('[data-rm="close"]'); if (x) x.click(); });
+      });
+    }
+    var top = document.querySelector('#uxDaysBar .uxd-top');
+    if (top && !top.querySelector('.lb-ctx-tbs')) {
+      var d = document.createElement('span'); d.className = 'lb-ctx-tbs'; d.innerHTML = FOUR(); top.appendChild(d);
+      d.addEventListener('click', function(ev){
+        var b = ev.target.closest && ev.target.closest('[data-ctx]'); if (!b) return; ev.preventDefault(); ev.stopPropagation();
+        var a = b.getAttribute('data-ctx');
+        if (a === 'layers') { try { window.lbOpenLayers(); } catch (e) {} return; }      // (Layers over the service days map, which stays)
+        go(a, function(){ if (typeof window.uxDaysClose === 'function') window.uxDaysClose(); });
+      });
+    }
+  }
+  setInterval(function(){ try { otherTops(); } catch (e) {} }, 300);
+  // (straight away when either draws its top again - watching just those two, not the whole page)
+  var watched = [];
+  function watchTops(){
+    ['uxDaysBar', 'lbRunMap'].forEach(function(id){
+      var e = $(id); if (!e || watched.indexOf(e) >= 0) return; watched.push(e);
+      new MutationObserver(function(){ try { otherTops(); } catch (x) {} }).observe(e, { childList: true, subtree: id === 'lbRunMap' ? false : true });
+      if (id === 'lbRunMap') { var h = e.querySelector('.rm-head'); if (h) new MutationObserver(function(){ try { otherTops(); } catch (x) {} }).observe(h, { childList: true }); }
+    });
+    watched = watched.filter(function(e){ return e.isConnected; });
+  }
+  new MutationObserver(function(){ watchTops(); try { otherTops(); } catch (x) {} }).observe(document.body, { childList: true });
+  watchTops();
 
   // ---- the break countdown: amber in the last 15 minutes (the round-5 painter writes the digits) ----
   function paint(){
