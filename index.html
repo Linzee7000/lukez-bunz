@@ -47695,6 +47695,8 @@ html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f) 
     // touch the cash it is tightened a step at a time (see the CSS: smaller type only - seconds and tenths always stay), and let out
     // again only when there is clearly room - so it settles and does not flip back and forth.
     var c = $('rbClock'), body = document.body, vis = function(e){ return e && e.getBoundingClientRect().width > 4 && getComputedStyle(e).visibility !== 'hidden'; };
+    // (whichever pill is showing - the cash or the break countdown take turns; measuring only the cash let the clock jump to full size, and under the break pill, every time the break showed)
+    var bp = t.querySelector('.lb-brk'); if (!vis(cs) && vis(bp)) cs = bp;
     if (!vis(c) || !vis(cs)) { if (body.hasAttribute('data-hdr-tight')) body.removeAttribute('data-hdr-tight'); return; }
     var lvl = +body.getAttribute('data-hdr-tight') || 0, set = function(n){ lvl = n; if (n) body.setAttribute('data-hdr-tight', String(n)); else body.removeAttribute('data-hdr-tight'); };
     var gap = function(){ var run = $('mapRunTitleText'); var g1 = cs.getBoundingClientRect().left - c.getBoundingClientRect().right; var g2 = run && vis(run) ? c.getBoundingClientRect().left - run.getBoundingClientRect().right : 99; var bar = $('mapNormalTopBar'), g3 = bar ? bar.getBoundingClientRect().right - 2 - cs.getBoundingClientRect().right : 99; return Math.min(g1, g2, g3); };
@@ -48583,25 +48585,33 @@ html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):no
   function bc(){ try { return window.lbBreakClock && window.lbBreakClock.view ? window.lbBreakClock.view() : null; } catch (e) { return null; } }
 
   // ---- the cash and the time to the next break take turns (4 s each) ----
-  var flip = 0;
+  // The countdown is written like the title-bar clock: hours, minutes, then the seconds and a tenths digit smaller, each
+  // in its own colour, close together (Fox). Its colour says how soon: green, yellow under an hour, orange under half an
+  // hour, red-orange under 15 minutes, red once it is due. Every tenth of a second only the digits that changed are written.
+  var CUP = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="square" aria-hidden="true"><path d="M5 8h11v6a4 4 0 0 1-4 4H9a4 4 0 0 1-4-4z"/><path d="M16 10h2a2 2 0 0 1 0 4h-2"/><path d="M8 3v2M12 3v2"/></svg>';
+  var setT = function(e, v){ if (e && e.textContent !== v) e.textContent = v; };
   setInterval(function(){
     try {
       var h = $('uxGtaHealth'); if (!h) return;
       var v = bc(), want = v && v.mode === 'working' && isFinite(v.remaining);
       var el = h.querySelector('.lb-brk');
       if (!el) { el = document.createElement('b'); el.className = 'lb-brk'; h.appendChild(el); }
-      if (want) {
-        var t = hm(v.remaining), over = v.remaining <= 0, ts = p2(Math.floor(Math.abs(v.remaining) / 1000) % 60);
-        // (Fox: hours, minutes and seconds each their own colour, like the clock - "02 14" alone could be h:m or m:s)
-        var html = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="square" aria-hidden="true"><path d="M5 8h11v6a4 4 0 0 1-4 4H9a4 4 0 0 1-4-4z"/><path d="M16 10h2a2 2 0 0 1 0 4h-2"/><path d="M8 3v2M12 3v2"/></svg><i class="h">' + t.h + '</i><i class="m">' + t.m + '</i><i class="s">' + ts + '</i>';
-        if (el._h !== html) { el._h = html; el.innerHTML = html; }
-        el.setAttribute('data-over', over ? '1' : '0');
-        el.title = over ? 'Break overdue' : 'Time to the next break';
+      var on = !!want && Math.floor(Date.now() / 4000) % 2 === 1;
+      if (want && (on || !el.firstChild)) {
+        if (!el.querySelector('i.sx')) el.innerHTML = CUP + '<i class="h"></i><i class="m"></i><i class="sx"><i class="s"></i><i class="s"></i><i class="t"></i></i>';
+        var ms = Math.abs(v.remaining), sec = Math.floor(ms / 1000), over = v.remaining <= 0;
+        if (over) sec = Math.floor(ms / 1000);
+        var ss = p2(sec % 60), tn = String(Math.floor(ms / 100) % 10), cells = el.querySelectorAll('i.sx > i');
+        setT(el.querySelector('i.h'), p2(sec / 3600)); setT(el.querySelector('i.m'), p2((sec % 3600) / 60));
+        setT(cells[0], ss.charAt(0)); setT(cells[1], ss.charAt(1)); setT(cells[2], tn);
+        var mins = v.remaining / 60000, lvl = over ? 'over' : mins <= 15 ? '3' : mins <= 30 ? '2' : mins <= 60 ? '1' : '0';
+        if (el.getAttribute('data-lvl') !== lvl) el.setAttribute('data-lvl', lvl);
+        var ov = over ? '1' : '0'; if (el.getAttribute('data-over') !== ov) el.setAttribute('data-over', ov);
+        var ti = over ? 'Break overdue' : 'Time to the next break'; if (el.title !== ti) el.title = ti;
       }
-      flip = (flip + 1) % 8;                       // ticks of 1 s: 4 cash, 4 break
-      h.classList.toggle('lb-brk-on', !!want && flip >= 4);
+      if (h.classList.contains('lb-brk-on') !== on) h.classList.toggle('lb-brk-on', on);
     } catch (e) {}
-  }, 1000);
+  }, 100);
 
   // ---- phone app: the run notification (run time, next break, Start / End break) ----
   var cap = window.Capacitor;
@@ -48774,16 +48784,29 @@ html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):
 html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #uxDaysBar .uxd-top:has(.lb-ctx-tbs) .uxd-sub{order:2 !important;flex:1 0 100% !important;margin:0 !important}
 /* a map chip ("Toilets - tap one for directions") or a toast never sits over an open panel or takes its taps */
 body:is(.lb-drawer-open,.lb-layers-open,.lb-settings-open) :is(#uxplChip,#uxsToast){display:none !important}
-/* break countdown: hours / minutes / seconds */
-html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #uxGtaHealth .lb-brk i.m{color:#fff !important;-webkit-text-stroke:.6px #000;paint-order:stroke fill}
-html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #uxGtaHealth .lb-brk i.s{font-size:.68em !important;color:#1b1c20 !important;opacity:.8;align-self:flex-end;margin-bottom:1px}
-html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #uxGtaHealth .lb-brk i{display:inline-block;text-align:center}
-html body.ux2 #uxGtaHealth .lb-brk i.h{min-width:var(--lbw-h,0)} html body.ux2 #uxGtaHealth .lb-brk i.m{min-width:var(--lbw-m,0)} html body.ux2 #uxGtaHealth .lb-brk i.s{min-width:var(--lbw-s,0)}
-/* under 15 minutes to go: amber, then red once it is due (data-over) */
-html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #uxGtaHealth.lb-brk-on .lb-brk[data-soon="1"]:not([data-over="1"]){background:#ffb020 !important}
-html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #uxGtaHealth.lb-brk-on .lb-brk[data-over="1"] i.h{color:#fff !important}
-html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #uxGtaHealth.lb-brk-on .lb-brk[data-over="1"] i.m{color:#ffd21f !important}
-html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #uxGtaHealth.lb-brk-on .lb-brk[data-over="1"] i.s{color:#fff !important}
+/* "Select run" in the run chip takes turns: "Select", then "Run" - one word at a time, so the chip is narrow and the clock
+   beside it never has to shrink (the two words sit on top of each other, so the chip is always the wider one's width) */
+#mapRunTitleText .lb-sr{display:inline-grid !important;vertical-align:middle}
+#mapRunTitleText .lb-sr > b{grid-area:1/1;visibility:hidden;font:inherit;text-align:center}
+#mapRunTitleText .lb-sr[data-w="0"] > b:first-child,#mapRunTitleText .lb-sr[data-w="1"] > b:last-child{visibility:visible}
+/* break countdown: written like the clock - hours, minutes, then seconds + tenths smaller - close together; colour by how soon */
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #uxGtaHealth .lb-brk{gap:0 !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #uxGtaHealth .lb-brk svg{margin-right:4px}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #uxGtaHealth .lb-brk i{display:inline-block;text-align:center;letter-spacing:0 !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #uxGtaHealth .lb-brk i.h{color:#000 !important;min-width:1.1em}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #uxGtaHealth .lb-brk i.m{color:#fff !important;-webkit-text-stroke:.6px #000;paint-order:stroke fill;min-width:1.1em;margin-left:.12em}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #uxGtaHealth .lb-brk i.sx{margin-left:.1em;align-self:flex-end;line-height:1 !important;margin-bottom:.05em}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #uxGtaHealth .lb-brk i.sx > i{color:#1b1c20 !important;opacity:.85}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #uxGtaHealth .lb-brk i.sx > i.s{font-size:.7em !important;width:.62em}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #uxGtaHealth .lb-brk i.sx > i.t{font-size:.5em !important;width:.6em}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #uxGtaHealth.lb-brk-on .lb-brk[data-lvl="1"]{background:#ffd21f !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #uxGtaHealth.lb-brk-on .lb-brk[data-lvl="2"]{background:#ff9f1c !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #uxGtaHealth.lb-brk-on .lb-brk[data-lvl="3"]{background:#ff6a2b !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #uxGtaHealth.lb-brk-on .lb-brk[data-lvl="over"]{background:#e53935 !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #uxGtaHealth.lb-brk-on .lb-brk[data-lvl="over"] :is(i.h,i.sx > i,svg){color:#fff !important;stroke:#fff !important;opacity:1}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #uxGtaHealth.lb-brk-on .lb-brk[data-lvl="over"] i.m{color:#ffd21f !important}
+/* the cash and the break pill: no padding above and below (Fox) */
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #uxGtaHealth :is(.uxgh-cash,.lb-brk){padding-top:1px !important;padding-bottom:0 !important}
 </style>
 <script>
 (function(){
@@ -48836,6 +48859,20 @@ html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):no
   var cb0 = function(){ var cb = $('mapContextBar'); if (!cb) { setTimeout(cb0, 500); return; } new MutationObserver(sync).observe(cb, { attributes: true, attributeFilter: ['style', 'class'] }); sync(); };
   cb0();
 
+  // ---- "Select run" -> "Select" / "Run", taking turns ----
+  function selRun(){
+    var t = $('mapRunTitleText'); if (!t) return;
+    var sr = t.querySelector('.lb-sr');
+    if (!sr) {
+      if (!/^\s*select\s+run\s*$/i.test(t.textContent || '')) return;
+      t.innerHTML = '<span class="lb-sr" data-w="0"><b>Select</b><b>Run</b></span>'; sr = t.firstChild;
+    }
+    var w = String(Math.floor(Date.now() / 2500) % 2);
+    if (sr.getAttribute('data-w') !== w) sr.setAttribute('data-w', w);
+  }
+  setInterval(function(){ try { selRun(); } catch (e) {} }, 250);
+  (function wt(){ var t = $('mapRunTitleText'); if (!t) { setTimeout(wt, 500); return; } new MutationObserver(function(){ try { selRun(); } catch (e) {} }).observe(t, { childList: true, characterData: true, subtree: true }); selRun(); })();
+
   // ---- Run maps and Service days get the same four buttons ----
   var FOUR = function(){ return tb('menu', 'r', 'Menu', '<path d="M4 7h16M4 12h16M4 17h16"/>') + tb('layers', 'y', 'Layers', '<path d="M12 3l9 5-9 5-9-5 9-5z"/><path d="M3 13l9 5 9-5"/>') +
     tb('back', 'g', 'Back', '<path d="M19 12H5M11 6l-6 6 6 6"/>') + tb('close', 'b', 'Close', '<path d="M6 6l12 12M18 6L6 18"/>'); };
@@ -48881,21 +48918,6 @@ html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):no
   new MutationObserver(function(){ watchTops(); try { otherTops(); } catch (x) {} }).observe(document.body, { childList: true });
   watchTops();
 
-  // ---- the break countdown: amber in the last 15 minutes (the round-5 painter writes the digits) ----
-  function paint(){
-    var h = $('uxGtaHealth'), el = h && h.querySelector('.lb-brk'); if (!el) return;
-    var v = null; try { v = window.lbBreakClock && window.lbBreakClock.view ? window.lbBreakClock.view() : null; } catch (e) {}
-    var soon = !!v && v.mode === 'working' && v.remaining > 0 && v.remaining <= 15 * 60000 ? '1' : '0';
-    if (el.getAttribute('data-soon') !== soon) el.setAttribute('data-soon', soon);
-    // each group of digits keeps its widest width so the pill doesn't twitch as they count down
-    if (document.getElementById('uxGtaHealth').classList.contains('lb-brk-on')) el.querySelectorAll('i').forEach(function(x){
-      var fs = getComputedStyle(el).fontSize; if (el._fs !== fs) { el._fs = fs; el._mw = {}; }
-      var k = x.className, was = x.style.minWidth; var w = x.offsetWidth; el._mw = el._mw || {};   // (offsetWidth: the pill is tilted and pops in - its box on screen is bigger than the digits)
-      if (w > (el._mw[k] || 0)) el._mw[k] = w;
-      var want = el._mw[k] + 'px'; if (el.style.getPropertyValue('--lbw-' + k) !== want) el.style.setProperty('--lbw-' + k, want);   // (a style on the pill: the digits are redrawn every second)
-    });
-  }
-  setInterval(function(){ try { paint(); } catch (e) {} }, 250);
 })();
 </script>
 <style id="lb-pswap-style">
