@@ -5314,6 +5314,7 @@ const STREET_LITTER_SERVICE_LEVELS = {"seasons":[{"key":"tourist1","label":"Tour
   let lbSpeedLast = { v: 0, t: 0 };
   let lbLastFixJumped = false;
   let lbStopSince = 0;   // when the truck last came to a stop (see the bin flip below)
+  const lbStillFixes = [];   // the last few seconds of positions, for 'stopped' by place
   try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (e) {}   // keep the saved data: don't let the phone clear it when space is short   // this fix leapt further than the truck could have driven (ignored for heading)
   window.lbGpsJumpAt = 0;
   // Frozen GPS. The driver's Android stops reading the GPS when it decides the phone is standing still - and a
@@ -18228,7 +18229,19 @@ window.addEventListener('DOMContentLoaded', async () => {
     // A bin is only flipped when the truck has STOPPED (Fox, Oct 2026): rolling slowly from bin to bin is under 6 km/h
     // too, so "slow" flipped every bin crawled past. Stopped = 2 km/h or less (GPS never reads a clean 0) held for 1.5 s.
     if (speedKmh <= 2) { if (!lbStopSince) lbStopSince = Date.now(); } else lbStopSince = 0;
-    const lbStopped = !!lbStopSince && Date.now() - lbStopSince >= 1500;
+    // ...or by where it is: the phone app reads the GPS chip itself, and on a parked truck its speed wobbles around
+    // 1-4 km/h while the position barely moves. Stopped too when the fixes of the last 2 s or so all sit within 2 m.
+    {
+      const nowT = Date.now(); lbStillFixes.push({ t: nowT, lat: userCurrentLocation.lat, lng: userCurrentLocation.lng });
+      while (lbStillFixes.length && nowT - lbStillFixes[0].t > 4000) lbStillFixes.shift();
+    }
+    const lbStillByPlace = (() => {
+      const nowT = Date.now(), win = lbStillFixes.filter(f => nowT - f.t <= 2600);   // (2.6 s: with one fix a second the oldest of three is just over 2 s old)
+      if (win.length < 2 || nowT - win[0].t < 1500 || speedKmh > 6) return false;
+      return win.every(f => getDistanceMeters(f.lat, f.lng, userCurrentLocation.lat, userCurrentLocation.lng) <= 2);
+    })();
+    const lbStopped = (!!lbStopSince && Date.now() - lbStopSince >= 1500) || lbStillByPlace;
+    window.lbFlipState = { stopped: lbStopped, byPlace: lbStillByPlace, kmh: speedKmh, heading: lastValidHeading };   // (test hook)
     if (!lbLastFixJumped) activeMapCircleMarkers.forEach((markerObj, markerKey) => {
       const binId = markerObj.serial || markerKey;
       if (servicedBinSerials.has(binId)) return;
@@ -18259,6 +18272,9 @@ window.addEventListener('DOMContentLoaded', async () => {
         servicedBinSerials.add(binId);
         if (markerObj.provisional) confirmProvisionalBinLocation(markerObj, userCurrentLocation);
         if (mapMarkersLayer && markerObj.layer) mapMarkersLayer.removeLayer(markerObj.layer);
+        // With data source "All" a bin is drawn twice - from Solo's list and from the council's (a rough dot at the
+        // house). Only the dot that was reached used to go, so its twin stayed on the map yellow after the bin was done.
+        if (mapMarkersLayer) activeMapCircleMarkers.forEach(o => { if (o !== markerObj && o.layer && (o.serial || '') === binId) mapMarkersLayer.removeLayer(o.layer); });
         updateFlippedBinCount();
         saveRunProgress();
       } else if (speedKmh > 6 && !markerObj.provisional && d <= 9 && !missedBinSerials.has(binId)) {
@@ -48523,6 +48539,88 @@ html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):no
   setInterval(function(){ try { msgs(); } catch (e) {} }, 300);
   setInterval(function(){ try { nav(); } catch (e) {} }, 2500);
   try { nav(); msgs(); } catch (e) {}
+})();
+</script>
+<style id="lb-round5-style">
+/* ============ Oct 2026 (Fox), round 5: in the title bar the cash takes turns with the time to the next break, written
+   like the clock (hours in the accent colour, then minutes, no colon) */
+#uxGtaHealth .lb-brk{display:none}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #uxGtaHealth.lb-brk-on .uxgh-cash{display:none !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #uxGtaHealth.lb-brk-on .lb-brk{display:inline-flex !important;align-items:baseline;gap:3px;padding:5px 8px 3px !important;border:var(--rb-bd) !important;border-radius:6px !important;background:var(--rb-dslab,#2a2c31) !important;box-shadow:var(--rb-sh-md) !important;font-family:var(--rb-font) !important;font-weight:400 !important;font-size:17px !important;line-height:1 !important;white-space:nowrap}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #uxGtaHealth .lb-brk svg{width:15px;height:15px;align-self:center;color:var(--ui-accent,#ffd21f)}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #uxGtaHealth .lb-brk .h{color:var(--ui-accent,#ffd21f);font-style:normal}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #uxGtaHealth .lb-brk .m{color:#fff;font-style:normal;margin-left:.12em}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #uxGtaHealth.lb-brk-on .lb-brk[data-over="1"]{background:#c81e1e !important}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #uxGtaHealth.lb-brk-on .lb-brk[data-over="1"] .h{color:#fff}
+</style>
+<script>
+(function(){
+  var $ = function(id){ return document.getElementById(id); };
+  var p2 = function(n){ n = Math.max(0, Math.floor(n)); return (n < 10 ? '0' : '') + n; };
+  function hm(ms){ var m = Math.floor(Math.abs(ms) / 60000); return { h: p2(m / 60), m: p2(m % 60) }; }
+  function bc(){ try { return window.lbBreakClock && window.lbBreakClock.view ? window.lbBreakClock.view() : null; } catch (e) { return null; } }
+
+  // ---- the cash and the time to the next break take turns (4 s each) ----
+  var flip = 0;
+  setInterval(function(){
+    try {
+      var h = $('uxGtaHealth'); if (!h) return;
+      var v = bc(), want = v && v.mode === 'working' && isFinite(v.remaining);
+      var el = h.querySelector('.lb-brk');
+      if (!el) { el = document.createElement('b'); el.className = 'lb-brk'; h.appendChild(el); }
+      if (want) {
+        var t = hm(v.remaining), over = v.remaining <= 0;
+        var html = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="square" aria-hidden="true"><path d="M5 8h11v6a4 4 0 0 1-4 4H9a4 4 0 0 1-4-4z"/><path d="M16 10h2a2 2 0 0 1 0 4h-2"/><path d="M8 3v2M12 3v2"/></svg><i class="h">' + t.h + '</i><i class="m">' + t.m + '</i>';
+        if (el._h !== html) { el._h = html; el.innerHTML = html; }
+        el.setAttribute('data-over', over ? '1' : '0');
+        el.title = over ? 'Break overdue' : 'Time to the next break';
+      }
+      flip = (flip + 1) % 8;                       // ticks of 1 s: 4 cash, 4 break
+      h.classList.toggle('lb-brk-on', !!want && flip >= 4);
+    } catch (e) {}
+  }, 1000);
+
+  // ---- phone app: the run notification (run time, next break, Start / End break) ----
+  var cap = window.Capacitor;
+  if (!cap || typeof cap.isNativePlatform !== 'function' || !cap.isNativePlatform() || typeof cap.nativePromise !== 'function') return;
+  if (cap.PluginHeaders && !cap.PluginHeaders.some(function(x){ return x && x.name === 'LbNotify'; })) return;
+  var last = '';
+  function runLabel(){
+    try { if (window.lbHudTotals) { var r = window.lbHudTotals().run; if (r) return String(r).replace(/\s+/g, ' ').trim(); } } catch (e) {}
+    return '';
+  }
+  function send(force){
+    if (!window.lbNativeGps) return;
+    var bcl = window.lbBreakClock, st = null; try { st = bcl && bcl.state; } catch (e) {}
+    var v = bc(), now = Date.now(), title = 'Lukez Bunz', text = 'Tracking the run', buttons = false;
+    var run = runLabel();
+    if (st && st.start != null) {
+      var rt = hm(now - st.start);
+      title = (run ? run + ' · ' : '') + 'Run time ' + rt.h + ' ' + rt.m;
+      buttons = true;
+      if (v && v.mode === 'break') { var bt = hm(v.elapsed); text = 'On break ' + bt.h + ' ' + bt.m; }
+      else if (v && v.mode === 'working' && isFinite(v.remaining)) { var nt = hm(v.remaining); text = v.remaining <= 0 ? 'Break overdue by ' + nt.h + ' ' + nt.m : 'Next break in ' + nt.h + ' ' + nt.m; }
+    } else if (run) { title = run; }
+    var key = title + '|' + text + '|' + buttons;
+    if (!force && key === last) return;
+    last = key;
+    try { cap.nativePromise('LbNotify', 'update', { title: title, text: text, buttons: buttons }).catch(function(){}); } catch (e) {}
+  }
+  window.lbNotifyRefresh = function(){ send(true); };
+  // the GPS service puts its own plain notice back whenever it (re)starts: write ours over it every 20 s regardless
+  setInterval(function(){ send(false); }, 5000);
+  setInterval(function(){ send(true); }, 20000);
+  setTimeout(function(){ send(true); }, 4000);
+  try {
+    cap.addListener('LbNotify', 'action', function(d){
+      var a = d && d.a;
+      try {
+        if (a === 'breakStart' && window.lbBreakClock) { window.lbBreakClock.startBreak(); window.lbBreakClock.paint(); }
+        if (a === 'breakEnd' && window.lbBreakClock) { window.lbBreakClock.endBreak(); window.lbBreakClock.paint(); }
+      } catch (e) {}
+      setTimeout(function(){ send(true); }, 300);
+    });
+  } catch (e) {}
 })();
 </script>
 </body>

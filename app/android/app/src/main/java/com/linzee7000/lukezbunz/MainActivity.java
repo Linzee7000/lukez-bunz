@@ -1,6 +1,7 @@
 package com.linzee7000.lukezbunz;
 
 import android.annotation.SuppressLint;
+import android.os.Bundle;
 import android.content.Intent;
 import android.net.Uri;
 import android.os.Build;
@@ -16,6 +17,12 @@ public class MainActivity extends BridgeActivity {
     // the app comes to the front without the exemption it asks again with the system's own Allow / Deny box.
     // On the managed tablets Scalefusion can grant the exemption, and then this never shows.
     private long lastAsked = 0;
+
+    @Override
+    public void onCreate(Bundle savedInstanceState) {
+        registerPlugin(LbNotifyPlugin.class);   // the run notification with the break buttons
+        super.onCreate(savedInstanceState);
+    }
 
     @Override
     public void onResume() {
