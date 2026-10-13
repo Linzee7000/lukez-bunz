@@ -48592,27 +48592,32 @@ html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):no
     try { if (window.lbHudTotals) { var r = window.lbHudTotals().run; if (r) return String(r).replace(/\s+/g, ' ').trim(); } } catch (e) {}
     return '';
   }
+  function streamOf(){
+    var t = $('mapRunTitleText'), im = t && t.querySelector('img'), src = im ? String(im.getAttribute('src') || '') : '';
+    return /garbage/.test(src) ? 'garbage' : /recycl/.test(src) ? 'recycle' : /fogo/.test(src) ? 'fogo' : /litter/.test(src) ? 'litter' : '';
+  }
+  // The phone writes the times itself every 15 s (LbNotifyPlugin), so the page only sends when something changes:
+  // the run, its stream, the shift start, a break starting or ending, or when the next break is due.
   function send(force){
     if (!window.lbNativeGps) return;
     var bcl = window.lbBreakClock, st = null; try { st = bcl && bcl.state; } catch (e) {}
-    var v = bc(), now = Date.now(), title = 'Lukez Bunz', text = 'Tracking the run', buttons = false;
-    var run = runLabel();
-    if (st && st.start != null) {
-      var rt = hm(now - st.start);
-      title = (run ? run + ' · ' : '') + 'Run time ' + rt.h + ' ' + rt.m;
-      buttons = true;
-      if (v && v.mode === 'break') { var bt = hm(v.elapsed); text = 'On break ' + bt.h + ' ' + bt.m; }
-      else if (v && v.mode === 'working' && isFinite(v.remaining)) { var nt = hm(v.remaining); text = v.remaining <= 0 ? 'Break overdue by ' + nt.h + ' ' + nt.m : 'Next break in ' + nt.h + ' ' + nt.m; }
-    } else if (run) { title = run; }
-    var key = title + '|' + text + '|' + buttons;
+    var v = bc(), now = Date.now(), run = runLabel(), shift = !!(st && st.start != null);
+    var o = { run: run, stream: streamOf(), shift: shift, title: run || 'Lukez Bunz', text: 'Tracking the run', start: 0, onBreak: false, breakAt: 0, breakStart: 0 };
+    if (shift) {
+      o.start = st.start;
+      var lb = st.breaks && st.breaks.length ? st.breaks[st.breaks.length - 1] : null;
+      if (v && v.mode === 'break' && lb) { o.onBreak = true; o.breakStart = lb.s; }
+      else if (v && v.mode === 'working' && isFinite(v.remaining)) o.breakAt = Math.round((now + v.remaining) / 60000) * 60000;
+    }
+    var key = JSON.stringify(o);
     if (!force && key === last) return;
     last = key;
-    try { cap.nativePromise('LbNotify', 'update', { title: title, text: text, buttons: buttons }).catch(function(){}); } catch (e) {}
+    try { cap.nativePromise('LbNotify', 'update', o).catch(function(){}); } catch (e) {}
   }
   window.lbNotifyRefresh = function(){ send(true); };
-  // the GPS service puts its own plain notice back whenever it (re)starts: write ours over it every 20 s regardless
+  // the GPS service puts its own plain notice back whenever it (re)starts: send ours again every minute regardless
   setInterval(function(){ send(false); }, 5000);
-  setInterval(function(){ send(true); }, 20000);
+  setInterval(function(){ send(true); }, 60000);
   setTimeout(function(){ send(true); }, 4000);
   try {
     cap.addListener('LbNotify', 'action', function(d){
