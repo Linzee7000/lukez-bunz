@@ -17,6 +17,9 @@ import android.graphics.RectF;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
+import android.view.View;
+import android.widget.RemoteViews;
 
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
@@ -29,7 +32,8 @@ import com.getcapacitor.annotation.CapacitorPlugin;
  * It replaces the plain "Tracking the run" notice the background GPS service shows (same notification id and channel),
  * so there is only ever one. The page sends the times (when the shift started, when the next break is due, when the
  * break began) and the phone rewrites the text itself every 15 s, so the times keep up even with the screen off and the
- * page asleep. Written "07 11" like the app's clock - Android's own live counter can only show 7:11:22.
+ * page asleep. On Android 7 and later the run time and the break are live timers (to the second, 7:11:22 - Fox is fine
+ * with the colons for live seconds): a run-time count-up and a next-break count-down, which turns into "overdue by".
  */
 @CapacitorPlugin(name = "LbNotify")
 public class LbNotifyPlugin extends Plugin {
@@ -95,7 +99,9 @@ public class LbNotifyPlugin extends Plugin {
             else if (breakAt > 0) text = breakAt <= now ? "Break overdue by " + hm(now - breakAt) : "Next break in " + hm(breakAt - now);
             else text = "";
         }
-        String key = title + "|" + text + "|" + stream + "|" + shift;
+        boolean live = Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && shift && start > 0;
+        String state = onBreak ? "break" : (breakAt > 0 && breakAt <= now ? "over" : (breakAt > 0 ? "due" : "none"));
+        String key = live ? ("live|" + run + "|" + stream + "|" + start + "|" + state + "|" + breakAt + "|" + breakStart) : (title + "|" + text + "|" + stream + "|" + shift);
         if (key.equals(lastKey)) return;     // nothing has changed since the last write
         lastKey = key;
 
@@ -105,7 +111,32 @@ public class LbNotifyPlugin extends Plugin {
         if (icon == 0) icon = c.getResources().getIdentifier("ic_launcher", "mipmap", c.getPackageName());
         b.setSmallIcon(icon != 0 ? icon : android.R.drawable.ic_menu_mylocation);
         Bitmap lg = streamLogo(c);
-        if (lg != null) b.setLargeIcon(lg);
+        if (live) {
+            // our own body with two live timers; Android keeps drawing the header and the buttons round it
+            RemoteViews rv = new RemoteViews(c.getPackageName(), R.layout.lb_notify);
+            long el = SystemClock.elapsedRealtime();
+            rv.setTextViewText(R.id.lb_t1, (run.isEmpty() ? "" : run + " · ") + "Run time ");
+            rv.setChronometer(R.id.lb_c1, el - (now - start), null, true);
+            if (state.equals("break")) {
+                rv.setTextViewText(R.id.lb_t2, "On break ");
+                rv.setChronometer(R.id.lb_c2, el - (now - breakStart), null, true);
+                rv.setChronometerCountDown(R.id.lb_c2, false);
+            } else if (state.equals("due")) {
+                rv.setTextViewText(R.id.lb_t2, "Next break in ");
+                rv.setChronometer(R.id.lb_c2, el + (breakAt - now), null, true);
+                rv.setChronometerCountDown(R.id.lb_c2, true);
+            } else if (state.equals("over")) {
+                rv.setTextViewText(R.id.lb_t2, "Break overdue by ");
+                rv.setChronometer(R.id.lb_c2, el - (now - breakAt), null, true);
+                rv.setChronometerCountDown(R.id.lb_c2, false);
+            } else {
+                rv.setTextViewText(R.id.lb_t2, "");
+                rv.setViewVisibility(R.id.lb_c2, View.GONE);
+            }
+            if (lg != null) rv.setImageViewBitmap(R.id.lb_logo, lg); else rv.setViewVisibility(R.id.lb_logo, View.GONE);
+            b.setCustomContentView(rv);
+            b.setStyle(new Notification.DecoratedCustomViewStyle());
+        } else if (lg != null) b.setLargeIcon(lg);
         Intent open = c.getPackageManager().getLaunchIntentForPackage(c.getPackageName());
         if (open != null) {
             open.addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
