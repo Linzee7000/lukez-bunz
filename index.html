@@ -12373,6 +12373,10 @@ let siteReminders = JSON.parse(localStorage.getItem('siteReminders') || '{}');
   // Single tap target for a stream tab: flips it from shown->hidden or
   // hidden/filtered-out->shown (forcing it on in the latter case).
   window.toggleMapStreamTab = function(streamKey) {
+    if (lbOffRunNow) {
+      const fk = (typeof activeFilterStream !== 'undefined' && activeFilterStream) ? String(activeFilterStream).toLowerCase().replace('summerrecycling', 'recycling') : '';
+      if (fk && fk !== 'all' && streamKey.toLowerCase() !== fk) return;   // off the run only the stream being looked at opens its serials
+    }
     if (typeof lastTelemetrySite !== 'undefined' && lastTelemetrySite && isStreamShownAtAddress(streamKey, lastTelemetrySite)) {
       hiddenBinStreams.add(streamKey);
     } else {
@@ -17947,11 +17951,14 @@ window.addEventListener('DOMContentLoaded', async () => {
   // means - and it shows which runs collect the house as the stream tabs (logo + run number + week). The serials stay
   // hidden until a tab is tapped (that forces the stream's serials on, as it always has).
   const offRun = !!(site && !isSiteOnFilteredRun);
-  // ...except when the truck has stopped at an off-run house: then its serials show, with the + to add it to the run
+  // Serials are hidden by default when off the run, and only the stream being looked at (the filter) can show them, when its tab
+  // is tapped. Stopped at an off-run house the + to add it to the run shows, still without serials.
   const stoppedOff = offRun && (currentMapSpeedKmh || 0) < 3;
-  lbOffRunNow = offRun && !stoppedOff;
-  const mapBins = site && (!offRun || forcedBinStreams.size > 0 || stoppedOff)
-    ? window.buildBinsAtAddress(site, true, true, stoppedOff && forcedBinStreams.size === 0 ? new Set(['Garbage', 'Recycling', 'FOGO']) : forcedBinStreams)
+  lbOffRunNow = offRun;
+  const filtKey = (typeof activeFilterStream !== 'undefined' && activeFilterStream) ? (String(activeFilterStream).toLowerCase() === 'summerrecycling' ? 'Recycling' : String(activeFilterStream)) : '';
+  const offForced = new Set(); if (offRun) forcedBinStreams.forEach(k => { if (!filtKey || k.toLowerCase() === filtKey.toLowerCase()) offForced.add(k); });
+  const mapBins = site && (!offRun || offForced.size > 0)
+    ? window.buildBinsAtAddress(site, true, true, offRun ? offForced : forcedBinStreams)
     : '';
   const showSerials = Boolean(mapBins);
 
@@ -49443,8 +49450,6 @@ html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2.lb-hud:not(#m
 </style>
 <style id="lb-offrun-style">
 /* the bin box when the property is not on the run being driven: orange, bins still shown */
-#mapBinsAtAddress.lb-offrun{background:#c2410c !important;border-color:#fb923c !important;color:#fff !important}
-#mapBinsAtAddress.lb-offrun *{color:#fff !important}
 #mapBinsAtAddress .lb-offrun-add{align-self:flex-start;margin:4px 8px 6px;padding:4px 10px;border:0;border-radius:var(--ux-rad,6px);background:#fff;color:#c2410c !important;font-weight:800;font-size:13px;cursor:pointer}
 html body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #uxCardStack .map-address-telemetry.lb-offrun-card .address-telemetry-address-row{background:#f97316 !important;color:#000 !important}
 html body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #uxCardStack .map-address-telemetry.lb-offrun-card{border-color:#f97316 !important}
@@ -49453,5 +49458,56 @@ html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x
 @media (orientation: landscape) and (max-height: 520px){html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbCluster .rb-spd b{font-size:42px !important}}
 html body.ux2.lb-startfab-away:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h):not(#mn-i) #lbStartFab{display:none !important}
 </style>
+<style id="lb-firstload-style">
+/* first download of the runs: a full-screen "Downloading runs" with the three bins bouncing along a moving road */
+#lbFirstLoad{position:fixed;inset:0;z-index:2147483000;display:none;flex-direction:column;align-items:center;justify-content:center;gap:18px;background:var(--rb-bg,#0b0d10);color:#fff;font-family:inherit;padding:24px;text-align:center}
+#lbFirstLoad.on{display:flex}
+#lbFirstLoad .fl-t{font-size:26px;font-weight:900;letter-spacing:.06em;text-transform:uppercase}
+#lbFirstLoad .fl-s{font-size:14px;opacity:.8;min-height:1.3em;max-width:320px}
+#lbFirstLoad .fl-bins{display:flex;gap:14px;height:64px;align-items:flex-end}
+#lbFirstLoad .fl-b{width:48px;height:48px;border-radius:10px;display:flex;align-items:center;justify-content:center;animation:lbFlBounce .9s ease-in-out infinite}
+#lbFirstLoad .fl-b i{width:30px;height:30px;background:#000;-webkit-mask:var(--m) center/contain no-repeat;mask:var(--m) center/contain no-repeat}
+#lbFirstLoad .fl-b:nth-child(1){background:#ff4b3e}#lbFirstLoad .fl-b:nth-child(1) i{background:#fff}
+#lbFirstLoad .fl-b:nth-child(2){background:#ffd21f;animation-delay:.15s}
+#lbFirstLoad .fl-b:nth-child(3){background:#2ecc62;animation-delay:.3s}
+@keyframes lbFlBounce{0%,100%{transform:translateY(0)}50%{transform:translateY(-16px)}}
+#lbFirstLoad .fl-road{position:relative;width:min(320px,80vw);height:10px;border-radius:5px;background:#2a2f37;overflow:hidden}
+#lbFirstLoad .fl-road::before{content:"";position:absolute;left:0;right:0;top:4px;height:2px;background:repeating-linear-gradient(90deg,#ffd21f 0 16px,transparent 16px 32px);animation:lbFlRoad .6s linear infinite}
+@keyframes lbFlRoad{to{transform:translateX(-32px)}}
+#lbFirstLoad .fl-bar{width:min(320px,80vw);height:8px;border-radius:4px;background:#2a2f37;overflow:hidden}
+#lbFirstLoad .fl-bar i{display:block;height:100%;width:8%;background:var(--rb-a,#ffd21f);transition:width .4s}
+#lbFirstLoad button{margin-top:6px;padding:7px 14px;border:0;border-radius:8px;background:#f28c38;color:#000;font-weight:800;font-size:14px}
+@media (prefers-reduced-motion:reduce){#lbFirstLoad *{animation:none !important}}
+</style>
+<script id="lb-firstload-script">
+(function(){
+  // Shown only while there are no runs on this phone yet (the very first download); gone as soon as they arrive.
+  var el = null, shown = false, dismissed = false;
+  function have(){ try { return typeof siteRecords !== 'undefined' && siteRecords.length > 0; } catch (e) { return false; } }
+  function build(){
+    if (el) return; el = document.createElement('div'); el.id = 'lbFirstLoad'; el.setAttribute('role', 'status');
+    el.innerHTML = '<div class="fl-bins"><span class="fl-b"><i style="--m:url(garbage.png)"></i></span><span class="fl-b"><i style="--m:url(recycle.png)"></i></span><span class="fl-b"><i style="--m:url(fogo.png)"></i></span></div>' +
+      '<div class="fl-road"></div><div class="fl-t">Downloading runs</div><div class="fl-s" id="lbFlS">This only happens the first time</div><div class="fl-bar"><i id="lbFlB"></i></div>';
+    document.body.appendChild(el);
+  }
+  function tick(){
+    try {
+      if (have()) { if (shown) { shown = false; el.classList.remove('on'); } return; }
+      if (dismissed || document.readyState === 'loading' || !document.body) return;
+      build();
+      var sm = document.getElementById('syncStatusMsg'), pf = document.getElementById('pBarFill'), s = el.querySelector('#lbFlS'), b = el.querySelector('#lbFlB');
+      var txt = sm && sm.style.display !== 'none' ? (sm.textContent || '').trim() : '';
+      if (!shown) { shown = true; el.classList.add('on'); }
+      if (/⚠/.test(txt)) {
+        // the download failed: say so and let the person through (the CSV fallback button is in the sync message)
+        if (s.textContent !== txt.replace(/Select master CSV file/, '').trim()) s.textContent = txt.replace(/Select master CSV file/, '').trim();
+        if (!el.querySelector('button')) { var bt = document.createElement('button'); bt.type = 'button'; bt.textContent = 'Close'; bt.onclick = function(){ dismissed = true; shown = false; el.classList.remove('on'); }; el.appendChild(bt); }
+      } else if (txt && s.textContent !== txt) s.textContent = txt.replace(/^Step \d\/\d:\s*/, '');
+      var w = pf && pf.style.width ? pf.style.width : '8%'; if (b.style.width !== w && parseFloat(w) > 0) b.style.width = w;
+    } catch (e) {}
+  }
+  setInterval(tick, 400);
+})();
+</script>
 </body>
 </html>

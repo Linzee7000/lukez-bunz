@@ -99,9 +99,11 @@ public class LbNotifyPlugin extends Plugin {
             else if (breakAt > 0) text = breakAt <= now ? "Break overdue by " + hm(now - breakAt) : "Next break in " + hm(breakAt - now);
             else text = "";
         }
-        boolean live = Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && shift && start > 0;
+        boolean working = shift && start > 0;
+        // (always our own body from Android 7: on shift two live timers, off shift a live clock)
+        boolean live = Build.VERSION.SDK_INT >= Build.VERSION_CODES.N;
         String state = onBreak ? "break" : (breakAt > 0 && breakAt <= now ? "over" : (breakAt > 0 ? "due" : "none"));
-        String key = live ? ("live|" + run + "|" + stream + "|" + start + "|" + state + "|" + breakAt + "|" + breakStart) : (title + "|" + text + "|" + stream + "|" + shift);
+        String key = live ? ("live|" + working + "|" + run + "|" + stream + "|" + start + "|" + state + "|" + breakAt + "|" + breakStart) : (title + "|" + text + "|" + stream + "|" + shift + "|" + run);
         if (key.equals(lastKey)) return;     // nothing has changed since the last write
         lastKey = key;
 
@@ -115,6 +117,14 @@ public class LbNotifyPlugin extends Plugin {
             // our own body with two live timers; Android keeps drawing the header and the buttons round it
             RemoteViews rv = new RemoteViews(c.getPackageName(), R.layout.lb_notify);
             long el = SystemClock.elapsedRealtime();
+            if (!working) {
+                // not on a shift: the run, and the time of day ticking along live
+                rv.setTextViewText(R.id.lb_t1, (run.isEmpty() ? "" : run + " · ") + plainText);
+                rv.setViewVisibility(R.id.lb_c1, View.GONE);
+                rv.setTextViewText(R.id.lb_t2, "");
+                rv.setViewVisibility(R.id.lb_c2, View.GONE);
+                rv.setViewVisibility(R.id.lb_clk, View.VISIBLE);
+            } else {
             rv.setTextViewText(R.id.lb_t1, (run.isEmpty() ? "" : run + " · ") + "Run time ");
             rv.setChronometer(R.id.lb_c1, el - (now - start), null, true);
             if (state.equals("break")) {
@@ -132,6 +142,7 @@ public class LbNotifyPlugin extends Plugin {
             } else {
                 rv.setTextViewText(R.id.lb_t2, "");
                 rv.setViewVisibility(R.id.lb_c2, View.GONE);
+            }
             }
             if (lg != null) rv.setImageViewBitmap(R.id.lb_logo, lg); else rv.setViewVisibility(R.id.lb_logo, View.GONE);
             b.setCustomContentView(rv);
@@ -153,7 +164,8 @@ public class LbNotifyPlugin extends Plugin {
     // the run's stream as the app's run chips show it: its logo in a box of the stream's colour
     private Bitmap streamLogo(Context c) {
         if (stream == null || stream.isEmpty()) return null;
-        if (stream.equals(logoFor)) return logo;
+        String lk = stream + "|" + run;
+        if (lk.equals(logoFor)) return logo;
         String res; int bg; boolean white;
         switch (stream) {
             case "garbage": res = "lb_garbage"; bg = Color.parseColor("#ff4d3d"); white = true; break;
@@ -176,8 +188,23 @@ public class LbNotifyPlugin extends Plugin {
         lp.setColorFilter(new PorterDuffColorFilter(white ? Color.WHITE : Color.BLACK, PorterDuff.Mode.SRC_IN));
         float sc = Math.min(n * 0.62f / src.getWidth(), n * 0.62f / src.getHeight());
         float w = src.getWidth() * sc, h = src.getHeight() * sc;
+        String label = run == null ? "" : run.replaceAll("\\s+", "").toUpperCase(java.util.Locale.ROOT);
+        if (!label.isEmpty()) {
+            // the whole run number (227B) in the stream's colour box, in place of the logo
+            Paint tp = new Paint(Paint.ANTI_ALIAS_FLAG);
+            tp.setColor(white ? Color.WHITE : Color.BLACK);
+            tp.setTypeface(android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD));
+            tp.setTextAlign(Paint.Align.CENTER);
+            float ts = n * 0.62f;
+            tp.setTextSize(ts);
+            float tw = tp.measureText(label);
+            if (tw > n * 0.88f) { ts = ts * n * 0.88f / tw; tp.setTextSize(ts); }
+            cv.drawRoundRect(new RectF(0, 0, n, n), n * 0.18f, n * 0.18f, p);
+            Paint.FontMetrics fm = tp.getFontMetrics();
+            cv.drawText(label, n / 2f, n / 2f - (fm.ascent + fm.descent) / 2f, tp);
+        } else
         cv.drawBitmap(src, null, new RectF((n - w) / 2, (n - h) / 2, (n + w) / 2, (n + h) / 2), lp);
-        logo = out; logoFor = stream;
+        logo = out; logoFor = lk;
         return out;
     }
 
