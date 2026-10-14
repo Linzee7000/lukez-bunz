@@ -41789,11 +41789,15 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
   function money(n){ return '$' + Math.round(n).toLocaleString('en-AU'); }
   // What the right-hand box takes turns showing. Only what there is a number for: km, bins an hour
   // and fines need a shift (and fines need Game mode).
-  function statList(){
+  // wide: the cluster has room for two boxes each side of the speed, so "Bins to go" and "Streets to go" have boxes of
+  // their own (paintCluster) and the one that takes turns only has the rest (km, bins an hour, fines).
+  function statList(wide){
     var out = [], HT = null, sh = shift();
     try { HT = window.lbHudTotals ? window.lbHudTotals() : null; } catch (e) {}
-    if (HT && HT.run) out.push({ k: 'togo', l: 'Bins to go', v: Math.max(0, (HT.bins || 0) - doneCount()) });
-    var sg = streetsToGo(); if (sg != null && HT && HT.run) out.push({ k: 'streets', l: 'Streets to go', v: sg });
+    if (!wide) {
+      if (HT && HT.run) out.push({ k: 'togo', l: 'Bins to go', v: Math.max(0, (HT.bins || 0) - doneCount()) });
+      var sg = streetsToGo(); if (sg != null && HT && HT.run) out.push({ k: 'streets', l: 'Streets to go', v: sg });
+    }
     var r = null; try { r = window.uxShiftRates ? window.uxShiftRates() : null; } catch (e) {}
     if (r) {
       out.push({ k: 'km', l: 'Km driven', v: r.km < 100 ? r.km.toFixed(1) : Math.round(r.km) });
@@ -41804,7 +41808,7 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
       var f = 0; try { var S = window.uxGta.stats(); if (S.led && S.led.shift === sh.id) f = S.led.fines || 0; } catch (e) {}
       out.push({ k: 'fines', l: 'Fines', v: money(f) });
     }
-    if (!out.length) out.push({ k: 'none', l: 'Bins to go', v: '-' });
+    if (!out.length) out.push(wide ? { k: 'km', l: 'Km driven', v: '-' } : { k: 'none', l: 'Bins to go', v: '-' });   // (wide: the box is always there, so it says what it will count once a shift is going)
     return out;
   }
 
@@ -41816,10 +41820,19 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
     if (el && el.parentNode === stack && stack.lastElementChild === el) return el;
     if (!el) {
       el = document.createElement('div'); el.id = 'rbCluster';
+      // Two boxes each side of the speed on a wide screen (a folded-out phone, a tablet): #rbTruck + #rbBins on the left,
+      // #rbStreets + #rbStat on the right. On a narrow screen (and in Speedo, whose round dials have no room) #rbBins and
+      // #rbStreets (.rb-x) are hidden and #rbStat takes turns over everything, as it always did (data-wide, below).
       el.innerHTML = '<div class="rb-hz" aria-hidden="true"></div><div class="rb-cl">' +
-        '<button type="button" class="rb-ct" id="rbTruck"><span class="rb-k">On truck</span><b>-</b></button>' +
+        '<div class="rb-gl">' +
+          '<button type="button" class="rb-ct" id="rbTruck"><span class="rb-k">On truck</span><b>-</b></button>' +
+          '<button type="button" class="rb-ct rb-x" id="rbBins"><span class="rb-k">Bins to go</span><b>-</b></button>' +
+        '</div>' +
         '<div class="rb-spd" id="rbSpd"><svg class="rb-arc" viewBox="0 0 220 124" aria-hidden="true"><path class="t" d="M20 114A90 90 0 0 1 200 114"/><path class="a" d="M20 114A90 90 0 0 1 200 114"/></svg><i class="rb-lim" id="rbLim" aria-hidden="true"></i><b id="rbSpdN">0</b><span>km/h</span></div>' +
-        '<button type="button" class="rb-ct" id="rbStat" title="Tap for the next number"><span class="rb-k"></span><b></b><span class="rb-pips" aria-hidden="true"></span></button>' +
+        '<div class="rb-gr">' +
+          '<button type="button" class="rb-ct rb-x" id="rbStreets"><span class="rb-k">Streets to go</span><b>-</b></button>' +
+          '<button type="button" class="rb-ct" id="rbStat" title="Tap for the next number"><span class="rb-k"></span><b></b><span class="rb-pips" aria-hidden="true"></span></button>' +
+        '</div>' +
         '</div>';
       el.addEventListener('click', function(ev){
         var t = ev.target.closest ? ev.target.closest('button') : null; if (!t) return;
@@ -41846,6 +41859,21 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
     txt(tk.querySelector('.rb-k'), lab); txt(tk.querySelector('b'), val);
     attr(tk, 'aria-label', lab + ' ' + val);
     attr(tk, 'data-n', String(val).length);          // how many characters: Speedo's round dials shrink long ones
+    // Wide enough for two boxes each side of the speed? (Speedo never: its round dials are big.) A little slack either
+    // way so a box that is right on the edge doesn't flip back and forth.
+    var cw = el.clientWidth, wide = !speedo() && cw > 0 && (el._wide ? cw >= 500 : cw >= 520);
+    el._wide = wide; attr(el, 'data-wide', wide ? '1' : '0');
+    if (wide) {
+      // Collected / On truck and Bins to go on the left, Streets to go on the right, each in a box of its own
+      var HT = null; try { HT = window.lbHudTotals ? window.lbHudTotals() : null; } catch (e) {}
+      var hasRun = !!(HT && HT.run), sg = hasRun ? streetsToGo() : null;
+      [['rbBins', 'Bins to go', hasRun ? Math.max(0, (HT.bins || 0) - doneCount()) : '-'], ['rbStreets', 'Streets to go', sg != null ? sg : '-']].forEach(function(r){
+        var bx = $(r[0]); if (!bx) return;
+        txt(bx.querySelector('.rb-k'), r[1]); txt(bx.querySelector('b'), r[2]);
+        attr(bx, 'aria-label', r[1] + ' ' + r[2]); attr(bx, 'data-n', String(r[2]).length);
+        if (!speedo()) fitB(bx);
+      });
+    }
     // speed, and the limit where the map has one
     var sp = Math.round(+g('currentMapSpeedKmh') || 0), lim = limitNow(), box = $('rbSpd');
     txt($('rbSpdN'), sp);
@@ -41856,7 +41884,7 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
     var arc = box.querySelector('.rb-arc .a');
     if (arc) arc.style.strokeDasharray = Math.round(Math.min(1, sp / 80) * 283) + ' 283';
     // the box that takes turns
-    var list = statList(), now = Date.now();
+    var list = statList(wide), now = Date.now();
     if (now > statHold && now - (paintCluster._t || 0) >= TURN) { paintCluster._t = now; statAt++; }
     var s = list[statAt % list.length], st = $('rbStat');
     txt(st.querySelector('.rb-k'), s.l); txt(st.querySelector('b'), s.v);
@@ -49000,18 +49028,31 @@ html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2.lb-hud:not(#m
   var SV = function(p){ return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" aria-hidden="true">' + p + '</svg>'; };   // (the same line weight as the menus' squares)
   var CUP = SV('<path d="M5 8h11v6a4 4 0 0 1-4 4H9a4 4 0 0 1-4-4z"/><path d="M16 10h2a2 2 0 0 1 0 4h-2"/><path d="M8 3v2M12 3v2"/>');
   var TRUCK = '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M2 6h12v9H2zM14 9h4l3 3v3h-7z"/><circle cx="6" cy="17" r="2"/><circle cx="17" cy="17" r="2"/></svg>';
+  // (Fox: the green square is a start button until a shift is going, then the coffee cup for the break; the blue one opens
+  //  "Check out a run" - the same wizard as the menu's - instead of the search box)
+  var PLAY = SV('<path d="M7 5l12 7-12 7z"/>');
   var SQ = [
     ['menu', 'var(--rb-red,#ff4b3e)', SV('<path d="M4 7h16M4 12h16M4 17h16"/>'), 'Menu'],
     ['layers', 'var(--rb-yel,#ffd21f)', SV('<path d="M12 3l9 5-9 5-9-5 9-5z"/><path d="M3 13l9 5 9-5"/>'), 'Layers'],
-    ['shift', 'var(--rb-grn,#2ecc62)', CUP, 'Shift'],
-    ['search', 'var(--rb-blu,#4f8bff)', SV('<circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5L21 21"/>'), 'Search']
+    ['shift', 'var(--rb-grn,#2ecc62)', PLAY, 'Start shift'],
+    ['search', 'var(--rb-blu,#4f8bff)', SV('<circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5L21 21"/>'), 'Check out a run']
   ];
+  // the menu's "Check out a run" row: open the menu, then press that row once it has been drawn
+  function openExplore(){
+    try { if (window.lbOpenDrawer) window.lbOpenDrawer(); } catch (e) {}
+    var n = 0;
+    (function press(){
+      var b = document.querySelector('#lbDrawer button[data-act="explore"]');
+      if (b) { try { b.click(); } catch (e) {} return; }
+      if (++n < 25) setTimeout(press, 60);
+    })();
+  }
   var hud = null, E = {};
   function build(){
     if (hud) return;
     hud = document.createElement('div'); hud.id = 'lbHud'; hud.setAttribute('data-rows', '3');
     hud.innerHTML = '<div class="bg"></div>' +
-      '<div class="r r1"><div class="tb tm"><span class="val" data-e="clk"><span class="h"></span><span class="m"></span><span class="sx"><i></i><i></i><u></u></span></span></div>' +
+      '<div class="r r1"><div class="ttl">Lukez Bunz</div><div class="tb tm"><span class="val" data-e="clk"><span class="h"></span><span class="m"></span><span class="sx"><i></i><i></i><u></u></span></span></div>' +
       '<div class="sqs">' + SQ.map(function(q){ return '<button type="button" class="sq" data-sq="' + q[0] + '" aria-label="' + q[3] + '" title="' + q[3] + '"><span class="a" style="background:' + q[1] + '">' + q[2] + '</span><span class="b"></span></button>'; }).join('') + '</div></div>' +
       '<div class="r r2"><div class="tb brk"><span class="lab" data-e="blab">BREAK</span><span class="val" data-e="bv"><span class="h"></span><span class="m"></span><span class="sx"><i></i><i></i><u></u></span></span></div>' +
       '<div class="tb cash"><span class="lab">CASH</span><span class="val" data-e="cash"></span></div></div>' +
@@ -49026,7 +49067,7 @@ html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2.lb-hud:not(#m
         if (a === 'menu') { if (window.uxOpenNav) window.uxOpenNav(); else if (window.lbOpenDrawer) window.lbOpenDrawer(); }
         if (a === 'layers' && window.lbOpenLayers) window.lbOpenLayers();
         if (a === 'shift' && window.uxShiftOpen) window.uxShiftOpen();
-        if (a === 'search' && window.lbOpenDrawer) { window.lbOpenDrawer(); setTimeout(function(){ var i = $('lbDrawerInput'); if (i) try { i.focus(); } catch (e) {} }, 60); }
+        if (a === 'search') openExplore();
         if (a === 'hazard') { var hz = $('uxHazardBtn'); if (hz) hz.click(); }
       } catch (e) { console.warn('hud', e); }
     });
@@ -49055,6 +49096,14 @@ html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2.lb-hud:not(#m
     digits(E.clk, p2(d.getHours()), p2(d.getMinutes()), p2(d.getSeconds()), String(Math.floor(d.getMilliseconds() / 100)));
     var BC = window.lbBreakClock, v = null, st = null; try { v = BC.view(); st = BC.state; } catch (e) {}
     var shift = !!(v && v.mode && v.mode !== 'idle' && st && st.start);
+    // the green square: start icon off shift, coffee cup on shift
+    var onShift = shift; try { if (!onShift && window.uxShiftState && window.uxShiftState()) onShift = true; } catch (e) {}
+    if (hud._sh !== onShift) {
+      hud._sh = onShift;
+      var shb = hud.querySelector('[data-sq="shift"]'), sha = shb && shb.querySelector('.a'), shl = onShift ? 'Shift' : 'Start shift';
+      if (sha) sha.innerHTML = onShift ? CUP : PLAY;
+      if (shb) { shb.setAttribute('aria-label', shl); shb.title = shl; }
+    }
     var cashEl = document.querySelector('#uxGtaHealth .uxgh-cash'), cashTxt = cashEl ? (cashEl.textContent || '').trim() : '';
     var rows = shift ? '3' : '1'; if (hud.getAttribute('data-rows') !== rows) hud.setAttribute('data-rows', rows);
     var H = rows === '3' ? '115px' : '50px'; if (document.body.style.getPropertyValue('--lb-hud-h') !== H) document.body.style.setProperty('--lb-hud-h', H);
@@ -49211,5 +49260,40 @@ body.lb-pswap :is(.modal-overlay,.modal-overlay > .modal-box){animation:none !im
   });
 })();
 </script>
+<style id="lb-fold-style">
+/* ============ Oct 2026 (Fox): more room on a folded-out phone / tablet, and no stretched boxes.
+   - The dash cluster's boxes are as wide as their text plus the same padding on every side (they used to be
+     stretched across a third of the screen each), and with room for them there are two each side of the speed:
+     Collected / On truck + Bins to go on the left, Streets to go + the box that takes turns (km, bins an hour,
+     fines) on the right, so nothing has to be scrolled through. paintCluster sets data-wide on #rbCluster when the
+     cluster is about 520 px or wider; narrower (a phone upright) it is the three boxes it was, just not stretched.
+     Speedo keeps its round dials: the two extra boxes stay hidden there.
+   - The top bar: "Lukez Bunz" on the left with the clock in the middle of the screen and the squares on the right,
+     when the screen is 560 px or wider. */
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-y) #rbCluster .rb-cl{grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);align-items:stretch;gap:8px}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-y) #rbCluster :is(.rb-gl,.rb-gr){display:flex;align-items:stretch;gap:8px;min-width:0}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-y) #rbCluster .rb-gl{justify-content:flex-end}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-y) #rbCluster .rb-gr{justify-content:flex-start}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-y) #rbCluster .rb-ct,
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-y) #rbCluster #rbStat{position:relative;flex:0 1 auto;width:auto;min-width:64px;height:auto;margin:0;padding:8px;align-items:center;justify-content:center;gap:3px;text-align:center;box-sizing:border-box}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-y) #rbCluster .rb-ct .rb-k{white-space:nowrap;max-width:100%}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-y) #rbCluster .rb-spd{flex:none;width:96px;height:auto;margin-top:0;box-sizing:border-box}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-y) #rbCluster .rb-pips{top:4px;right:5px;bottom:auto;transform:none;flex-direction:row;gap:2px}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-y) #rbCluster .rb-pips i{width:3px;height:3px}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-y) #rbCluster .rb-x{display:none}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-y) #rbCluster[data-wide="1"] .rb-x{display:flex}
+/* Speedo: the groups are transparent to its grid (it lays out three round dials itself) and the extra boxes stay away */
+html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-y) #rbCluster :is(.rb-gl,.rb-gr){display:contents}
+html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-y) #rbCluster .rb-x{display:none !important}
+
+/* the top bar */
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2.lb-hud:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h) #lbHud .ttl{display:none;justify-self:start;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-size:22px;line-height:1;color:var(--rb-a,#ffd21f);text-shadow:0 0 1px #000,2px 2px 0 #000,-1px -1px 0 #000,1px -1px 0 #000,-1px 1px 0 #000}
+@media (min-width: 560px){
+  html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2.lb-hud:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h) #lbHud .r1{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);align-items:center;gap:8px}
+  html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2.lb-hud:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h) #lbHud .r1 .ttl{display:block}
+  html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2.lb-hud:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h) #lbHud .r1 .tb.tm{flex:none;width:auto;justify-self:center}
+  html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2.lb-hud:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h) #lbHud .r1 .sqs{justify-self:end}
+}
+</style>
 </body>
 </html>
