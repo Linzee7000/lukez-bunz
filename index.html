@@ -17935,8 +17935,11 @@ window.addEventListener('DOMContentLoaded', async () => {
   if (hudRunsEl) hudRunsEl.innerHTML = buildRunsAtAddress(site, false);
 
   const isSiteOnFilteredRun = site && (typeof siteMatchesAllActiveFilters === 'function' ? siteMatchesAllActiveFilters(site) : true);
-  const mapBins = site && (isSiteOnFilteredRun || forcedBinStreams.size > 0)
-    ? window.buildBinsAtAddress(site, true, true, forcedBinStreams)
+  // The bins are ALWAYS shown for the property you are at. Off your run (or with no run picked) the box is orange - that
+  // is all orange means - and every stream's bins show, since none of them is "yours" there.
+  const offRun = !!(site && !isSiteOnFilteredRun);
+  const mapBins = site
+    ? window.buildBinsAtAddress(site, true, true, (offRun && forcedBinStreams.size === 0) ? new Set(['Garbage', 'Recycling', 'FOGO']) : forcedBinStreams)
     : '';
   const showSerials = Boolean(mapBins);
 
@@ -17979,7 +17982,15 @@ window.addEventListener('DOMContentLoaded', async () => {
 
   const mapBinsEl = document.getElementById('mapBinsAtAddress');
   if (mapBinsEl) {
-    mapBinsEl.innerHTML = (showSerials ? mapBins : '') + unassignedBinBannerHtml;
+    // Stopped at a property that isn't on the run: a + to put it on the run being driven (one run picked, one stream)
+    let addHtml = '';
+    if (offRun && site && activeFilterStream && STREAM_RUN_FIELD[activeFilterStream] && selectedRunsSet && selectedRunsSet.size === 1
+        && ((site.soloStreams && site.soloStreams[activeFilterStream]) || []).length > 0 && (currentMapSpeedKmh || 0) < 3) {
+      const pid = esc(String(site.propId || site.siteId || '')), rn = Array.from(selectedRunsSet)[0].toUpperCase();
+      addHtml = `<button type="button" class="lb-offrun-add" onclick="event.stopPropagation(); window.quickAssignBinToCurrentRun('${pid}', '${esc(activeFilterStream)}', '${esc(rn)}')">+ Add to run ${esc(rn)}</button>`;
+    }
+    mapBinsEl.classList.toggle('lb-offrun', offRun);
+    mapBinsEl.innerHTML = (showSerials ? mapBins : '') + addHtml + unassignedBinBannerHtml;
     mapBinsEl.style.display = 'flex';
     mapBinsEl.style.flexDirection = 'column';
     if (typeof requestAnimationFrame === 'function') {
@@ -26098,6 +26109,35 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
   setInterval(tick, TICK_MS);
 
   window.lbNextBin = nextBin;
+
+  // The house beside the truck on one side, on the street it is driving - for the L/R numbers in the street box.
+  // It looks at EVERY property, not just the run's: the old way came from nextBin(), which only knows the run's own bins,
+  // so on a street the run doesn't use it fell through to "the next street ahead" and both sides showed the same house
+  // on another road. Here a side only ever shows a house on this street, on that side of the truck, and an empty side
+  // stays empty. Works off a run and off shift.
+  window.lbSideHouse = function (truck, heading, side, streetName) {
+    try {
+      if (!truck) return null;
+      const want = normStreet(streetName || '');
+      const hr = heading * Math.PI / 180, hx = Math.sin(hr), hy = Math.cos(hr);
+      let best = null, bestScore = Infinity;
+      const recs = records();
+      for (let i = 0; i < recs.length; i++) {
+        const s = recs[i], pos = posOf(s);
+        if (!pos || Math.abs(pos.lat - truck.lat) > 0.0007) continue;
+        const sid = streetIdOf(s);
+        if (want && (!sid || sid.name !== want)) continue;
+        const v = local(pos, truck), d = Math.hypot(v.x, v.y);
+        if (d > 45) continue;
+        const along = hx * v.x + hy * v.y, left = hx * v.y - hy * v.x;
+        if ((left > 0 ? 'L' : 'R') !== side) continue;
+        if (Math.abs(left) < 1.5) continue;                    // on the road line itself, no side
+        const score = Math.abs(along + 4) + Math.abs(left) * .3;   // level with the bin arm, a little behind the cab
+        if (score < bestScore && houseNo(s)) { bestScore = score; best = s; }
+      }
+      return best ? houseNo(best) : null;
+    } catch (e) { return null; }
+  };
   window.lbStreetStats = {
     refresh: tick,
     _t: { normStreet, houseNo, parseLineNo, classify, tally, pickStreet, setSites, getEntry, angDiff, local,
@@ -30483,13 +30523,14 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     }
     var loc = null; try { loc = userCurrentLocation; } catch (e) {}
     var rec = { id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), ts: Date.now(), scope: 'driver', code: act, label: label, serial: '', stream: '', propId: '', address: '', street: gpsStreet() || '', run: runLabel(),
-      lat: loc ? +loc.lat.toFixed(6) : null, lng: loc ? +loc.lng.toFixed(6) : null, note: clean(($('uxiNote') || {}).value), media: [], driver: d.name || '', synced: false };
+      lat: loc ? +loc.lat.toFixed(6) : null, lng: loc ? +loc.lng.toFixed(6) : null, note: clean(($('uxiNote') || {}).value), media: (cur.media || []).slice(), driver: d.name || '', synced: false };
+    cur.media = [];
     var log0 = log; log0.push(rec); saveLog(log0);
     var who = (d.name || 'Driver') + (d.emp ? ' (' + d.emp + ')' : '') + (truck ? ' · truck ' + truck : '');
     var to = act === 'help' ? ['ops', 'lead'] : ['lead', 'ops'];
     var subj = (act === 'help' ? 'HELP NEEDED' : label.toUpperCase()) + ': ' + who;
     var text = subj + (rec.street ? '\nNear ' + rec.street : '') + (rec.lat ? '\nhttps://maps.google.com/?q=' + rec.lat + ',' + rec.lng : '') + (rec.run ? '\nRun ' + rec.run : '') + (rec.note ? '\n' + rec.note : '');
-    try { if (window.lbOutbox) window.lbOutbox.send({ rid: 'i_' + rec.id, kind: 'driver-' + act, urgent: act === 'help' || act === 'injury', to: to, subject: subj, text: text, data: { driver: d.name || '', emp: d.emp || '', truck: truck, lat: rec.lat, lng: rec.lng, ts: rec.ts }, delayMs: 6000 }); } catch (e) {}
+    try { if (window.lbOutbox) window.lbOutbox.send({ rid: 'i_' + rec.id, kind: 'driver-' + act, urgent: act === 'help' || act === 'injury', to: to, subject: subj, text: text, data: { driver: d.name || '', emp: d.emp || '', truck: truck, lat: rec.lat, lng: rec.lng, ts: rec.ts }, media: rec.media, delayMs: 6000 }); } catch (e) {}
     closeIssue(); cache.__hk = null; tick();
     toast(label + ' · sent to ' + (act === 'help' ? 'ops and leading hand' : 'leading hand and ops'), function(){
       log = log.filter(function(i){ return i.id !== rec.id; }); saveLog(log); cache.__hk = null; tick();
@@ -30584,6 +30625,19 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   }
   window.uxOpenIssue = openIssue;
 
+  // The reminder uses the app's own site reminders (shown when the truck is next at the address), keyed by property.
+  // It never overwrites a reminder somebody already set: the check is added to the end of it.
+  function addCheckReminder(rec){
+    try {
+      var all = JSON.parse(localStorage.getItem('siteReminders') || '{}') || {}, key = rec.propId;
+      var msg = 'Check the ' + (rec.serial ? 'bin ' + rec.serial : 'bin') + ' (contamination etc.): ' + (rec.label || 'issue') + ' logged ' + new Date(rec.ts).toLocaleDateString('en-AU', { day: 'numeric', month: 'short' });
+      var ex = all[key];
+      if (ex && ex.message) { if (ex.message.indexOf(msg) < 0) ex.message = ex.message + ' | ' + msg; }
+      else all[key] = { message: msg, triggerDate: null, created: Date.now() };
+      localStorage.setItem('siteReminders', JSON.stringify(all));
+      try { if (typeof siteReminders !== 'undefined') siteReminders = all; } catch (e) {}
+    } catch (e) {}
+  }
   function commit(code, label){
     var site = cur.site || S.site;
     var loc = null; try { loc = userCurrentLocation; } catch (e) {}
@@ -30603,12 +30657,16 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     log.push(rec); saveLog(log);
     // a damaged bin goes to operations / bin maintenance (a few seconds later, so Undo can stop it)
     if (rec.scope === 'bin' && rec.code === 'broken') { try { if (window.lbOutbox) window.lbOutbox.report('bin', rec); } catch (e) {} }
+    // ...and every issue goes to the leading hand straight away, photos included
+    try { if (window.lbOutbox) window.lbOutbox.report('issue', rec); } catch (e) {}
+    // a bin or house issue: a reminder at the address so the next collection checks the bin (contamination etc.)
+    try { if (rec.propId && (rec.scope === 'bin' || rec.scope === 'house')) addCheckReminder(rec); } catch (e) {}
     closeIssue();
     cache.__hk = null; tick();
     var what = cur.scope === 'bin' ? (cur.serial || 'bin') : cur.scope === 'house' ? (rec.address || 'house') : (rec.street || 'street');
     toast(rec.label + ' · ' + what, function(){
       log = log.filter(function(i){ return i.id !== rec.id; }); saveLog(log); cache.__hk = null; tick();
-      try { if (window.lbOutbox) window.lbOutbox.cancel('i_' + rec.id); } catch (e) {}
+      try { if (window.lbOutbox) { window.lbOutbox.cancel('i_' + rec.id); window.lbOutbox.cancel('il_' + rec.id); } } catch (e) {}
     });
   }
 
@@ -31120,7 +31178,32 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     });
     ov.addEventListener('click', function(ev){ if (ev.target === ov || (ev.target.closest && ev.target.closest('.drv-view-x'))) ov.remove(); });
   }
-  window.lbMedia = { takePhoto: takePhoto, recordVoice: recordVoice, thumb: thumb, hydrate: hydrate, view: viewMedia, get: mGet, put: mPut, del: mDel };
+  // Plain text -> a small real PDF (Helvetica, A4, wrapped, paged), kept as a media item so the outbox sends it like a photo.
+  function textPdf(title, text){
+    var W = 92, PER = 60, lines = [];
+    String(text || '').split('\n').forEach(function(l){ l = l.replace(/\t/g, '  '); if (!l) { lines.push(''); return; } while (l.length > W) { var cut = l.lastIndexOf(' ', W); if (cut < 40) cut = W; lines.push(l.slice(0, cut)); l = l.slice(cut).replace(/^ /, ''); } lines.push(l); });
+    var pages = []; for (var i = 0; i < lines.length; i += PER) pages.push(lines.slice(i, i + PER)); if (!pages.length) pages.push(['']);
+    var esc = function(s){ var o = ''; for (var k = 0; k < s.length; k++) { var c = s.charCodeAt(k); if (c === 40 || c === 41 || c === 92) o += '\\' + s.charAt(k); else if (c < 32) o += ' '; else if (c > 255) o += '?'; else if (c > 126) o += '\\' + ('00' + c.toString(8)).slice(-3); else o += s.charAt(k); } return o; };
+    var objs = [], add = function(s){ objs.push(s); return objs.length; };
+    add('<< /Type /Catalog /Pages 2 0 R >>'); add('PAGES'); add('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>');
+    var kids = [];
+    pages.forEach(function(pg, pi){
+      var s = 'BT /F1 10 Tf 12 TL 40 800 Td ' + (pi === 0 && title ? '/F1 13 Tf (' + esc(title) + ') Tj T* /F1 10 Tf T* ' : '') + pg.map(function(l){ return '(' + esc(l) + ') Tj T*'; }).join(' ') + ' ET';
+      var cn = add('<< /Length ' + s.length + ' >>\nstream\n' + s + '\nendstream');
+      kids.push(add('<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents ' + cn + ' 0 R /Resources << /Font << /F1 3 0 R >> >> >>') + ' 0 R');
+    });
+    objs[1] = '<< /Type /Pages /Kids [' + kids.join(' ') + '] /Count ' + kids.length + ' >>';
+    var out = '%PDF-1.4\n', offs = [];
+    objs.forEach(function(o, i){ offs.push(out.length); out += (i + 1) + ' 0 obj\n' + o + '\nendobj\n'; });
+    var xr = out.length; out += 'xref\n0 ' + (objs.length + 1) + '\n0000000000 65535 f \n' + offs.map(function(o){ return ('0000000000' + o).slice(-10) + ' 00000 n \n'; }).join('') + 'trailer\n<< /Size ' + (objs.length + 1) + ' /Root 1 0 R >>\nstartxref\n' + xr + '\n%%EOF';
+    var bytes = new Uint8Array(out.length); for (var j = 0; j < out.length; j++) bytes[j] = out.charCodeAt(j) & 255;
+    return new Blob([bytes], { type: 'application/pdf' });
+  }
+  function putPdf(title, text){
+    var blob = textPdf(title, text), id = 'f_' + uid();
+    return mPut({ id: id, kind: 'file', type: 'application/pdf', blob: blob, ts: Date.now(), synced: false }).then(function(){ keep(); return id; });
+  }
+  window.lbMedia = { putPdf: putPdf, takePhoto: takePhoto, recordVoice: recordVoice, thumb: thumb, hydrate: hydrate, view: viewMedia, get: mGet, put: mPut, del: mDel };
 
   /* =====================================================================
      QR / barcode scan -> a bin in the list
@@ -32403,7 +32486,11 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       var tl2 = tc2.streets.slice().sort(function(x, y){ return (y.hs || 0) - (x.hs || 0); }), d2 = me(), loc2 = here();
       var subj2 = 'TO DO ON RUN ' + String(SH.run).toUpperCase() + ': ' + (d2.name || SH.driver || 'Driver');
       var txt2 = subj2 + '\n' + tl2.length + ' streets, ' + tc2.houses + ' houses, ' + (tc2.left + tc2.pink) + ' bins left\n' + tl2.slice(0, 30).map(function(x){ return '- ' + x.name + ': ' + (x.hs || 0) + ' houses'; }).join('\n') + (tl2.length > 30 ? '\n+ ' + (tl2.length - 30) + ' more streets' : '') + (loc2 ? '\nhttps://maps.google.com/?q=' + loc2.lat.toFixed(6) + ',' + loc2.lng.toFixed(6) : '');
-      try { if (window.lbOutbox) window.lbOutbox.send({ rid: 't_' + uid(), kind: 'driver-todo', urgent: false, to: ['lead'], subject: subj2, text: txt2, data: { run: SH.run, streets: tl2.length, houses: tc2.houses, bins: tc2.left + tc2.pink, ts: Date.now() }, delayMs: 0 }); } catch (e) {}
+      try { if (window.lbOutbox) {
+        var rid2 = 't_' + uid(), go2 = function(ids){ window.lbOutbox.send({ rid: rid2, kind: 'driver-todo', urgent: false, to: ['lead'], subject: subj2, text: txt2, data: { run: SH.run, streets: tl2.length, houses: tc2.houses, bins: tc2.left + tc2.pink, ts: Date.now() }, media: ids || [], delayMs: 0 }); };
+        // with the list as a PDF too
+        if (window.lbMedia && window.lbMedia.putPdf) window.lbMedia.putPdf(subj2, txt2).then(function(id){ go2([id]); }, function(){ go2([]); }); else go2([]);
+      } } catch (e) {}
       toast('Sent to your leading hand'); return;
     }
     if (a === 'runmap') { closeSheet(); if (window.lbRunMapOpen) window.lbRunMapOpen(); return; }
@@ -32540,7 +32627,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   function b64(blob){
     return new Promise(function(res, rej){ var fr = new FileReader(); fr.onload = function(){ res(String(fr.result).split(',')[1] || ''); }; fr.onerror = function(){ rej(fr.error); }; fr.readAsDataURL(blob); });
   }
-  function extOf(t){ return /csv/.test(t) ? 'csv' : /png/.test(t) ? 'png' : /webm/.test(t) ? 'webm' : /mp4|m4a|aac/.test(t) ? 'm4a' : /ogg/.test(t) ? 'ogg' : 'jpg'; }
+  function extOf(t){ return /pdf/.test(t) ? 'pdf' : /csv/.test(t) ? 'csv' : /png/.test(t) ? 'png' : /webm/.test(t) ? 'webm' : /mp4|m4a|aac/.test(t) ? 'm4a' : /ogg/.test(t) ? 'ogg' : 'jpg'; }
 
   /* ---- what the script said ---- */
   function readStatus(e){
@@ -32812,6 +32899,13 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
         subject: 'Damaged bin' + (r.serial ? ' ' + r.serial : '') + (r.address ? ' · ' + r.address : ''),
         text: 'Damaged bin\n' + (r.driver || 'A driver') + '\n' + when(r.ts) + '\n' + (r.serial ? 'Bin: ' + r.serial + (r.stream ? ' (' + r.stream + ')' : '') + '\n' : '') + (r.address ? 'Address: ' + r.address + '\n' : '') + (r.street ? 'Street: ' + r.street + '\n' : '') + (r.run ? 'Run: ' + r.run + '\n' : '') + (r.note ? 'Note: ' + r.note + '\n' : '') + loc(r),
         data: { driver: r.driver || '', lat: r.lat, lng: r.lng, ts: r.ts, serial: r.serial || '' }, media: r.media || [], src: { key: 'lbIssueLog', id: r.id } });
+    }
+    if (kind === 'issue') {
+      // every issue a driver logs goes to the leading hand as soon as it is logged, with its photos (and voice notes)
+      return send({ rid: 'il_' + r.id, kind: 'issue', urgent: false, to: ['lead'], delayMs: 4000,
+        subject: (r.label || 'Issue') + (r.serial ? ' · bin ' + r.serial : '') + (r.address ? ' · ' + r.address : r.street ? ' · ' + r.street : ''),
+        text: (r.label || 'Issue') + '\n' + who(r) + '\n' + when(r.ts) + '\n' + (r.serial ? 'Bin: ' + r.serial + (r.stream ? ' (' + r.stream + ')' : '') + '\n' : '') + (r.address ? 'Address: ' + r.address + '\n' : '') + (r.street ? 'Street: ' + r.street + '\n' : '') + (r.run ? 'Run: ' + r.run + '\n' : '') + (r.note ? 'Note: ' + r.note + '\n' : '') + loc(r) + (r.media && r.media.length ? '\nPhotos attached.' : ''),
+        data: { driver: r.driver || '', lat: r.lat, lng: r.lng, ts: r.ts, serial: r.serial || '', propId: r.propId || '' }, media: r.media || [], src: { key: 'lbIssueLog', id: r.id } });
     }
     if (kind === 'binedit') {
       return send({ rid: 'e_' + r.id.replace(/^e_/, ''), kind: 'binedit', urgent: false, to: ['binmaint', 'ops'], delayMs: 6000,
@@ -35804,9 +35898,12 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   function choice(){ try { return (window.uxTruckChoice && window.uxTruckChoice()) || 'standard'; } catch (e) { return 'standard'; } }
   function current(){
     var c = choice();
-    if (c === 'auto') {
+    // (Fox: no truck chosen = the default truck for the stream being driven. The app's own plain truck picture has no
+    //  flashing beacon, so "standard" - what an unchosen truck is saved as - gets the stream's picture too, and a
+    //  stream with no picture gets the garbage truck.)
+    if (c === 'auto' || c === 'standard') {
       var sh = null; try { sh = window.uxShiftState ? window.uxShiftState() : null; } catch (e) {}
-      c = (sh && BY_STREAM[sh.stream]) || BY_STREAM[g('activeFilterStream')] || 'standard';
+      c = (sh && BY_STREAM[sh.stream]) || BY_STREAM[g('activeFilterStream')] || 'garbage';
     }
     return TRUCKS.filter(function(t){ return t.id === c && loaded[t.id]; })[0] || null;
   }
@@ -37116,8 +37213,13 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     if (!window.lbOutbox) { shareSheet(); return; }
     var miss = missing(SHc.s.id);
     if (miss.length && !confirm('Still to fill in: ' + miss.join(', ') + '.\n\nSend it anyway?')) return;
-    window.lbOutbox.send({ rid: 'rs_' + R.id, kind: 'runsheet', to: ['lead'], subject: 'Run sheet · ' + (SHc.s.driver || 'driver') + ' · run ' + (SHc.s.run || '?') + ' · ' + dateStr(SHc.s.start),
-      text: sheetText(), data: { runSheet: Object.assign({}, R, { sig: R.sig ? 'signed ' + new Date(R.sigTs).toISOString() : null }), shift: { id: SHc.s.id, start: SHc.s.start, end: SHc.s.end || null, driver: SHc.s.driver, truck: SHc.s.truck, run: SHc.s.run } }, media: mediaIds() });
+    var R0 = R, S0 = SHc, txt0 = sheetText(), ids0 = mediaIds();
+    var send0 = function(extra){ window.lbOutbox.send({ rid: 'rs_' + R0.id, kind: 'runsheet', to: ['lead'], subject: 'Run sheet · ' + (S0.s.driver || 'driver') + ' · run ' + (S0.s.run || '?') + ' · ' + dateStr(S0.s.start),
+      text: txt0, data: { runSheet: Object.assign({}, R0, { sig: R0.sig ? 'signed ' + new Date(R0.sigTs).toISOString() : null }), shift: { id: S0.s.id, start: S0.s.start, end: S0.s.end || null, driver: S0.s.driver, truck: S0.s.truck, run: S0.s.run } }, media: ids0.concat(extra || []) }); };
+    
+    // the shift sheet goes as a PDF as well as the text, with the dockets / photos from the shift
+    var ttl0 = 'Run sheet ' + dateStr(S0.s.start) + ' - ' + (S0.s.driver || 'driver') + ' - run ' + (S0.s.run || '?');
+    (window.lbMedia && window.lbMedia.putPdf ? window.lbMedia.putPdf(ttl0, txt0).then(function(id){ return [id]; }, function(){ return []; }) : Promise.resolve([])).then(send0);
     R.sentAt = Date.now(); save(R); toast('Run sheet sent to the leading hand'); paint();
   }
 
@@ -41634,16 +41736,15 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
     }
     // the house you're at on each side of the truck (the next bin on that side: its number)
     var nl = st.querySelector('.rb-nl'), nr = st.querySelector('.rb-nr');
-    if (nl && nr) { txt(nl, name ? sideNo('L') : ''); txt(nr, name ? sideNo('R') : ''); }
+    if (nl && nr) { txt(nl, name ? sideNo('L', name) : ''); txt(nr, name ? sideNo('R', name) : ''); }
     // sits on the map just above the red line - and above the map credit when that is showing along the bottom
     stackOffsets();
   }
-  function sideNo(side){
+  function sideNo(side, name){
     try {
-      var nb = window.lbNextBin, T = window.lbStreetStats && window.lbStreetStats._t, loc = g('userCurrentLocation');
-      if (typeof nb !== 'function' || !T || !loc) return '';
-      var site = nb(loc, +g('lastValidHeading') || 0, side, null);
-      var n = site ? T.houseNo(site) : null;
+      var loc = g('userCurrentLocation');
+      if (typeof window.lbSideHouse !== 'function' || !loc) return '';
+      var n = window.lbSideHouse(loc, +g('lastValidHeading') || 0, side, name);
       return n === null || n === undefined ? '' : String(n);
     } catch (e) { return ''; }
   }
@@ -41654,7 +41755,10 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
     var at = document.querySelector('.leaflet-control-attribution'), ab = 0, ns = $('uxNerdStrip'), nh = 0;
     if (at && at.offsetParent !== null && getComputedStyle(at).display !== 'none') { var q = at.getBoundingClientRect(); if (q.height && q.bottom > window.innerHeight * .4) ab = Math.round(q.height); }
     if (ns && ns.offsetParent !== null && (ns.textContent || '').trim()) nh = Math.round(ns.getBoundingClientRect().height);
-    stack.style.setProperty('--rb-ab', ab + 'px'); stack.style.setProperty('--rb-sh2', nh + 'px');
+    // Measured, and set as important so it beats the fixed 16px in the skin's CSS: that fixed value left a gap under the
+    // street name whenever the map credit was hidden or sat lower (a zoomed-in screen). Only the credit's real height counts,
+    // and it must be sitting at the bottom of the screen to be underneath the box at all.
+    stack.style.setProperty('--rb-ab', ab + 'px', 'important'); stack.style.setProperty('--rb-sh2', nh + 'px');
   }
 
   // ---- Home: the day's week pills as stream-coloured stickers -------------------------------------
@@ -47018,6 +47122,7 @@ html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):no
 html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f)[data-hdr-tight="4"] #uxGtaHealth .uxgh-cash{font-size:12px !important;padding:4px 4px 3px !important}
 /* ---- the street over the dash: smaller, and it shrinks to fit rather than being cut off (paintStreet) ---- */
 html[data-ux-skin="rubbish"] body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f) #uxCardStack > #rbSt{grid-template-columns:auto minmax(0,1fr) auto !important;column-gap:6px !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #uxCardStack > #rbSt{padding-bottom:0 !important}
 html[data-ux-skin="rubbish"] body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f) #uxCardStack > #rbSt b{font-size:20px !important;font-weight:700 !important;line-height:1.1 !important;text-overflow:clip !important;text-shadow:-1.5px -1.5px 0 #000, 1.5px -1.5px 0 #000, -1.5px 1.5px 0 #000, 1.5px 1.5px 0 #000, 0 2px 0 #000 !important}
 html[data-ux-skin="rubbish"] body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f) #uxCardStack > #rbSt .rb-n{min-width:44px !important;box-sizing:border-box !important;font-size:16px !important;padding:3px 6px !important}
 
@@ -48236,7 +48341,7 @@ html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):
   html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #mapRunColoredBox > #rbClock{margin:0 0 0 10px !important}
   html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #uxHdrTools{position:static !important;right:auto !important;top:auto !important;margin:0 0 0 10px !important;align-self:center !important;flex:none !important}
   /* the report-a-problem button: down at the bottom right, just above the street name */
-  html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g)[data-ux-screen="map"] #uxHazardBtn.lb-haz-low{position:fixed !important;left:auto !important;right:calc(6px + env(safe-area-inset-right,0px)) !important;top:auto !important;bottom:var(--lb-haz-b,220px) !important;z-index:1200 !important;margin:0 !important}
+  html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g)[data-ux-screen="map"] #uxHazardBtn.lb-haz-low{position:fixed !important;left:auto !important;right:var(--lb-haz-r, calc(6px + env(safe-area-inset-right,0px))) !important;top:auto !important;bottom:var(--lb-haz-b,220px) !important;z-index:1200 !important;margin:0 !important}
 }
 /* the street over the dash: bigger (it still shrinks to fit a long name - paintStreet) */
 html[data-ux-skin="rubbish"] body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #uxCardStack > #rbSt b{font-size:30px !important}
@@ -48272,8 +48377,17 @@ html[data-ux-skin="rubbish"] body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d
     if (st && st.offsetParent !== null && st.getBoundingClientRect().height > 4) top = st.getBoundingClientRect().top;
     else if (stack && stack.offsetParent !== null) top = stack.getBoundingClientRect().top;
     if (!top) return;
-    var b = Math.max(60, Math.round(window.innerHeight - top + 8)) + 'px';
+    var bPx = Math.max(60, Math.round(window.innerHeight - top + 8)), b = bPx + 'px';
     if (document.body.style.getPropertyValue('--lb-haz-b') !== b) document.body.style.setProperty('--lb-haz-b', b);
+    // With the screen zoomed in (or big text) the zoom column comes down far enough to reach the button's spot, and it sat
+    // right over the - button. When it would, the button moves left, clear of the column (Fox, from another driver's screenshot).
+    var side = $('mapFixedSideControls'), rr = '';
+    if (side && side.offsetParent !== null) {
+      var sr = side.getBoundingClientRect(), hh = hz.offsetHeight || 48;
+      if (sr.width > 4 && window.innerHeight - bPx - hh < sr.bottom + 6) rr = Math.max(6, Math.round(window.innerWidth - sr.left + 8)) + 'px';
+    }
+    if (rr) { if (document.body.style.getPropertyValue('--lb-haz-r') !== rr) document.body.style.setProperty('--lb-haz-r', rr); }
+    else document.body.style.removeProperty('--lb-haz-r');
   }
   function tick(){ try { combo(); } catch (e) {} try { hazard(); } catch (e) {} }
   setInterval(tick, 400);
@@ -49052,7 +49166,7 @@ html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2.lb-hud:not(#m
     if (hud) return;
     hud = document.createElement('div'); hud.id = 'lbHud'; hud.setAttribute('data-rows', '3');
     hud.innerHTML = '<div class="bg"></div>' +
-      '<div class="r r1"><div class="ttl">Lukez Bunz</div><div class="tb tm"><span class="val" data-e="clk"><span class="h"></span><span class="m"></span><span class="sx"><i></i><i></i><u></u></span></span></div>' +
+      '<div class="r r1"><div class="ttl">LUKEZ BUNZ</div><div class="tb tm"><span class="val" data-e="clk"><span class="h"></span><span class="m"></span><span class="sx"><i></i><i></i><u></u></span></span></div>' +
       '<div class="sqs">' + SQ.map(function(q){ return '<button type="button" class="sq" data-sq="' + q[0] + '" aria-label="' + q[3] + '" title="' + q[3] + '"><span class="a" style="background:' + q[1] + '">' + q[2] + '</span><span class="b"></span></button>'; }).join('') + '</div></div>' +
       '<div class="r r2"><div class="tb brk"><span class="lab" data-e="blab">BREAK</span><span class="val" data-e="bv"><span class="h"></span><span class="m"></span><span class="sx"><i></i><i></i><u></u></span></span></div>' +
       '<div class="tb cash"><span class="lab">CASH</span><span class="val" data-e="cash"></span></div></div>' +
@@ -49287,13 +49401,19 @@ html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-y) #rbCluster
 html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-y) #rbCluster .rb-x{display:none !important}
 
 /* the top bar */
-html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2.lb-hud:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h) #lbHud .ttl{display:none;justify-self:start;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-size:22px;line-height:1;color:var(--rb-a,#ffd21f);text-shadow:0 0 1px #000,2px 2px 0 #000,-1px -1px 0 #000,1px -1px 0 #000,-1px 1px 0 #000}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2.lb-hud:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h) #lbHud .ttl{display:none;justify-self:start;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-size:22px;line-height:1;color:#fff;text-shadow:0 0 1px #000,2px 2px 0 #000,-1px -1px 0 #000,1px -1px 0 #000,-1px 1px 0 #000}
 @media (min-width: 560px){
   html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2.lb-hud:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h) #lbHud .r1{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);align-items:center;gap:8px}
   html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2.lb-hud:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h) #lbHud .r1 .ttl{display:block}
   html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2.lb-hud:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h) #lbHud .r1 .tb.tm{flex:none;width:auto;justify-self:center}
   html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2.lb-hud:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h) #lbHud .r1 .sqs{justify-self:end}
 }
+</style>
+<style id="lb-offrun-style">
+/* the bin box when the property is not on the run being driven: orange, bins still shown */
+#mapBinsAtAddress.lb-offrun{background:#c2410c !important;border-color:#fb923c !important;color:#fff !important}
+#mapBinsAtAddress.lb-offrun *{color:#fff !important}
+#mapBinsAtAddress .lb-offrun-add{align-self:flex-start;margin:4px 8px 6px;padding:4px 10px;border:0;border-radius:var(--ux-rad,6px);background:#fff;color:#c2410c !important;font-weight:800;font-size:13px;cursor:pointer}
 </style>
 </body>
 </html>
