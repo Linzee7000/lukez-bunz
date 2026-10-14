@@ -12328,6 +12328,7 @@ let siteReminders = JSON.parse(localStorage.getItem('siteReminders') || '{}');
   // buildStreamTabsRow (which way each tab's arrow points, and which tab
   // gets pulled to the front) read from - so the tabs and the list they
   // control can never drift out of sync with each other.
+  let lbOffRunNow = false;
   let forcedBinStreams = new Set();
   let hiddenBinStreams = new Set();
   function isStreamShownAtAddress(streamKey, site) {
@@ -12338,6 +12339,7 @@ let siteReminders = JSON.parse(localStorage.getItem('siteReminders') || '{}');
     if (((displaySources[streamKey] || []).length) === 0) return false;
     if (hiddenBinStreams.has(streamKey)) return false;
     if (forcedBinStreams.has(streamKey)) return true;
+    if (lbOffRunNow) return false;      // off the run: serials only once the run's tab is tapped
     const currentStreamFilter = (typeof activeFilterStream !== 'undefined' && activeFilterStream ? activeFilterStream : '').toLowerCase().trim();
     if (!currentStreamFilter || currentStreamFilter === 'all') return true;
     const targetKey = (currentStreamFilter === 'summerrecycling') ? 'recycling' : currentStreamFilter;
@@ -17637,12 +17639,18 @@ window.addEventListener('DOMContentLoaded', async () => {
     try { if (typeof window.lbNextBin === 'function' && userCurrentLocation) nb = window.lbNextBin(userCurrentLocation, lastValidHeading || 0, wantSide === 'left' ? 'L' : wantSide === 'right' ? 'R' : null, isBothSidesSite); } catch (e) { nb = undefined; }
     // (lbNextBin covers the bin beside the truck too, and judges its kerb by the street's odd/even sides,
     // which a few metres of GPS error can't flip - so when it has an answer, it decides.)
-    const currentSite0 = nb !== undefined ? nb
+    // (lbNextBin answers null when the run has nothing ahead on this street - e.g. a street the run doesn't use - and that
+    // used to blank the box to just the street name. Null now falls back to the nearest house, run or not.)
+    const currentSite0 = (nb !== undefined && nb !== null) ? nb
       : (nearestBinSite && nearestBinDist <= BIN_AT_TRUCK_M) ? nearestBinSite
-      : (nearestSameSideSite && nearestSameSideDist <= 300) ? nearestSameSideSite : null;
+      : (nearestSameSideSite && nearestSameSideDist <= 300) ? nearestSameSideSite
+      : (nearestSiteOverall && nearestDistOverall <= 45) ? nearestSiteOverall : null;
     // A bin within 8 m of the truck is the one it is at, even if lbNextBin chose a house further on (its street
     // name differs from the street being driven - 3461 Graydon Heights, 4 Graydon Court, was skipped).
-    const currentSite = (nearestBinSite && nearestBinDist <= 8 && currentSite0 !== nearestBinSite &&
+    // The house being passed is always the one shown: an off-run house right beside the truck (within 12 m, not on the run's
+    // bins) wins over a run bin that is still well ahead, so the box says what collects the house you are at.
+    const passing = (nearestSiteOverall && nearestDistOverall <= 12 && !binDistBySite.has(String(nearestSiteOverall.propId || nearestSiteOverall.siteId || '')) && onWantedSide(nearestSiteOverall)) ? nearestSiteOverall : null;
+    const currentSite = (passing && (!currentSite0 || currentSite0 === passing || getDistanceMeters(userCurrentLocation.lat, userCurrentLocation.lng, Number(currentSite0.lat), Number(currentSite0.lng)) > 25)) ? passing : (nearestBinSite && nearestBinDist <= 8 && currentSite0 !== nearestBinSite &&
       (!currentSite0 || (binDistBySite.get(String(currentSite0.propId || currentSite0.siteId || '')) ?? 1e9) > nearestBinDist + 3)) ? nearestBinSite : currentSite0;
     if (currentSite) lastSideOfTravel = isBothSidesSite(currentSite) ? null : (sideOfSite(currentSite) || lastSideOfTravel);
     const mapLiveStreet = q('mapLiveStreet');
@@ -17935,11 +17943,15 @@ window.addEventListener('DOMContentLoaded', async () => {
   if (hudRunsEl) hudRunsEl.innerHTML = buildRunsAtAddress(site, false);
 
   const isSiteOnFilteredRun = site && (typeof siteMatchesAllActiveFilters === 'function' ? siteMatchesAllActiveFilters(site) : true);
-  // The bins are ALWAYS shown for the property you are at. Off your run (or with no run picked) the box is orange - that
-  // is all orange means - and every stream's bins show, since none of them is "yours" there.
+  // The box always describes the property you are at. Off your run (or with no run picked) it is orange - that is all orange
+  // means - and it shows which runs collect the house as the stream tabs (logo + run number + week). The serials stay
+  // hidden until a tab is tapped (that forces the stream's serials on, as it always has).
   const offRun = !!(site && !isSiteOnFilteredRun);
-  const mapBins = site
-    ? window.buildBinsAtAddress(site, true, true, (offRun && forcedBinStreams.size === 0) ? new Set(['Garbage', 'Recycling', 'FOGO']) : forcedBinStreams)
+  // ...except when the truck has stopped at an off-run house: then its serials show, with the + to add it to the run
+  const stoppedOff = offRun && (currentMapSpeedKmh || 0) < 3;
+  lbOffRunNow = offRun && !stoppedOff;
+  const mapBins = site && (!offRun || forcedBinStreams.size > 0 || stoppedOff)
+    ? window.buildBinsAtAddress(site, true, true, stoppedOff && forcedBinStreams.size === 0 ? new Set(['Garbage', 'Recycling', 'FOGO']) : forcedBinStreams)
     : '';
   const showSerials = Boolean(mapBins);
 
@@ -17985,11 +17997,12 @@ window.addEventListener('DOMContentLoaded', async () => {
     // Stopped at a property that isn't on the run: a + to put it on the run being driven (one run picked, one stream)
     let addHtml = '';
     if (offRun && site && activeFilterStream && STREAM_RUN_FIELD[activeFilterStream] && selectedRunsSet && selectedRunsSet.size === 1
-        && ((site.soloStreams && site.soloStreams[activeFilterStream]) || []).length > 0 && (currentMapSpeedKmh || 0) < 3) {
+        && ((site.soloStreams && site.soloStreams[activeFilterStream]) || []).length > 0 && stoppedOff) {
       const pid = esc(String(site.propId || site.siteId || '')), rn = Array.from(selectedRunsSet)[0].toUpperCase();
       addHtml = `<button type="button" class="lb-offrun-add" onclick="event.stopPropagation(); window.quickAssignBinToCurrentRun('${pid}', '${esc(activeFilterStream)}', '${esc(rn)}')">+ Add to run ${esc(rn)}</button>`;
     }
     mapBinsEl.classList.toggle('lb-offrun', offRun);
+    try { const card = mapBinsEl.closest('.map-address-telemetry'); if (card) card.classList.toggle('lb-offrun-card', offRun); } catch (e) {}
     mapBinsEl.innerHTML = (showSerials ? mapBins : '') + addHtml + unassignedBinBannerHtml;
     mapBinsEl.style.display = 'flex';
     mapBinsEl.style.flexDirection = 'column';
@@ -47549,6 +47562,25 @@ html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f) 
     document.body.appendChild(b);
     function paint(){ var sh = null; try { sh = window.uxShiftState ? window.uxShiftState() : null; } catch (e) {} document.body.classList.toggle('mn-offshift', !sh); }
     setInterval(paint, 1000); paint();
+    // Swipe the Start shift box away when only looking at runs: it shrinks into the green Start square at the top and stays
+    // put until a shift starts or the page is opened again (the green square still starts the shift).
+    (function(){
+      var x0 = 0, y0 = 0, on = false, away = false;
+      function target(){ var list = document.querySelectorAll('#lbHud .sq[data-sq="shift"], .mn-tb[data-act="shift"]'); for (var i = 0; i < list.length; i++) if (list[i].offsetParent !== null) return list[i]; return null; }
+      b.addEventListener('touchstart', function(e){ var t = e.touches[0]; x0 = t.clientX; y0 = t.clientY; on = true; }, { passive: true });
+      b.addEventListener('touchend', function(e){
+        if (!on) return; on = false;
+        var t = e.changedTouches[0], dx = t.clientX - x0, dy = t.clientY - y0;
+        if (Math.hypot(dx, dy) < 40) return;
+        var r = b.getBoundingClientRect(), g = target(), gr = g ? g.getBoundingClientRect() : null;
+        var tx = gr ? gr.left + gr.width / 2 - (r.left + r.width / 2) : 0, ty = gr ? gr.top + gr.height / 2 - (r.top + r.height / 2) : -r.top;
+        b.style.transition = 'transform .35s ease-in, opacity .35s ease-in';
+        b.style.transform = 'translate(' + Math.round(tx) + 'px,' + Math.round(ty) + 'px) scale(.1)'; b.style.opacity = '0';
+        away = true; e.preventDefault();
+        setTimeout(function(){ document.body.classList.add('lb-startfab-away'); b.style.transition = ''; b.style.transform = ''; b.style.opacity = ''; }, 380);
+      }, { passive: false });
+      setInterval(function(){ var sh = null; try { sh = window.uxShiftState ? window.uxShiftState() : null; } catch (e) {} if (sh && away) { away = false; document.body.classList.remove('lb-startfab-away'); } }, 1000);
+    })();
     // the app lands on the map
     setTimeout(function(){ try { if (typeof activeTab !== 'undefined' && activeTab === 'welcome' && typeof switchMainTab === 'function') switchMainTab('map'); } catch (e) {} }, 1200);
   })();
@@ -48377,7 +48409,7 @@ html[data-ux-skin="rubbish"] body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d
     if (st && st.offsetParent !== null && st.getBoundingClientRect().height > 4) top = st.getBoundingClientRect().top;
     else if (stack && stack.offsetParent !== null) top = stack.getBoundingClientRect().top;
     if (!top) return;
-    var bPx = Math.max(60, Math.round(window.innerHeight - top + 8)), b = bPx + 'px';
+    var bPx = Math.max(60, Math.round(window.innerHeight - top + 3)), b = bPx + 'px';
     if (document.body.style.getPropertyValue('--lb-haz-b') !== b) document.body.style.setProperty('--lb-haz-b', b);
     // With the screen zoomed in (or big text) the zoom column comes down far enough to reach the button's spot, and it sat
     // right over the - button. When it would, the button moves left, clear of the column (Fox, from another driver's screenshot).
@@ -49116,8 +49148,8 @@ html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2.lb-hud:not(#m
 html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2.lb-hud:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #lbHud[data-sk="w"] .sq .b{color:#fff} html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2.lb-hud:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #lbHud[data-sk="w"] .sq .b img{filter:brightness(0) invert(1)}
 html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2.lb-hud:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #lbHud.run .sq{transform:rotateY(180deg)}
 html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2.lb-hud:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #lbHud .sq .b .wk{display:none;font-style:normal}
-html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2.lb-hud:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #lbHud.wkon .sq:first-child .b img{display:none}
-html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2.lb-hud:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #lbHud.wkon .sq:first-child .b .wk{display:inline}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2.lb-hud:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #lbHud.wkon .sq:last-child .b img{display:none}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2.lb-hud:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #lbHud.wkon .sq:last-child .b .wk{display:inline}
 html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2.lb-hud:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #lbHud .sq:nth-child(2){transition-delay:.07s} html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2.lb-hud:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #lbHud .sq:nth-child(3){transition-delay:.14s} html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2.lb-hud:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #lbHud .sq:nth-child(4){transition-delay:.21s} 
 html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2.lb-hud:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #lbHud .hp{position:relative;flex:1;height:16px;border:3px solid #000;border-radius:4px;background:#3b0d0b;box-shadow:2px 2px 0 #000;box-sizing:border-box;overflow:hidden}
 html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2.lb-hud:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) #lbHud .hp > i{position:absolute;left:0;top:0;bottom:0;background:var(--hc,#2ecc62);box-shadow:inset 0 -4px 0 rgba(0,0,0,.22)}
@@ -49265,7 +49297,7 @@ html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2.lb-hud:not(#m
       while (num.length < 3) num.unshift('');
       hud._wk = wk;
       hud.querySelectorAll('.sq .b').forEach(function(b, k){
-        b.innerHTML = k === 0 ? '<img src="' + lg + '" alt=""><b class="wk">' + wk + '</b>' : (num[k - 1] || '');
+        b.innerHTML = k === 3 ? '<img src="' + lg + '" alt=""><b class="wk">' + wk + '</b>' : (num[k] || '');   // (the logo and week sit in the 4th box, the number in the first three)
       });
     }
     // (Fox: the icons for 15 s, then the run for 6 s - the first square showing the logo and the week letter in turn, 2 s each)
@@ -49414,6 +49446,12 @@ html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2.lb-hud:not(#m
 #mapBinsAtAddress.lb-offrun{background:#c2410c !important;border-color:#fb923c !important;color:#fff !important}
 #mapBinsAtAddress.lb-offrun *{color:#fff !important}
 #mapBinsAtAddress .lb-offrun-add{align-self:flex-start;margin:4px 8px 6px;padding:4px 10px;border:0;border-radius:var(--ux-rad,6px);background:#fff;color:#c2410c !important;font-weight:800;font-size:13px;cursor:pointer}
+html body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #uxCardStack .map-address-telemetry.lb-offrun-card .address-telemetry-address-row{background:#f97316 !important;color:#000 !important}
+html body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #uxCardStack .map-address-telemetry.lb-offrun-card{border-color:#f97316 !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbCluster .rb-spd > span{display:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbCluster .rb-spd b{font-size:72px !important;line-height:1 !important}
+@media (orientation: landscape) and (max-height: 520px){html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbCluster .rb-spd b{font-size:42px !important}}
+html body.ux2.lb-startfab-away:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h):not(#mn-i) #lbStartFab{display:none !important}
 </style>
 </body>
 </html>
