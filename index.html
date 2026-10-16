@@ -4101,18 +4101,27 @@ body:not(.dark-mode) .welcome-go-wrap {
 <body class="ux2 dark-mode">
 <div id="lbSplash" role="status" aria-label="Loading"><div class="lbs-in">
   <div class="lbs-ico"><span style="background:#ff4d3d"><img src="garbage.png" alt=""></span><span style="background:#ffd21f"><img src="recycle.png" alt=""></span><span style="background:#2fd16a"><img src="fogo.png" alt=""></span><span style="background:#3b82f6"><img src="litter.png" alt=""></span></div>
-  <div class="lbs-t">Lukez Bunz</div><div class="lbs-bar"><i></i></div><div class="lbs-s">Loading the map</div></div></div>
+  <div class="lbs-road"></div><div class="lbs-t">Lukez Bunz</div><div class="lbs-bar"><i></i></div><div class="lbs-s">Loading the map</div></div></div>
 <style>
 #lbSplash{position:fixed;inset:0;z-index:99999;display:flex;align-items:center;justify-content:center;background:#0d1117;color:#fff;transition:opacity .35s ease}
 #lbSplash.out{opacity:0;pointer-events:none}
 #lbSplash .lbs-in{display:flex;flex-direction:column;align-items:center;gap:14px;padding:24px}
 #lbSplash .lbs-ico{display:flex;gap:8px}
-#lbSplash .lbs-ico span{display:flex;align-items:center;justify-content:center;width:56px;height:56px;border:3px solid #000;border-radius:8px;box-shadow:3px 3px 0 #000}
+#lbSplash .lbs-ico span{animation:lbsBounce .9s ease-in-out infinite;display:flex;align-items:center;justify-content:center;width:56px;height:56px;border:3px solid #000;border-radius:8px;box-shadow:3px 3px 0 #000}
 #lbSplash .lbs-ico img{width:34px;height:34px}
 #lbSplash .lbs-t{font:400 34px/1 "Bowlby One","Anton",Impact,sans-serif;letter-spacing:.02em;text-transform:uppercase}
 #lbSplash .lbs-bar{width:180px;height:8px;border:2px solid #000;border-radius:6px;background:#1b2430;overflow:hidden}
 #lbSplash .lbs-bar i{display:block;width:40%;height:100%;background:#ffd21f;animation:lbsMove 1.1s ease-in-out infinite}
 #lbSplash .lbs-s{font:700 12px/1 -apple-system,"Segoe UI",Roboto,sans-serif;letter-spacing:.14em;text-transform:uppercase;color:#9fb0c4}
+#lbSplash .lbs-ico span:nth-child(2){animation-delay:.12s}#lbSplash .lbs-ico span:nth-child(3){animation-delay:.24s}#lbSplash .lbs-ico span:nth-child(4){animation-delay:.36s}
+@keyframes lbsBounce{0%,100%{transform:translateY(0)}50%{transform:translateY(-12px)}}
+#lbSplash .lbs-road{position:relative;width:min(260px,70vw);height:8px;border-radius:4px;background:#1b2430;overflow:hidden;margin-top:-4px}
+#lbSplash .lbs-road::before{content:"";position:absolute;left:0;right:-32px;top:3px;height:2px;background:repeating-linear-gradient(90deg,#ffd21f 0 16px,transparent 16px 32px);animation:lbsRoad .6s linear infinite}
+@keyframes lbsRoad{to{transform:translateX(-32px)}}
+#lbSplash .lbs-bar.det{width:min(260px,70vw)}#lbSplash .lbs-bar.det i{animation:none;transition:width .4s}
+#lbSplash .lbs-s{text-align:center;max-width:300px;line-height:1.3}
+#lbSplash button{padding:7px 14px;border:0;border-radius:8px;background:#f28c38;color:#000;font-weight:800;font-size:14px}
+@media (prefers-reduced-motion:reduce){#lbSplash *{animation:none !important}}
 @keyframes lbsMove{0%{transform:translateX(-100%)}100%{transform:translateX(260%)}}
 </style>
 <script>
@@ -4127,8 +4136,29 @@ body:not(.dark-mode) .welcome-go-wrap {
       return !!(m && m.offsetWidth > 0 && (m.querySelector('.leaflet-tile-loaded') || m.querySelector('.leaflet-marker-icon')));
     } catch (e) { return false; }
   }
+  // One loading screen for the whole start: while the runs are being downloaded (first time on this phone, or the sync at
+  // start) its words and bar follow the download; it lifts once the runs are here and the map has drawn. A failed download
+  // lifts it too, so the "select master CSV file" fallback is reachable.
+  function haveRuns(){ try { return typeof siteRecords !== 'undefined' && siteRecords.length > 0; } catch (e) { return false; } }
+  function follow(){
+    try {
+      var sm = document.getElementById('syncStatusMsg'), pf = document.getElementById('pBarFill'), s = el.querySelector('.lbs-s'), bar = el.querySelector('.lbs-bar');
+      var txt = sm && sm.style.display !== 'none' ? (sm.textContent || '').replace(/Select master CSV file/, '').replace(/^\s*(Step \d\/\d:\s*)?/, '').trim() : '';
+      var failed = /⚠|not found online|corrupt|incomplete|error|could not/i.test(txt);
+      var dl = !haveRuns() || /download|saving|index|sync/i.test(txt);
+      var want = failed ? txt : (dl ? ('Downloading runs' + (txt && !/^download/i.test(txt) ? ' · ' + txt : '')) : 'Loading the map');
+      if (s.textContent !== want) s.textContent = want;
+      var w = pf && parseFloat(pf.style.width) > 0 ? pf.style.width : '';
+      bar.classList.toggle('det', !!w && dl);
+      if (w && dl) bar.firstElementChild.style.width = w; else bar.firstElementChild.style.width = '';
+      return failed;
+    } catch (e) { return false; }
+  }
   var iv = setInterval(function(){
-    var age = Date.now() - t0;
+    if (!el) { clearInterval(iv); return; }
+    var age = Date.now() - t0, failed = follow();
+    var waitRuns = !haveRuns() && age < 180000 && !failed;     // (the first download can take a while on a slow connection)
+    if (waitRuns) return;
     if ((age > 900 && ready()) || age > 9000) { clearInterval(iv); done(); }
   }, 150);
 })();
@@ -17511,6 +17541,25 @@ window.addEventListener('DOMContentLoaded', async () => {
   // above catches on its own - this is for in-place changes.
   window.invalidateDriveStreetIndex = function(){ driveStreetIndexCache = null; };
 
+  // With no run picked the map's bottom box used to just say "check filter". It now shows the house beside the truck and the
+  // runs that collect it (the same box as off-run, orange, serials hidden until a tab is tapped). Light: the nearest house
+  // within 60 m by a latitude band, not the run index, and at most twice a second.
+  let lbIdleAt = 0;
+  function lbIdleTelemetry() {
+    const now = Date.now(); if (now - lbIdleAt < 500) return; lbIdleAt = now;
+    const loc = userCurrentLocation; if (!loc || !Number.isFinite(loc.lat)) return;
+    const recs = getRecordsArray(); let best = null, bd = 60;
+    for (let i = 0; i < recs.length; i++) {
+      const s = recs[i], la = Number(s.lat);
+      if (!la || Math.abs(la - loc.lat) > 0.0006) continue;
+      const d = getDistanceMeters(loc.lat, loc.lng, la, Number(s.lng));
+      if (d < bd) { bd = d; best = s; }
+    }
+    const el = q('mapLiveStreet');
+    if (el) el.innerText = best ? toSentenceCaseLabel((best.baseStreetLine || best.addressText?.split(',')[0] || '').trim()) : 'No bins in range';
+    renderCurrentAddressTelemetry(best);
+  }
+
   window.updateDriverHud = function(opts) {
     const listContainer = q('hudStreetList');
     if (!listContainer) return;
@@ -17535,6 +17584,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     // until one is tapped (see selectRunOnDrive).
     if (!selectedRunsSet || selectedRunsSet.size === 0) {
       listContainer.innerHTML = buildDriveRunPickerHtml();
+      try { lbIdleTelemetry(); } catch (e) {}
       return;
     }
 
@@ -17950,7 +18000,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   // The box always describes the property you are at. Off your run (or with no run picked) it is orange - that is all orange
   // means - and it shows which runs collect the house as the stream tabs (logo + run number + week). The serials stay
   // hidden until a tab is tapped (that forces the stream's serials on, as it always has).
-  const offRun = !!(site && !isSiteOnFilteredRun);
+  const offRun = !!(site && (!isSiteOnFilteredRun || !selectedRunsSet || selectedRunsSet.size === 0));   // (no run picked counts as off the run)
   // Serials are hidden by default when off the run, and only the stream being looked at (the filter) can show them, when its tab
   // is tapped. Stopped at an off-run house the + to add it to the run shows, still without serials.
   const stoppedOff = offRun && (currentMapSpeedKmh || 0) < 3;
@@ -49459,55 +49509,18 @@ html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x
 @media (orientation: landscape) and (max-height: 520px){html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbCluster .rb-spd b{font-size:36px !important}}
 html body.ux2.lb-startfab-away:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h):not(#mn-i) #lbStartFab{display:none !important}
 </style>
-<style id="lb-firstload-style">
-/* first download of the runs: a full-screen "Downloading runs" with the three bins bouncing along a moving road */
-#lbFirstLoad{position:fixed;inset:0;z-index:2147483000;display:none;flex-direction:column;align-items:center;justify-content:center;gap:18px;background:var(--rb-bg,#0b0d10);color:#fff;font-family:inherit;padding:24px;text-align:center}
-#lbFirstLoad.on{display:flex}
-#lbFirstLoad .fl-t{font-size:26px;font-weight:900;letter-spacing:.06em;text-transform:uppercase}
-#lbFirstLoad .fl-s{font-size:14px;opacity:.8;min-height:1.3em;max-width:320px}
-#lbFirstLoad .fl-bins{display:flex;gap:14px;height:64px;align-items:flex-end}
-#lbFirstLoad .fl-b{width:48px;height:48px;border-radius:10px;display:flex;align-items:center;justify-content:center;animation:lbFlBounce .9s ease-in-out infinite}
-#lbFirstLoad .fl-b i{width:30px;height:30px;background:#000;-webkit-mask:var(--m) center/contain no-repeat;mask:var(--m) center/contain no-repeat}
-#lbFirstLoad .fl-b:nth-child(1){background:#ff4b3e}#lbFirstLoad .fl-b:nth-child(1) i{background:#fff}
-#lbFirstLoad .fl-b:nth-child(2){background:#ffd21f;animation-delay:.15s}
-#lbFirstLoad .fl-b:nth-child(3){background:#2ecc62;animation-delay:.3s}
-@keyframes lbFlBounce{0%,100%{transform:translateY(0)}50%{transform:translateY(-16px)}}
-#lbFirstLoad .fl-road{position:relative;width:min(320px,80vw);height:10px;border-radius:5px;background:#2a2f37;overflow:hidden}
-#lbFirstLoad .fl-road::before{content:"";position:absolute;left:0;right:0;top:4px;height:2px;background:repeating-linear-gradient(90deg,#ffd21f 0 16px,transparent 16px 32px);animation:lbFlRoad .6s linear infinite}
-@keyframes lbFlRoad{to{transform:translateX(-32px)}}
-#lbFirstLoad .fl-bar{width:min(320px,80vw);height:8px;border-radius:4px;background:#2a2f37;overflow:hidden}
-#lbFirstLoad .fl-bar i{display:block;height:100%;width:8%;background:var(--rb-a,#ffd21f);transition:width .4s}
-#lbFirstLoad button{margin-top:6px;padding:7px 14px;border:0;border-radius:8px;background:#f28c38;color:#000;font-weight:800;font-size:14px}
-@media (prefers-reduced-motion:reduce){#lbFirstLoad *{animation:none !important}}
-</style>
-<script id="lb-firstload-script">
+<script id="lb-trackup-default">
 (function(){
-  // Shown only while there are no runs on this phone yet (the very first download); gone as soon as they arrive.
-  var el = null, shown = false, dismissed = false;
-  function have(){ try { return typeof siteRecords !== 'undefined' && siteRecords.length > 0; } catch (e) { return false; } }
-  function build(){
-    if (el) return; el = document.createElement('div'); el.id = 'lbFirstLoad'; el.setAttribute('role', 'status');
-    el.innerHTML = '<div class="fl-bins"><span class="fl-b"><i style="--m:url(garbage.png)"></i></span><span class="fl-b"><i style="--m:url(recycle.png)"></i></span><span class="fl-b"><i style="--m:url(fogo.png)"></i></span></div>' +
-      '<div class="fl-road"></div><div class="fl-t">Downloading runs</div><div class="fl-s" id="lbFlS">This only happens the first time</div><div class="fl-bar"><i id="lbFlB"></i></div>';
-    document.body.appendChild(el);
-  }
-  function tick(){
+  // Track up is on from the start: once the map is showing and following the truck, it turns to the heading (once; after that
+  // the driver's own choice with the follow button stands).
+  var tries = 0, iv = setInterval(function(){
     try {
-      if (have()) { if (shown) { shown = false; el.classList.remove('on'); } return; }
-      if (dismissed || document.readyState === 'loading' || !document.body) return;
-      build();
-      var sm = document.getElementById('syncStatusMsg'), pf = document.getElementById('pBarFill'), s = el.querySelector('#lbFlS'), b = el.querySelector('#lbFlB');
-      var txt = sm && sm.style.display !== 'none' ? (sm.textContent || '').trim() : '';
-      if (!shown) { shown = true; el.classList.add('on'); }
-      if (/⚠|not found online|corrupt|incomplete|error|could not/i.test(txt)) {   // (the app swaps the warning emoji for a picture, so the words are checked too)
-        // the download failed: say so and let the person through (the CSV fallback button is in the sync message)
-        if (s.textContent !== txt.replace(/Select master CSV file/, '').trim()) s.textContent = txt.replace(/Select master CSV file/, '').trim();
-        if (!el.querySelector('button')) { var bt = document.createElement('button'); bt.type = 'button'; bt.textContent = 'Close'; bt.onclick = function(){ dismissed = true; shown = false; el.classList.remove('on'); }; el.appendChild(bt); }
-      } else if (txt && s.textContent !== txt) s.textContent = txt.replace(/^Step \d\/\d:\s*/, '');
-      var w = pf && pf.style.width ? pf.style.width : '8%'; if (b.style.width !== w && parseFloat(w) > 0) b.style.width = w;
+      if (++tries > 60) { clearInterval(iv); return; }
+      if (typeof leafletMap === 'undefined' || !leafletMap || document.getElementById('lbSplash')) return;
+      clearInterval(iv);
+      if (!window.isTrackUpEnabled && typeof isTruckFollowEnabled !== 'undefined' && isTruckFollowEnabled && typeof window.toggleTrackUpOrientation === 'function') window.toggleTrackUpOrientation();
     } catch (e) {}
-  }
-  setInterval(tick, 400);
+  }, 500);
 })();
 </script>
 </body>
