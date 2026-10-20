@@ -37527,6 +37527,9 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   function metres(a, b){ var kx = 111320 * Math.cos(a.lat * Math.PI / 180); return Math.hypot((b.lng - a.lng) * kx, (b.lat - a.lat) * 110540); }
   function esc(v){ return String(v == null ? '' : v).replace(/[&<>"']/g, function(c){ return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
   function hhmm(t){ try { return new Date(t).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }); } catch (e) { return ''; } }
+  // The break offered is the stop so far rounded DOWN to whole 15 min blocks (breaks count in 15 min blocks): stopped 30-44 min offers 30,
+  // 45-59 offers 45, and so on, never less than 15. It grows while the pop-up is up (see refreshRest).
+  function restMs(t0){ return Math.max(1, Math.floor((Date.now() - t0) / (15 * 60000))) * 15 * 60000; }
   var MIN = 60000, STAGE1_S = 60, STAGE2_S = 180, REST_MS = 15 * MIN, NEAR_BIN_M = 40, PLACE_R = 300, GO_KMH = 6;
 
   function firstName(){
@@ -37585,7 +37588,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
         var n = document.getElementById('uxiNote');
         if (n && !n.value) n.value = a === 'mess' ? 'Bin knocked over / spilt while emptying' : 'Stickered bin';
       } else if (a === 'add15' && BC && BC.addBreak) {
-        if (BC.addBreak(st.t0, st.t0 + REST_MS)) note('15 min break added', hhmm(st.t0) + ' to ' + hhmm(st.t0 + REST_MS) + '.');
+        var rn = restMs(st.t0);
+        if (BC.addBreak(st.t0, st.t0 + rn)) note(Math.round(rn / MIN) + ' min break added', hhmm(st.t0) + ' to ' + hhmm(st.t0 + rn) + '.');
         else note('Couldn’t add the break', 'Is a shift running? Check the break clock in Layers.');
       } else if (a === 'rest' && BC && BC.startBreakAt) {
         if (BC.startBreakAt(st.t0)) { var cb = clockBreak(); restBreak = cb ? cb.s : st.t0; note('On a break since ' + hhmm(restBreak), 'Enjoy it. End it from the shift screen when you’re back to work.'); }
@@ -37629,8 +37633,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
         '<div class="lbsp-b lbsp-b3"><button type="button" data-a="logrev">I was reversing</button><button type="button" data-a="logbins">Picking up bins in a row</button></div>' +
         '<div class="lbsp-b"><button type="button" data-a="x">Not now</button></div>';
     } else if (stage === 3) {
-      html = '<div class="lbsp-t">Having a rest, ' + name + '?</div><div class="lbsp-s">Stopped since ' + esc(hhmm(st.t0)) + ' (' + Math.floor((Date.now() - st.t0) / MIN) + ' min).</div>' +
-        '<div class="lbsp-b lbsp-b3"><button type="button" data-a="x">No, working</button><button type="button" data-a="add15">Add a 15 min break</button>' +
+      html = '<div class="lbsp-t">Having a rest, ' + name + '?</div><div class="lbsp-s" id="lbspRestAge">Stopped since ' + esc(hhmm(st.t0)) + ' (' + Math.floor((Date.now() - st.t0) / MIN) + ' min).</div>' +
+        '<div class="lbsp-b lbsp-b3"><button type="button" data-a="x">No, working</button><button type="button" data-a="add15">Add a ' + Math.round(restMs(st.t0) / MIN) + ' min break</button>' +
         '<button type="button" class="go" data-a="rest">I’m resting: break from ' + esc(hhmm(st.t0)) + '</button></div>';
     } else {
       html = '<div class="lbsp-t">Back on the road, ' + name + '?</div><div class="lbsp-s">Your break’s still running (since ' + esc(hhmm(st.s)) + ', ' + Math.floor((Date.now() - st.s) / MIN) + ' min).</div>' +
@@ -37643,7 +37647,16 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     try { if (navigator.vibrate) navigator.vibrate(stage === 2 || stage === 4 ? [120, 80, 120] : 120); } catch (x) {}
   }
 
+  // the "(N min)" and the break length move on while the pop-up stays up
+  function refreshRest(){
+    if (shown !== 3 || !el || !el._st) return;
+    var t0 = el._st.t0, a = el.querySelector('#lbspRestAge'), b = el.querySelector('[data-a="add15"]');
+    var age = 'Stopped since ' + hhmm(t0) + ' (' + Math.floor((Date.now() - t0) / MIN) + ' min).', lab = 'Add a ' + Math.round(restMs(t0) / MIN) + ' min break';
+    if (a && a.textContent !== age) a.textContent = age;
+    if (b && b.textContent !== lab) b.textContent = lab;
+  }
   function tick(){
+    refreshRest();
     if (shown === 9) return;                                   // let a note finish
     var sh = window.uxShiftState ? window.uxShiftState() : null;
     var cur = window.lbStops && window.lbStops.current ? window.lbStops.current() : null;
@@ -41812,11 +41825,11 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
       stack.insertBefore(st, stack.firstChild);
     }
     if (!st) return;
-    var name = (src && !(wrap && wrap.classList.contains('street-overlay-hidden'))) ? (src.textContent || '').replace(/\s+/g, ' ').trim() : '';
+    var name = (src && !(wrap && wrap.classList.contains('street-overlay-hidden'))) ? (src.getAttribute('data-full') || src.textContent || '').replace(/\s+/g, ' ').trim() : '';   // (data-full: the whole name, kept by lb-street-short-script)
     // Sentence Case: "GRAYDON COURT" and "graydon court" both read "Graydon Court"
     name = name.toLowerCase().replace(/(^|[\s\-])([a-z])/g, function(m, a, b){ return a + b.toUpperCase(); });
     var sb = st.querySelector('b');
-    txt(sb, name);
+    if (window.lbStreetShortInto) window.lbStreetShortInto(sb, name); else txt(sb, name);
     st.style.display = name ? '' : 'none';
     // the whole name, smaller if it has to be, instead of "Adams Ave..."
     var fk = name + '|' + st.clientWidth + '|' + (st.querySelector('.rb-nl') || {}).textContent + '|' + (st.querySelector('.rb-nr') || {}).textContent;
@@ -42143,16 +42156,11 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
   var RD_ISSUES = ['Contaminated', 'Heavy', 'Overfull', 'Prior spill', 'Jammed'];
   var RD_SVG_CLOCK = '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="13" r="7.5"/><path d="M12 9v4l3 2M4 5l3-2M20 5l-3-2"/></svg>';
   var RD_SVG_WARN = '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="square" aria-hidden="true"><path d="M12 3 2.5 20h19L12 3z"/><path d="M12 10v5M12 17.6v.4"/></svg>';
-  // The street type is shortened, the way a street sign does it: "Henry Wilson Drive" -> "Henry Wilson D" + a small raised "R".
-  // Only the last word, and only when there is a name before it ("Avenue" on its own stays). First letter full size, the rest small and raised.
-  var RD_TYPES = { street: 'st', road: 'rd', drive: 'dr', avenue: 'ave', court: 'ct', crescent: 'cres', place: 'pl', close: 'cl', parade: 'pde', highway: 'hwy', boulevard: 'blvd', lane: 'ln', terrace: 'tce', grove: 'gr', esplanade: 'esp', circuit: 'cct', parkway: 'pwy', gardens: 'gdns', square: 'sq', crt: 'ct', cir: 'cct', drv: 'dr', av: 'ave', cr: 'cres', ter: 'tce', esp: 'esp' };
-  function rdEsc(t){ return String(t).replace(/[&<>]/g, function(c){ return { '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]; }); }
+  // The street type is shortened everywhere by lb-street-short-script ("Henry Wilson Drive" -> "Henry Wilson D" + small raised "r").
   function rdStreetSet(sb, nm){
     if (!sb || sb._nm === nm) return;
     sb._nm = nm;
-    var m = /^(.*\S)\s+(\S+)$/.exec(String(nm || '').trim()), ab = m ? RD_TYPES[m[2].toLowerCase().replace(/\./g, '')] : null;
-    if (!ab) { sb.textContent = nm; return; }
-    sb.innerHTML = '<span>' + rdEsc(m[1]) + ' ' + rdEsc(ab.charAt(0)) + '<sup>' + rdEsc(ab.slice(1)) + '</sup></span>';
+    if (window.lbStreetShortInto) window.lbStreetShortInto(sb, nm); else sb.textContent = nm;
   }
   function rdMask(png){ return '<i class="rd-ic" style="--m:url(' + png + ')"></i>'; }
   var RD_SVG_ROAD = '<svg class="rd-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3h8l4.5 18h-17z" fill="currentColor"/><path d="M12 6v3M12 11.5v3M12 17v3" stroke="#1b1d22" stroke-width="1.7" fill="none"/></svg>';
@@ -42373,7 +42381,7 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
     var hd = ((Math.round(+g('lastValidHeading') || 0) % 360) + 360) % 360, hs = String(hd);
     segSet($('rdDeg'), '000'.slice(hs.length) + hs); txt($('rdCard'), CARD8[Math.round(hd / 45) % 8]);
     // street, copied from the one the street code keeps up to date
-    var src = $('rbSt'), nm = src ? ((src.querySelector('b') || {}).textContent || '') : '';
+    var src = $('rbSt'), sbb = src ? src.querySelector('b') : null, nm = sbb ? (sbb.getAttribute('data-full') || sbb.textContent || '') : '';
     // (no street name yet - no signal for the street lookup - the street of the house the bins are at stands in, so the band still shows)
     if (!nm) { var ts = rdSite(); if (ts) nm = rdStreetOf(ts); }
     var st = $('rdSt'), sb = st.querySelector('b');
@@ -50187,6 +50195,58 @@ html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x
   function step(){ ph = ph === 'd' ? 'i' : 'd'; apply(); setTimeout(step, ph === 'i' ? ICON_MS : DIGIT_MS); }
   setInterval(apply, 1000);              // the row is built after load (and rebuilt on a skin change), so keep the class on it
   apply(); setTimeout(step, DIGIT_MS);
+})();
+</script>
+
+<script id="lb-street-short-script">
+/* Street types are shortened everywhere a street name is shown, the way a street sign does it: the first letter full size and the
+   rest small and raised - "Henry Wilson Drive" -> "Henry Wilson D" + "r", "Avenue" -> "A" + "ve" ("Dr", "Ave", "St", "Rd", "Ct" ...).
+   Only the LAST word, only when something comes before it ("Avenue" alone stays), only a plain word ("Scanning Street..." stays).
+   Many places write these labels (the GPS street pill, the Drive page strip, the address line, the street box, the dash), so rather than
+   change every writer, a MutationObserver re-draws any of them that was just written as plain text, and keeps the full name on
+   data-full. The text a script reads back ("Henry Wilson DR") still means the same street: every street-name matcher in the app
+   expands a short last word (dr -> drive). The case of the original is kept (DRIVE -> DR, Drive -> Dr). */
+(function(){
+  'use strict';
+  var T = { street: 'st', road: 'rd', drive: 'dr', avenue: 'ave', court: 'ct', crescent: 'cres', place: 'pl', close: 'cl', parade: 'pde', highway: 'hwy', boulevard: 'blvd', lane: 'ln', terrace: 'tce', grove: 'gr', esplanade: 'esp', circuit: 'cct', parkway: 'pwy', gardens: 'gdns', square: 'sq', crt: 'ct', cir: 'cct', drv: 'dr', av: 'ave', cr: 'cres', ter: 'tce' };
+  // already short ones map to themselves, so a name that is already short is drawn the same way
+  ['st', 'rd', 'dr', 'ave', 'ct', 'cres', 'pl', 'cl', 'pde', 'hwy', 'blvd', 'ln', 'tce', 'gr', 'esp', 'cct', 'pwy', 'gdns', 'sq'].forEach(function(a){ T[a] = a; });
+  function esc(t){ return String(t).replace(/[&<>]/g, function(c){ return { '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]; }); }
+  function parts(name){
+    var m = /^(.*\S)\s+([A-Za-z]+)$/.exec(String(name || '').trim());
+    var ab = m && T[m[2].toLowerCase()]; if (!ab || ab.length < 2) return null;
+    var up = m[2] === m[2].toUpperCase(); ab = up ? ab.toUpperCase() : ab.charAt(0).toUpperCase() + ab.slice(1);
+    return { lead: m[1], a: ab.charAt(0), b: ab.slice(1) };
+  }
+  function html(name){
+    var p = parts(name); if (!p) return esc(name);
+    return '<span class="lbss">' + esc(p.lead) + ' ' + esc(p.a) + '<sup>' + esc(p.b) + '</sup></span>';
+  }
+  function into(el, name){
+    if (!el) return; name = String(name == null ? '' : name);
+    var h = html(name);
+    el.setAttribute('data-full', name);
+    if (h === esc(name)) { if (el.textContent !== name || el.children.length) el.textContent = name; return; }
+    if (el.innerHTML !== h) el.innerHTML = h;
+  }
+  window.lbStreetShort = html; window.lbStreetShortInto = into;
+
+  var css = document.createElement('style');
+  css.textContent = '.lbss sup{font-size:.6em;line-height:0;vertical-align:baseline;position:relative;top:-.45em;letter-spacing:.03em}';
+  document.head.appendChild(css);
+
+  // the labels other code writes with innerText: the GPS street pill, the Drive page strip, the map's address line
+  var IDS = ['mapStreetOverlay', 'hudStreetName', 'mapLiveStreet'], busy = false;
+  function fix(el){
+    if (!el || el.querySelector('.lbss')) return;                    // already drawn by us
+    var t = (el.textContent || '').trim(); if (!t || !parts(t)) return;
+    busy = true; try { into(el, t); } finally { busy = false; }
+  }
+  var mo = new MutationObserver(function(){ if (busy) return; IDS.forEach(function(id){ fix(document.getElementById(id)); }); });
+  IDS.forEach(function(id){
+    var el = document.getElementById(id); if (!el) return;
+    fix(el); mo.observe(el, { childList: true, characterData: true, subtree: true });
+  });
 })();
 </script>
 </body>
