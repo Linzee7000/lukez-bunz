@@ -49970,7 +49970,7 @@ html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x
 html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-row .rd-ob b{font-size:16px}
 html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-row .rd-ob + .rd-ob{border-left:3px solid #000}
 html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-closed .rd-ob{flex:1;flex-direction:row;min-height:46px}
-html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-closed .rd-ob + .rd-ob{border-left:3px solid #000}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-closed .rd-ob + .rd-ob{border-left:0}   /* (Fox: with no serials showing the stream boxes sit edge to edge - no black seam between them) */
 html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-ob.front{box-shadow:inset 0 0 0 3px #fff}
 /* tapped serial: the other-stream boxes turn into REMIND and REPORT for that bin */
 html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-acts.rd-col{width:104px}
@@ -50028,6 +50028,136 @@ html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x
       if (!window.isTrackUpEnabled && typeof isTruckFollowEnabled !== 'undefined' && isTruckFollowEnabled && typeof window.toggleTrackUpOrientation === 'function') window.toggleTrackUpOrientation();
     } catch (e) {}
   }, 500);
+})();
+</script>
+
+<script id="lb-osm-numbers-script">
+/* Street numbers for places the app has no bin record for.
+   The L / R numbers in the street box (paintStreet -> sideNo -> window.lbSideHouse) come from the property list, and that list
+   only holds kerbside bin properties. On a street with none - the depot's own David Court, an industrial estate, a new
+   subdivision, a park - both sides stayed blank, whether or not the truck was inside a run boundary. This wraps lbSideHouse:
+   when the property list has no house on that side it asks the OpenStreetMap address points (addr:housenumber + addr:street)
+   instead. They are fetched a ~550 m square at a time from the same Overpass servers the truck-line drawing uses, kept in
+   IndexedDB (key lbAddrTiles) so the second visit - and a no-signal one - needs no network, and picked by the same rule as
+   the property list: same street, that side of the truck, level with the bin arm. The first look at a new area shows nothing
+   for a second or two, then the numbers appear on the next tick. It never replaces a number the property list gave. */
+(function(){
+  'use strict';
+  var GF = {};
+  function g(n){ try { return (GF[n] || (GF[n] = new Function('return typeof ' + n + ' === "undefined" ? undefined : ' + n)))(); } catch (e) { return undefined; } }
+  var TS = 0.005, KEEP = 80, RETRY_MS = 60000, M_LAT = 110540, M_LNG = 111320, REACH_M = 45;
+  var MIRRORS = ['https://overpass-api.de/api/interpreter', 'https://overpass.kumi.systems/api/interpreter', 'https://overpass.private.coffee/api/interpreter', 'https://overpass-api.de/api/interpreter'];
+  var tiles = {}, loaded = false, loading = false, failed = {}, queue = Promise.resolve(), inflight = {};
+
+  // same last-word expansion the street stats use, so "David Ct" and "David Court" are the one street
+  var SUFFIX = { st: 'street', rd: 'road', ave: 'avenue', av: 'avenue', dr: 'drive', drv: 'drive', ct: 'court', crt: 'court', cres: 'crescent', cr: 'crescent', pl: 'place', cl: 'close', pde: 'parade', hwy: 'highway', blvd: 'boulevard', bvd: 'boulevard', ln: 'lane', tce: 'terrace', ter: 'terrace', gr: 'grove', esp: 'esplanade', cct: 'circuit', cir: 'circuit', pwy: 'parkway', pky: 'parkway', gdns: 'gardens', gdn: 'gardens', sq: 'square', wy: 'way' };
+  function norm(s){
+    var w = String(s || '').toLowerCase().replace(/[.,'’]/g, ' ').replace(/\s+/g, ' ').trim().split(' ').filter(Boolean);
+    if (!w.length) return '';
+    if (SUFFIX[w[w.length - 1]]) w[w.length - 1] = SUFFIX[w[w.length - 1]];
+    return w.join(' ');
+  }
+  // "4" -> 4, "12A" -> 12, "4-6" -> 4, "3/12" -> 12 (the street number of a unit), nothing -> null
+  function numOf(v){
+    var s = String(v || '').trim(), m = s.match(/^[A-Za-z0-9]+\s*\/\s*(\d+)/) || s.match(/^(\d+)/);
+    var n = m ? parseInt(m[1], 10) : NaN;
+    return n > 0 ? n : null;
+  }
+  function keyOf(lat, lng){ return Math.floor(lat / TS) + ',' + Math.floor(lng / TS); }
+
+  function dbLoad(){
+    if (loaded) return Promise.resolve();
+    var ld = g('loadFromDB'); if (!ld) { loaded = true; return Promise.resolve(); }
+    return Promise.resolve(ld('lbAddrTiles')).then(function(v){ if (v && typeof v === 'object') tiles = v; loaded = true; }).catch(function(){ loaded = true; });
+  }
+  function dbSave(){
+    try {
+      var ks = Object.keys(tiles);
+      if (ks.length > KEEP) ks.sort(function(a, b){ return tiles[a].ts - tiles[b].ts; }).slice(0, ks.length - KEEP).forEach(function(k){ delete tiles[k]; });
+      var sv = g('saveToDB'); if (sv) sv('lbAddrTiles', tiles);
+    } catch (e) {}
+  }
+
+  async function fetchTile(k){
+    var p = k.split(','), s = +p[0] * TS, w = +p[1] * TS;
+    var q = '[out:json][timeout:25];nwr["addr:housenumber"]["addr:street"](' + s.toFixed(4) + ',' + w.toFixed(4) + ',' + (s + TS).toFixed(4) + ',' + (w + TS).toFixed(4) + ');out center tags;';
+    var els = null, lastErr;
+    if (window.lbOsmNumbers && window.lbOsmNumbers._fetch) els = await window.lbOsmNumbers._fetch(q, k);      // tests hand the addresses in
+    else {
+      for (var u = 0; u < MIRRORS.length && els === null; u++) {
+        if (u === 3) await new Promise(function(res){ setTimeout(res, 2500); });
+        var ctl = new AbortController(), to = setTimeout(function(){ ctl.abort(); }, 25000);
+        try {
+          var r = await fetch(MIRRORS[u] + '?data=' + encodeURIComponent(q), { signal: ctl.signal });
+          if (!r.ok) throw new Error('Overpass ' + r.status);
+          var d = await r.json(); els = d.elements || [];
+        } catch (e) { lastErr = e; } finally { clearTimeout(to); }
+      }
+      if (els === null) throw lastErr || new Error('no address data');
+    }
+    var pts = [];
+    els.forEach(function(el){
+      var t = el.tags || {}, c = el.center || el;
+      var lat = +(c.lat), lng = +(c.lon !== undefined ? c.lon : c.lng), n = numOf(t['addr:housenumber']), st = norm(t['addr:street']);
+      if (!isFinite(lat) || !isFinite(lng) || !n || !st) return;
+      pts.push([Math.round(lat * 1e6) / 1e6, Math.round(lng * 1e6) / 1e6, st, n]);
+    });
+    tiles[k] = { ts: Date.now(), p: pts };
+    dbSave();
+  }
+  // One request at a time (the servers turn a second one away), and a square that failed is left alone for a minute.
+  function ensure(truck){
+    if (!loaded) { if (!loading) { loading = true; dbLoad().then(function(){ loading = false; }); } return; }
+    var lat = truck.lat, lng = truck.lng, pad = REACH_M / M_LAT, padx = pad / Math.cos(lat * Math.PI / 180);
+    var y0 = Math.floor((lat - pad) / TS), y1 = Math.floor((lat + pad) / TS), x0 = Math.floor((lng - padx) / TS), x1 = Math.floor((lng + padx) / TS);
+    for (var y = y0; y <= y1; y++) for (var x = x0; x <= x1; x++) {
+      var k = y + ',' + x;
+      if (tiles[k] || inflight[k]) continue;
+      if (failed[k] && Date.now() - failed[k] < RETRY_MS) continue;
+      if (navigator.onLine === false) continue;
+      inflight[k] = 1;
+      queue = queue.then(function(kk){ return function(){ return fetchTile(kk).then(function(){ delete failed[kk]; }, function(){ failed[kk] = Date.now(); }).then(function(){ delete inflight[kk]; }); }; }(k));
+    }
+  }
+
+  function pick(truck, heading, side, street){
+    var hr = heading * Math.PI / 180, hx = Math.sin(hr), hy = Math.cos(hr), cl = Math.cos(truck.lat * Math.PI / 180);
+    var best = null, bestScore = Infinity, pad = REACH_M / M_LAT, padx = pad / cl;
+    var y0 = Math.floor((truck.lat - pad) / TS), y1 = Math.floor((truck.lat + pad) / TS), x0 = Math.floor((truck.lng - padx) / TS), x1 = Math.floor((truck.lng + padx) / TS);
+    for (var y = y0; y <= y1; y++) for (var x = x0; x <= x1; x++) {
+      var t = tiles[y + ',' + x]; if (!t) continue;
+      for (var i = 0; i < t.p.length; i++) {
+        var a = t.p[i];
+        if (street && a[2] !== street) continue;
+        var vx = (a[1] - truck.lng) * M_LNG * cl, vy = (a[0] - truck.lat) * M_LAT;
+        if (Math.hypot(vx, vy) > REACH_M) continue;
+        var along = hx * vx + hy * vy, left = hx * vy - hy * vx;
+        if ((left > 0 ? 'L' : 'R') !== side) continue;
+        if (Math.abs(left) < 1.5) continue;                      // on the road line itself, no side
+        var score = Math.abs(along + 4) + Math.abs(left) * .3;   // the same "level with the bin arm" rule as the property list
+        if (score < bestScore) { bestScore = score; best = a[3]; }
+      }
+    }
+    return best;
+  }
+
+  function wrap(){
+    var prev = window.lbSideHouse;
+    if (typeof prev !== 'function' || prev._osm) return;
+    var fn = function(truck, heading, side, streetName){
+      var n = null;
+      try { n = prev.apply(this, arguments); } catch (e) {}
+      if (n !== null && n !== undefined) return n;
+      try {
+        if (!truck || !isFinite(truck.lat) || !isFinite(truck.lng)) return null;
+        ensure(truck);
+        return pick(truck, +heading || 0, side, norm(streetName || ''));
+      } catch (e) { return null; }
+    };
+    fn._osm = true; window.lbSideHouse = fn;
+  }
+  wrap();
+  window.lbOsmNumbers = { _t: { norm: norm, numOf: numOf, tiles: function(){ return tiles; }, pick: pick, ensure: ensure, failed: function(){ return failed; } } };
 })();
 </script>
 </body>
