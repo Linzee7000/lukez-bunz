@@ -29966,7 +29966,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     if (st.skin === 'rubbish' && !document.getElementById('uxRbFont')) {
       var rf = document.createElement('link');
       rf.id = 'uxRbFont'; rf.rel = 'stylesheet';
-      rf.href = 'https://fonts.googleapis.com/css2?family=Bowlby+One&display=swap';
+      // (Share Tech Mono: the plain letters of a serial that seven segments cannot draw, like UNKNOWN)
+      rf.href = 'https://fonts.googleapis.com/css2?family=Bowlby+One&family=Share+Tech+Mono&display=swap';
       document.head.appendChild(rf);
     }
     // Speedo's font, the same way (it falls back to the phone's own font with no signal).
@@ -42098,40 +42099,87 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
     if (pips.innerHTML !== want) pips.innerHTML = want;
     if (!speedo()) { fitB(tk); fitB(st); }
   }
-  // ---- Hard Rubbish dash: speed row, street, and the stats row (the layout Fox drew) ---------------------
-  // Top of the panel: speed limit sign | the speed in big GTA-green digits (leading zeros dim, like unlit segments) | the heading,
-  // then the speed bar (grows with the speed, orange then red as the speeding warnings come on), then the street with the house
-  // number each side. Bottom of the panel (under the address card): on truck | km | bins an hour | bins to go | streets to go
-  // (and fines in Game mode), each just an icon and a number - no words. These replace the three boxes of #rbCluster and the
-  // floating street name in Hard Rubbish only (both stay in the page, hidden, because other code reads them; Speedo keeps them).
+  // ---- Hard Rubbish dash (design B2, drawn on the Design canvas and approved) --------------------------------
+  // One joined block, no gaps, from the top of the panel down:
+  //   1. an 80s digital speedo in a black bezel: limit sign | speed in seven-segment digits (unlit segments ghosted behind the
+  //      lit ones) | heading, then a 20-block LED bar that lights up to the speed (green, orange once 3+ km/h over the limit,
+  //      red at 10+, the same steps as the wanted level),
+  //   2. the street, with the house number each side as a tab. The tab of the house the bins belong to takes the stream's
+  //      colour and runs down into the band below; the other tab stays grey,
+  //   3. the bin band: the stream's colour, its logo, and each bin's serial in big seven-segment digits (a size tag only when
+  //      the bin is not the standard one: 80L garbage, 240L recycling / FOGO). The other streams are boxes in stream order with
+  //      their run numbers; tap one to look at its serials instead. Houses on the right mirror it: boxes on the left,
+  //      serials right-justified. With two or more bins the band only grows to the big digits when stopped, so it does not
+  //      jump about while driving. TAPPING A SERIAL is how a reminder or a report is made: the boxes become REMIND / REPORT.
+  //   4. under the address card: on truck | km | bins an hour | streets to go | bins to go (and fines in Game mode), seven-segment.
+  // These replace the three boxes of #rbCluster, the floating street name, and the address card's header, stream tabs and
+  // serial rows in Hard Rubbish only (all stay in the page, hidden, because other code reads them; Speedo keeps them).
+  var SEGP = { a: '8,2 32,2 28,8 12,8', b: '34,4 34,32 31,34.5 28,32 28,10', c: '34,38 34,66 28,60 28,40 31,36', d: '8,68 32,68 28,62 12,62', e: '6,38 6,66 12,60 12,40 9,36', f: '6,4 6,32 9,34.5 12,32 12,10', g: '10,35 13,32 27,32 30,35 27,38 13,38' };
+  var SEGS = { '0': 'abcdef', '1': 'bc', '2': 'abdeg', '3': 'abcdg', '4': 'bcfg', '5': 'acdfg', '6': 'acdefg', '7': 'abc', '8': 'abcdefg', '9': 'abcdfg', 'r': 'eg', '-': 'g', ' ': '' };
+  function segId(c){ return 'rdg-' + (c === '-' ? 'dash' : c === ' ' ? 'sp' : c); }
+  function segDefs(){
+    if ($('rdSegDefs')) return;
+    var s = '<svg id="rdSegDefs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>';
+    Object.keys(SEGP).forEach(function(k){ s += '<polygon id="rds-' + k + '" points="' + SEGP[k] + '"/>'; });
+    Object.keys(SEGS).forEach(function(c){ s += '<g id="' + segId(c) + '">' + SEGS[c].split('').map(function(k){ return '<use href="#rds-' + k + '"/>'; }).join('') + '</g>'; });
+    s += '</defs></svg>';
+    document.body.insertAdjacentHTML('beforeend', s);
+  }
+  // Can this text be drawn in seven segments? Digits, "r" (R047008 serials), "-" and spaces; a "." is drawn as a dot.
+  function segOk(s){ return /^[0-9rR\-. ]+$/.test(s); }
+  function segHtml(s){
+    return String(s).toLowerCase().split('').map(function(c){
+      if (c === '.') return '<i class="rd-dot"></i>';
+      return '<svg class="rd-sg" viewBox="0 0 40 70" aria-hidden="true" focusable="false"><use class="gh" href="#rdg-8"/><use href="#' + segId(c) + '"/></svg>';
+    }).join('');
+  }
+  function segSet(el, s){ if (el && el._sv !== s) { el._sv = s; el.innerHTML = segHtml(s); } }
+  function escH(v){ return String(v == null ? '' : v).replace(/[&<>"']/g, function(c){ return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+  var RD_STREAMS = [
+    { key: 'Garbage', bg: '#dc2626', fg: '#fff', icon: 'garbage.png', run: 'garRun', std: 80 },
+    { key: 'Recycling', bg: '#ffd21f', fg: '#000', icon: 'recycle.png', run: 'recRun', std: 240 },
+    { key: 'FOGO', bg: '#16a34a', fg: '#fff', icon: 'fogo.png', run: 'fogRun', std: 240 }
+  ];
+  var RD_ISSUES = ['Contaminated', 'Heavy', 'Overfull', 'Prior spill', 'Jammed'];
+  var RD_SVG_CLOCK = '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="13" r="7.5"/><path d="M12 9v4l3 2M4 5l3-2M20 5l-3-2"/></svg>';
+  var RD_SVG_WARN = '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="square" aria-hidden="true"><path d="M12 3 2.5 20h19L12 3z"/><path d="M12 10v5M12 17.6v.4"/></svg>';
   function rdMask(png){ return '<i class="rd-ic" style="--m:url(' + png + ')"></i>'; }
   var RD_SVG_ROAD = '<svg class="rd-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3h8l4.5 18h-17z" fill="currentColor"/><path d="M12 6v3M12 11.5v3M12 17v3" stroke="#1b1d22" stroke-width="1.7" fill="none"/></svg>';
   var RD_SVG_GAUGE = '<svg class="rd-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M4.2 17.5a8.6 8.6 0 1 1 15.6 0"/><path d="M12 14.5l3.2-5.2"/><path d="M8.5 20h7"/></svg>';
+  var rdPick = null, rdIssue = false, rdPickT = 0;     // the serial tapped (its bin key), and whether REPORT is open on it
+  function rdClearPick(){ rdPick = null; rdIssue = false; clearTimeout(rdPickT); }
   function buildDash(){
     var stack = $('uxCardStack'); if (!stack) return null;
+    segDefs();
     var top = $('rbDash');
     if (!top) {
       top = document.createElement('div'); top.id = 'rbDash';
+      var led = ''; for (var i = 0; i < 20; i++) led += '<i></i>';
       top.innerHTML =
         '<div class="rd-hero">' +
           '<i class="rd-lim" id="rdLim" aria-hidden="true"></i>' +
-          '<b class="rd-spd" id="rdSpd" aria-live="off"><s></s><span>0</span></b>' +
-          '<div class="rd-cmp" id="rdCmp"><b id="rdDeg">0&deg;</b><span id="rdCard">N</span></div>' +
+          '<b class="rd-spd" id="rdSpd" aria-live="off"></b>' +
+          '<div class="rd-cmp" id="rdCmp"><span class="rd-deg" id="rdDeg"></span><em>&deg;</em><span id="rdCard">N</span></div>' +
         '</div>' +
-        '<div class="rd-bar" aria-hidden="true"><i></i><u></u></div>' +
-        '<div class="rd-st" id="rdSt"><i class="rd-n rd-nl"></i><b></b><i class="rd-n rd-nr"></i></div>';
+        '<div class="rd-led" id="rdLed" aria-hidden="true">' + led + '</div>' +
+        '<div class="rd-st" id="rdSt"><i class="rd-n rd-nl"></i><b></b><i class="rd-n rd-nr"></i></div>' +
+        '<div class="rd-sd" id="rdSd"><i></i><i></i><i></i></div>' +
+        '<div id="rdBins"></div>';
+      var bn = top.querySelector('#rdBins');
+      bn.addEventListener('click', rdBinsClick);
+      document.addEventListener('click', function(ev){ if (rdPick && !(ev.target.closest && ev.target.closest('#rdBins'))) { rdClearPick(); paintBins(true); } });
     }
     if (top.parentNode !== stack || stack.firstElementChild !== top) stack.insertBefore(top, stack.firstChild);
     var bot = $('rbStats');
     if (!bot) {
       bot = document.createElement('div'); bot.id = 'rbStats';
       bot.innerHTML =
-        '<button type="button" class="rd-c rd-truck" id="rdTruck" aria-label="On truck">' + rdMask('garbagetruck.png') + '<b>-</b></button>' +
-        '<div class="rd-c rd-km" id="rdKm" aria-label="Km driven">' + RD_SVG_ROAD + '<b>-</b><small>km</small></div>' +
-        '<div class="rd-c rd-rate" id="rdRate" aria-label="Bins an hour">' + RD_SVG_GAUGE + '<b>-</b><small>/hr</small></div>' +
-        '<div class="rd-c rd-streets" id="rdStreets" aria-label="Streets to go">' + rdMask('route.png') + '<b>-</b></div>' +
-        '<div class="rd-c rd-fines" id="rdFines" aria-label="Fines" style="display:none"><em>$</em><b>0</b></div>' +
-        '<div class="rd-c rd-togo" id="rdTogo" aria-label="Bins to go">' + rdMask('bin.png') + '<b>-</b><small>to go</small></div>';
+        '<button type="button" class="rd-c rd-truck" id="rdTruck" aria-label="On truck">' + rdMask('garbagetruck.png') + '<span class="rd-v"></span></button>' +
+        '<div class="rd-c rd-km" id="rdKm" aria-label="Km driven">' + RD_SVG_ROAD + '<span class="rd-v"></span><small>km</small></div>' +
+        '<div class="rd-c rd-rate" id="rdRate" aria-label="Bins an hour">' + RD_SVG_GAUGE + '<span class="rd-v"></span><small>/hr</small></div>' +
+        '<div class="rd-c rd-streets" id="rdStreets" aria-label="Streets to go">' + rdMask('route.png') + '<span class="rd-v"></span></div>' +
+        '<div class="rd-c rd-fines" id="rdFines" aria-label="Fines" style="display:none"><em>$</em><span class="rd-v"></span></div>' +
+        '<div class="rd-c rd-togo" id="rdTogo" aria-label="Bins to go">' + rdMask('bin.png') + '<span class="rd-v"></span><small>to go</small></div>';
       bot.addEventListener('click', function(ev){
         var t = ev.target.closest ? ev.target.closest('#rdTruck') : null; if (!t) return;
         ev.stopPropagation(); if (typeof window.uxShiftOpen === 'function') window.uxShiftOpen();
@@ -42144,25 +42192,158 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
     return top;
   }
   var CARD8 = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+
+  // ---- the bin band -----------------------------------------------------------------------------------
+  function rdSite(){ var s = g('lastTelemetrySite'); return s || null; }
+  function rdRunLabel(site, def){
+    var sch = site.soloSchedule || {}, run = String(sch[def.run] == null ? '' : sch[def.run]).trim() || '-';
+    if ((def.key === 'Recycling' || def.key === 'FOGO') && run !== '-' && sch.weekLetter) run += String(sch.weekLetter).toUpperCase();
+    return run;
+  }
+  // which of the two house numbers on the street row is the house the bins belong to ('L' or 'R')
+  function rdStreetOf(site){
+    var s = String(site.addressText || site.address || '').split(',')[0].replace(/^\s*(unit|apt|apartment|shop|suite|u)\s*\S+\s+/i, '').replace(/^\s*\d+[a-z]?(\s*[\/-]\s*\d+[a-z]?)?\s+/i, '').replace(/^\s*\d+[a-z]?\/\d+[a-z]?\s+/i, '').trim();
+    return s.toLowerCase().replace(/(^|[\s\-])([a-z])/g, function(m, a, b){ return a + b.toUpperCase(); });
+  }
+  function rdSide(site, nl, nr){
+    var m = /^\s*(\d+)/.exec(String(site.addressText || site.address || '')), n = m ? m[1] : '';
+    if (n && n === nr && n !== nl) return 'R';
+    return 'L';
+  }
+  // the text for one bin's serial, the same rules the serial rows always used: a serial that would read the same as another
+  // bin's here shows its tail ("#226944"), and an identical one with no tail gets "(2)"
+  function rdSerialText(bins, idx){
+    var b = bins[idx], label = b.serial || '—', shown = String(label).replace(/__\d+$/, '');
+    var same = bins.length > 1 && bins.filter(function(o){ return String(o.serial || '—').replace(/__\d+$/, '') === shown; }).length > 1;
+    if (!same) return shown;
+    var tail = (String(label).match(/__(\d+)$/) || [])[1];
+    var seen = bins.slice(0, idx).filter(function(o){ return String(o.serial || '—') === String(label); }).length;
+    return tail ? ((/^unknown$/i.test(shown) ? '' : shown + ' ') + '#' + tail) : (seen ? shown + ' (' + (seen + 1) + ')' : shown);
+  }
+  function rdSizeTag(b, def){
+    var n = parseInt(String(b.size || ''), 10);
+    return (n && n !== def.std) ? '<em class="rd-sz">' + escH(String(b.size).toUpperCase().replace(/\s+/g, '')) + '</em>' : '';
+  }
+  function rdSerialHtml(text){
+    var t = String(text).trim();
+    return segOk(t) ? '<span class="rd-seg">' + segHtml(t) + '</span>' : '<span class="rd-tx" style="--n:' + Math.max(1, t.length) + '">' + escH(t) + '</span>';
+  }
+  // Show this stream's serials and nothing else (the others go to boxes), or hide it again when it is the one showing
+  function rdSwitch(key){
+    try {
+      var hid = g('hiddenBinStreams'), frc = g('forcedBinStreams'), site = rdSite(); if (!hid || !frc || !site) return;
+      var off = g('lbOffRunNow'), f = String(g('activeFilterStream') || '').toLowerCase().replace('summerrecycling', 'recycling');
+      if (off && f && f !== 'all' && key.toLowerCase() !== f) return;     // off the run only the stream being looked at opens its serials
+      var shownFn = g('isStreamShownAtAddress');
+      var showing = typeof shownFn === 'function' && shownFn(key, site);
+      var onlyThis = showing && RD_STREAMS.every(function(d){ return d.key === key || !shownFn(d.key, site); });
+      RD_STREAMS.forEach(function(d){ if (d.key !== key) { hid.add(d.key); frc.delete(d.key); } });
+      if (onlyThis) { hid.add(key); frc.delete(key); } else { hid.delete(key); frc.add(key); }
+      rdClearPick();
+      if (typeof window.renderCurrentAddressTelemetry === 'function') window.renderCurrentAddressTelemetry(site);
+    } catch (e) {}
+  }
+  function rdBinsClick(ev){
+    var t = ev.target.closest ? ev.target.closest('[data-a]') : null; if (!t) return;
+    ev.stopPropagation();
+    var a = t.getAttribute('data-a'), site = rdSite();
+    if (a === 'sn') { var k = t.getAttribute('data-k'); if (rdPick === k) rdClearPick(); else { rdPick = k; rdIssue = false; clearTimeout(rdPickT); rdPickT = setTimeout(function(){ rdClearPick(); paintBins(true); }, 9000); } paintBins(true); return; }
+    if (a === 'logo' || a === 'ob') { rdSwitch(t.getAttribute('data-s')); return; }
+    if (a === 'rem') { var k2 = t.getAttribute('data-k'), sr = t.getAttribute('data-sr') || ''; rdClearPick(); paintBins(true); if (typeof window.openBinReminderModal === 'function') window.openBinReminderModal(k2, escape(site ? (site.addressText || '') : ''), sr); return; }
+    if (a === 'rep') { rdIssue = !rdIssue; paintBins(true); return; }
+    if (a === 'iss') { var mid = t.getAttribute('data-m'), is = t.getAttribute('data-i'); rdClearPick(); paintBins(true); if (typeof window.setBinIssue === 'function') window.setBinIssue(ev, mid, is); return; }
+  }
+  var rdSig = '';
+  function paintBins(force){
+    var bn = $('rdBins'), tab = $('rdSt'), sd = $('rdSd'); if (!bn) return;
+    var site = rdSite(), nm = ((tab.querySelector('b') || {}).textContent || '');
+    var src = site ? ((g('activeFilterDataSource') === 'council') ? (site.councilStreams || {}) : (site.soloStreams || {})) : {};
+    var eligible = site ? RD_STREAMS.filter(function(d){ return (src[d.key] || []).length > 0; }) : [];
+    if (!site || !eligible.length || !nm) { bn.style.display = 'none'; if (sd) sd.style.display = 'none'; tab.removeAttribute('data-side'); rdSig = ''; return; }
+    bn.style.display = ''; sd.style.display = '';
+    var shownFn = g('isStreamShownAtAddress');
+    var shown = eligible.filter(function(d){ try { return typeof shownFn === 'function' ? !!shownFn(d.key, site) : true; } catch (e) { return true; } });
+    var f = String(g('activeFilterStream') || '').toLowerCase().replace('summerrecycling', 'recycling');
+    var act = null;
+    if (shown.length) act = shown.filter(function(d){ return d.key.toLowerCase() === f; })[0] || shown[0];
+    var tint = act || eligible.filter(function(d){ return d.key.toLowerCase() === f; })[0] || eligible[0];
+    var others = eligible.filter(function(d){ return d !== act; });
+    var nl = (tab.querySelector('.rd-nl') || {}).textContent || '', nr = (tab.querySelector('.rd-nr') || {}).textContent || '';
+    var side = rdSide(site, nl, nr);
+    var bins = act ? src[act.key] : [];
+    var spd = +g('currentMapSpeedKmh') || 0, stopped = spd < 3;
+    var big = bins.length <= 1 || stopped;                  // two bins or more: only the big digits when stopped
+    var propId = String(site.propId || site.siteId || ''), rems = g('siteReminders') || {};
+    var off = !!g('lbOffRunNow');
+    var items = bins.map(function(b, i){
+      var bk = propId + '_' + (b.serial || i), rem = rems[bk], today = new Date().toISOString().slice(0, 10);
+      return { b: b, i: i, k: bk, text: rdSerialText(bins, i), rem: rem ? (!rem.triggerDate || rem.triggerDate <= today ? 'due' : 'set') : '' };
+    });
+    if (rdPick && !items.some(function(x){ return x.k === rdPick; })) rdClearPick();
+    var sig = [propId, act ? act.key : '-', eligible.map(function(d){ return d.key + rdRunLabel(site, d); }).join(','), side, big ? 1 : 0, off ? 1 : 0, rdPick || '', rdIssue ? 1 : 0, items.map(function(x){ return x.text + x.rem + (x.b.size || ''); }).join('|'), nl, nr].join('~');
+    tab.setAttribute('data-side', side); sd.setAttribute('data-side', side);
+    tab.style.setProperty('--bc', tint.bg); tab.style.setProperty('--bt', tint.fg); sd.style.setProperty('--bc', tint.bg);
+    attr(sd, 'data-off', off ? '1' : '0');
+    if (!force && sig === rdSig) return;
+    rdSig = sig;
+    var h = '';
+    var boxes = function(list, cls){
+      return '<div class="rd-oth ' + cls + '">' + list.map(function(d){
+        return '<button type="button" class="rd-ob" data-a="ob" data-s="' + d.key + '" style="--c:' + d.bg + ';--t:' + d.fg + '" aria-label="' + d.key + ' ' + escH(rdRunLabel(site, d)) + '"><img src="' + d.icon + '" alt="">' + '<b>' + escH(rdRunLabel(site, d)) + '</b></button>';
+      }).join('') + '</div>';
+    };
+    var pickItem = rdPick ? items.filter(function(x){ return x.k === rdPick; })[0] : null;
+    var menuId = pickItem ? ('binMenu_' + propId + '_' + act.key + '_' + pickItem.i).replace(/[^a-zA-Z0-9_]/g, '_') : '';
+    var right = '';
+    if (pickItem) {
+      right = '<div class="rd-oth ' + ((big && items.length > 1) ? 'rd-col' : 'rd-row') + ' rd-acts">' +
+        '<button type="button" class="rd-ac rd-ac-rem" data-a="rem" data-k="' + escH(pickItem.k) + '" data-sr="' + escH(pickItem.b.serial || '') + '" aria-label="Set a reminder for this bin">' + RD_SVG_CLOCK + '<b>REMIND</b></button>' +
+        '<button type="button" class="rd-ac rd-ac-rep" data-a="rep" aria-label="Report a problem with this bin">' + RD_SVG_WARN + '<b>REPORT</b></button>' +
+        (rdIssue ? '<div class="rd-iss">' + RD_ISSUES.map(function(is){ return '<button type="button" data-a="iss" data-m="' + menuId + '" data-i="' + is + '">' + is + '</button>'; }).join('') + '</div>' : '') +
+        '</div>';
+    } else if (others.length) right = boxes(others, (big && items.length > 1 && others.length > 1) ? 'rd-col' : 'rd-row');
+    if (act) {
+      var ser = items.map(function(x){
+        return '<button type="button" class="rd-sn' + (x.k === rdPick ? ' pick' : '') + (x.rem ? ' rem-' + x.rem : '') + '" data-a="sn" data-k="' + escH(x.k) + '" aria-label="Bin ' + escH(x.text) + ', tap to set a reminder or report">' + rdSerialHtml(x.text) + rdSizeTag(x.b, act) + '</button>';
+      }).join('');
+      h = '<div class="rd-band ' + (side === 'R' ? 'r ' : '') + (big ? 'big' : 'small') + '" style="--bc:' + act.bg + ';--bt:' + act.fg + '">' +
+        '<div class="rd-area"><button type="button" class="rd-logo" data-a="logo" data-s="' + act.key + '" aria-label="' + act.key + ' serials, tap to hide"><img src="' + act.icon + '" alt=""></button><div class="rd-ser">' + ser + '</div></div>' +
+        (right ? '<i class="rd-bar3"></i>' + right : '') + '</div>';
+    } else {
+      // nothing showing (off the run, or the driver closed it): just the streams' boxes, side by side and joined
+      h = '<div class="rd-band rd-closed ' + (side === 'R' ? 'r ' : '') + 'small">' + eligible.map(function(d){
+        var isF = d.key.toLowerCase() === f;
+        return '<button type="button" class="rd-ob' + (isF ? ' front' : '') + '" data-a="ob" data-s="' + d.key + '" style="--c:' + d.bg + ';--t:' + d.fg + '" aria-label="' + d.key + ' ' + escH(rdRunLabel(site, d)) + '"><img src="' + d.icon + '" alt=""><b>' + escH(rdRunLabel(site, d)) + '</b></button>';
+      }).join('') + '</div>';
+    }
+    bn.innerHTML = h;
+  }
+
   function paintDash(){
     if (skin() !== 'rubbish') return;
     var top = buildDash(); if (!top) return;
     var sp = Math.max(0, Math.round(+g('currentMapSpeedKmh') || 0)), lim = limitNow();
-    // speed: three digits, the unused leading ones dim
-    var d = String(Math.min(sp, 999)), pad = '000'.slice(d.length), spd = $('rdSpd');
-    txt(spd.querySelector('s'), pad); txt(spd.querySelector('span'), d);
+    // speed: three seven-segment digits (the unused leading ones just show their ghost segments)
+    var d = String(Math.min(sp, 999)); d = '   '.slice(d.length) + d;
+    segSet($('rdSpd'), d);
     var warn = (lim && sp > lim + 9) ? 2 : (lim && sp > lim + 2) ? 1 : 0;
     attr(top, 'data-warn', warn);
-    attr(spd, 'aria-label', 'Speed ' + sp + ' kilometres an hour' + (lim ? ', limit ' + lim : ''));
+    attr($('rdSpd'), 'aria-label', 'Speed ' + sp + ' kilometres an hour' + (lim ? ', limit ' + lim : ''));
     var lm = $('rdLim'); txt(lm, lim || ''); lm.style.visibility = lim ? '' : 'hidden';
-    var bar = top.querySelector('.rd-bar i'), tick = top.querySelector('.rd-bar u');
-    var wpc = Math.round(Math.min(1, sp / 80) * 100) + '%'; if (bar.style.width !== wpc) bar.style.width = wpc;
-    if (lim) { var lpc = Math.min(98, Math.round(lim / 80 * 100)) + '%'; if (tick.style.left !== lpc) tick.style.left = lpc; tick.style.display = 'block'; } else tick.style.display = 'none';
+    // the LED bar: 20 blocks of 4 km/h, lit up to the speed. A block's colour follows the same steps as the wanted level.
+    var leds = $('rdLed').children, lit = Math.min(20, Math.round(sp / 4)), lb = lim ? Math.min(20, Math.round(lim / 4)) - 1 : -1;
+    for (var i = 0; i < 20; i++) {
+      var v = (i + 1) * 4, z = (lim && v > lim + 9) ? 'r' : (lim && v > lim + 2) ? 'o' : 'g';
+      var cls = z + (i < lit ? ' on' : '') + (i === lb ? ' lim' : '');
+      if (leds[i].className !== cls) leds[i].className = cls;
+    }
     // heading
-    var hd = ((Math.round(+g('lastValidHeading') || 0) % 360) + 360) % 360;
-    txt($('rdDeg'), hd + '°'); txt($('rdCard'), CARD8[Math.round(hd / 45) % 8]);
+    var hd = ((Math.round(+g('lastValidHeading') || 0) % 360) + 360) % 360, hs = String(hd);
+    segSet($('rdDeg'), '000'.slice(hs.length) + hs); txt($('rdCard'), CARD8[Math.round(hd / 45) % 8]);
     // street, copied from the one the street code keeps up to date
     var src = $('rbSt'), nm = src ? ((src.querySelector('b') || {}).textContent || '') : '';
+    // (no street name yet - no signal for the street lookup - the street of the house the bins are at stands in, so the band still shows)
+    if (!nm) { var ts = rdSite(); if (ts) nm = rdStreetOf(ts); }
     var st = $('rdSt'), sb = st.querySelector('b');
     txt(sb, nm);
     txt(st.querySelector('.rd-nl'), src ? ((src.querySelector('.rb-nl') || {}).textContent || '') : '');
@@ -42174,24 +42355,25 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
       var f0 = parseFloat(getComputedStyle(sb).fontSize) || 22;
       if (sb.clientWidth > 20 && sb.scrollWidth > sb.clientWidth + 1) sb.style.setProperty('font-size', Math.max(12, Math.floor(f0 * sb.clientWidth / sb.scrollWidth)) + 'px', 'important');
     }
+    try { paintBins(false); } catch (e) {}
     // stats row
     var HT = null; try { HT = window.lbHudTotals ? window.lbHudTotals() : null; } catch (e) {}
     var hasRun = !!(HT && HT.run), T = onTruck();
-    txt($('rdTruck').querySelector('b'), T ? T.n : doneCount());
+    segSet($('rdTruck').querySelector('.rd-v'), String(T ? T.n : doneCount()));
     attr($('rdTruck'), 'aria-label', (T ? 'On truck ' + T.n : 'Collected ' + doneCount()));
     var r = null; try { r = window.uxShiftRates ? window.uxShiftRates() : null; } catch (e) {}
-    txt($('rdKm').querySelector('b'), r ? (r.km < 100 ? r.km.toFixed(1) : Math.round(r.km)) : '-');
+    segSet($('rdKm').querySelector('.rd-v'), r ? String(r.km < 100 ? r.km.toFixed(1) : Math.round(r.km)) : '-');
     var ph = r ? (r.perHr != null ? r.perHr : r.recent) : null;
-    txt($('rdRate').querySelector('b'), ph != null ? Math.round(ph) : '-');
+    segSet($('rdRate').querySelector('.rd-v'), ph != null ? String(Math.round(ph)) : '-');
     var sg = hasRun ? streetsToGo() : null;
-    txt($('rdStreets').querySelector('b'), sg != null ? sg : '-');
-    txt($('rdTogo').querySelector('b'), hasRun ? Math.max(0, (HT.bins || 0) - doneCount()) : '-');
+    segSet($('rdStreets').querySelector('.rd-v'), sg != null ? String(sg) : '-');
+    segSet($('rdTogo').querySelector('.rd-v'), hasRun ? String(Math.max(0, (HT.bins || 0) - doneCount())) : '-');
     // a cell with nothing to count (no shift, no run yet) is left out, so the row is never a string of dashes
     [['rdKm', !!r], ['rdRate', ph != null], ['rdStreets', sg != null], ['rdTogo', hasRun]].forEach(function(c){ var e = $(c[0]); if (e) e.style.display = c[1] ? '' : 'none'; });
     var sh = shift(), fx = $('rdFines');
     if (sh && game()) {
       var f = 0; try { var S = window.uxGta.stats(); if (S.led && S.led.shift === sh.id) f = S.led.fines || 0; } catch (e) {}
-      fx.style.display = ''; txt(fx.querySelector('b'), Math.round(f).toLocaleString('en-AU'));
+      fx.style.display = ''; segSet(fx.querySelector('.rd-v'), String(Math.round(f)));
     } else fx.style.display = 'none';
   }
   // A number too long for its box ("$227" in FINES on a 360 px phone ran out of the box and under the dots) is drawn
@@ -48607,7 +48789,8 @@ html[data-ux-skin="rubbish"] body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d
     var on = portraitMap();
     hz.classList.toggle('lb-haz-low', on);
     if (!on) return;
-    var st = $('rbSt'), stack = $('uxCardStack'), top = 0;
+    // (in Hard Rubbish the dash's own top - the speedo bezel - is what it sits above; #rbSt is hidden there)
+    var st = ($('rbDash') && $('rbDash').offsetParent !== null) ? $('rbDash') : $('rbSt'), stack = $('uxCardStack'), top = 0;
     if (st && st.offsetParent !== null && st.getBoundingClientRect().height > 4) top = st.getBoundingClientRect().top;
     else if (stack && stack.offsetParent !== null) top = stack.getBoundingClientRect().top;
     if (!top) return;
@@ -49689,55 +49872,126 @@ html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x)
 html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbCluster .rb-spd[data-over="1"] .rb-arc .a{stroke:var(--sc);filter:drop-shadow(0 0 6px var(--sc))}
 </style>
 <style id="lb-rbdash-style">
-/* Hard Rubbish dash, as drawn: speed row + bar + street on top, stats row under the address card. No words, icons and numbers. */
+/* Hard Rubbish dash (design B2): digital speedo + LED bar, the street with house-number tabs, the bin band, and the stats row under the address card.
+   Seven-segment digits are inline SVG (#rdSegDefs holds the shapes); everything takes its colour from currentColor. */
 #rbDash, #rbStats{display:none}
 html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbCluster, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #uxCardStack > #rbSt{display:none !important}
-html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash{order:-1;display:block;position:relative;background:var(--rb-bar);border-top:5px solid var(--rb-a);padding:4px 10px 5px;pointer-events:auto;--sc:#72cc72}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash{order:-1;display:block;position:relative;background:#1b1d22;pointer-events:auto;--sc:#72cc72;--rd-f:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
 html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash[data-warn="1"]{--sc:#ff9a1f}
 html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash[data-warn="2"]{--sc:#ff4b3e}
-html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-hero{display:grid;grid-template-columns:minmax(40px,1fr) auto minmax(40px,1fr);align-items:center;gap:8px}
-html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-lim{justify-self:start;display:flex;align-items:center;justify-content:center;width:40px;height:40px;box-sizing:border-box;border-radius:50%;background:#fff;border:5px solid #e0261b;color:#000;font:800 15px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;font-style:normal;letter-spacing:-.02em}
-html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-spd{display:flex;align-items:baseline;justify-content:center;font:400 54px/1 var(--rb-font);color:var(--sc);letter-spacing:.02em;font-variant-numeric:tabular-nums;text-shadow:0 0 10px color-mix(in srgb,var(--sc) 45%,transparent)}
-html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-spd s{text-decoration:none;opacity:.22}
-html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-cmp{justify-self:end;display:flex;flex-direction:column;align-items:flex-end;gap:1px;color:#fff;line-height:1}
-html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-cmp b{font:400 22px/1 var(--rb-font)}
-html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-cmp span{font:800 12px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;color:var(--rb-a);letter-spacing:.06em}
-html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-bar{position:relative;height:6px;margin:3px 2px 5px;border-radius:3px;background:rgba(255,255,255,.14)}
-html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-bar i{display:block;width:0;height:100%;border-radius:3px;background:var(--sc);box-shadow:0 0 8px var(--sc);transition:width .35s linear,background-color .2s}
-html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-bar u{position:absolute;top:-3px;bottom:-3px;width:2px;margin-left:-1px;background:#fff;opacity:.9;display:none;text-decoration:none}
-html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-st{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;column-gap:8px}
-html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-st b{min-width:0;text-align:center;font:800 22px/1.1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;letter-spacing:.01em;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-transform:uppercase}
-html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-n{font-style:normal;font:400 20px/1 var(--rb-font);min-width:18px;text-align:center;padding:4px 8px;border-radius:7px;color:#000;background:var(--rb-a);border:2px solid #000}
-html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-nr{background:#3a3d44;color:#fff;border-color:#000}
-html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-n:empty{visibility:hidden}
-html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats{order:3;display:flex;align-items:center;justify-content:space-between;gap:6px;background:var(--rb-bar);padding:5px 12px 7px;border-top:2px solid #000;pointer-events:auto}
-html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats .rd-c{display:flex;align-items:center;gap:5px;min-width:0;margin:0;padding:0;border:0;background:none;box-shadow:none;color:#fff;font:inherit;white-space:nowrap;width:auto;height:auto;min-height:0}
-html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats .rd-c b{font:400 24px/1 var(--rb-font);color:#fff}
-html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats .rd-c small{font:800 11px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;color:#9aa0aa;letter-spacing:.04em;margin-left:-1px}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash button{min-height:0;min-width:0;margin:0;box-shadow:none;border-radius:0;text-transform:none;letter-spacing:normal;-webkit-tap-highlight-color:transparent}
+/* seven-segment digit: the width sets the size (height is 1.75 x), unlit segments ghosted behind the lit ones */
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) .rd-sg{display:block;flex:0 1 auto;min-width:0;width:var(--dw,13px);height:calc(var(--dw,13px) * 1.75);fill:currentColor;transform:skewX(-6deg);overflow:visible}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) .rd-sg .gh{opacity:.13}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) .rd-sg use:not(.gh){filter:drop-shadow(0 0 2px currentColor)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) .rd-dot{display:block;flex:none;width:3px;height:3px;border-radius:50%;background:currentColor;box-shadow:0 0 2px currentColor;margin:0 0 1px}
+/* 1. the bezel: limit sign | speed | heading, then the LED bar */
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-hero{display:grid;grid-template-columns:minmax(40px,1fr) auto minmax(40px,1fr);align-items:center;background:#07090a;border-top:5px solid var(--rb-a);padding:6px 12px 0}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-lim{justify-self:start;display:flex;align-items:center;justify-content:center;width:44px;height:44px;box-sizing:border-box;border-radius:50%;background:#fff;border:6px solid #e0261b;color:#000;font:800 16px/1 var(--rd-f);font-style:normal;letter-spacing:-.02em}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-spd{display:flex;gap:7px;align-items:flex-end;color:var(--sc);--dw:40px}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-cmp{justify-self:end;display:grid;grid-template-columns:auto auto;justify-items:end;align-items:start;row-gap:4px;color:var(--rb-a)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-deg{display:flex;gap:3px;align-items:flex-end;--dw:14px}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-cmp em{font:800 11px/1 var(--rd-f);font-style:normal;margin-left:1px}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash #rdCard{grid-column:1 / -1;font:800 12px/1 var(--rd-f);letter-spacing:.1em}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-led{display:flex;gap:2px;height:9px;background:#07090a;padding:6px 12px 8px;box-sizing:content-box}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-led i{flex:1;opacity:.16;background:var(--lc)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-led i.g{--lc:#72cc72}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-led i.o{--lc:#ff9a1f}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-led i.r{--lc:#ff4b3e}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-led i.on{opacity:1;box-shadow:0 0 5px var(--lc)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-led i.lim{box-shadow:0 3px 0 #fff}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-led i.on.lim{box-shadow:0 0 5px var(--lc),0 3px 0 #fff}
+/* 2. the street, the house numbers as tabs */
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-st{display:grid;grid-template-columns:56px minmax(0,1fr) 56px;height:44px;border-top:3px solid #000;background:#1b1d22}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-st b{display:flex;align-items:center;justify-content:center;min-width:0;padding:0 6px;border-left:3px solid #000;border-right:3px solid #000;font:800 22px/1.1 var(--rd-f);letter-spacing:.02em;color:#fff;white-space:nowrap;overflow:hidden;text-transform:uppercase}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-n{display:flex;align-items:center;justify-content:center;min-width:0;font:400 24px/1 var(--rb-font);font-style:normal;background:#2a2c31;color:#8b909a}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-st[data-side="L"] .rd-nl,html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-st[data-side="R"] .rd-nr{background:var(--bc);color:var(--bt)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-sd{display:grid;grid-template-columns:56px minmax(0,1fr) 56px;height:3px;background:#000}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-sd i{display:block;background:#000}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-sd[data-side="L"] i:first-child,html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-sd[data-side="R"] i:last-child{background:var(--bc)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-sd[data-off="1"] i:nth-child(2){background:#f97316}
+/* 3. the bin band */
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash #rdBins{display:block}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-band{display:flex;background:var(--bc);color:var(--bt);min-height:56px;position:relative;border-bottom:3px solid #000}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-band.r{flex-direction:row-reverse}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-area{flex:1;min-width:0;display:flex;align-items:center;gap:10px;padding:8px 12px}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .r .rd-area{flex-direction:row-reverse}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-logo{flex:none;width:44px;height:44px;padding:0;border:0;background:none;cursor:pointer}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-logo img{display:block;width:100%;height:100%}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-band.small .rd-logo{width:30px;height:30px}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-band[style*="--bt:#fff"] .rd-logo img{filter:invert(1)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-ser{display:flex;flex-direction:column;gap:5px;min-width:0}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-band.small .rd-ser{gap:3px}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .r .rd-ser{align-items:flex-end}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-sn{display:flex;align-items:center;gap:6px;min-width:0;max-width:100%;padding:0 3px;margin:0;border:0;outline:2px solid transparent;border-radius:2px !important;background:none;color:inherit;cursor:pointer;font:inherit}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .r .rd-sn{flex-direction:row-reverse}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-sn.pick{outline-color:#fff;box-shadow:0 0 0 4px #000}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-band.small .rd-sn.pick{box-shadow:0 0 0 2px #000}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-sn.rem-set{outline-color:#a855f7}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-sn.rem-due{outline-color:#a855f7;animation:rec-light-pulse 1.6s ease-in-out infinite}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-seg{display:flex;gap:3px;align-items:flex-end;min-width:0}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-band.big .rd-seg{--dw:22px}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-band.small .rd-seg{--dw:11px}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-tx{font:400 34px/38px 'Share Tech Mono',ui-monospace,'SF Mono',Menlo,Consolas,monospace;font-size:min(34px,calc(250px / var(--n,8)));letter-spacing:.02em;white-space:nowrap;min-width:0;overflow:hidden}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-band.small .rd-tx{line-height:19px;font-size:min(17px,calc(125px / var(--n,8)))}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-sz{flex:none;font:800 14px/1 var(--rd-f);font-style:normal;background:#000;color:var(--bc);padding:3px 5px;border-radius:4px}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-band[style*="--bt:#fff"] .rd-sz{color:#fff}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-bar3{flex:none;width:3px;background:#000}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-oth{flex:none;display:flex;position:relative}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-oth.rd-col{flex-direction:column;width:92px}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-ob{flex:1;display:flex;align-items:center;justify-content:center;gap:7px;padding:0 8px;border:0;background:var(--c);color:var(--t);cursor:pointer;font:inherit}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-ob img{display:block;width:24px;height:24px;flex:none}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-ob[style*="--t:#fff"] img{filter:invert(1)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-ob b{font:400 17px/1 var(--rb-font);color:var(--t)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-col .rd-ob + .rd-ob{border-top:3px solid #000}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-row .rd-ob{flex-direction:column;gap:4px;min-width:64px}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-row .rd-ob img{width:22px;height:22px}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-row .rd-ob b{font-size:16px}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-row .rd-ob + .rd-ob{border-left:3px solid #000}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-closed .rd-ob{flex:1;flex-direction:row;min-height:56px}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-closed .rd-ob + .rd-ob{border-left:3px solid #000}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-ob.front{box-shadow:inset 0 0 0 3px #fff}
+/* tapped serial: the other-stream boxes turn into REMIND and REPORT for that bin */
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-acts.rd-col{width:104px}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-ac{flex:1;display:flex;align-items:center;justify-content:center;gap:7px;padding:0 8px;border:0;cursor:pointer;font:inherit}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-ac b{font:800 12px/1 var(--rd-f);letter-spacing:.06em}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-ac-rem{background:#1b1d22;color:var(--rb-a)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-ac-rem b{color:#fff}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-ac-rep{background:#f97316;color:#000}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-acts.rd-col .rd-ac + .rd-ac{border-top:3px solid #000}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-acts.rd-row .rd-ac{flex-direction:column;gap:4px;min-width:64px}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-acts.rd-row .rd-ac + .rd-ac{border-left:3px solid #000}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-iss{position:absolute;bottom:100%;right:0;display:flex;flex-direction:column;background:#1b1d22;border:3px solid #000;border-bottom:0;z-index:5}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .r .rd-iss{right:auto;left:0}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-iss button{width:max-content;padding:9px 14px;border:0;border-top:3px solid #000;background:#1b1d22;color:#fff;text-align:left;font:800 14px/1 var(--rd-f);cursor:pointer}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-iss button:first-child{border-top:0}
+/* 4. the stats row */
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats{order:3;display:flex;align-items:center;justify-content:space-between;gap:6px;background:#1b1d22;padding:6px 14px 8px;border-top:0;pointer-events:auto}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats .rd-c{display:flex;align-items:center;gap:5px;min-width:0;margin:0;padding:0;border:0;background:none;box-shadow:none;color:#d0d3d9;font:inherit;white-space:nowrap;width:auto;height:auto;min-height:0}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats .rd-v{display:flex;gap:3px;align-items:flex-end;--dw:13px}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats .rd-c small{font:800 11px/1 var(--rd-f,sans-serif);color:#9aa0aa;letter-spacing:.04em}
 html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats .rd-ic{display:block;flex:none;width:26px;height:26px;background:currentColor;-webkit-mask:var(--m) center/contain no-repeat;mask:var(--m) center/contain no-repeat}
 html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats svg.rd-ic{background:none;-webkit-mask:none;mask:none}
 html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats .rd-truck{color:var(--rb-a)}
 html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats .rd-km{color:#7fa6c9}
 html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats .rd-rate{color:#ff8a1f}
-html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats .rd-streets{color:#b9bdc4}
-html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats .rd-togo{color:#b9bdc4}
-html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats .rd-fines em{font:400 22px/1 var(--rb-font);font-style:normal;color:var(--rb-red)}
-html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats .rd-fines b{color:var(--rb-red)}
-@media (max-width: 359px), (orientation: landscape) and (max-height: 520px){
-  html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-spd{font-size:44px}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats .rd-streets .rd-ic,html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats .rd-togo .rd-ic{opacity:.7}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats .rd-fines{color:var(--rb-red)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats .rd-fines em{font:400 22px/1 var(--rb-font);font-style:normal}
+/* the address card's own header, stream tabs and serial rows are replaced by the street row and the band (the card itself only stays for its banners) */
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) .map-address-telemetry .address-telemetry-grid,html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #mapRunsAtAddress,html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #mapBinsAtAddress .next-bin-row,html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #mapBinsAtAddress .uprop-content{display:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) .map-address-telemetry:not(:has(.lb-offrun-add,.unassigned-bin-banner)){display:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x)media (max-width: 359px), (orientation: landscape) and (max-height: 520px){
+  html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-spd{--dw:32px}
   html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-st b{font-size:18px}
-  html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats .rd-c b{font-size:20px}
+  html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats .rd-v{--dw:11px}
   html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats .rd-ic{width:22px;height:22px}
 }
-/* On its side the panel is the whole left half, top to bottom: the speed row is bigger, and the stats row sits at the bottom of the panel instead of leaving a blank block under the bins */
-@media (orientation: landscape) and (max-width: 899px), (orientation: landscape) and (hover: none){
-  html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-spd{font-size:66px}
-  html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-lim{width:48px;height:48px;font-size:17px}
-  html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-cmp b{font-size:26px}
-  html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-bar{height:8px;margin:5px 2px 7px}
+/* On its side the panel is the whole left half, top to bottom: the stats row sits at the bottom of the panel instead of leaving a blank block under the bins */
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x)media (orientation: landscape) and (max-width: 899px), (orientation: landscape) and (hover: none){
   html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-st b{font-size:22px}
   html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats{margin-top:auto}
-  html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats .rd-c b{font-size:24px}
+  html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats .rd-v{--dw:13px}
   html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats .rd-ic{width:26px;height:26px}
 }
 </style>
