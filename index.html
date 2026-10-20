@@ -50273,5 +50273,94 @@ html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x
   });
 })();
 </script>
+
+<script id="lb-layer-runs-script">
+/* "Runs on the map" at the top of the Layers panel. It lists only what is on the map right now (the runs picked
+   in the filter, plus a Street Litter layer left on from an earlier look) so each can be hidden with one tap.
+   The full list of run numbers is NOT shown here: it only appears after "Add run" is pressed. Hiding goes
+   through the same removeFilter / toggle code the filter chips use, so the map, Drive and search follow. */
+(function(){
+  var ID = 'lbRunsSect', DAYS = ['sun','mon','tue','wed','thu','fri','sat'];
+  function g(n){ try { return (new Function('return typeof ' + n + '==="undefined"?undefined:' + n))(); } catch (e) { return undefined; } }
+  function set(n, v){ try { (new Function('v', n + '=v'))(v); } catch (e) {} }
+  function esc(t){ return String(t == null ? '' : t).replace(/[&<>"']/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
+  var STREAMS = [['Garbage','bin.png','Garbage'], ['Recycling','recycle.png','Recycling'], ['FOGO','fogo.png','FOGO'], ['SummerRecycling','','Summer'], ['StreetGarbage','litter.png','Street litter'], ['StreetRecycling','recycle.png','Street recycling']];
+  function icon(st){
+    var f = STREAMS.filter(function(x){ return x[0] === st; })[0];
+    if (!f) return '<span class="lb-ico">📍</span>';
+    return f[1] ? '<img class="icon-img" src="' + f[1] + '" alt="">' : '<span class="lb-ico">☀️</span>';
+  }
+  function dayTxt(d){ d = String(d || ''); if (!d) return ''; var a = d.slice(0,3).toLowerCase(); return a === DAYS[new Date().getDay()] ? '' : a.charAt(0).toUpperCase() + a.slice(1); }
+  function isStreetStream(st){ return st === 'StreetGarbage' || st === 'StreetRecycling'; }
+
+  // everything currently on the map: [{kind:'run'|'litter', stream, label, day, hide()}]
+  function active(){
+    var out = [], st = g('activeFilterStream') || '', wk = g('activeFilterWeek') || '', dy = g('activeFilterDay') || '';
+    var runs = Array.from(g('selectedRunsSet') || []).filter(function(r){ return r.indexOf('__') !== 0; });
+    runs.forEach(function(r){
+      var weekly = wk && st !== 'Garbage' && st !== 'SummerRecycling' && !isStreetStream(st);
+      out.push({ stream: st, label: r.toUpperCase() + (weekly ? String(wk).toUpperCase() : ''), day: dayTxt(dy),
+        hide: function(){ if (typeof window.removeFilter === 'function') window.removeFilter('run', r); else if (typeof removeFilter === 'function') removeFilter('run', r); } });
+    });
+    // a Street Litter layer that is on without being the filtered stream (left over from an earlier look)
+    if (g('showStreetLitter') && !isStreetStream(st)) {
+      var m = g('streetLitterStreamMode'), f = g('streetLitterRunFilter');
+      out.push({ stream: m === 'rr' ? 'StreetRecycling' : 'StreetGarbage', label: f ? String(f) : 'All street litter', day: '',
+        hide: function(){ set('showStreetLitter', false); set('streetLitterRunFilter', null); set('streetLitterDayFilter', null);
+          try { localStorage.setItem('lukezBunzShowStreetLitter', 'false'); } catch (e) {}
+          if (typeof renderStreetLitterLayer === 'function') renderStreetLitterLayer();
+          if (typeof updateMapSideLayersUI === 'function') updateMapSideLayersUI(); } });
+    }
+    return out;
+  }
+
+  function tileHtml(a, i){
+    return '<div class="lb-layer-btn on lbrs-tile" data-i="' + i + '">' + icon(a.stream) + '<span class="lb-label"><b>' + esc(a.label) + '</b>' + (a.day ? ' <i>' + esc(a.day) + '</i>' : '') + '</span>' +
+      '<button type="button" class="lbrs-x" data-hide="' + i + '" aria-label="Hide ' + esc(a.label) + '">✕</button></div>';
+  }
+  function html(list){
+    var h = '<div class="lb-layers-sect">Runs on the map</div>';
+    h += '<div class="lbrs-grid">' + list.map(tileHtml).join('') + '<div class="lb-layer-btn lbrs-add" data-add="1" role="button" tabindex="0"><span class="lb-ico">＋</span><span class="lb-label">Add run</span></div></div>';
+    return h;
+  }
+
+  var drawing = false;
+  function draw(){
+    var body = document.getElementById('lbLayersBody'); if (!body) return;
+    drawing = true;
+    try {
+      var list = active(), box = document.getElementById(ID);
+      if (!box) { box = document.createElement('div'); box.id = ID; body.insertBefore(box, body.firstChild); }
+      else if (body.firstChild !== box) body.insertBefore(box, body.firstChild);
+      box.innerHTML = html(list);
+      box._list = list;
+    } finally { setTimeout(function(){ drawing = false; }, 0); }
+  }
+
+  document.addEventListener('click', function(ev){
+    var t = ev.target, box = t.closest && t.closest('#' + ID); if (!box) return;
+    var b;
+    if ((b = t.closest('[data-hide]'))) { var a = box._list[+b.getAttribute('data-hide')]; if (a) a.hide(); draw(); return; }
+    if (t.closest('[data-add]')) { if (typeof window.lbCloseLayers === 'function') window.lbCloseLayers(); if (typeof window.openFilterDrawerModal === 'function') window.openFilterDrawerModal(); return; }
+  });
+
+  var css = document.createElement('style');
+  css.textContent =
+    '#lbRunsSect .lbrs-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin:2px 0 8px}' +
+    '#lbRunsSect .lbrs-tile,#lbRunsSect .lbrs-add{position:relative;cursor:pointer;min-width:0}' +
+    '#lbRunsSect .lbrs-tile .lb-label b{font-weight:500}#lbRunsSect .lbrs-tile i{font-style:normal;opacity:.75;font-size:.85em}' +
+    '#lbRunsSect .lbrs-x{position:absolute;top:3px;right:3px;width:20px;height:20px;border:0;border-radius:50%;background:#f57c00 !important;color:#fff !important;font-size:11px;line-height:20px;padding:0;cursor:pointer;z-index:2}';
+  document.head.appendChild(css);
+
+  function hook(){
+    var body = document.getElementById('lbLayersBody'); if (!body) return;
+    new MutationObserver(function(){ if (!drawing && !document.getElementById(ID)) draw(); }).observe(body, { childList: true });
+    var prev = window.lbOpenLayers;
+    window.lbOpenLayers = function(){ var r = typeof prev === 'function' ? prev.apply(this, arguments) : undefined; draw(); return r; };
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', hook); else hook();
+  window.lbLayerRuns = { draw: draw, active: active };
+})();
+</script>
 </body>
 </html>
