@@ -42098,6 +42098,102 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
     if (pips.innerHTML !== want) pips.innerHTML = want;
     if (!speedo()) { fitB(tk); fitB(st); }
   }
+  // ---- Hard Rubbish dash: speed row, street, and the stats row (the layout Fox drew) ---------------------
+  // Top of the panel: speed limit sign | the speed in big GTA-green digits (leading zeros dim, like unlit segments) | the heading,
+  // then the speed bar (grows with the speed, orange then red as the speeding warnings come on), then the street with the house
+  // number each side. Bottom of the panel (under the address card): on truck | km | bins an hour | bins to go | streets to go
+  // (and fines in Game mode), each just an icon and a number - no words. These replace the three boxes of #rbCluster and the
+  // floating street name in Hard Rubbish only (both stay in the page, hidden, because other code reads them; Speedo keeps them).
+  function rdMask(png){ return '<i class="rd-ic" style="--m:url(' + png + ')"></i>'; }
+  var RD_SVG_ROAD = '<svg class="rd-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3h8l4.5 18h-17z" fill="currentColor"/><path d="M12 6v3M12 11.5v3M12 17v3" stroke="#1b1d22" stroke-width="1.7" fill="none"/></svg>';
+  var RD_SVG_GAUGE = '<svg class="rd-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M4.2 17.5a8.6 8.6 0 1 1 15.6 0"/><path d="M12 14.5l3.2-5.2"/><path d="M8.5 20h7"/></svg>';
+  function buildDash(){
+    var stack = $('uxCardStack'); if (!stack) return null;
+    var top = $('rbDash');
+    if (!top) {
+      top = document.createElement('div'); top.id = 'rbDash';
+      top.innerHTML =
+        '<div class="rd-hero">' +
+          '<i class="rd-lim" id="rdLim" aria-hidden="true"></i>' +
+          '<b class="rd-spd" id="rdSpd" aria-live="off"><s></s><span>0</span></b>' +
+          '<div class="rd-cmp" id="rdCmp"><b id="rdDeg">0&deg;</b><span id="rdCard">N</span></div>' +
+        '</div>' +
+        '<div class="rd-bar" aria-hidden="true"><i></i><u></u></div>' +
+        '<div class="rd-st" id="rdSt"><i class="rd-n rd-nl"></i><b></b><i class="rd-n rd-nr"></i></div>';
+    }
+    if (top.parentNode !== stack || stack.firstElementChild !== top) stack.insertBefore(top, stack.firstChild);
+    var bot = $('rbStats');
+    if (!bot) {
+      bot = document.createElement('div'); bot.id = 'rbStats';
+      bot.innerHTML =
+        '<button type="button" class="rd-c rd-truck" id="rdTruck" aria-label="On truck">' + rdMask('garbagetruck.png') + '<b>-</b></button>' +
+        '<div class="rd-c rd-km" id="rdKm" aria-label="Km driven">' + RD_SVG_ROAD + '<b>-</b><small>km</small></div>' +
+        '<div class="rd-c rd-rate" id="rdRate" aria-label="Bins an hour">' + RD_SVG_GAUGE + '<b>-</b><small>/hr</small></div>' +
+        '<div class="rd-c rd-streets" id="rdStreets" aria-label="Streets to go">' + rdMask('route.png') + '<b>-</b></div>' +
+        '<div class="rd-c rd-fines" id="rdFines" aria-label="Fines" style="display:none"><em>$</em><b>0</b></div>' +
+        '<div class="rd-c rd-togo" id="rdTogo" aria-label="Bins to go">' + rdMask('bin.png') + '<b>-</b><small>to go</small></div>';
+      bot.addEventListener('click', function(ev){
+        var t = ev.target.closest ? ev.target.closest('#rdTruck') : null; if (!t) return;
+        ev.stopPropagation(); if (typeof window.uxShiftOpen === 'function') window.uxShiftOpen();
+      });
+    }
+    var cl = $('rbCluster');
+    if (bot.parentNode !== stack || (cl && cl.parentNode === stack && bot.nextElementSibling !== cl) || (!cl && stack.lastElementChild !== bot)) {
+      if (cl && cl.parentNode === stack) stack.insertBefore(bot, cl); else stack.appendChild(bot);
+    }
+    return top;
+  }
+  var CARD8 = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+  function paintDash(){
+    if (skin() !== 'rubbish') return;
+    var top = buildDash(); if (!top) return;
+    var sp = Math.max(0, Math.round(+g('currentMapSpeedKmh') || 0)), lim = limitNow();
+    // speed: three digits, the unused leading ones dim
+    var d = String(Math.min(sp, 999)), pad = '000'.slice(d.length), spd = $('rdSpd');
+    txt(spd.querySelector('s'), pad); txt(spd.querySelector('span'), d);
+    var warn = (lim && sp > lim + 9) ? 2 : (lim && sp > lim + 2) ? 1 : 0;
+    attr(top, 'data-warn', warn);
+    attr(spd, 'aria-label', 'Speed ' + sp + ' kilometres an hour' + (lim ? ', limit ' + lim : ''));
+    var lm = $('rdLim'); txt(lm, lim || ''); lm.style.visibility = lim ? '' : 'hidden';
+    var bar = top.querySelector('.rd-bar i'), tick = top.querySelector('.rd-bar u');
+    var wpc = Math.round(Math.min(1, sp / 80) * 100) + '%'; if (bar.style.width !== wpc) bar.style.width = wpc;
+    if (lim) { var lpc = Math.min(98, Math.round(lim / 80 * 100)) + '%'; if (tick.style.left !== lpc) tick.style.left = lpc; tick.style.display = 'block'; } else tick.style.display = 'none';
+    // heading
+    var hd = ((Math.round(+g('lastValidHeading') || 0) % 360) + 360) % 360;
+    txt($('rdDeg'), hd + '°'); txt($('rdCard'), CARD8[Math.round(hd / 45) % 8]);
+    // street, copied from the one the street code keeps up to date
+    var src = $('rbSt'), nm = src ? ((src.querySelector('b') || {}).textContent || '') : '';
+    var st = $('rdSt'), sb = st.querySelector('b');
+    txt(sb, nm);
+    txt(st.querySelector('.rd-nl'), src ? ((src.querySelector('.rb-nl') || {}).textContent || '') : '');
+    txt(st.querySelector('.rd-nr'), src ? ((src.querySelector('.rb-nr') || {}).textContent || '') : '');
+    st.style.display = nm ? '' : 'none';
+    var fk = nm + '|' + st.clientWidth + '|' + st.querySelector('.rd-nl').textContent + '|' + st.querySelector('.rd-nr').textContent;
+    if (nm && st._fk !== fk) {
+      st._fk = fk; sb.style.removeProperty('font-size');
+      var f0 = parseFloat(getComputedStyle(sb).fontSize) || 22;
+      if (sb.clientWidth > 20 && sb.scrollWidth > sb.clientWidth + 1) sb.style.setProperty('font-size', Math.max(12, Math.floor(f0 * sb.clientWidth / sb.scrollWidth)) + 'px', 'important');
+    }
+    // stats row
+    var HT = null; try { HT = window.lbHudTotals ? window.lbHudTotals() : null; } catch (e) {}
+    var hasRun = !!(HT && HT.run), T = onTruck();
+    txt($('rdTruck').querySelector('b'), T ? T.n : doneCount());
+    attr($('rdTruck'), 'aria-label', (T ? 'On truck ' + T.n : 'Collected ' + doneCount()));
+    var r = null; try { r = window.uxShiftRates ? window.uxShiftRates() : null; } catch (e) {}
+    txt($('rdKm').querySelector('b'), r ? (r.km < 100 ? r.km.toFixed(1) : Math.round(r.km)) : '-');
+    var ph = r ? (r.perHr != null ? r.perHr : r.recent) : null;
+    txt($('rdRate').querySelector('b'), ph != null ? Math.round(ph) : '-');
+    var sg = hasRun ? streetsToGo() : null;
+    txt($('rdStreets').querySelector('b'), sg != null ? sg : '-');
+    txt($('rdTogo').querySelector('b'), hasRun ? Math.max(0, (HT.bins || 0) - doneCount()) : '-');
+    // a cell with nothing to count (no shift, no run yet) is left out, so the row is never a string of dashes
+    [['rdKm', !!r], ['rdRate', ph != null], ['rdStreets', sg != null], ['rdTogo', hasRun]].forEach(function(c){ var e = $(c[0]); if (e) e.style.display = c[1] ? '' : 'none'; });
+    var sh = shift(), fx = $('rdFines');
+    if (sh && game()) {
+      var f = 0; try { var S = window.uxGta.stats(); if (S.led && S.led.shift === sh.id) f = S.led.fines || 0; } catch (e) {}
+      fx.style.display = ''; txt(fx.querySelector('b'), Math.round(f).toLocaleString('en-AU'));
+    } else fx.style.display = 'none';
+  }
   // A number too long for its box ("$227" in FINES on a 360 px phone ran out of the box and under the dots) is drawn
   // smaller until it fits. Only redone when the number or the box's width changes.
   function fitB(box){
@@ -42713,6 +42809,7 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
     try { paintStars(); } catch (e) {}
     try { paintBearing(); } catch (e) {}
     try { paintCluster(); } catch (e) {}
+    try { paintDash(); } catch (e) {}
     try { paintRolling(); } catch (e) {}
     try { paintPops(); } catch (e) {}
     try { measurePanel(); } catch (e) {}
@@ -49590,6 +49687,59 @@ html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x)
 html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbCluster .rb-spd[data-over="1"]{background:none}
 html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbCluster .rb-spd[data-over="1"] b{text-shadow:0 0 14px var(--sc)}
 html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbCluster .rb-spd[data-over="1"] .rb-arc .a{stroke:var(--sc);filter:drop-shadow(0 0 6px var(--sc))}
+</style>
+<style id="lb-rbdash-style">
+/* Hard Rubbish dash, as drawn: speed row + bar + street on top, stats row under the address card. No words, icons and numbers. */
+#rbDash, #rbStats{display:none}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbCluster, html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #uxCardStack > #rbSt{display:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash{order:-1;display:block;position:relative;background:var(--rb-bar);border-top:5px solid var(--rb-a);padding:4px 10px 5px;pointer-events:auto;--sc:#72cc72}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash[data-warn="1"]{--sc:#ff9a1f}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash[data-warn="2"]{--sc:#ff4b3e}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-hero{display:grid;grid-template-columns:minmax(40px,1fr) auto minmax(40px,1fr);align-items:center;gap:8px}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-lim{justify-self:start;display:flex;align-items:center;justify-content:center;width:40px;height:40px;box-sizing:border-box;border-radius:50%;background:#fff;border:5px solid #e0261b;color:#000;font:800 15px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;font-style:normal;letter-spacing:-.02em}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-spd{display:flex;align-items:baseline;justify-content:center;font:400 54px/1 var(--rb-font);color:var(--sc);letter-spacing:.02em;font-variant-numeric:tabular-nums;text-shadow:0 0 10px color-mix(in srgb,var(--sc) 45%,transparent)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-spd s{text-decoration:none;opacity:.22}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-cmp{justify-self:end;display:flex;flex-direction:column;align-items:flex-end;gap:1px;color:#fff;line-height:1}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-cmp b{font:400 22px/1 var(--rb-font)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-cmp span{font:800 12px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;color:var(--rb-a);letter-spacing:.06em}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-bar{position:relative;height:6px;margin:3px 2px 5px;border-radius:3px;background:rgba(255,255,255,.14)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-bar i{display:block;width:0;height:100%;border-radius:3px;background:var(--sc);box-shadow:0 0 8px var(--sc);transition:width .35s linear,background-color .2s}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-bar u{position:absolute;top:-3px;bottom:-3px;width:2px;margin-left:-1px;background:#fff;opacity:.9;display:none;text-decoration:none}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-st{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;column-gap:8px}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-st b{min-width:0;text-align:center;font:800 22px/1.1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;letter-spacing:.01em;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-transform:uppercase}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-n{font-style:normal;font:400 20px/1 var(--rb-font);min-width:18px;text-align:center;padding:4px 8px;border-radius:7px;color:#000;background:var(--rb-a);border:2px solid #000}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-nr{background:#3a3d44;color:#fff;border-color:#000}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-n:empty{visibility:hidden}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats{order:3;display:flex;align-items:center;justify-content:space-between;gap:6px;background:var(--rb-bar);padding:5px 12px 7px;border-top:2px solid #000;pointer-events:auto}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats .rd-c{display:flex;align-items:center;gap:5px;min-width:0;margin:0;padding:0;border:0;background:none;box-shadow:none;color:#fff;font:inherit;white-space:nowrap;width:auto;height:auto;min-height:0}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats .rd-c b{font:400 24px/1 var(--rb-font);color:#fff}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats .rd-c small{font:800 11px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;color:#9aa0aa;letter-spacing:.04em;margin-left:-1px}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats .rd-ic{display:block;flex:none;width:26px;height:26px;background:currentColor;-webkit-mask:var(--m) center/contain no-repeat;mask:var(--m) center/contain no-repeat}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats svg.rd-ic{background:none;-webkit-mask:none;mask:none}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats .rd-truck{color:var(--rb-a)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats .rd-km{color:#7fa6c9}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats .rd-rate{color:#ff8a1f}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats .rd-streets{color:#b9bdc4}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats .rd-togo{color:#b9bdc4}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats .rd-fines em{font:400 22px/1 var(--rb-font);font-style:normal;color:var(--rb-red)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats .rd-fines b{color:var(--rb-red)}
+@media (max-width: 359px), (orientation: landscape) and (max-height: 520px){
+  html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-spd{font-size:44px}
+  html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-st b{font-size:18px}
+  html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats .rd-c b{font-size:20px}
+  html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats .rd-ic{width:22px;height:22px}
+}
+/* On its side the panel is the whole left half, top to bottom: the speed row is bigger, and the stats row sits at the bottom of the panel instead of leaving a blank block under the bins */
+@media (orientation: landscape) and (max-width: 899px), (orientation: landscape) and (hover: none){
+  html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-spd{font-size:66px}
+  html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-lim{width:48px;height:48px;font-size:17px}
+  html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-cmp b{font-size:26px}
+  html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-bar{height:8px;margin:5px 2px 7px}
+  html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-st b{font-size:22px}
+  html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats{margin-top:auto}
+  html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats .rd-c b{font-size:24px}
+  html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats .rd-ic{width:26px;height:26px}
+}
 </style>
 <script id="lb-trackup-default">
 (function(){
