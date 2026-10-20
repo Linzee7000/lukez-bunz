@@ -42205,8 +42205,23 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
     var s = String(site.addressText || site.address || '').split(',')[0].replace(/^\s*(unit|apt|apartment|shop|suite|u)\s*\S+\s+/i, '').replace(/^\s*\d+[a-z]?(\s*[\/-]\s*\d+[a-z]?)?\s+/i, '').replace(/^\s*\d+[a-z]?\/\d+[a-z]?\s+/i, '').trim();
     return s.toLowerCase().replace(/(^|[\s\-])([a-z])/g, function(m, a, b){ return a + b.toUpperCase(); });
   }
+  // The number on the house the bins belong to, as the address gives it ("8", "12A", "9/8" for Unit 9/8)
+  function rdHouseNo(site){
+    var s = String(site.addressText || site.address || '').split(',')[0].replace(/^\s*(unit|apt|apartment|shop|suite|u)\s+/i, '');
+    var m = /^\s*(\d+[a-z]?(?:\s*[\/-]\s*\d+[a-z]?)?)\s/i.exec(s);
+    return m ? m[1].replace(/\s+/g, '') : '';
+  }
+  // Which side of the truck the house is on, from where the house is against the way the truck faces ('L' or 'R'); with no
+  // position for either, by matching its number to the numbers the street row gives each side, else the left.
   function rdSide(site, nl, nr){
-    var m = /^\s*(\d+)/.exec(String(site.addressText || site.address || '')), n = m ? m[1] : '';
+    try {
+      var loc = g('userCurrentLocation'), la = parseFloat(site.lat), ln = parseFloat(site.lng);
+      if (loc && isFinite(la) && isFinite(ln) && typeof g('getBearing') === 'function' && (Math.abs(la - loc.lat) + Math.abs(ln - loc.lng)) > 0.0000045) {
+        var b = g('getBearing')(loc.lat, loc.lng, la, ln), d = (((b - (+g('lastValidHeading') || 0)) % 360) + 360) % 360;
+        return d < 180 ? 'R' : 'L';
+      }
+    } catch (e) {}
+    var n = rdHouseNo(site);
     if (n && n === nr && n !== nl) return 'R';
     return 'L';
   }
@@ -42224,9 +42239,9 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
     var n = parseInt(String(b.size || ''), 10);
     return (n && n !== def.std) ? '<em class="rd-sz">' + escH(String(b.size).toUpperCase().replace(/\s+/g, '')) + '</em>' : '';
   }
-  function rdSerialHtml(text){
+  function rdSerialHtml(text, n){
     var t = String(text).trim();
-    return segOk(t) ? '<span class="rd-seg">' + segHtml(t) + '</span>' : '<span class="rd-tx" style="--n:' + Math.max(1, t.length) + '">' + escH(t) + '</span>';
+    return '<span class="rd-tx" style="--n:' + Math.max(1, n || t.length) + '">' + escH(t) + '</span>';
   }
   // Show this stream's serials and nothing else (the others go to boxes), or hide it again when it is the one showing
   function rdSwitch(key){
@@ -42281,6 +42296,11 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
     });
     if (rdPick && !items.some(function(x){ return x.k === rdPick; })) rdClearPick();
     var sig = [propId, act ? act.key : '-', eligible.map(function(d){ return d.key + rdRunLabel(site, d); }).join(','), side, big ? 1 : 0, off ? 1 : 0, rdPick || '', rdIssue ? 1 : 0, items.map(function(x){ return x.text + x.rem + (x.b.size || ''); }).join('|'), nl, nr].join('~');
+    // the tab of the side the bins are on says the number of THAT house (the street row's own numbers are for the next bin on each side,
+    // which is not always this house), smaller when it is long
+    var hn = rdHouseNo(site), hel = tab.querySelector(side === 'R' ? '.rd-nr' : '.rd-nl');
+    if (hn) { txt(hel, hn); hel.style.fontSize = hn.length > 5 ? '13px' : hn.length > 3 ? '17px' : ''; }
+    tab.querySelectorAll('.rd-n').forEach(function(e){ if (e !== hel) e.style.fontSize = ''; });
     tab.setAttribute('data-side', side); sd.setAttribute('data-side', side);
     tab.style.setProperty('--bc', tint.bg); tab.style.setProperty('--bt', tint.fg); sd.style.setProperty('--bc', tint.bg);
     attr(sd, 'data-off', off ? '1' : '0');
@@ -42303,8 +42323,9 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
         '</div>';
     } else if (others.length) right = boxes(others, (big && items.length > 1 && others.length > 1) ? 'rd-col' : 'rd-row');
     if (act) {
+      var maxN = Math.max.apply(null, items.map(function(x){ return String(x.text).length; }));   // (one size for every row of the band)
       var ser = items.map(function(x){
-        return '<button type="button" class="rd-sn' + (x.k === rdPick ? ' pick' : '') + (x.rem ? ' rem-' + x.rem : '') + '" data-a="sn" data-k="' + escH(x.k) + '" aria-label="Bin ' + escH(x.text) + ', tap to set a reminder or report">' + rdSerialHtml(x.text) + rdSizeTag(x.b, act) + '</button>';
+        return '<button type="button" class="rd-sn' + (x.k === rdPick ? ' pick' : '') + (x.rem ? ' rem-' + x.rem : '') + '" data-a="sn" data-k="' + escH(x.k) + '" aria-label="Bin ' + escH(x.text) + ', tap to set a reminder or report">' + rdSerialHtml(x.text, maxN) + rdSizeTag(x.b, act) + '</button>';
       }).join('');
       h = '<div class="rd-band ' + (side === 'R' ? 'r ' : '') + (big ? 'big' : 'small') + '" style="--bc:' + act.bg + ';--bt:' + act.fg + '">' +
         '<div class="rd-area"><button type="button" class="rd-logo" data-a="logo" data-s="' + act.key + '" aria-label="' + act.key + ' serials, tap to hide"><img src="' + act.icon + '" alt=""></button><div class="rd-ser">' + ser + '</div></div>' +
@@ -49912,28 +49933,28 @@ html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x
 html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-sd[data-off="1"] i:nth-child(2){background:#f97316}
 /* 3. the bin band */
 html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash #rdBins{display:block}
-html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-band{display:flex;background:var(--bc);color:var(--bt);min-height:56px;position:relative;border-bottom:3px solid #000}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-band{display:flex;background:var(--bc);color:var(--bt);min-height:46px;position:relative;border-bottom:3px solid #000}
 html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-band.r{flex-direction:row-reverse}
-html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-area{flex:1;min-width:0;display:flex;align-items:center;gap:10px;padding:8px 12px}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-area{flex:1;min-width:0;display:flex;align-items:center;gap:8px;padding:3px 8px}
 html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .r .rd-area{flex-direction:row-reverse}
-html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-logo{flex:none;width:44px;height:44px;padding:0;border:0;background:none;cursor:pointer}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-logo{flex:none;width:38px;height:38px;padding:0;border:0;background:none;cursor:pointer}
 html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-logo img{display:block;width:100%;height:100%}
-html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-band.small .rd-logo{width:30px;height:30px}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-band.small .rd-logo{width:28px;height:28px}
 html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-band[style*="--bt:#fff"] .rd-logo img{filter:invert(1)}
-html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-ser{display:flex;flex-direction:column;gap:5px;min-width:0}
-html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-band.small .rd-ser{gap:3px}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-ser{display:flex;flex-direction:column;gap:3px;min-width:0}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-band.small .rd-ser{gap:1px}
 html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .r .rd-ser{align-items:flex-end}
-html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-sn{display:flex;align-items:center;gap:6px;min-width:0;max-width:100%;padding:0 3px;margin:0;border:0;outline:2px solid transparent;border-radius:2px !important;background:none;color:inherit;cursor:pointer;font:inherit}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-sn{display:flex;align-items:center;gap:6px;min-width:0;max-width:100%;padding:0 2px;margin:0;border:0;outline:2px solid transparent;border-radius:2px !important;background:none;color:inherit;cursor:pointer;font:inherit}
 html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .r .rd-sn{flex-direction:row-reverse}
-html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-sn.pick{outline-color:#fff;box-shadow:0 0 0 4px #000}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-sn.pick{outline-color:#fff;box-shadow:0 0 0 3px #000}
 html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-band.small .rd-sn.pick{box-shadow:0 0 0 2px #000}
 html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-sn.rem-set{outline-color:#a855f7}
 html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-sn.rem-due{outline-color:#a855f7;animation:rec-light-pulse 1.6s ease-in-out infinite}
 html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-seg{display:flex;gap:3px;align-items:flex-end;min-width:0}
 html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-band.big .rd-seg{--dw:22px}
 html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-band.small .rd-seg{--dw:11px}
-html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-tx{font:400 34px/38px 'Share Tech Mono',ui-monospace,'SF Mono',Menlo,Consolas,monospace;font-size:min(34px,calc(250px / var(--n,8)));letter-spacing:.02em;white-space:nowrap;min-width:0;overflow:hidden}
-html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-band.small .rd-tx{line-height:19px;font-size:min(17px,calc(125px / var(--n,8)))}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-tx{font:400 32px/32px 'Share Tech Mono',ui-monospace,'SF Mono',Menlo,Consolas,monospace;font-size:min(32px,calc(250px / var(--n,8) - 2px));letter-spacing:.02em;white-space:nowrap;min-width:0;overflow:hidden}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-band.small .rd-tx{line-height:16px;font-size:min(15px,calc(125px / var(--n,8) - 2px))}
 html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-sz{flex:none;font:800 14px/1 var(--rd-f);font-style:normal;background:#000;color:var(--bc);padding:3px 5px;border-radius:4px}
 html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-band[style*="--bt:#fff"] .rd-sz{color:#fff}
 html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-bar3{flex:none;width:3px;background:#000}
@@ -49948,7 +49969,7 @@ html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x
 html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-row .rd-ob img{width:22px;height:22px}
 html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-row .rd-ob b{font-size:16px}
 html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-row .rd-ob + .rd-ob{border-left:3px solid #000}
-html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-closed .rd-ob{flex:1;flex-direction:row;min-height:56px}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-closed .rd-ob{flex:1;flex-direction:row;min-height:46px}
 html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-closed .rd-ob + .rd-ob{border-left:3px solid #000}
 html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-ob.front{box-shadow:inset 0 0 0 3px #fff}
 /* tapped serial: the other-stream boxes turn into REMIND and REPORT for that bin */
