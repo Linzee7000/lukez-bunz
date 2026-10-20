@@ -5115,6 +5115,20 @@ const STREET_LITTER_SERVICE_LEVELS = {"seasons":[{"key":"tourist1","label":"Tour
               const menuId = `binMenu_${propId}_${st.key}_${idx}`.replace(/[^a-zA-Z0-9_]/g, '_');
               const remMenuId = `binRemMenu_${propId}_${st.key}_${idx}`.replace(/[^a-zA-Z0-9_]/g, '_');
               const serialLabel = b.serial || '—';
+              // A stream with 2+ bins: each row says its own bin's size (the coloured block on the left only has the first
+              // bin's), and a serial that would read the same as another bin's here (the "__226944" tail is cut off for
+              // display, so two "UNKNOWN__..." bins both read "UNKNOWN") shows its whole number instead, so the two
+              // bins can be told apart.
+              const serialShown = String(serialLabel).replace(/__\d+$/, '');
+              const serialSame = bins.length > 1 && bins.filter(o => String(o.serial || '—').replace(/__\d+$/, '') === serialShown).length > 1;
+              // (shown short, as "#226944" for an UNKNOWN one, so it fits the row and isn't cut off; two bins with the very same
+              // serial and no tail get "(2)" on the later one)
+              const serialTail = (String(serialLabel).match(/__(\d+)$/) || [])[1];
+              const serialSeen = bins.slice(0, idx).filter(o => String(o.serial || '—') === String(serialLabel)).length;
+              const serialText = !serialSame ? serialShown
+                : serialTail ? ((/^unknown$/i.test(serialShown) ? '' : serialShown + ' ') + '#' + serialTail)
+                : (serialSeen ? serialShown + ' (' + (serialSeen + 1) + ')' : serialShown);
+              const sizeTag = (bins.length > 1 && b.size) ? `<span class="bin-size-tag" style="flex:0 0 auto; font-size:12px; font-weight:800; line-height:1; padding:3px 5px; border-radius:4px; background:rgba(0,0,0,0.35); color:#fff;">${esc(b.size)}</span>` : '';
               const addrForModal = escape(site.addressText || '');
 
               // Edit pencil: only offered when displaySources is actually the
@@ -5149,8 +5163,9 @@ const STREET_LITTER_SERVICE_LEVELS = {"seasons":[{"key":"tourist1","label":"Tour
               return `
                 <div style="display:flex; align-items:center; justify-content:space-between; ${idx < bins.length - 1 ? 'border-bottom:1px solid rgba(255,255,255,0.2);' : ''} padding:3px 6px; position:relative; ${hasRem ? `background:rgba(147,51,234,0.5); border-radius:var(--ux-rad); ${isDue ? 'animation: rec-light-pulse 1.6s ease-in-out infinite;' : ''}` : ''}">
                   <span class="bin-serial-tap-target" style="display:flex; align-items:center; gap:6px; min-width:0; flex:1 1 auto; overflow:hidden; ${(hasRem || canEditPencil) ? 'cursor:pointer;' : ''}" title="${hasRem ? esc(remTitle) : (canEditPencil ? 'Edit bin' : '')}" ${hasRem ? `onclick="event.stopPropagation(); window.toggleBinReminderMenu(event, '${remMenuId}')"` : (canEditPencil ? `onclick="event.stopPropagation(); window.toggleDriveBinEditorInline('${propId}', '${st.key}', ${soloIdxForPencil})"` : '')}>
+                    ${sizeTag}
                     <span class="bin-serial-text" data-serial="${esc(serialLabel)}" data-msg="${hasRem && rem.message ? esc(rem.message) : ''}" style="font-size:17px; font-family:monospace; letter-spacing:0.5px; max-width:170px; flex:0 1 auto; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#fff; font-weight:${hasRem ? '700' : '400'};">
-                      ${esc(String(serialLabel).replace(/__\d+$/, ''))}
+                      ${esc(serialText)}
                     </span>
                     ${hasRem ? `<span class="reminder-date-badge app-marquee" style="font-size:13px; font-weight:700; color:${isDue ? '#fca5a5' : '#e9d5ff'}; flex:1 1 auto; min-width:0;"><span class="app-marquee-inner">${isDue ? '⏰ DUE' : '📅 ' + esc(remDateLabel)}</span></span>` : ''}
                   </span>
@@ -42007,7 +42022,7 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
           '<button type="button" class="rb-ct" id="rbTruck"><span class="rb-k">On truck</span><b>-</b></button>' +
           '<button type="button" class="rb-ct rb-x" id="rbBins"><span class="rb-k">Bins to go</span><b>-</b></button>' +
         '</div>' +
-        '<div class="rb-spd" id="rbSpd"><svg class="rb-arc" viewBox="0 0 220 124" aria-hidden="true"><path class="t" d="M20 114A90 90 0 0 1 200 114"/><path class="a" d="M20 114A90 90 0 0 1 200 114"/></svg><i class="rb-lim" id="rbLim" aria-hidden="true"></i><b id="rbSpdN">0</b><span>km/h</span></div>' +
+        '<div class="rb-spd" id="rbSpd"><svg class="rb-arc" viewBox="0 0 220 124" aria-hidden="true"><path class="t" d="M20 114A90 90 0 0 1 200 114"/><path class="a" d="M20 114A90 90 0 0 1 200 114"/></svg><i class="rb-lim" id="rbLim" aria-hidden="true"></i><b id="rbSpdN">0</b><span>km/h</span><div class="rb-sbar" aria-hidden="true"><i></i><u></u></div></div>' +
         '<div class="rb-gr">' +
           '<button type="button" class="rb-ct rb-x" id="rbStreets"><span class="rb-k">Streets to go</span><b>-</b></button>' +
           '<button type="button" class="rb-ct" id="rbStat" title="Tap for the next number"><span class="rb-k"></span><b></b><span class="rb-pips" aria-hidden="true"></span></button>' +
@@ -42058,6 +42073,14 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
     txt($('rbSpdN'), sp);
     var lm = $('rbLim'); txt(lm, lim || ''); lm.style.display = lim ? '' : 'none';
     attr(box, 'data-over', (lim && sp > lim + 2) ? '1' : '0');
+    // The speed bar under the number grows with the speed (full at 80 km/h, the same scale as Speedo's arc). Green while all
+    // is well, orange once over the limit (the same 3+ km/h that starts the wanted level), red at 10+ over (two stars). No
+    // limit known = no warning, same as the wanted level. A white tick on the bar marks the limit.
+    var warn = (lim && sp > lim + 9) ? 2 : (lim && sp > lim + 2) ? 1 : 0;
+    attr(box, 'data-warn', warn);
+    var sbf = box.querySelector('.rb-sbar i'), sbt = box.querySelector('.rb-sbar u');
+    if (sbf) { var wpc = Math.round(Math.min(1, sp / 80) * 100) + '%'; if (sbf.style.width !== wpc) sbf.style.width = wpc; }
+    if (sbt) { if (lim) { var lpc = Math.min(98, Math.round(lim / 80 * 100)) + '%'; if (sbt.style.left !== lpc) sbt.style.left = lpc; sbt.style.display = 'block'; } else sbt.style.display = 'none'; }
     attr(box, 'aria-label', 'Speed ' + sp + ' kilometres an hour' + (lim ? ', limit ' + lim : ''));
     // Speedo's arc: full at 80 km/h (the arc is a half circle of radius 90, so 283 long)
     var arc = box.querySelector('.rb-arc .a');
@@ -49540,6 +49563,33 @@ html body.ux2.lb-startfab-away:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#
 #rbTipPop .rb-inf{display:block;margin:0 0 6px;font:700 13px/1.3 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;color:#000}
 #rbTipPop .rb-inf a{color:#000;text-decoration:underline}
 #rbTipPop .rb-inf + .rb-go,#rbTipPop .rb-uhf + .rb-go{margin-top:6px}
+</style>
+<style id="lb-speedbar-style">
+/* Speed: GTA green number (#72cc72, the Game skin's own --gta-green), with a bar under it that grows with the speed and goes orange, then red,
+   as the speeding warnings come on (data-warn 1 = over the limit, 2 = 10+ over; set in paintCluster). The old red box on "over" is gone - the
+   number and the bar carry the warning instead, so they always agree. Speedo has its arc for this, which takes the same colours.
+   (Four :not(#rb-x) so these win over the number-size rules in lb-offrun-style.) */
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbCluster .rb-spd{--sc:#72cc72;color:var(--sc)}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbCluster .rb-spd[data-warn="1"]{--sc:#ff9a1f}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbCluster .rb-spd[data-warn="2"]{--sc:#ff4b3e}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbCluster .rb-spd[data-over="1"]{background:var(--rb-bar);color:var(--sc)}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbCluster .rb-sbar{position:absolute;left:7px;right:7px;bottom:5px;height:5px;border-radius:3px;background:rgba(255,255,255,.16);pointer-events:none}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbCluster .rb-sbar i{display:block;width:0;height:100%;border-radius:3px;background:var(--sc);box-shadow:0 0 6px var(--sc);transition:width .35s linear,background-color .2s}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbCluster .rb-sbar u{position:absolute;top:-3px;bottom:-3px;width:2px;margin-left:-1px;background:#fff;opacity:.9;display:none;text-decoration:none}
+/* Upright and in the split layout the box is only as tall as its neighbours, so the number is a little smaller and sits at the top, above the bar */
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbCluster .rb-spd{box-sizing:border-box;justify-content:flex-start;padding:2px 0 0}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbCluster .rb-spd b{font-size:34px !important;line-height:1 !important}
+@media (orientation: landscape) and (max-height: 520px){
+  html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbCluster .rb-spd b{font-size:30px !important}
+  html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbCluster .rb-sbar{bottom:4px;height:4px}
+}
+/* Speedo: no bar (it has the arc); the arc and the number take the same colours */
+html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbCluster .rb-sbar{display:none}
+html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbCluster .rb-spd b{text-shadow:0 0 14px var(--sc)}
+html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbCluster .rb-spd .rb-arc .a{stroke:var(--sc);filter:drop-shadow(0 0 6px var(--sc))}
+html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbCluster .rb-spd[data-over="1"]{background:none}
+html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbCluster .rb-spd[data-over="1"] b{text-shadow:0 0 14px var(--sc)}
+html[data-ux-skin="speedo"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbCluster .rb-spd[data-over="1"] .rb-arc .a{stroke:var(--sc);filter:drop-shadow(0 0 6px var(--sc))}
 </style>
 <script id="lb-trackup-default">
 (function(){
