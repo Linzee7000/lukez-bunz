@@ -31270,7 +31270,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     ov.addEventListener('click', function(ev){ if (ev.target === ov || (ev.target.closest && ev.target.closest('.drv-view-x'))) ov.remove(); });
   }
   // Plain text -> a small real PDF (Helvetica, A4, wrapped, paged), kept as a media item so the outbox sends it like a photo.
-  function textPdf(title, text){
+  function textPdf(title, text, img){
     var W = 92, PER = 60, lines = [];
     String(text || '').split('\n').forEach(function(l){ l = l.replace(/\t/g, '  '); if (!l) { lines.push(''); return; } while (l.length > W) { var cut = l.lastIndexOf(' ', W); if (cut < 40) cut = W; lines.push(l.slice(0, cut)); l = l.slice(cut).replace(/^ /, ''); } lines.push(l); });
     var pages = []; for (var i = 0; i < lines.length; i += PER) pages.push(lines.slice(i, i + PER)); if (!pages.length) pages.push(['']);
@@ -31278,6 +31278,14 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var objs = [], add = function(s){ objs.push(s); return objs.length; };
     add('<< /Type /Catalog /Pages 2 0 R >>'); add('PAGES'); add('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>');
     var kids = [];
+    if (img && img.jpeg) {   // page 1: a picture (the run map), fitted to the page, landscape or portrait to suit it
+      var land = img.w > img.h, PW = land ? 842 : 595, PH = land ? 595 : 842, k = Math.min((PW - 24) / img.w, (PH - 24) / img.h), dw = img.w * k, dh = img.h * k;
+      var bs = ''; for (var bi = 0; bi < img.jpeg.length; bi += 8192) bs += String.fromCharCode.apply(null, img.jpeg.subarray(bi, bi + 8192));
+      var imn = add('<< /Type /XObject /Subtype /Image /Width ' + img.w + ' /Height ' + img.h + ' /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ' + bs.length + ' >>\nstream\n' + bs + '\nendstream');
+      var cs = 'q ' + dw.toFixed(2) + ' 0 0 ' + dh.toFixed(2) + ' ' + ((PW - dw) / 2).toFixed(2) + ' ' + ((PH - dh) / 2).toFixed(2) + ' cm /Im1 Do Q';
+      var cn0 = add('<< /Length ' + cs.length + ' >>\nstream\n' + cs + '\nendstream');
+      kids.push(add('<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ' + PW + ' ' + PH + '] /Contents ' + cn0 + ' 0 R /Resources << /XObject << /Im1 ' + imn + ' 0 R >> >> >>') + ' 0 R');
+    }
     pages.forEach(function(pg, pi){
       var s = 'BT /F1 10 Tf 12 TL 40 800 Td ' + (pi === 0 && title ? '/F1 13 Tf (' + esc(title) + ') Tj T* /F1 10 Tf T* ' : '') + pg.map(function(l){ return '(' + esc(l) + ') Tj T*'; }).join(' ') + ' ET';
       var cn = add('<< /Length ' + s.length + ' >>\nstream\n' + s + '\nendstream');
@@ -31290,11 +31298,11 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var bytes = new Uint8Array(out.length); for (var j = 0; j < out.length; j++) bytes[j] = out.charCodeAt(j) & 255;
     return new Blob([bytes], { type: 'application/pdf' });
   }
-  function putPdf(title, text){
-    var blob = textPdf(title, text), id = 'f_' + uid();
+  function putPdf(title, text, img){
+    var blob = textPdf(title, text, img), id = 'f_' + uid();
     return mPut({ id: id, kind: 'file', type: 'application/pdf', blob: blob, ts: Date.now(), synced: false }).then(function(){ keep(); return id; });
   }
-  window.lbMedia = { putPdf: putPdf, takePhoto: takePhoto, recordVoice: recordVoice, thumb: thumb, hydrate: hydrate, view: viewMedia, get: mGet, put: mPut, del: mDel };
+  window.lbMedia = { putPdf: putPdf, pdfBlob: textPdf, takePhoto: takePhoto, recordVoice: recordVoice, thumb: thumb, hydrate: hydrate, view: viewMedia, get: mGet, put: mPut, del: mDel };
 
   /* =====================================================================
      QR / barcode scan -> a bin in the list
@@ -32571,18 +32579,31 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     if (a === 'runcheck') { view = 'runcheck'; paint(); return; }
     if (a === 'todo') { view = 'todo'; todoAll = false; paint(); return; }
     if (a === 'todoall') { todoAll = !todoAll; paint(); return; }
-    if (a === 'todopdf') { var rc = runCheck(); closeSheet(); if (window.lbRunMapOpen) window.lbRunMapOpen(null, { done: !!(rc && rc.doneStreets && rc.doneStreets.length) }); return; }
-    if (a === 'todosend') {
+    if (a === 'todopdf' || a === 'todosend') {
       var tc2 = SH ? runCheck() : null; if (!tc2) { toast('No run to send'); return; }
       var tl2 = tc2.streets.slice().sort(function(x, y){ return (y.hs || 0) - (x.hs || 0); }), d2 = me(), loc2 = here();
       var subj2 = 'TO DO ON RUN ' + String(SH.run).toUpperCase() + ': ' + (d2.name || SH.driver || 'Driver');
       var txt2 = subj2 + '\n' + tl2.length + ' streets, ' + tc2.houses + ' houses, ' + (tc2.left + tc2.pink) + ' bins left\n' + tl2.slice(0, 30).map(function(x){ return '- ' + x.name + ': ' + (x.hs || 0) + ' houses'; }).join('\n') + (tl2.length > 30 ? '\n+ ' + (tl2.length - 30) + ' more streets' : '') + (loc2 ? '\nhttps://maps.google.com/?q=' + loc2.lat.toFixed(6) + ',' + loc2.lng.toFixed(6) : '');
+      // page 1 of the PDF is the run map with the finished streets in red; the list of what is left follows it
+      var mapImg = function(){ try { return window.lbRunMapImage ? window.lbRunMapImage(null, {}).catch(function(){ return null; }) : Promise.resolve(null); } catch (e) { return Promise.resolve(null); } };
+      if (a === 'todopdf') {
+        toast('Making the PDF…');
+        mapImg().then(function(img){
+          var blob = window.lbMedia.pdfBlob(subj2, txt2, img), u = URL.createObjectURL(blob), an = document.createElement('a');
+          an.href = u; an.download = 'Run ' + String(SH.run).toUpperCase() + ' to do ' + new Date().toISOString().slice(0, 10) + '.pdf'; document.body.appendChild(an); an.click();
+          setTimeout(function(){ an.remove(); URL.revokeObjectURL(u); }, 4000);
+          if (!img) toast('PDF saved, without the map (no run map for this run)');
+        });
+        return;
+      }
+      toast('Sending to your leading hand…');
       try { if (window.lbOutbox) {
         var rid2 = 't_' + uid(), go2 = function(ids){ window.lbOutbox.send({ rid: rid2, kind: 'driver-todo', urgent: false, to: ['lead'], subject: subj2, text: txt2, data: { run: SH.run, streets: tl2.length, houses: tc2.houses, bins: tc2.left + tc2.pink, ts: Date.now() }, media: ids || [], delayMs: 0 }); };
-        // with the list as a PDF too
-        if (window.lbMedia && window.lbMedia.putPdf) window.lbMedia.putPdf(subj2, txt2).then(function(id){ go2([id]); }, function(){ go2([]); }); else go2([]);
+        mapImg().then(function(img){
+          if (window.lbMedia && window.lbMedia.putPdf) window.lbMedia.putPdf(subj2, txt2, img).then(function(id){ go2([id]); toast('Sent to your leading hand'); }, function(){ go2([]); toast('Sent to your leading hand'); }); else { go2([]); toast('Sent to your leading hand'); }
+        });
       } } catch (e) {}
-      toast('Sent to your leading hand'); return;
+      return;
     }
     if (a === 'runmap') { closeSheet(); if (window.lbRunMapOpen) window.lbRunMapOpen(); return; }
     if (a === 'rcstreet') { closeSheet(); try { if (typeof switchMainTab === 'function') switchMainTab('map'); if (window.showStreetOnMap) window.showStreetOnMap(b.getAttribute('data-k')); } catch (e) {} return; }
@@ -38872,6 +38893,64 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       setTimeout(function(){ show(k); }, 30);
     });
   }
+  // The run map as a picture (street tiles, the route, the houses, finished streets red) for the To do PDF and what is
+  // sent to the leading hand. Drawn straight on a canvas, so it needs no screen and no print dialogue. If the street
+  // tiles can't be had (no signal, or a browser that won't let the canvas be read back) the route is still drawn, on plain grey.
+  window.lbRunMapImage = function(key, o2){
+    return load().then(function(){
+      var k = key || currentKey(); if (!k || !DATA[k]) return null;
+      var R = DATA[k], o = parse(k), E = edits(k), rc = null;
+      try { rc = window.lbRunCheck ? window.lbRunCheck() : null; } catch (e) {}
+      var dn = (rc && rc.doneStreets && rc.doneStreets.length) ? rc.doneStreets.map(normSt) : [];
+      var lines = R.lines.map(function(l){ var ov = E.pieces[pid(l)]; return { l: l, gone: ov === 'x', col: ov && ov !== 'x' ? ov : (dn.length && l.n && dn.indexOf(normSt(l.n)) >= 0 ? DONE_COL : (l.s || '#16a34a')) }; }).filter(function(x){ return !x.gone; });
+      var houses = []; var grp = groupFor(o); if (grp) grp.sites.forEach(function(s){ var la = +s.lat, ln = +s.lng; if (la && ln) houses.push([la, ln]); });
+      var pts = []; R.lines.forEach(function(l){ pts = pts.concat(l.c); }); E.drawn.forEach(function(d){ pts = pts.concat(d.c); });
+      if (!pts.length) pts = houses;
+      if (!pts.length) return null;
+      var b = bboxOf(pts), padLa = (b[2] - b[0]) * .06 + .0004, padLn = (b[3] - b[1]) * .06 + .0005;
+      b = [b[0] - padLa, b[1] - padLn, b[2] + padLa, b[3] + padLn];
+      var wx = function(lng, z){ return (lng + 180) / 360 * 256 * Math.pow(2, z); };
+      var wy = function(lat, z){ var r = lat * Math.PI / 180; return (1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2 * 256 * Math.pow(2, z); };
+      var MAXPX = 1700, z = 19;
+      while (z > 10 && Math.max(wx(b[3], z) - wx(b[1], z), wy(b[0], z) - wy(b[2], z)) > MAXPX) z -= 0.1;
+      var x0 = wx(b[1], z), y0 = wy(b[2], z), W = Math.round(wx(b[3], z) - x0), H = Math.round(wy(b[0], z) - y0), TOP = 118;
+      if (W < 1100) { x0 -= (1100 - W) / 2; W = 1100; }   // (room for the title however narrow the run is)
+      var zt = Math.max(1, Math.min(19, Math.floor(z))), sc = Math.pow(2, z - zt), TS = 256 * sc;
+      var tiles = [];
+      for (var tx = Math.floor(x0 / TS); tx <= Math.floor((x0 + W) / TS); tx++) for (var ty = Math.floor(y0 / TS); ty <= Math.floor((y0 + H) / TS); ty++) tiles.push([tx, ty]);
+      var loadTile = function(t){ return new Promise(function(res){
+        var im = new Image(); im.crossOrigin = 'anonymous'; var to = setTimeout(function(){ res(null); }, 9000);
+        im.onload = function(){ clearTimeout(to); res({ t: t, im: im }); }; im.onerror = function(){ clearTimeout(to); res(null); };
+        im.src = 'https://tile.openstreetmap.org/' + zt + '/' + t[0] + '/' + t[1] + '.png';
+      }); };
+      var render = function(got){
+        var c = document.createElement('canvas'); c.width = W; c.height = H + TOP; var x = c.getContext('2d');
+        x.fillStyle = '#e5e7eb'; x.fillRect(0, 0, c.width, c.height);
+        got.forEach(function(g2){ if (g2) x.drawImage(g2.im, g2.t[0] * TS - x0, g2.t[1] * TS - y0 + TOP, TS, TS); });
+        var P = function(p){ return [wx(p[1], z) - x0, wy(p[0], z) - y0 + TOP]; };
+        var path = function(cc){ x.beginPath(); cc.forEach(function(p, i){ var q = P(p); if (i) x.lineTo(q[0], q[1]); else x.moveTo(q[0], q[1]); }); x.stroke(); };
+        x.lineCap = 'round'; x.lineJoin = 'round';
+        houses.forEach(function(h){ var q = P(h); x.fillStyle = 'rgba(71,85,105,.75)'; x.beginPath(); x.arc(q[0], q[1], 3, 0, 7); x.fill(); });
+        x.strokeStyle = '#fff'; x.lineWidth = 12; lines.forEach(function(m){ path(m.l.c); }); E.drawn.forEach(function(d){ path(d.c); });
+        lines.forEach(function(m){ x.strokeStyle = m.col; x.lineWidth = 7; path(m.l.c); });
+        E.drawn.forEach(function(d){ x.strokeStyle = d.s; x.lineWidth = 7; path(d.c); });
+        x.fillStyle = COL[o.stream] || '#16a34a'; x.fillRect(0, 0, c.width, 14);
+        x.fillStyle = '#fff'; x.fillRect(0, 14, c.width, TOP - 14);
+        x.fillStyle = '#111'; x.font = 'bold 44px system-ui, Arial, sans-serif'; x.textBaseline = 'middle';
+        x.fillText('Run ' + String(o.run).toUpperCase() + (o.week || '') + ' · ' + o.day + ' · ' + o.stream, 20, 48);
+        var done = dn.length, tot = rc && rc.streetKeys ? rc.streetKeys.length : 0;
+        x.font = '28px system-ui, Arial, sans-serif'; x.fillStyle = '#374151';
+        x.fillText((done ? done + (tot ? ' of ' + tot : '') + ' streets done (red) · ' : '') + new Date().toLocaleDateString('en-AU') + ' ' + new Date().toLocaleTimeString('en-AU', { hour: '2-digit', minute: '2-digit' }), 20, 92);
+        return new Promise(function(res){
+          try { c.toBlob(function(bl){ if (!bl) { res(null); return; } bl.arrayBuffer().then(function(ab){ res({ jpeg: new Uint8Array(ab), w: c.width, h: c.height }); }, function(){ res(null); }); }, 'image/jpeg', 0.85); }
+          catch (e) { res(null); }
+        });
+      };
+      return Promise.all(tiles.slice(0, 80).map(loadTile)).then(function(got){
+        return render(got).then(function(r){ return r || render([]); });   // (a canvas the tiles tainted can't be read: draw it again without them)
+      });
+    });
+  };
   window.lbRunMapOpen = open;
   window.lbRunMapDebug = function(){ return { view: view, printing: printing }; };
   window.lbRunMapPages = function(key){ return DATA && DATA[key] ? pagesFor(DATA[key]) : null; };
