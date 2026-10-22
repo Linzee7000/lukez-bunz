@@ -34890,13 +34890,18 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   function now(){ var m = g('leafletMap'); try { apply(m && m.getZoom()); } catch (e) {} }
 
   // ---- keep only the markers near the view on the map ---------------------------------
-  var cullT = 0;
-  function cull(){
+  var cullT = 0, lastCullB = null, lastCullZ = null;
+  // (Fox: zooming was slow. The scan below visits every marker of the run - up to ~16,000 - and used to run after every map move,
+  //  which includes every GPS fix while following the truck. A move that stays inside the area already sorted at the same zoom has
+  //  nothing to change, so it is skipped; zooming, a redraw or a new run still scan.)
+  function cull(force){
     var m = g('leafletMap'), grp = g('mapMarkersLayer');
     if (!m || !grp || typeof grp.eachLayer !== 'function' || typeof m.getBounds !== 'function') return;
     var z; try { z = m.getZoom(); } catch (e) { return; }
     if (typeof z !== 'number' || z < LOW_ZOOM) return;            // panes are hidden down there anyway
     var b0, b; try { b0 = m.getBounds(); b = b0.pad(0.35); } catch (e) { return; }
+    if (force !== true && z === lastCullZ && lastCullB && lastCullB.contains(b0)) { apply(z); return 0; }
+    lastCullB = b; lastCullZ = z;
     var moved = 0, inView = 0;
     grp.eachLayer(function(l){
       if (!l || typeof l.getLatLng !== 'function' || !l.options || !l.options.icon) return;
@@ -34911,8 +34916,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     window.uxMarkersInView = inView;
     return moved;
   }
-  function cullSoon(){ clearTimeout(cullT); cullT = setTimeout(cull, 120); }
-  window.uxCullMarkers = cull;
+  function cullSoon(){ clearTimeout(cullT); cullT = setTimeout(function(){ cull(); }, 120); }
+  window.uxCullMarkers = function(){ return cull(true); };
 
   var bound = null;
   function bind(){
@@ -34920,6 +34925,9 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     if (!m || m === bound || !m.on) return;
     bound = m;
     m.on('zoomanim', function(e){ apply(e && typeof e.zoom === 'number' ? e.zoom : m.getZoom()); });  // before the animation starts
+    // the thousands of house / bin markers are not drawn while the zoom animation runs (the browser had to scale every one of them each
+    // frame); they come straight back when it ends (apply on zoomend)
+    m.on('zoomanim', function(){ PANES.forEach(function(n){ try { var p = m.getPane && m.getPane(n); if (p) p.style.display = 'none'; } catch (e) {} }); });
     m.on('zoomend', function(){ apply(m.getZoom()); cullSoon(); });
     m.on('moveend', function(){ apply(m.getZoom()); cullSoon(); });
     now();
@@ -34935,7 +34943,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   // the app creates the panes inside renderMapData; re-apply right after every render
   var prev = window.renderMapData;
   if (typeof prev === 'function') {
-    window.renderMapData = function(){ var r = prev.apply(this, arguments); try { bind(); now(); cull(); } catch (e) {} return r; };
+    window.renderMapData = function(){ var r = prev.apply(this, arguments); try { bind(); now(); cull(true); } catch (e) {} return r; };
   }
 })();
 
