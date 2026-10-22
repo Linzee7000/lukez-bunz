@@ -37148,13 +37148,22 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   /* ---- signature pad ---- */
   var sigDirty = false;
   function sigPad(cv){
-    var ctx = cv.getContext('2d'), drawing = false, last = null; sigDirty = false;
+    var ctx = cv.getContext('2d'), drawing = false, last = null, rc = null; sigDirty = false;
     ctx.lineWidth = 3; ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.strokeStyle = '#000';
-    function pos(e){ var r = cv.getBoundingClientRect(); return { x: (e.clientX - r.left) * cv.width / r.width, y: (e.clientY - r.top) * cv.height / r.height }; }
-    cv.addEventListener('pointerdown', function(e){ drawing = true; last = pos(e); try { cv.setPointerCapture(e.pointerId); } catch (x) {} e.preventDefault(); });
-    cv.addEventListener('pointermove', function(e){ if (!drawing) return; var p = pos(e); ctx.beginPath(); ctx.moveTo(last.x, last.y); ctx.lineTo(p.x, p.y); ctx.stroke(); last = p; sigDirty = true; e.preventDefault(); });
-    cv.addEventListener('pointerup', function(){ drawing = false; });
-    cv.addEventListener('pointercancel', function(){ drawing = false; });
+    // (the pad's box is measured once when the pen goes down, not on every move: measuring forced the browser to lay the whole page
+    //  out again for each of the ~100 moves a second, and the other tickers are paused while drawing, so the line keeps up)
+    function pos(e){ return { x: (e.clientX - rc.left) * cv.width / rc.width, y: (e.clientY - rc.top) * cv.height / rc.height }; }
+    function end(){ drawing = false; window.lbBusyDrawing = false; }
+    cv.addEventListener('pointerdown', function(e){ drawing = true; window.lbBusyDrawing = true; rc = cv.getBoundingClientRect(); last = pos(e); try { cv.setPointerCapture(e.pointerId); } catch (x) {} e.preventDefault(); });
+    cv.addEventListener('pointermove', function(e){
+      if (!drawing) return;
+      var evs = (e.getCoalescedEvents && e.getCoalescedEvents()) || [e];
+      ctx.beginPath(); ctx.moveTo(last.x, last.y);
+      for (var i = 0; i < evs.length; i++) { last = pos(evs[i]); ctx.lineTo(last.x, last.y); }
+      ctx.stroke(); sigDirty = true; e.preventDefault();
+    });
+    cv.addEventListener('pointerup', end);
+    cv.addEventListener('pointercancel', end);
   }
 
   /* ---- typing ---- */
@@ -43172,7 +43181,7 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
     else if (el.style.minWidth) { el.style.removeProperty('min-width'); el.style.removeProperty('justify-content'); runW = 0; }
   }
   var runW = 0, runWFor = null;
-  setInterval(function(){ try { runChip(); } catch (e) {} }, 400);
+  setInterval(function(){ try { if (window.lbCovered && window.lbCovered()) return; runChip(); } catch (e) {} }, 400);
 
   // ---- fines and rewards from the stop questions (uxGtaFine / uxGtaReward draw the card themselves now) ----------
   var SLASH_NEAR_M = 200, SLASH_REWARD = 25, SLASH_FINE = 300;
@@ -43301,7 +43310,7 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
     try { paintPopArea(); } catch (e) {}
     try { readWanted(); } catch (e) {}
   }
-  setInterval(function(){ try { tick(); } catch (e) { console.warn('Hard Rubbish:', e); } }, 1000);
+  setInterval(function(){ try { if (window.lbCovered && window.lbCovered()) return; tick(); } catch (e) { console.warn('Hard Rubbish:', e); } }, 1000);
   setTimeout(tick, 0);
   window.lbRubbish = { tick: tick, _t: { toast: toast, onTruck: onTruck, paintBreak: paintBreak, statList: statList, streetsToGo: streetsToGo, pop: pop, unpop: unpop, pin: function(ms){ pinUntil = Date.now() + (ms || 12000); }, next: function(){ statAt++; statHold = Date.now() + 15000; } } };
   // keep the trail painted: the vector layer sometimes only repaints when something else disturbs the map
@@ -50505,6 +50514,23 @@ html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x
 })();
 </script>
 
+<script id="lb-covered-script">
+/* window.lbCovered(): true while a panel / sheet is covering the map, or while a signature is being drawn. The once-a-second
+   map furniture tickers (street box, dash, run chip, stats row) stop while it is true: nobody can see them, and on a phone they
+   made the sheets (signature, brakes, pre-start) lag. They catch up within a second of the sheet closing. */
+(function(){
+  var IDS = ['uxShift', 'uxRs', 'uxPlaces', 'uxAcc', 'uxIssue', 'uxStraySheet', 'lbCouncilSheet'];
+  window.lbCovered = function(){
+    try {
+      if (window.lbBusyDrawing) return true;
+      var c = document.body.classList;
+      if (c.contains('lb-drawer-open') || c.contains('lb-layers-open') || c.contains('lb-settings-open')) return true;
+      for (var i = 0; i < IDS.length; i++) { var e = document.getElementById(IDS[i]); if (e && e.classList.contains('open')) return true; }
+    } catch (x) {}
+    return false;
+  };
+})();
+</script>
 <script id="lb-strip-cycle-script">
 /* The stats row under the street name. Icon and digits are always shown together (the row never changes height). When every
    cell fits on the one line they are all shown; when they don't, they take turns in two pages of three, 3 seconds each:
@@ -50527,7 +50553,7 @@ html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x
     if (!el._fit) pg = !n1 ? '2' : !n2 ? '1' : (Math.floor(Date.now() / PAGE_MS) % 2 ? '2' : '1');
     ['all', '1', '2'].forEach(function(x){ el.classList.toggle('rd-pg-' + x, x === pg); });
   }
-  setInterval(apply, 250); apply();
+  setInterval(function(){ if (window.lbCovered && window.lbCovered()) return; apply(); }, 500); apply();
 })();
 </script>
 
