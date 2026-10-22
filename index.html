@@ -31466,12 +31466,45 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var br = breaksIn(SH.start, now).reduce(function(t, b){ return t + (b.e - b.s); }, 0);
     return Math.max(0, now - SH.start - br);
   }
+  /* Work segments (Fox): the bins per hour / per km count does not start until the first bin is lifted inside the run, stops at the
+     last bin before the truck goes to tip or goes on a break, and starts again from the first lift after that. Driving to the tip,
+     the tip, the break and the drive back never count. Each bin remembers when it was lifted (binTs) and how far the truck had driven
+     (binD); the tips are the times the truck arrived at one (SH.tips) and the breaks come from the break clock. A segment's time is
+     first lift to last lift, its distance is the same stretch, and the rates are the sums over all segments. A shift saved before
+     binD existed has no distances, so it keeps the old whole-shift sums. */
+  function segStats(){
+    if (!SH) return null;
+    var ts = SH.binTs || [], dd = SH.binD || [];
+    if (!ts.length || dd.length !== ts.length) return null;
+    var cuts = (SH.tips || []).slice();
+    var cs = clockState(); if (cs && cs.breaks) cs.breaks.forEach(function(b){ if (b && b.s >= SH.start - 60000) cuts.push(b.s); });
+    cuts.sort(function(a, b){ return a - b; });
+    var groups = {}, ci = 0;
+    for (var i = 0; i < ts.length; i++) { while (ci < cuts.length && cuts[ci] <= ts[i]) ci++; (groups[ci] = groups[ci] || []).push(i); }
+    var bins = 0, ms = 0, km = 0, kmOk = true;
+    Object.keys(groups).forEach(function(k){
+      var g2 = groups[k]; if (g2.length < 2) return;
+      var a = g2[0], z = g2[g2.length - 1];
+      bins += g2.length; ms += ts[z] - ts[a];
+      if (dd[a] == null || dd[z] == null) kmOk = false; else km += Math.max(0, dd[z] - dd[a]) / 1000;
+    });
+    return { bins: bins, ms: ms, km: kmOk ? km : null };
+  }
   function rates(){
     if (!SH) return null;
-    var w = worked(), km = (SH.dist || 0) / 1000, n = SH.bins || 0;
-    return { worked: w, km: km, bins: n, perKm: km >= 0.3 ? n / km : null, perHr: w >= 5 * 60000 ? n / (w / 3600000) : null,
+    var w = worked(), km = (SH.dist || 0) / 1000, n = SH.bins || 0, sg = segStats();
+    var perKm, perHr;
+    if (sg) {
+      perHr = sg.ms >= 5 * 60000 ? sg.bins / (sg.ms / 3600000) : null;
+      perKm = (sg.km != null && sg.km >= 0.3) ? sg.bins / sg.km : null;
+    } else {
+      perKm = km >= 0.3 ? n / km : null; perHr = w >= 5 * 60000 ? n / (w / 3600000) : null;
+    }
+    return { worked: w, km: km, bins: n, perKm: perKm, perHr: perHr, seg: sg,
       recent: (function(){ var t = Date.now() - 30 * 60000, c = (SH.binTs || []).filter(function(x){ return x > t; }).length; return w >= 30 * 60000 ? c * 2 : null; })() };
   }
+  // the truck arrived at a tip: whatever is lifted next is a new segment
+  window.uxShiftNoteTip = function(t){ if (!SH) return; SH.tips = SH.tips || []; SH.tips.push(t || Date.now()); saveSh(); };
 
   /* ---- per-run legs within a shift ----------------------------------------------------
      SH.run can change mid-shift (see crsave), and until now switching just overwrote it -
@@ -31691,7 +31724,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     // a fresh trail for the shift: whatever was driven before it started isn't part of it
     try { var clr = g('clearSnailTrail'); if (typeof clr === 'function') clr(); } catch (e) {}
     SH = { id: 's_' + uid(), start: now, stream: o.stream || '', run: o.run || '', day: o.run ? todayDay() : '', week: o.run ? todayWeek(o.stream) : '', driver: o.driver || '', emp: o.emp || '', truck: o.truck || '', rego: o.rego || '', startKm: o.km, startHrs: o.hrs, startPhoto: o.photo || null,
-      prestart: o.prestart || null, defects: [], dist: 0, bins: 0, binTs: [], auto: !!o.auto, synced: false, legs: [], leg: null, truckChanges: [] };
+      prestart: o.prestart || null, defects: [], dist: 0, bins: 0, binTs: [], binD: [], tips: [], auto: !!o.auto, synced: false, legs: [], leg: null, truckChanges: [] };
     SH.leg = SH.run ? newLeg(SH.stream, SH.run, SH.day, SH.week) : null;
     if (o.auto && s && s.start) SH.start = s.start;
     saveSh();
@@ -31712,7 +31745,14 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var rec = JSON.parse(JSON.stringify(SH));
     rec.end = now; rec.endKm = o.km; rec.endHrs = o.hrs; rec.endPhoto = o.photo || null; rec.note = o.note || '';
     rec.worked = r.worked; rec.gpsKm = +(r.km.toFixed(2)); rec.breaks = breaksIn(SH.start, now);
-    rec.perKm = r.perKm == null ? null : +r.perKm.toFixed(1); rec.perHr = r.perHr == null ? null : Math.round(r.perHr);
+    // Bins from the truck's own counter (typed at the end of each run) beat the app's count when they were given; a run with none
+    // keeps the app's number. The rates then use the same count over the time and distance actually spent lifting.
+    var sgF = r.seg, obN = 0, obAny = false;
+    (SH.legs || []).forEach(function(l){ if (!l || !l.run) return; if (l.truckBinCount != null) { obAny = true; obN += l.truckBinCount; } else obN += legBinsKm(l).bins; });
+    if (obAny) { rec.binsApp = rec.bins; rec.bins = obN; }
+    var useN = obAny ? obN : (sgF ? sgF.bins : null), pk = r.perKm, ph = r.perHr;
+    if (obAny && sgF) { ph = sgF.ms >= 5 * 60000 ? obN / (sgF.ms / 3600000) : null; pk = (sgF.km != null && sgF.km >= 0.3) ? obN / sgF.km : null; }
+    rec.perKm = pk == null ? null : +pk.toFixed(1); rec.perHr = ph == null ? null : Math.round(ph);
     rec.odoKm = (rec.endKm != null && rec.startKm != null) ? +(rec.endKm - rec.startKm).toFixed(1) : null;
     rec.engHrs = (rec.endHrs != null && rec.startHrs != null) ? +(rec.endHrs - rec.startHrs).toFixed(1) : null;
     rec.issues = ((window.uxIssueLog && window.uxIssueLog()) || []).filter(function(i){ return i.ts >= SH.start; }).length;
@@ -31895,7 +31935,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       if (rk !== lastRunKey || lastSize < 0 || size < lastSize) { lastRunKey = rk; lastSize = size; }
       else if (size > lastSize) {
         var inc = size - lastSize; lastSize = size;
-        if (inc <= 25) { SH.bins = (SH.bins || 0) + inc; var now = Date.now(); SH.binTs = (SH.binTs || []); for (var i = 0; i < inc; i++) SH.binTs.push(now); if (SH.binTs.length > 4000) SH.binTs = SH.binTs.slice(-4000); ch = true; }
+        if (inc <= 25) { SH.bins = (SH.bins || 0) + inc; var now = Date.now(); SH.binTs = (SH.binTs || []); SH.binD = (SH.binD && SH.binD.length === SH.binTs.length) ? SH.binD : SH.binTs.map(function(){ return null; }); for (var i = 0; i < inc; i++) { SH.binTs.push(now); SH.binD.push(SH.dist || 0); } if (SH.binTs.length > 4000) { SH.binTs = SH.binTs.slice(-4000); SH.binD = SH.binD.slice(-4000); } ch = true; }
       }
     }
     if (SH.leg && loc) {
@@ -31973,6 +32013,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   /* =====================================================================
      The shift sheet
      ===================================================================== */
+  var startChecked = false, startCarry = 0;
   var sheet = null, view = 'main', todoAll = false, draft = null, defDraft = null, endDraft = null, lastRec = null, crDraft = null, truckDraft = null;
   function build(){
     if (sheet) return;
@@ -32354,7 +32395,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   }
   function roleHtml(){ return (isLead() ? '<div class="drv-role">' + I.truck + '<span>Depot: ' + (lsGet('lbDepot', null) ? 'set on this phone' : (window.lbKnownPlaces && window.lbKnownPlaces.depot() ? '4 David Court, Rosebud' : '4 David Court, Rosebud (not found on the map yet, using where each shift starts)')) + '</span><button type="button" class="drv-link" data-a="setdepot">Set depot to here</button></div>' : '') + '<div class="drv-role">' + I.key + '<span>' + (isLead() ? 'Leading hand mode' : 'Driver mode') + '</span><button type="button" class="drv-link" data-a="role">' + (isLead() ? 'Switch to driver' : 'Leading hand…') + '</button></div>'; }
   function summaryHtml(s){
-    return '<div class="drv-stats">' + stat(hm(s.worked), 'worked') + stat((s.odoKm != null ? s.odoKm : (+s.gpsKm || 0).toFixed(1)), s.odoKm != null ? 'km (odometer)' : 'km (GPS)') + stat(s.bins || 0, 'bins') +
+    return '<div class="drv-stats">' + stat(hm(s.worked), 'worked') + stat((s.odoKm != null ? s.odoKm : (+s.gpsKm || 0).toFixed(1)), s.odoKm != null ? 'km (odometer)' : 'km (GPS)') + stat(s.bins || 0, s.binsApp != null ? 'bins (truck)' : 'bins') +
       stat(s.perKm == null ? '–' : (+s.perKm).toFixed(1), 'bins / km') + stat(s.perHr == null ? '–' : Math.round(s.perHr), 'bins / h') + stat(s.engHrs != null ? s.engHrs : '–', 'engine h') + '</div>';
   }
   function summaryText(s){
@@ -32491,13 +32532,28 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       var tgtD = view === 'end' ? endDraft : view === 'prestart' ? pre : draft;
       takePhoto('dash').then(function(id){ if (!id) return; if (tgtD.photo) mDel(tgtD.photo); tgtD.photo = id; paint(); }); return;
     }
+    if (a === 'start' && !startChecked) {
+      // Fox: bins still on the truck from the last shift (not tipped) are asked about before this one starts
+      var hist0 = history(), prev0 = hist0[hist0.length - 1], pend0 = null;
+      try { if (prev0 && window.lbRunSheet && window.lbRunSheet.pendingLoad && Date.now() - (prev0.end || prev0.start) < 4 * 86400000) pend0 = window.lbRunSheet.pendingLoad(prev0.id); } catch (e) {}
+      if (pend0 && pend0.n > 0) {
+        confirmIt('The truck still had ' + pend0.n + ' bin' + (pend0.n === 1 ? '' : 's') + ' on it from your last shift (' + dateStr(prev0.start) + ') that were not tipped.\n\nOK = they are still on the truck (they count in your first load).\nCancel = they are not on it any more.').then(function(yes){
+          startCarry = yes ? pend0.n : 0;
+          try { window.lbRunSheet.clearLoad(prev0.id); } catch (e) {}
+          startChecked = true; var b2 = sheet && sheet.querySelector('[data-a="start"]'); if (b2) b2.click(); else startChecked = false;
+        });
+        return;
+      }
+    }
     if (a === 'start') {
+      startChecked = false; var carry0 = startCarry; startCarry = 0;
       var dr = draft;
       lsSet('lbDriver', { name: dr.driver.trim(), emp: String(dr.emp || '').trim(), truck: dr.truck.trim() });
       // The rego is remembered per unit, so the next shift on the same truck (and the accident card) fill it in.
       if (dr.truck && dr.rego) { var rgS = lsGet('lbRegos', {}) || {}; rgS[String(dr.truck).trim().toLowerCase()] = String(dr.rego).trim().toUpperCase(); lsSet('lbRegos', rgS); }
       var faults = Object.keys(dr.checks).filter(function(k){ return dr.checks[k] === 'fault'; });
       startShift({ stream: dr.stream || '', run: dr.run || '', driver: dr.driver.trim(), emp: String(dr.emp || '').trim(), truck: dr.truck.trim(), rego: String(dr.rego || '').trim().toUpperCase(), km: num(dr.km), hrs: num(dr.hrs), photo: dr.photo, prestart: { ts: Date.now(), checks: dr.checks, faults: faults } });
+      if (carry0 > 0) { try { window.lbRunSheet.carryLoad(SH.id, carry0); } catch (e) {} }
       draft = null; localStorage.removeItem('lbShiftNoAuto');
       if (faults.length) { view = 'defect'; newDefect(faults[0]); pendingFaults = faults.slice(1); }
       else { view = 'main'; toast('Shift started'); }
@@ -37010,6 +37066,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var L = { id: 'l_' + uid(), runNo: '', n: R.cur.n, first: R.cur.first, last: R.cur.last, site: nt ? nt.name : '', lat: loc && loc.lat, lng: loc && loc.lng,
       arrT: Date.now(), arrW: '', depW: '', depT: null, docket: '', photos: [] };
     R.loads.push(L); R.cur = { n: 0, first: null, last: null }; save(R);
+    try { if (window.uxShiftNoteTip) window.uxShiftNoteTip(L.arrT); } catch (e) {}   // (the bins/hour count starts again after this tip)
     return L;
   }
 
@@ -37462,7 +37519,9 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       } catch (e) { done(false); }
     });
   }
-  window.lbRunSheet = { autoSend: autoSend, formImage: formImage, open: open, missing: missing, text: function(id){ var sh = shiftFor(id); if (!sh) return ''; SHc = sh; R = getOrMake(sh.s.id); return sheetText(); }, truckChanged: truckChanged, pendingLoad: pendingLoad, data: function(id){
+  window.lbRunSheet = { carryLoad: function(id, n){ var sh = shiftFor(id); if (!sh) return; var R0 = getOrMake(sh.s.id); R0.cur = { n: n, first: null, last: null }; R0.carried = n; save(R0); },
+    clearLoad: function(id){ var sh = shiftFor(id); if (!sh) return; var R0 = getOrMake(sh.s.id); R0.cur = { n: 0, first: null, last: null }; save(R0); },
+    autoSend: autoSend, formImage: formImage, open: open, missing: missing, text: function(id){ var sh = shiftFor(id); if (!sh) return ''; SHc = sh; R = getOrMake(sh.s.id); return sheetText(); }, truckChanged: truckChanged, pendingLoad: pendingLoad, data: function(id){
     var sh = shiftFor(id); if (!sh) return null; SHc = sh; R = getOrMake(sh.s.id);
     var d = sheetData(), s = d.s, sum = function(a){ var t = 0, any = false; (a || []).forEach(function(x){ var v = parseFloat(x.litres); if (isFinite(v)) { t += v; any = true; } }); return any ? t : null; };
     var n = function(v){ v = parseFloat(v); return isFinite(v) ? v : null; };
