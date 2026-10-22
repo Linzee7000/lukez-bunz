@@ -10631,12 +10631,14 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
     const all = (typeof STREET_LITTER_SITES !== 'undefined') ? STREET_LITTER_SITES : [];
     if (!userCurrentLocation || !all.length) return null;
     let nearest = null, nearestDist = Infinity;
-    all.forEach(s => {
-      if (s.lat && s.lng) {
-        const d = getDistanceMeters(userCurrentLocation.lat, userCurrentLocation.lng, s.lat, s.lng);
-        if (d < nearestDist) { nearestDist = d; nearest = s; }
-      }
-    });
+    // (skip anything clearly farther than the limit before doing the distance sum: this runs on every GPS fix)
+    const lim = (maxDistMeters / 111000) * 1.6, ulat = userCurrentLocation.lat, ulng = userCurrentLocation.lng;
+    for (let i = 0; i < all.length; i++) {
+      const s = all[i];
+      if (!s.lat || !s.lng || Math.abs(s.lat - ulat) > lim || Math.abs(s.lng - ulng) > lim * 1.3) continue;
+      const d = getDistanceMeters(ulat, ulng, s.lat, s.lng);
+      if (d < nearestDist) { nearestDist = d; nearest = s; }
+    }
     return nearestDist <= maxDistMeters ? nearest : null;
   }
 
@@ -10669,12 +10671,16 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
     let html = '';
     if (userCurrentLocation && siteRecords && siteRecords.length) {
       let nearest = null, nearestDist = Infinity;
-      siteRecords.forEach(site => {
-        if (site.lat && site.lng && Number(site.lat) !== 0) {
-          const d = getDistanceMeters(userCurrentLocation.lat, userCurrentLocation.lng, Number(site.lat), Number(site.lng));
-          if (d < nearestDist) { nearestDist = d; nearest = site; }
-        }
-      });
+      // (only a site within 300 m is ever used, so anything more than ~0.004 degrees away is skipped without the distance sum: this
+      //  runs on every GPS fix over ~57,000 sites, and the sums alone were a visible part of the app's work)
+      const ulat = userCurrentLocation.lat, ulng = userCurrentLocation.lng;
+      for (let i = 0; i < siteRecords.length; i++) {
+        const site = siteRecords[i], la = +site.lat, ln = +site.lng;
+        if (!la || !ln) continue;
+        if (Math.abs(la - ulat) > 0.004 || Math.abs(ln - ulng) > 0.005) continue;
+        const d = getDistanceMeters(ulat, ulng, la, ln);
+        if (d < nearestDist) { nearestDist = d; nearest = site; }
+      }
       const site = nearestDist <= 300 ? nearest : null;
       html += buildAreaRunsBarHtml(site);
     }
@@ -17685,20 +17691,25 @@ window.addEventListener('DOMContentLoaded', async () => {
     const BIN_AT_TRUCK_M = 10;
     let nearestBinSite = null, nearestBinDist = Infinity;
     if (userCurrentLocation) {
-      records.forEach(site => {
+      // (this runs on every GPS fix over every house of the run: the distance is worked out once per house, and a house more than
+      //  ~500 m away - whose bin isn't near either - is skipped before the sum, since nothing below uses anything past 300 m)
+      const ulat = userCurrentLocation.lat, ulng = userCurrentLocation.lng;
+      for (let ri = 0; ri < records.length; ri++) {
+        const site = records[ri];
+        const la = Number(site.lat), ln = Number(site.lng);
         const bd = binDistBySite.get(String(site.propId || site.siteId || ''));
+        if (!la || !ln) continue;
+        if ((bd === undefined || bd > 300) && (Math.abs(la - ulat) > 0.0045 || Math.abs(ln - ulng) > 0.0057)) continue;
+        const hd = getDistanceMeters(ulat, ulng, la, ln);
         // (and its house nearby too: a bin pinned in the wrong place - a Mount Martha house's bin sitting
         // in Rosebud - isn't "the bin at the truck")
-        if (bd !== undefined && bd < nearestBinDist && onWantedSide(site) && site.lat && Number(site.lat) !== 0
-          && getDistanceMeters(userCurrentLocation.lat, userCurrentLocation.lng, Number(site.lat), Number(site.lng)) <= 80) { nearestBinDist = bd; nearestBinSite = site; }
-        if (site.lat && site.lng && Number(site.lat) !== 0) {
-          let d = getDistanceMeters(userCurrentLocation.lat, userCurrentLocation.lng, Number(site.lat), Number(site.lng));
-          if (bd !== undefined && bd < d) d = bd;
-          if (d < nearestDistOverall) { nearestDistOverall = d; nearestSiteOverall = site; }
-          // with the run's bins on the map, only houses that have one count (it's the next *bin*)
-          if (d < nearestSameSideDist && (bd !== undefined || !binDistBySite.size) && onWantedSide(site)) { nearestSameSideDist = d; nearestSameSideSite = site; }
-        }
-      });
+        if (bd !== undefined && bd < nearestBinDist && onWantedSide(site) && hd <= 80) { nearestBinDist = bd; nearestBinSite = site; }
+        let d = hd;
+        if (bd !== undefined && bd < d) d = bd;
+        if (d < nearestDistOverall) { nearestDistOverall = d; nearestSiteOverall = site; }
+        // with the run's bins on the map, only houses that have one count (it's the next *bin*)
+        if (d < nearestSameSideDist && (bd !== undefined || !binDistBySite.size) && onWantedSide(site)) { nearestSameSideDist = d; nearestSameSideSite = site; }
+      }
     }
     // In the order the truck gets to them - same street ahead on your side, else the next street off to
     // your side, else the next turn (lbNextBin, in lb-street-stats, which knows the run's streets and
@@ -32649,7 +32660,14 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var e = endDraft;
     try { autoSendReports('End of shift'); } catch (x) {}   // (before the shift is closed: the run check and the run sheet need it still running)
     if (SH && SH.leg) { closeLeg(SH.leg, e.truckBinCount); SH.leg = null; }
+    var shRun0 = SH && SH.run != null ? String(SH.run) : '';
     lastRec = finishShift({ km: num(e.km), hrs: num(e.hrs), photo: e.photo, note: (e.note || '').trim() });
+    // (Fox: after finishing the shift 219A was still on the screen as if still on it.) The run that was being driven comes off the map
+    // with the shift; a run picked to look at something else stays.
+    try {
+      var picked = Array.from(g('selectedRunsSet') || []);
+      if (shRun0 && typeof window.removeFilter === 'function') picked.forEach(function(r){ if (String(r).toLowerCase() === shRun0.toLowerCase()) window.removeFilter('run', r); });
+    } catch (x) { console.warn('drop run after shift', x); }
     endDraft = null; view = 'done'; paint();
   }
   function paintPre(){
