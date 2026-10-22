@@ -31283,14 +31283,17 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var objs = [], add = function(s){ objs.push(s); return objs.length; };
     add('<< /Type /Catalog /Pages 2 0 R >>'); add('PAGES'); add('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>');
     var kids = [];
-    if (img && img.jpeg) {   // page 1: a picture (the run map), fitted to the page, landscape or portrait to suit it
-      var land = img.w > img.h, PW = land ? 842 : 595, PH = land ? 595 : 842, k = Math.min((PW - 24) / img.w, (PH - 24) / img.h), dw = img.w * k, dh = img.h * k;
-      var bs = ''; for (var bi = 0; bi < img.jpeg.length; bi += 8192) bs += String.fromCharCode.apply(null, img.jpeg.subarray(bi, bi + 8192));
-      var imn = add('<< /Type /XObject /Subtype /Image /Width ' + img.w + ' /Height ' + img.h + ' /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ' + bs.length + ' >>\nstream\n' + bs + '\nendstream');
+    // pictures first, one page each (the run sheet form, the run map...), each fitted to its page, landscape or portrait to suit it
+    var imgs = (Array.isArray(img) ? img : [img]).filter(function(m){ return m && m.jpeg; });
+    imgs.forEach(function(im){
+      var land = im.w > im.h, PW = land ? 842 : 595, PH = land ? 595 : 842, k = Math.min((PW - 24) / im.w, (PH - 24) / im.h), dw = im.w * k, dh = im.h * k;
+      var bs = ''; for (var bi = 0; bi < im.jpeg.length; bi += 8192) bs += String.fromCharCode.apply(null, im.jpeg.subarray(bi, bi + 8192));
+      var imn = add('<< /Type /XObject /Subtype /Image /Width ' + im.w + ' /Height ' + im.h + ' /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ' + bs.length + ' >>\nstream\n' + bs + '\nendstream');
       var cs = 'q ' + dw.toFixed(2) + ' 0 0 ' + dh.toFixed(2) + ' ' + ((PW - dw) / 2).toFixed(2) + ' ' + ((PH - dh) / 2).toFixed(2) + ' cm /Im1 Do Q';
       var cn0 = add('<< /Length ' + cs.length + ' >>\nstream\n' + cs + '\nendstream');
       kids.push(add('<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ' + PW + ' ' + PH + '] /Contents ' + cn0 + ' 0 R /Resources << /XObject << /Im1 ' + imn + ' 0 R >> >> >>') + ' 0 R');
-    }
+    });
+    if (imgs.length && !String(text || '').trim()) pages = [];   // (pictures only: no empty text page after them)
     pages.forEach(function(pg, pi){
       var s = 'BT /F1 10 Tf 12 TL 40 800 Td ' + (pi === 0 && title ? '/F1 13 Tf (' + esc(title) + ') Tj T* /F1 10 Tf T* ' : '') + pg.map(function(l){ return '(' + esc(l) + ') Tj T*'; }).join(' ') + ' ET';
       var cn = add('<< /Length ' + s.length + ' >>\nstream\n' + s + '\nendstream');
@@ -32629,7 +32632,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       if (lastAuto.k === key && now - lastAuto.t < 90000) return;
       lastAuto = { k: key, t: now };
       var sid = SH.id, run = SH.run, d2 = me(), loc2 = here();
-      try { if (window.lbRunSheet && window.lbRunSheet.autoSend) window.lbRunSheet.autoSend(sid, tag); } catch (e) {}
+      try { if (window.lbRunSheet && window.lbRunSheet.autoSend) window.lbRunSheet.autoSend(sid, tag, (endDraft && endDraft.photo) ? [endDraft.photo] : []); } catch (e) {}
       var tc2 = (run && !isStreet(SH.stream)) ? runCheck() : null;
       if (!tc2 || !window.lbOutbox) return;
       var tl2 = tc2.streets.slice().sort(function(x, y){ return (y.hs || 0) - (x.hs || 0); });
@@ -37368,20 +37371,63 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
 
   // Sent by itself (end of shift, start of a break): the same message as Send, but no questions asked, a fresh id each time
   // so a later one is not taken for the first, and the "sent" mark the driver sees is left for their own press of Send.
-  function autoSend(id, tag){
+  // The company run sheet form (IMS-OPER-F-8007) drawn to a picture, so the PDF shows the real form and not a text dump.
+  // html2canvas is loaded when first needed; with no signal (or it fails) the caller falls back to the text PDF.
+  function loadH2C(){
+    if (window.html2canvas) return Promise.resolve(window.html2canvas);
+    return new Promise(function(res, rej){
+      var sc = document.createElement('script'), t = setTimeout(function(){ rej(new Error('html2canvas timeout')); }, 9000);
+      sc.src = 'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js';
+      sc.onload = function(){ clearTimeout(t); window.html2canvas ? res(window.html2canvas) : rej(new Error('html2canvas missing')); };
+      sc.onerror = function(){ clearTimeout(t); rej(new Error('html2canvas failed')); };
+      document.head.appendChild(sc);
+    });
+  }
+  function formImage(sh0, R1){
+    return loadH2C().then(function(h2c){
+      if (sh0) { SHc = sh0; R = R1 || getOrMake(sh0.s.id); }   // (it is drawn a moment later: make sure it is this shift's sheet)
+      var host = document.createElement('div'); host.id = 'rsPrint';
+      host.style.cssText = 'position:absolute;left:-6000px;top:0;right:auto;bottom:auto;width:1140px;height:auto;overflow:visible;z-index:-1';
+      host.innerHTML = printHtml(); document.body.appendChild(host);
+      var pg = host.querySelector('.rsp-page'); pg.style.margin = '0'; pg.style.width = '1100px';
+      return h2c(pg, { scale: 1.5, backgroundColor: '#fff', logging: false, useCORS: true }).then(function(cv){
+        host.remove();
+        var url = cv.toDataURL('image/jpeg', .85), bin = atob(url.split(',')[1]), u8 = new Uint8Array(bin.length);
+        for (var i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+        return { jpeg: u8, w: cv.width, h: cv.height };
+      }, function(e){ host.remove(); throw e; });
+    });
+  }
+
+  // Sent by itself (end of shift, start of a break): the same message as Send, but no questions asked, a fresh id each time
+  // so a later one is not taken for the first, and the "sent" mark the driver sees is left for their own press of Send.
+  // The PDF is the run sheet form, then the run map (finished streets red). Photos from the shift go with it, each one only the
+  // first time (R.sentMedia), so a break and the end of shift don't send the same pictures again; the PDF goes every time.
+  function autoSend(id, tag, extraIds){
     return new Promise(function(done){
       try {
         var sh = shiftFor(id); if (!sh || !window.lbOutbox) { done(false); return; }
         SHc = sh; R = getOrMake(sh.s.id);
-        var R0 = R, S0 = SHc, txt0 = sheetText(), ids0 = mediaIds();
+        var R0 = R, S0 = SHc, txt0 = sheetText();
+        var sent0 = R0.sentMedia || [];
+        var ids0 = mediaIds().concat(S0.s.startPhoto ? [S0.s.startPhoto] : [], extraIds || []).filter(function(x, i, a){ return x && a.indexOf(x) === i && sent0.indexOf(x) < 0; });
         var ttl0 = 'Run sheet ' + dateStr(S0.s.start) + ' - ' + (S0.s.driver || 'driver') + ' - run ' + (S0.s.run || '?') + (tag ? ' - ' + tag : '');
         var send0 = function(extra){ window.lbOutbox.send({ rid: 'rsa_' + R0.id + '_' + Date.now(), kind: 'runsheet', to: ['lead'], subject: (tag ? tag + ' · ' : '') + 'Run sheet · ' + (S0.s.driver || 'driver') + ' · run ' + (S0.s.run || '?') + ' · ' + dateStr(S0.s.start),
-          text: txt0, data: { runSheet: Object.assign({}, R0, { sig: R0.sig ? 'signed ' + new Date(R0.sigTs).toISOString() : null }), shift: { id: S0.s.id, start: S0.s.start, end: S0.s.end || null, driver: S0.s.driver, truck: S0.s.truck, run: S0.s.run } }, media: ids0.concat(extra || []) }); done(true); };
-        (window.lbMedia && window.lbMedia.putPdf ? window.lbMedia.putPdf(ttl0, txt0).then(function(i){ return [i]; }, function(){ return []; }) : Promise.resolve([])).then(send0);
+          text: txt0, data: { runSheet: Object.assign({}, R0, { sig: R0.sig ? 'signed ' + new Date(R0.sigTs).toISOString() : null }), shift: { id: S0.s.id, start: S0.s.start, end: S0.s.end || null, driver: S0.s.driver, truck: S0.s.truck, run: S0.s.run } }, media: ids0.concat(extra || []) });
+          R0.sentMedia = sent0.concat(ids0); try { save(R0); } catch (e) {} done(true); };
+        var form = formImage(S0, R0).catch(function(e){ console.warn('run sheet form picture', e); return null; });
+        var map = window.lbRunMapImage ? window.lbRunMapImage(null, {}).catch(function(){ return null; }) : Promise.resolve(null);
+        Promise.all([form, map]).then(function(im){
+          var pics = im.filter(Boolean);
+          // no form picture (offline, library blocked): the text sheet follows the map so nothing is lost
+          var txtPage = im[0] ? '' : txt0;
+          if (!window.lbMedia || !window.lbMedia.putPdf) { send0([]); return; }
+          window.lbMedia.putPdf(ttl0, txtPage, pics).then(function(i){ send0([i]); }, function(){ send0([]); });
+        });
       } catch (e) { done(false); }
     });
   }
-  window.lbRunSheet = { autoSend: autoSend, open: open, missing: missing, text: function(id){ var sh = shiftFor(id); if (!sh) return ''; SHc = sh; R = getOrMake(sh.s.id); return sheetText(); }, truckChanged: truckChanged, pendingLoad: pendingLoad, data: function(id){
+  window.lbRunSheet = { autoSend: autoSend, formImage: formImage, open: open, missing: missing, text: function(id){ var sh = shiftFor(id); if (!sh) return ''; SHc = sh; R = getOrMake(sh.s.id); return sheetText(); }, truckChanged: truckChanged, pendingLoad: pendingLoad, data: function(id){
     var sh = shiftFor(id); if (!sh) return null; SHc = sh; R = getOrMake(sh.s.id);
     var d = sheetData(), s = d.s, sum = function(a){ var t = 0, any = false; (a || []).forEach(function(x){ var v = parseFloat(x.litres); if (isFinite(v)) { t += v; any = true; } }); return any ? t : null; };
     var n = function(v){ v = parseFloat(v); return isFinite(v) ? v : null; };
