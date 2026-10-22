@@ -32612,8 +32612,32 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     if (a === 'role') { (isLead() ? Promise.resolve(toDriver()) : toLead()).then(function(){ paint(); }); return; }
   }
   var pendingFaults = [], pre = null;
+  // Sent without being asked: when a break starts and when the shift ends, the run sheet (as a PDF) and the To do PDF (the run
+  // map with the finished streets red, then what is left) go to the leading hand. Once per shift and reason a minute.
+  var lastAuto = { k: '', t: 0 };
+  function autoSendReports(tag){
+    try {
+      if (!SH) return;
+      var key = SH.id + '|' + tag, now = Date.now();
+      if (lastAuto.k === key && now - lastAuto.t < 90000) return;
+      lastAuto = { k: key, t: now };
+      var sid = SH.id, run = SH.run, d2 = me(), loc2 = here();
+      try { if (window.lbRunSheet && window.lbRunSheet.autoSend) window.lbRunSheet.autoSend(sid, tag); } catch (e) {}
+      var tc2 = (run && !isStreet(SH.stream)) ? runCheck() : null;
+      if (!tc2 || !window.lbOutbox) return;
+      var tl2 = tc2.streets.slice().sort(function(x, y){ return (y.hs || 0) - (x.hs || 0); });
+      var subj2 = tag + ': TO DO ON RUN ' + String(run).toUpperCase() + ': ' + (d2.name || SH.driver || 'Driver');
+      var txt2 = subj2 + '\n' + tl2.length + ' streets, ' + tc2.houses + ' houses, ' + (tc2.left + tc2.pink) + ' bins left\n' + tl2.slice(0, 30).map(function(x){ return '- ' + x.name + ': ' + (x.hs || 0) + ' houses'; }).join('\n') + (tl2.length > 30 ? '\n+ ' + (tl2.length - 30) + ' more streets' : '') + (loc2 ? '\nhttps://maps.google.com/?q=' + loc2.lat.toFixed(6) + ',' + loc2.lng.toFixed(6) : '');
+      var go2 = function(ids){ window.lbOutbox.send({ rid: 't_' + uid(), kind: 'driver-todo', urgent: false, to: ['lead'], subject: subj2, text: txt2, data: { run: run, streets: tl2.length, houses: tc2.houses, bins: tc2.left + tc2.pink, ts: Date.now(), auto: tag }, media: ids || [], delayMs: 0 }); };
+      (window.lbRunMapImage ? window.lbRunMapImage(null, {}).catch(function(){ return null; }) : Promise.resolve(null)).then(function(img){
+        if (window.lbMedia && window.lbMedia.putPdf) window.lbMedia.putPdf(subj2, txt2, img).then(function(id){ go2([id]); }, function(){ go2([]); }); else go2([]);
+      });
+    } catch (e) { console.warn('auto send', e); }
+  }
+  window.lbAutoSendReports = autoSendReports;
   function doFinish(){
     var e = endDraft;
+    try { autoSendReports('End of shift'); } catch (x) {}   // (before the shift is closed: the run check and the run sheet need it still running)
     if (SH && SH.leg) { closeLeg(SH.leg, e.truckBinCount); SH.leg = null; }
     lastRec = finishShift({ km: num(e.km), hrs: num(e.hrs), photo: e.photo, note: (e.note || '').trim() });
     endDraft = null; view = 'done'; paint();
@@ -37335,7 +37359,22 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     R.sentAt = Date.now(); save(R); toast('Run sheet sent to the leading hand'); paint();
   }
 
-  window.lbRunSheet = { open: open, missing: missing, text: function(id){ var sh = shiftFor(id); if (!sh) return ''; SHc = sh; R = getOrMake(sh.s.id); return sheetText(); }, truckChanged: truckChanged, pendingLoad: pendingLoad, data: function(id){
+  // Sent by itself (end of shift, start of a break): the same message as Send, but no questions asked, a fresh id each time
+  // so a later one is not taken for the first, and the "sent" mark the driver sees is left for their own press of Send.
+  function autoSend(id, tag){
+    return new Promise(function(done){
+      try {
+        var sh = shiftFor(id); if (!sh || !window.lbOutbox) { done(false); return; }
+        SHc = sh; R = getOrMake(sh.s.id);
+        var R0 = R, S0 = SHc, txt0 = sheetText(), ids0 = mediaIds();
+        var ttl0 = 'Run sheet ' + dateStr(S0.s.start) + ' - ' + (S0.s.driver || 'driver') + ' - run ' + (S0.s.run || '?') + (tag ? ' - ' + tag : '');
+        var send0 = function(extra){ window.lbOutbox.send({ rid: 'rsa_' + R0.id + '_' + Date.now(), kind: 'runsheet', to: ['lead'], subject: (tag ? tag + ' · ' : '') + 'Run sheet · ' + (S0.s.driver || 'driver') + ' · run ' + (S0.s.run || '?') + ' · ' + dateStr(S0.s.start),
+          text: txt0, data: { runSheet: Object.assign({}, R0, { sig: R0.sig ? 'signed ' + new Date(R0.sigTs).toISOString() : null }), shift: { id: S0.s.id, start: S0.s.start, end: S0.s.end || null, driver: S0.s.driver, truck: S0.s.truck, run: S0.s.run } }, media: ids0.concat(extra || []) }); done(true); };
+        (window.lbMedia && window.lbMedia.putPdf ? window.lbMedia.putPdf(ttl0, txt0).then(function(i){ return [i]; }, function(){ return []; }) : Promise.resolve([])).then(send0);
+      } catch (e) { done(false); }
+    });
+  }
+  window.lbRunSheet = { autoSend: autoSend, open: open, missing: missing, text: function(id){ var sh = shiftFor(id); if (!sh) return ''; SHc = sh; R = getOrMake(sh.s.id); return sheetText(); }, truckChanged: truckChanged, pendingLoad: pendingLoad, data: function(id){
     var sh = shiftFor(id); if (!sh) return null; SHc = sh; R = getOrMake(sh.s.id);
     var d = sheetData(), s = d.s, sum = function(a){ var t = 0, any = false; (a || []).forEach(function(x){ var v = parseFloat(x.litres); if (isFinite(v)) { t += v; any = true; } }); return any ? t : null; };
     var n = function(v){ v = parseFloat(v); return isFinite(v) ? v : null; };
@@ -50175,6 +50214,9 @@ html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x
    for a second or two, then the numbers appear on the next tick. It never replaces a number the property list gave. */
 (function(){
   'use strict';
+  // OFF for now (Fox, 22 Oct): the app ran slow and this lookup of OpenStreetMap addresses for the whole map (not just the run
+  // being driven) is the suspect. Change to false to bring it back; nothing else depends on it.
+  var DISABLED = true; if (DISABLED) return;
   var GF = {};
   function g(n){ try { return (GF[n] || (GF[n] = new Function('return typeof ' + n + ' === "undefined" ? undefined : ' + n)))(); } catch (e) { return undefined; } }
   var TS = 0.005, KEEP = 80, RETRY_MS = 60000, M_LAT = 110540, M_LNG = 111320, REACH_M = 45;
@@ -50513,6 +50555,29 @@ document.addEventListener('click', function(ev){
   ev.preventDefault(); ev.stopPropagation();
   var b = document.querySelector('#mapBinsAtAddress .lb-offrun-add'); if (b) b.click();
 }, true);
+</script>
+<script id="lb-break-autosend-script">
+/* A break starting (the Start break tile, or the stop pop-up's "Having a rest?" when it begins one that is still going) sends
+   the run sheet and the To do PDF to the leading hand on its own. Only a break that really started counts. */
+(function(){
+  function hook(){
+    var BC = window.lbBreakClock; if (!BC || BC.__auto) return false;
+    BC.__auto = true;
+    ['startBreak', 'startBreakAt'].forEach(function(n){
+      var f = BC[n]; if (typeof f !== 'function') return;
+      BC[n] = function(){
+        var was = 0, now = 0;
+        try { was = (BC.state && BC.state.breaks || []).length; } catch (e) {}
+        var r = f.apply(this, arguments);
+        try { now = (BC.state && BC.state.breaks || []).length; } catch (e) {}
+        if (now > was) setTimeout(function(){ try { if (window.lbAutoSendReports) window.lbAutoSendReports('Break'); } catch (e) {} }, 400);
+        return r;
+      };
+    });
+    return true;
+  }
+  if (!hook()) { var n = 0, t = setInterval(function(){ if (hook() || ++n > 40) clearInterval(t); }, 500); }
+})();
 </script>
 </body>
 </html>
