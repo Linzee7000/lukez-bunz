@@ -41987,7 +41987,9 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
     for (var i = 0; i < cells.length; i++) txt(cells[i], str.charAt(i));
   }
   // (not while a panel covers the map: 20 redraws a second behind the menu made the menus slow to answer a tap on a phone)
-  setInterval(function(){ var c = document.body.classList; if (on() && !document.hidden && onMap() && !c.contains('lb-drawer-open') && !c.contains('lb-layers-open') && !c.contains('lb-settings-open') && !c.contains('lb-hud')) clockText(); }, 50);   // (lb-hud: the HUD draws its own clock)
+  // (requestAnimationFrame, not a 50 ms timer: a timer is bunched up whenever the phone is busy and the tenths then jump and stall;
+  //  this runs once per screen refresh, and only the digit that changed is written)
+  (function loop(){ requestAnimationFrame(loop);  var c = document.body.classList; if (on() && !document.hidden && onMap() && !c.contains('lb-drawer-open') && !c.contains('lb-layers-open') && !c.contains('lb-settings-open') && !c.contains('lb-hud')) clockText(); })();   // (lb-hud: the HUD draws its own clock)
   function paintClock(){
     var box = $('mapRunColoredBox'); if (!box) return;
     var c = $('rbClock');
@@ -42406,12 +42408,13 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
     if (!bot) {
       bot = document.createElement('div'); bot.id = 'rbStats';
       bot.innerHTML =
-        '<button type="button" class="rd-c rd-truck" id="rdTruck" aria-label="On truck">' + rdMask('garbagetruck.png') + '<span class="rd-v"></span></button>' +
-        '<div class="rd-c rd-km" id="rdKm" aria-label="Km driven">' + RD_SVG_ROAD + '<span class="rd-v"></span><small>km</small></div>' +
-        '<div class="rd-c rd-rate" id="rdRate" aria-label="Bins an hour">' + RD_SVG_GAUGE + '<span class="rd-v"></span><small>/hr</small></div>' +
-        '<div class="rd-c rd-streets" id="rdStreets" aria-label="Streets to go">' + rdMask('route.png') + '<span class="rd-v"></span></div>' +
-        '<div class="rd-c rd-fines" id="rdFines" aria-label="Fines" style="display:none"><em>$</em><span class="rd-v"></span></div>' +
-        '<div class="rd-c rd-togo" id="rdTogo" aria-label="Bins to go">' + rdMask('bin.png') + '<span class="rd-v"></span></div>';
+        '<div class="rd-c rd-p1 rd-done" id="rdDone" aria-label="Bins done of the total on the run">' + rdMask('bin.png') + '<span class="rd-v"></span><small class="rd-sl">/</small><span class="rd-v rd-v2"></span></div>' +
+        '<div class="rd-c rd-p1 rd-togo" id="rdTogo" aria-label="Bins to go">' + rdMask('bin.png') + '<span class="rd-v"></span></div>' +
+        '<div class="rd-c rd-p1 rd-streets" id="rdStreets" aria-label="Streets to go">' + rdMask('route.png') + '<span class="rd-v"></span></div>' +
+        '<button type="button" class="rd-c rd-p2 rd-truck" id="rdTruck" aria-label="On truck">' + rdMask('garbagetruck.png') + '<span class="rd-v"></span></button>' +
+        '<div class="rd-c rd-p2 rd-rate" id="rdRate" aria-label="Bins an hour">' + RD_SVG_GAUGE + '<span class="rd-v"></span><small>/hr</small></div>' +
+        '<div class="rd-c rd-p2 rd-km" id="rdKm" aria-label="Bins per km">' + RD_SVG_ROAD + '<span class="rd-v"></span><small>/km</small></div>' +
+        '<div class="rd-c rd-p2 rd-fines" id="rdFines" aria-label="Fines" style="display:none"><em>$</em><span class="rd-v"></span></div>';
       bot.addEventListener('click', function(ev){
         var t = ev.target.closest ? ev.target.closest('#rdTruck') : null; if (!t) return;
         ev.stopPropagation(); if (typeof window.uxShiftOpen === 'function') window.uxShiftOpen();
@@ -42636,14 +42639,17 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
     segSet($('rdTruck').querySelector('.rd-v'), String(T ? T.n : doneCount()));
     attr($('rdTruck'), 'aria-label', (T ? 'On truck ' + T.n : 'Collected ' + doneCount()));
     var r = null; try { r = window.uxShiftRates ? window.uxShiftRates() : null; } catch (e) {}
-    segSet($('rdKm').querySelector('.rd-v'), r ? String(r.km < 100 ? r.km.toFixed(1) : Math.round(r.km)) : '-');
+    // bins per km (it used to be the km driven)
+    segSet($('rdKm').querySelector('.rd-v'), (r && r.perKm != null) ? String(r.perKm >= 100 ? Math.round(r.perKm) : r.perKm.toFixed(1)) : '-');
     var ph = r ? (r.perHr != null ? r.perHr : r.recent) : null;
     segSet($('rdRate').querySelector('.rd-v'), ph != null ? String(Math.round(ph)) : '-');
     var sg = hasRun ? streetsToGo() : null;
     segSet($('rdStreets').querySelector('.rd-v'), sg != null ? String(sg) : '-');
-    segSet($('rdTogo').querySelector('.rd-v'), hasRun ? String(Math.max(0, (HT.bins || 0) - doneCount())) : '-');
+    var dn = doneCount(), tot = hasRun ? (HT.bins || 0) : 0;
+    segSet($('rdTogo').querySelector('.rd-v'), hasRun ? String(Math.max(0, tot - dn)) : '-');
+    var dv = $('rdDone').querySelectorAll('.rd-v'); segSet(dv[0], String(dn)); segSet(dv[1], String(tot));
     // a cell with nothing to count (no shift, no run yet) is left out, so the row is never a string of dashes
-    [['rdKm', !!r], ['rdRate', ph != null], ['rdStreets', sg != null], ['rdTogo', hasRun]].forEach(function(c){ var e = $(c[0]); if (e) e.style.display = c[1] ? '' : 'none'; });
+    [['rdKm', !!(r && r.perKm != null)], ['rdRate', ph != null], ['rdStreets', sg != null], ['rdTogo', hasRun], ['rdDone', hasRun && tot > 0]].forEach(function(c){ var e = $(c[0]); if (e) e.style.display = c[1] ? '' : 'none'; });
     var sh = shift(), fx = $('rdFines');
     if (sh && game()) {
       var f = 0; try { var S = window.uxGta.stats(); if (S.led && S.led.shift === sh.id) f = S.led.fines || 0; } catch (e) {}
@@ -49967,7 +49973,21 @@ html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2.lb-hud:not(#m
     if (hud.classList.contains('wkon') !== showWk) hud.classList.toggle('wkon', showWk);
     if (hud.classList.contains('run') !== flip) hud.classList.toggle('run', flip);
   }
-  setInterval(function(){ try { if (!document.hidden) tick(); } catch (e) {} }, 100);
+  // (Fox: the time stopped running smoothly - tenths stalled, then jumped. A 100 ms timer is bunched up whenever the phone is busy, and
+  //  the clock only moved when the whole tick got its turn. Now one requestAnimationFrame loop: the clock digits are written on every
+  //  screen refresh (only the one that changed is touched), and the full tick still runs about every 100 ms.)
+  var lastTick = 0;
+  (function loop(){
+    requestAnimationFrame(loop);
+    try {
+      if (document.hidden) return;
+      var t = performance.now(), bc = document.body.classList;
+      if (t - lastTick >= 100) { lastTick = t; tick(); return; }
+      if (bc.contains('lb-hud') && E && E.clk && !bc.contains('lb-drawer-open') && !bc.contains('lb-layers-open') && !bc.contains('lb-settings-open')) {
+        var d = new Date(); digits(E.clk, p2(d.getHours()), p2(d.getMinutes()), p2(d.getSeconds()), String(Math.floor(d.getMilliseconds() / 100)));
+      }
+    } catch (e) {}
+  })();
   window.lbHud = { tick: tick };
 })();
 </script>
@@ -50275,6 +50295,9 @@ html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x
 html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats{order:3;display:flex;align-items:center;justify-content:space-between;gap:6px;background:#1b1d22;padding:6px 14px 8px;border-top:0;pointer-events:auto}
 html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats .rd-c{display:flex;align-items:center;gap:5px;min-width:0;margin:0;padding:0;border:0;background:none;box-shadow:none;color:#d0d3d9;font:inherit;white-space:nowrap;width:auto;height:auto;min-height:0}
 html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats .rd-v{display:flex;gap:3px;align-items:flex-end;--dw:13px}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats .rd-c{flex:none}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats.rd-pg-1 .rd-p2,html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats.rd-pg-2 .rd-p1{display:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats .rd-sl{font:400 18px/1 var(--rb-font);margin:0 -1px}
 html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats .rd-c small{font:800 11px/1 var(--rd-f,sans-serif);color:#9aa0aa;letter-spacing:.04em}
 html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats .rd-ic{display:block;flex:none;width:26px;height:26px;background:currentColor;-webkit-mask:var(--m) center/contain no-repeat;mask:var(--m) center/contain no-repeat}
 html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats svg.rd-ic{background:none;-webkit-mask:none;mask:none}
@@ -50285,8 +50308,6 @@ html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x
 html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats .rd-fines{color:var(--rb-red)}
 html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats .rd-fines em{font:400 22px/1 var(--rb-font);font-style:normal}
 /* (Fox: the stats were overlapping - every cell now alternates: its icon for 1 second, then its digits for 10. Phase set by the lb-strip-cycle script.) */
-html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats.rd-ph-i .rd-v,html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats.rd-ph-i .rd-c small{display:none}
-html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats.rd-ph-d .rd-ic,html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats.rd-ph-d .rd-fines em{display:none}
 /* the address card's own header, stream tabs and serial rows are replaced by the street row and the band (the card itself only stays for its banners) */
 html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) .map-address-telemetry .address-telemetry-grid,html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #mapRunsAtAddress,html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #mapBinsAtAddress .next-bin-row,html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #mapBinsAtAddress .uprop-content{display:none !important}
 html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) .map-address-telemetry:not(:has(.unassigned-bin-banner)){display:none !important}   /* (the Add property button now lives in the dash's run row; the old one stays hidden and is clicked for it) */
@@ -50453,16 +50474,28 @@ html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x
 </script>
 
 <script id="lb-strip-cycle-script">
-/* The stats row under the street name (truck, km, bins an hour, streets, fines, bins to go) was too wide for one line with both
-   an icon and its digits on every cell, so they overlapped. Now the whole row alternates: the icons for 1 second, then the
-   digits for 10. The phase is a class on #rbStats (rd-ph-i / rd-ph-d); the CSS hides the other half. */
+/* The stats row under the street name. Icon and digits are always shown together (the row never changes height). When every
+   cell fits on the one line they are all shown; when they don't, they take turns in two pages of three, 3 seconds each:
+   page 1 bins done / total, bins to go, streets to go; page 2 bins on the truck, bins an hour, bins a km.
+   The cells carry rd-p1 / rd-p2; the class on #rbStats (rd-pg-1 / rd-pg-2) hides the other page's cells. */
 (function(){
   'use strict';
-  var ICON_MS = 1000, DIGIT_MS = 10000, ph = 'd';
-  function apply(){ var el = document.getElementById('rbStats'); if (!el) return; el.classList.toggle('rd-ph-i', ph === 'i'); el.classList.toggle('rd-ph-d', ph === 'd'); }
-  function step(){ ph = ph === 'd' ? 'i' : 'd'; apply(); setTimeout(step, ph === 'i' ? ICON_MS : DIGIT_MS); }
-  setInterval(apply, 1000);              // the row is built after load (and rebuilt on a skin change), so keep the class on it
-  apply(); setTimeout(step, DIGIT_MS);
+  var PAGE_MS = 3000, key = '';
+  function shown(el, cls){ var n = 0; el.querySelectorAll('.' + cls).forEach(function(c){ if (c.style.display !== 'none') n++; }); return n; }
+  function fitsAll(el){
+    var cs = getComputedStyle(el), room = el.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight), w = 0, n = 0, gap = parseFloat(cs.columnGap) || 6;
+    el.querySelectorAll('.rd-c').forEach(function(c){ if (c.style.display !== 'none') { w += c.getBoundingClientRect().width; n++; } });
+    return w + gap * Math.max(0, n - 1) <= room;
+  }
+  function apply(){
+    var el = document.getElementById('rbStats'); if (!el || !el.clientWidth) return;
+    var n1 = shown(el, 'rd-p1'), n2 = shown(el, 'rd-p2'), k = el.clientWidth + '|' + n1 + '|' + n2 + '|' + document.documentElement.getAttribute('data-ux-skin');
+    if (k !== key) { key = k; el.classList.remove('rd-pg-1', 'rd-pg-2'); el.classList.add('rd-pg-all'); el._fit = fitsAll(el); }
+    var pg = 'all';
+    if (!el._fit) pg = !n1 ? '2' : !n2 ? '1' : (Math.floor(Date.now() / PAGE_MS) % 2 ? '2' : '1');
+    ['all', '1', '2'].forEach(function(x){ el.classList.toggle('rd-pg-' + x, x === pg); });
+  }
+  setInterval(apply, 250); apply();
 })();
 </script>
 
