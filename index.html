@@ -42326,6 +42326,7 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
   function rdMask(png){ return '<i class="rd-ic" style="--m:url(' + png + ')"></i>'; }
   var RD_SVG_ROAD = '<svg class="rd-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3h8l4.5 18h-17z" fill="currentColor"/><path d="M12 6v3M12 11.5v3M12 17v3" stroke="#1b1d22" stroke-width="1.7" fill="none"/></svg>';
   var RD_SVG_GAUGE = '<svg class="rd-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M4.2 17.5a8.6 8.6 0 1 1 15.6 0"/><path d="M12 14.5l3.2-5.2"/><path d="M8.5 20h7"/></svg>';
+  var rdMany = false, rdManyFor = '';     // a place with a lot of bins (a retirement village, a block of units) shows a count, its list opens on a tap
   var rdPick = null, rdIssue = false, rdPickT = 0;     // the serial tapped (its bin key), and whether REPORT is open on it
   function rdClearPick(){ rdPick = null; rdIssue = false; clearTimeout(rdPickT); }
   function buildDash(){
@@ -42449,6 +42450,7 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
     var t = ev.target.closest ? ev.target.closest('[data-a]') : null; if (!t) return;
     ev.stopPropagation();
     var a = t.getAttribute('data-a'), site = rdSite();
+    if (a === 'more') { rdMany = !rdMany; paintBins(true); return; }
     if (a === 'sn') { var k = t.getAttribute('data-k'); if (rdPick === k) rdClearPick(); else { rdPick = k; rdIssue = false; clearTimeout(rdPickT); rdPickT = setTimeout(function(){ rdClearPick(); paintBins(true); }, 9000); } paintBins(true); return; }
     if (a === 'logo' || a === 'ob') { rdSwitch(t.getAttribute('data-s')); return; }
     if (a === 'rem') { var k2 = t.getAttribute('data-k'), sr = t.getAttribute('data-sr') || ''; rdClearPick(); paintBins(true); if (typeof window.openBinReminderModal === 'function') window.openBinReminderModal(k2, escape(site ? (site.addressText || '') : ''), sr); return; }
@@ -42474,7 +42476,7 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
     var side = rdSide(site, nl, nr);
     var bins = act ? src[act.key] : [];
     var spd = +g('currentMapSpeedKmh') || 0, stopped = spd < 3;
-    var big = bins.length <= 1 || stopped;                  // two bins or more: only the big digits when stopped
+    var many = bins.length > 5, big = !many && (bins.length <= 1 || stopped);                  // two bins or more: only the big digits when stopped
     var propId = String(site.propId || site.siteId || ''), rems = g('siteReminders') || {};
     var off = !!g('lbOffRunNow');
     var items = bins.map(function(b, i){
@@ -42483,7 +42485,8 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
     });
     if (rdPick && !items.some(function(x){ return x.k === rdPick; })) rdClearPick();
     var addBtn = document.querySelector('#mapBinsAtAddress .lb-offrun-add'), addTxt = addBtn ? (addBtn.textContent || '').replace(/^\s*\+\s*/, '').trim() : '';
-    var sig = [addTxt, propId, act ? act.key : '-', eligible.map(function(d){ return d.key + rdRunLabel(site, d); }).join(','), side, big ? 1 : 0, off ? 1 : 0, rdPick || '', rdIssue ? 1 : 0, items.map(function(x){ return x.text + x.rem + (x.b.size || ''); }).join('|'), nl, nr].join('~');
+    if (rdManyFor !== propId) { rdManyFor = propId; rdMany = false; }
+    var sig = [many ? (rdMany ? 'M1' : 'M0') : '', addTxt, propId, act ? act.key : '-', eligible.map(function(d){ return d.key + rdRunLabel(site, d); }).join(','), side, big ? 1 : 0, off ? 1 : 0, rdPick || '', rdIssue ? 1 : 0, items.map(function(x){ return x.text + x.rem + (x.b.size || ''); }).join('|'), nl, nr].join('~');
     // the tab of the side the bins are on says the number of THAT house (the street row's own numbers are for the next bin on each side,
     // which is not always this house), smaller when it is long
     var hn = rdHouseNo(site), hel = tab.querySelector(side === 'R' ? '.rd-nr' : '.rd-nl');
@@ -42515,8 +42518,13 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
       var ser = items.map(function(x){
         return '<button type="button" class="rd-sn' + (x.k === rdPick ? ' pick' : '') + (x.rem ? ' rem-' + x.rem : '') + '" data-a="sn" data-k="' + escH(x.k) + '" aria-label="Bin ' + escH(x.text) + ', tap to set a reminder or report">' + rdSerialHtml(x.text, maxN) + rdSizeTag(x.b, act) + '</button>';
       }).join('');
-      h = '<div class="rd-band ' + (side === 'R' ? 'r ' : '') + (big ? 'big' : 'small') + '" style="--bc:' + act.bg + ';--bt:' + act.fg + '">' +
-        '<div class="rd-area"><button type="button" class="rd-logo" data-a="logo" data-s="' + act.key + '" aria-label="' + act.key + ' serials, tap to hide"><img src="' + act.icon + '" alt=""></button><div class="rd-ser">' + ser + '</div></div>' +
+      // lots of bins at one spot: the count (and what is still to do), the list only when asked for, in a box that scrolls
+      var inner = '<div class="rd-ser">' + ser + '</div>';
+      if (many) inner = rdMany
+        ? '<div class="rd-ser rd-sc">' + ser + '</div><button type="button" class="rd-more" data-a="more" aria-label="Hide the list">▴</button>'
+        : '<button type="button" class="rd-more rd-sum" data-a="more" aria-label="Show the ' + items.length + ' bins"><b>' + items.length + '</b> bins here <span>▾ list</span></button>';
+      h = '<div class="rd-band ' + (side === 'R' ? 'r ' : '') + (big ? 'big' : 'small') + (many ? ' many' : '') + '" style="--bc:' + act.bg + ';--bt:' + act.fg + '">' +
+        '<div class="rd-area"><button type="button" class="rd-logo" data-a="logo" data-s="' + act.key + '" aria-label="' + act.key + ' serials, tap to hide"><img src="' + act.icon + '" alt=""></button>' + inner + '</div>' +
         (right ? '<i class="rd-bar3"></i>' + right : '') + '</div>';
     } else {
       // nothing showing (off the run, or the driver closed it): just the streams' boxes, side by side and joined
@@ -50141,6 +50149,17 @@ html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x
 html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-band.small .rd-logo{width:28px;height:28px}
 html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-band[style*="--bt:#fff"] .rd-logo img{filter:invert(1)}
 html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-ser{display:flex;flex-direction:column;gap:3px;min-width:0}
+/* a place with a lot of bins: the count, a scrolling list on request, and the whole bins area never taller than ~40% of the screen so the map stays in view */
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-band{max-height:42vh;max-height:42dvh;overflow:hidden}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-ser.rd-sc{max-height:calc(42dvh - 12px);overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;padding-right:4px}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-ser.rd-sc{flex:1;align-self:stretch;gap:2px;padding:4px 4px 4px 0}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-ser.rd-sc .rd-sn{flex:none;min-height:30px;display:flex;align-items:center;justify-content:center}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-ser.rd-sc .rd-tx{font-size:16px;line-height:20px}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-more{flex:none;border:0;background:rgba(0,0,0,.14);color:inherit;font:inherit;border-radius:6px;padding:6px 10px;min-height:34px;cursor:pointer}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-sum{font:400 17px/1.1 var(--rb-font);display:flex;align-items:center;gap:7px;margin-left:auto;margin-right:auto}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-sum b{font:400 26px/1 var(--rb-font)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-sum span{font-size:13px;opacity:.75}
+
 html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-band.small .rd-ser{gap:1px}
 html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .r .rd-ser{align-items:flex-end}
 html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-sn{display:flex;align-items:center;gap:6px;min-width:0;max-width:100%;padding:0 2px;margin:0;border:0;outline:2px solid transparent;border-radius:2px !important;background:none;color:inherit;cursor:pointer;font:inherit}
