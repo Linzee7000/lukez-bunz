@@ -41113,7 +41113,8 @@ html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxCardStack > #rbSt
 html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x) #uxCardStack > #rbSt .rb-n{font-size:18px;padding:3px 7px}
 }
 /* the beacon on the truck's cab: the script pulses it (see paintBeacon); smaller and softer than the app's own */
-html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) .lb-beacon{animation:none !important;width:7px !important;height:7px !important;margin:-3.5px 0 0 -3.5px !important;box-shadow:0 0 4px 2px rgba(255,150,0,.7), 0 0 10px 4px rgba(255,140,0,.35);opacity:.7}
+html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) .lb-beacon{animation:lbBeaconR 1s ease-in-out infinite !important;width:7px !important;height:7px !important;margin:-3.5px 0 0 -3.5px !important;box-shadow:0 0 4px 2px rgba(255,150,0,.7), 0 0 10px 4px rgba(255,140,0,.35);opacity:.7}
+@keyframes lbBeaconR{0%,100%{opacity:1;transform:scale(1.15)}50%{opacity:.25;transform:scale(.8)}}   /* (the flash runs as a CSS animation: it was redrawn from script 12 times a second, each time re-working the page's styles) */
 
 /* ---- round 9: cash and fines as the pop-up card from the design ---- */
 html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#rb-x):not(#rb-x) #uxGtaFeed{gap:8px !important;align-items:stretch !important;text-align:left}
@@ -42645,11 +42646,14 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
     segSet($('rdRate').querySelector('.rd-v'), ph != null ? String(Math.round(ph)) : '-');
     var sg = hasRun ? streetsToGo() : null;
     segSet($('rdStreets').querySelector('.rd-v'), sg != null ? String(sg) : '-');
+    // (Fox: bins done / total only matters when another truck is working the same run; nothing tells the app that yet, so it stays
+    //  hidden until something sets window.lbOtherTrucksOnRun - the shared-run feature)
+    var otherTruck = function(){ try { return typeof window.lbOtherTrucksOnRun === 'function' && !!window.lbOtherTrucksOnRun(); } catch (e) { return false; } };
     var dn = doneCount(), tot = hasRun ? (HT.bins || 0) : 0;
     segSet($('rdTogo').querySelector('.rd-v'), hasRun ? String(Math.max(0, tot - dn)) : '-');
     var dv = $('rdDone').querySelectorAll('.rd-v'); segSet(dv[0], String(dn)); segSet(dv[1], String(tot));
     // a cell with nothing to count (no shift, no run yet) is left out, so the row is never a string of dashes
-    [['rdKm', !!(r && r.perKm != null)], ['rdRate', ph != null], ['rdStreets', sg != null], ['rdTogo', hasRun], ['rdDone', hasRun && tot > 0]].forEach(function(c){ var e = $(c[0]); if (e) e.style.display = c[1] ? '' : 'none'; });
+    [['rdKm', !!(r && r.perKm != null)], ['rdRate', ph != null], ['rdStreets', sg != null], ['rdTogo', hasRun], ['rdDone', hasRun && tot > 0 && otherTruck()]].forEach(function(c){ var e = $(c[0]); if (e) e.style.display = c[1] ? '' : 'none'; });
     var sh = shift(), fx = $('rdFines');
     if (sh && game()) {
       var f = 0; try { var S = window.uxGta.stats(); if (S.led && S.led.shift === sh.id) f = S.led.fines || 0; } catch (e) {}
@@ -43108,15 +43112,15 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
   function readWanted(){ var L = 0; if (game()) { try { L = window.uxGta._t.wanted().L || 0; } catch (e) {} } wantedL = L; }
   function paintBeacon(){
     var els = document.querySelectorAll('.lb-beacon'); if (!els.length || !on()) return;
-    var t = Date.now(), ph = (t % 1000) / 1000, k = .5 + .5 * Math.cos(ph * 2 * Math.PI), op = (.25 + .75 * k).toFixed(2), sc = (.8 + .35 * k).toFixed(2);
+    var t = Date.now();
     var bg = '#ffc02e', sh = '0 0 4px 2px rgba(255,150,0,.7), 0 0 10px 4px rgba(255,140,0,.35)';
     if (wantedL >= 5) {
       if (Math.floor(t / 450) % 2) { bg = '#ff3b30'; sh = '0 0 4px 2px rgba(255,59,48,.75), 0 0 10px 4px rgba(255,59,48,.4)'; }
       else { bg = '#3b7bff'; sh = '0 0 4px 2px rgba(59,123,255,.75), 0 0 10px 4px rgba(59,123,255,.4)'; }
     }
-    for (var i = 0; i < els.length; i++) { var e = els[i].style; e.opacity = op; e.transform = 'scale(' + sc + ')'; e.background = bg; e.boxShadow = sh; }
+    for (var i = 0; i < els.length; i++) { var el = els[i], bk = bg + sh; if (el._bk === bk) continue; el._bk = bk; el.style.background = bg; el.style.boxShadow = sh; }   // (only when the colour changes; the pulse is the CSS animation)
   }
-  setInterval(function(){ try { paintBeacon(); } catch (e) {} }, 80);
+  setInterval(function(){ try { paintBeacon(); } catch (e) {} }, 400);
 
   // ---- run chip: on a run for another day it swaps between the run and the day's name -------------------------
   var DAYS = ['sunday','monday','tuesday','wednesday','thursday','friday','saturday'], runMine = null, runBase = '';
@@ -48537,7 +48541,16 @@ html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f) 
     if (lvl > 0 && gap() > [0, 24, 44, 30, 56][lvl]) { var was = lvl; set(lvl - 1); if (gap() < 6) set(was); }
   }
   function tick(){ try { dayReset(); } catch (e) {} try { hdrRoom(); } catch (e) {} try { heads(); tops(); } catch (e) {} try { xs(); popups(); tiles(); if (document.body.classList.contains('lb-drawer-open')) sync(); } catch (e) {} }
-  new MutationObserver(function(){ try { xs(); popups(); tiles(); heads(); tops(); } catch (e) {} }).observe(document.body, { childList: true, subtree: true });
+  // (Fox: the app was running slow and the clock stuttered. This watched every change anywhere in the page - every map marker, every
+  //  digit the dash redrew - and each time re-scanned the whole page for menus to restyle (about a third of all the app's work).
+  //  Now changes inside the map are ignored (it holds no menus), and the rest are bunched into one scan at most every 250 ms.)
+  var mnT = 0;
+  new MutationObserver(function(recs){
+    var real = false;
+    for (var i = 0; i < recs.length && !real; i++) { var tg = recs[i].target; if (!(tg && tg.closest && tg.closest('.leaflet-container, #rbDash, #rbStats, #lbHud'))) real = true; }
+    if (!real || mnT) return;
+    mnT = setTimeout(function(){ mnT = 0; try { xs(); popups(); tiles(); heads(); tops(); } catch (e) {} }, 250);
+  }).observe(document.body, { childList: true, subtree: true });
   var bodyWatch = function(){ var b = $('lbDrawerBody'); if (!b) { setTimeout(bodyWatch, 500); return; }
     new MutationObserver(function(){ try { sync(); } catch (e) {} }).observe(b, { childList: true }); sync(); };
   bodyWatch();
@@ -49381,10 +49394,11 @@ html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):no
   function up(id){
     var e = $(id); if (!e) return null;
     if (id === 'uxToast' && !e.classList.contains('on')) return null;
-    e.classList.add('lb-msg');
-    if (e.style.display === 'none' || !(e.textContent || '').trim()) { e.classList.remove('lb-msg'); return null; }
+    // (decide first, then touch the class once: it used to add 'lb-msg' and take it straight off again every 300 ms on a hidden message,
+    //  and each of those changes made the browser re-work the page's styles)
     var bc = document.body.classList;
-    if (id === 'uxLowHint' && (!bc.contains('ux-lowzoom') || bc.contains('ux-days'))) { e.classList.remove('lb-msg'); return null; }
+    if (e.style.display === 'none' || !(e.textContent || '').trim() || (id === 'uxLowHint' && (!bc.contains('ux-lowzoom') || bc.contains('ux-days')))) { if (e.classList.contains('lb-msg')) e.classList.remove('lb-msg'); return null; }
+    if (!e.classList.contains('lb-msg')) e.classList.add('lb-msg');
     return e;
   }
   function msgs(){
