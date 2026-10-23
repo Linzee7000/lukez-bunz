@@ -33067,6 +33067,14 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       // run map edits (section colours, drawn lines, notes) made on other phones: newest per run
       var rme = {};
       Object.keys(r.places).forEach(function(k){ var p = r.places[k]; if (p && p.kind === 'runMapEdit' && p.key && p.edits && (!rme[p.key] || (p.ts || 0) > (rme[p.key].ts || 0))) rme[p.key] = Object.assign({}, p.edits, { ts: p.ts || p.edits.ts || 0 }); });
+      // (sent in parts now - put together, a version only once all its parts are here; the newest whole version wins)
+      var rparts = {};
+      Object.keys(r.places).forEach(function(k){ var p = r.places[k]; if (p && p.kind === 'runMapEditPart' && p.key && p.n) { var g = p.key + '@' + p.ts; (rparts[g] = rparts[g] || { key: p.key, ts: p.ts, n: p.n, s: [] }).s[p.i] = p.s; } });
+      Object.keys(rparts).forEach(function(g){
+        var G = rparts[g], whole = true; for (var i = 0; i < G.n; i++) if (typeof G.s[i] !== 'string') whole = false;
+        if (!whole) return;
+        try { var ed = JSON.parse(G.s.join('')); if (!rme[G.key] || (G.ts || 0) > (rme[G.key].ts || 0)) rme[G.key] = Object.assign({}, ed, { ts: G.ts || ed.ts }); } catch (e) {}
+      });
       lsSet('lbRunMapEditsFleet', rme);
       // truck lines drawn on other phones: straight to the editor's own store (too big for localStorage)
       try { if (window.lbTruckLines) window.lbTruckLines.fleet(Object.keys(r.places).map(function(k){ return r.places[k]; }).filter(function(p){ return p && p.kind === 'truckLine' && p.key; })); } catch (e) {}
@@ -38379,7 +38387,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   function lsSet(k, v){ try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
   function edits(key){
     var mine = (lsGet('lbRunMapEdits', {}) || {})[key], fleet = (lsGet('lbRunMapEditsFleet', {}) || {})[key];
-    var e = (fleet && (!mine || (fleet.ts || 0) > (mine.ts || 0))) ? fleet : mine;
+    var e = (fleet && (!mine || !isLeadNow() || (fleet.ts || 0) > (mine.ts || 0))) ? fleet : mine;
     e = e || {};
     return { pieces: e.pieces || {}, drawn: e.drawn || [], erase: e.erase || [], sides: e.sides || {}, arrows: e.arrows || [], points: e.points || [], notes: e.notes || [], hide: e.hide || [], names: e.names || {}, labels: e.labels || {}, lrot: e.lrot || {}, ts: e.ts || 0 };
   }
@@ -38427,8 +38435,29 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   function writeEdits(key, E){
     E.ts = Date.now();
     var all = lsGet('lbRunMapEdits', {}) || {}; all[key] = E; lsSet('lbRunMapEdits', all);
-    try { if (window.lbOutbox && window.lbOutbox.sendPlace) window.lbOutbox.sendPlace({ id: 'rme_' + key.replace(/[^A-Za-z0-9]+/g, '_'), kind: 'runMapEdit', key: key, edits: E, ts: E.ts }); } catch (e) {}
+    queueSend(key);
   }
+  /* ---- the leading hand's map changes reach every phone ----
+     A run's edits went to the server as one place, but a sheet cell holds 50,000 characters and the server cuts anything longer,
+     so a run with many coloured pieces and drawn lines arrived broken and the other phones kept the old map. They now go in parts
+     of 24,000 characters (kind runMapEditPart, id rme_<run>_p<n>), all with the same ts, and a phone only takes a version once
+     every part of it has come (see pullPlaces). Sent 8 s after the last change (one send for a run of taps), and when the run map
+     is closed or the app put away. */
+  var SENDQ = {}, sendT = null;
+  function queueSend(key){ SENDQ[key] = 1; clearTimeout(sendT); sendT = setTimeout(flushSends, 8000); }
+  function flushSends(){
+    clearTimeout(sendT); sendT = null;
+    Object.keys(SENDQ).forEach(function(key){
+      delete SENDQ[key];
+      var E = (lsGet('lbRunMapEdits', {}) || {})[key]; if (!E || !window.lbOutbox || !window.lbOutbox.sendPlace) return;
+      var text = JSON.stringify(E), SZ = 24000, n = Math.max(1, Math.ceil(text.length / SZ)), safe = key.replace(/[^A-Za-z0-9]+/g, '_');
+      for (var i = 0; i < n; i++) { try { window.lbOutbox.sendPlace({ id: 'rme_' + safe + '_p' + i, kind: 'runMapEditPart', key: key, ts: E.ts, i: i, n: n, s: text.slice(i * SZ, (i + 1) * SZ) }); } catch (e) {} }
+    });
+  }
+  window.addEventListener('pagehide', flushSends);
+  document.addEventListener('visibilitychange', function(){ if (document.hidden) flushSends(); });
+  // only the leading hand changes run maps (and on a driver's phone the leading hand's version always wins)
+  function isLeadNow(){ try { return typeof window.uxIsLead === 'function' ? !!window.uxIsLead() : true; } catch (e) { return true; } }
   // a piece's own edit, else the whole street's (edits made before streets were cut at their corners still apply)
   function ovOf(E, l){
     var v = E.pieces[pid(l)]; if (v !== undefined) return v;
@@ -39924,7 +39953,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     el.addEventListener('click', function(e){
       var b = e.target.closest && e.target.closest('[data-rm]'); if (!b || b.disabled) return;
       var a = b.getAttribute('data-rm');
-      if (a === 'close') { editing = false; el.style.display = 'none'; return; }
+      if (a === 'close') { editing = false; el.style.display = 'none'; flushSends(); return; }
+      if (a === 'edit' && !isLeadNow()) return;
       if (a === 'more') { var on = el.classList.toggle('rm-showmore'); b.textContent = on ? 'Less \u25b4' : 'More \u25be'; return; }
       if (a === 'printview') { if (phonePrint()) { mobilePrint(b); } else printView(false); }
       if (a === 'pages') { pagesMode = !pagesMode; if (pagesMode) editing = false; selPage = 0; renderView(true, true); }
@@ -40014,6 +40044,18 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   }
   function sharePdf(blob, name, title){
     var C = window.Capacitor, P = C && C.Plugins;
+    // an app installed before the share sheet was added can't hand a file to anything: email it to the leading hand instead
+    if (C && C.isNativePlatform && C.isNativePlatform() && !(P && P.Filesystem && P.Share)) {
+      var ask = window.customConfirm ? window.customConfirm('This copy of the app can\'t print or share files yet (install the latest app to print). Email the run map PDF to the leading hand instead?') : Promise.resolve(confirm('Email the run map PDF to the leading hand?'));
+      return Promise.resolve(ask).then(function(ok){
+        if (!ok || !window.lbOutbox || !window.lbMedia || !window.lbMedia.put) return;
+        var id = 'f_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+        return window.lbMedia.put({ id: id, kind: 'file', type: 'application/pdf', blob: blob, ts: Date.now(), synced: false }).then(function(){
+          window.lbOutbox.send({ rid: 'rm_' + id, kind: 'run-map', urgent: false, to: ['lead'], subject: title + ' run map', text: title + ' - run map PDF from the app', data: { run: title, ts: Date.now() }, media: [id], delayMs: 0 });
+          try { (window.customAlert || alert)('Sending the run map PDF to the leading hand\'s email.'); } catch (e) {}
+        });
+      });
+    }
     // the phone app: saved to the app's cache, then the share sheet (print, save to Files, email...)
     if (C && C.isNativePlatform && C.isNativePlatform() && P && P.Filesystem && P.Share) {
       return new Promise(function(res, rej){ var fr = new FileReader(); fr.onload = function(){ res(String(fr.result).split(',')[1]); }; fr.onerror = rej; fr.readAsDataURL(blob); })
@@ -40047,7 +40089,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     if (view) { try { view.map.remove(); } catch (e) {} view = null; }
     host.innerHTML = '';
     paintTools();
-    Array.prototype.forEach.call(el.querySelectorAll('[data-rm="edit"]'), function(b){ b.classList.toggle('on', editing); b.textContent = editing ? 'Done editing' : 'Edit'; });
+    var lead = isLeadNow(); if (!lead) editing = false;
+    Array.prototype.forEach.call(el.querySelectorAll('[data-rm="edit"]'), function(b){ b.classList.toggle('on', editing); b.textContent = editing ? 'Done editing' : 'Edit'; b.style.display = lead ? '' : 'none'; });
     var R = route(curKey); if (!R) { host.innerHTML = '<div class="rm-empty">No route map for this run yet.</div>'; return; }
     var pg = pagesCache[0], o = orientOverride || phoneOrient() || pg.o;
     // the page keeps its size while you edit, so the map never shifts under your finger
@@ -40060,7 +40103,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     opts.onKeyMove = function(pos){ setKey(pos); };
     opts.notesPos = keyFor(curKey + '|notes');
     opts.onNotesMove = function(pos){ var all = lsGet('lbRunMapKey', {}) || {}; if (pos) all[curKey + '|notes'] = pos; else delete all[curKey + '|notes']; lsSet('lbRunMapKey', all); if (view) { view.notesPos = pos; placeCards(view); } };
-    opts.onLabelMove = function(id, ll){
+    if (!isLeadNow()) { /* (a driver can't move street names: that changes the map for everyone) */ } else opts.onLabelMove = function(id, ll){
       var E = edits(curKey); E.labels = E.labels || {};
       if (ll) E.labels[id] = ll; else delete E.labels[id];
       saveEdits(curKey, E);
@@ -40186,6 +40229,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     if (o) show(keyOf(o));
   }
   function open(key, o2){
+    // the leading hand's latest changes, fetched as the map opens (the map redraws when they come)
+    try { var pr0 = window.lbOutbox && window.lbOutbox.pullPlaces && window.lbOutbox.pullPlaces(); if (pr0 && pr0.then) pr0.then(function(){ if (curKey && el && el.style.display !== 'none' && !editing) { ROUTES = ROUTES; renderView(true); } }); } catch (e) {}
     if (!window.L) return;
     // From the shift's To Do list: streets already done are drawn red (names normalised the same way as street_ids below)
     doneOn = o2 && o2.done ? 'forced' : null; doneKey = '';   // from the To Do list: finished streets start red
@@ -40307,7 +40352,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     });
   };
   window.lbRunMapOpen = open;
-  window.lbRunMapDebug = function(){ return { view: view, printing: printing }; };
+  window.lbRunMapDebug = function(){ return { view: view, printing: printing, writeEdits: writeEdits, flushSends: flushSends, edits: edits, isLead: isLeadNow }; };
   window.lbRunMapPages = function(key){ return DATA && DATA[key] ? pagesFor(route(key)) : null; };
   window.lbRunRoute = function(key){ return load().then(function(){ return route(key); }); };   // (test hook)
 })();
