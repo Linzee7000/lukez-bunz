@@ -38426,13 +38426,25 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var ld = g('loadFromDB'); if (!ld) { RDB = {}; return Promise.resolve(RDB); }
     return Promise.resolve(ld('lbRunMapRoads')).then(function(v){ RDB = (v && typeof v === 'object') ? v : {}; return RDB; }).catch(function(){ RDB = {}; return RDB; });
   }
+  var SFILE = null;
+  function streetsFile(){
+    if (!SFILE) SFILE = fetch('data/run-streets.json', { cache: 'no-cache' }).then(function(r){ return r.ok ? r.json() : null; }).then(function(d){ return d && d.ways ? d.ways : null; }).catch(function(){ return null; });
+    return SFILE;
+  }
   function namedRoads(k, R){
     return roadsDb().then(function(db){
       if (db[k] && db[k].w) return db[k].w;
       if (rdQ[k]) return rdQ[k];
       var b = [90, 180, -90, -180]; R.lines.forEach(function(l){ l.c.forEach(function(p){ b[0] = Math.min(b[0], p[0]); b[1] = Math.min(b[1], p[1]); b[2] = Math.max(b[2], p[0]); b[3] = Math.max(b[3], p[1]); }); });
-      var pad = 0.004, q = '[out:json][timeout:25];way["highway"]["name"]["highway"!~"footway|path|steps|cycleway|pedestrian|bridleway|corridor|proposed|construction|platform"](' + [b[0] - pad, b[1] - pad, b[2] + pad, b[3] + pad].map(function(v){ return v.toFixed(4); }).join(',') + ');out geom;';
-      var get = window.lbRunMapRoadsFetch ? Promise.resolve(window.lbRunMapRoadsFetch(q)) : (function(){
+      var pad = 0.004, bb = [b[0] - pad, b[1] - pad, b[2] + pad, b[3] + pad];
+      // first the streets shipped with the app (data/run-streets.json, made by tools/streets on GitHub): no signal needed
+      var shipped = streetsFile().then(function(all){
+        var w = (all || []).filter(function(x){ var f = x[1]; for (var i = 0; i < f.length; i += 2) if (f[i] >= bb[0] && f[i] <= bb[2] && f[i + 1] >= bb[1] && f[i + 1] <= bb[3]) return true; return false; })
+          .map(function(x){ var f = x[1], c = []; for (var i = 0; i < f.length; i += 2) c.push([f[i], f[i + 1]]); return [x[0], c]; });
+        return w.length ? w : null;
+      });
+      var q = '[out:json][timeout:25];way["highway"]["name"]["highway"!~"footway|path|steps|cycleway|pedestrian|bridleway|corridor|proposed|construction|platform"](' + [b[0] - pad, b[1] - pad, b[2] + pad, b[3] + pad].map(function(v){ return v.toFixed(4); }).join(',') + ');out geom;';
+      var live = function(){ return window.lbRunMapRoadsFetch ? Promise.resolve(window.lbRunMapRoadsFetch(q)) : (function(){
         var urls = ['https://overpass-api.de/api/interpreter', 'https://overpass.kumi.systems/api/interpreter', 'https://overpass.private.coffee/api/interpreter'], i = 0;
         var one = function(){
           var ctl = new AbortController(), to = setTimeout(function(){ ctl.abort(); }, 20000);
@@ -38440,10 +38452,11 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
             .then(function(d){ return d.elements || []; }, function(e){ clearTimeout(to); if (++i < urls.length) return one(); throw e; });
         };
         return one();
-      })();
-      rdQ[k] = get.then(function(els){
-        var w = (els || []).filter(function(e){ return e && e.geometry && e.geometry.length > 1 && e.tags && e.tags.name; })
+      })(); };
+      rdQ[k] = shipped.then(function(w0){ return w0 ? { w: w0 } : live(); }).then(function(els){
+        var w = els && els.w ? els.w : (els || []).filter(function(e){ return e && e.geometry && e.geometry.length > 1 && e.tags && e.tags.name; })
           .map(function(e){ return [e.tags.name, e.geometry.map(function(p){ return [+p.lat.toFixed(6), +p.lon.toFixed(6)]; })]; });
+        if (els && els.w) { delete rdQ[k]; return w; }   // (the shipped file is not copied into the phone's store)
         db[k] = { ts: Date.now(), w: w };
         var ks = Object.keys(db); if (ks.length > 12) ks.sort(function(a, c){ return db[a].ts - db[c].ts; }).slice(0, ks.length - 12).forEach(function(x){ delete db[x]; });
         try { var sv = g('saveToDB'); if (sv) sv('lbRunMapRoads', db); } catch (e) {}
