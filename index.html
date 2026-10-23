@@ -38355,7 +38355,12 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     try { if (window.lbOutbox && window.lbOutbox.sendPlace) window.lbOutbox.sendPlace({ id: 'rme_' + key.replace(/[^A-Za-z0-9]+/g, '_'), kind: 'runMapEdit', key: key, edits: E, ts: E.ts }); } catch (e) {}
   }
   // a piece's own edit, else the whole street's (edits made before streets were cut at their corners still apply)
-  function ovOf(E, l){ var v = E.pieces[pid(l)]; return v !== undefined ? v : (l.pid0 && l.pp ? E.pieces[l.pid0] : undefined); }
+  function ovOf(E, l){
+    var v = E.pieces[pid(l)]; if (v !== undefined) return v;
+    if (l.pid0 && l.pp && E.pieces[l.pid0] !== undefined) return E.pieces[l.pid0];
+    if (l.alias) for (var i = 0; i < l.alias.length; i++) if (E.pieces[l.alias[i]] !== undefined) return E.pieces[l.alias[i]];   // (a dropped copy's colour)
+    return undefined;
+  }
   function pid(l){ if (l.pp) return l.pp; if (l.pid0) return l.pid0; var a = l.c[0], z = l.c[l.c.length - 1]; return (l.n || '') + '|' + a[0].toFixed(4) + ',' + a[1].toFixed(4) + '|' + z[0].toFixed(4) + ',' + z[1].toFixed(4); }
 
   /* ---- drawing the page into a container (the screen view, or the printed page) ----
@@ -38558,8 +38563,32 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
      A street of the route was one piece end to end, so colouring the end of Daveys Bay Rd (from Denistoun Ave on) coloured all of
      it. Each piece now runs from one corner to the next: wherever another piece of the route starts or ends on it, or crosses it.
      A piece's id is its street's id plus where it starts, and an edit made on the whole street still applies to its pieces. */
+  // pieces of the same street that meet end to end (and nothing else of that street meets there) become one line first,
+  // so the cuts below fall only where other streets meet it
+  function chainSame(src){
+    if (!src || src.length < 2) return src;
+    var lat0 = src[0].c[0][0], MX = 111320 * Math.cos(lat0 * Math.PI / 180), d = function(a, b){ return Math.hypot((a[0] - b[0]) * 110540, (a[1] - b[1]) * MX); };
+    var lines = src.map(function(l){ return l; }), used = lines.map(function(){ return false; }), out = [];
+    var endsAt = function(P, n, skip){ var r = []; lines.forEach(function(l, i){ if (used[i] || i === skip || l.n !== n || l.c.length < 2) return; if (d(l.c[0], P) <= 3) r.push([i, 0]); else if (d(l.c[l.c.length - 1], P) <= 3) r.push([i, 1]); }); return r; };
+    lines.forEach(function(l, i){
+      if (used[i]) return; used[i] = true;
+      if (!l.n || l.c.length < 2) { out.push(l); return; }
+      var c = l.c.slice(), ids = [], grew = false;
+      [1, 0].forEach(function(side){
+        for (var guard = 0; guard < 50; guard++) {
+          var P = side ? c[c.length - 1] : c[0], m = endsAt(P, l.n, i);
+          if (m.length !== 1) break;
+          var j = m[0][0], o = lines[j], oc = m[0][1] === 0 ? o.c.slice() : o.c.slice().reverse();   // (oc starts at P)
+          used[j] = true; ids.push(pid(o)); if (o.alias) ids = ids.concat(o.alias); grew = true;
+          if (side) c = c.concat(oc.slice(1)); else c = oc.slice(1).reverse().concat(c);
+        }
+      });
+      out.push(grew ? Object.assign({}, l, { c: c, pid0: pid(l), alias: (l.alias || []).concat(ids) }) : l);
+    });
+    return out;
+  }
   function cutAll(R){
-    var src = R.lines; if (!src || !src.length) return R;
+    var src = chainSame(R.lines); if (!src || !src.length) return R;
     var lat0 = src[0].c[0][0], lng0 = src[0].c[0][1], MY = 110540, MX = 111320 * Math.cos(lat0 * Math.PI / 180);
     var xy = function(p){ return [(p[1] - lng0) * MX, (p[0] - lat0) * MY]; }, ll = function(P){ return [+(lat0 + P[1] / MY).toFixed(6), +(lng0 + P[0] / MX).toFixed(6)]; };
     var C = 80, grid = {}, P = src.map(function(l){ return l.c.map(xy); });
@@ -38573,6 +38602,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       var seen = {}, cx = Math.floor(E[0] / C), cy = Math.floor(E[1] / C);
       for (var x = cx - 1; x <= cx + 1; x++) for (var y = cy - 1; y <= cy + 1; y++) (grid[x + ':' + y] || []).forEach(function(r){
         var li = r[0], i = r[1]; if (li === lj || seen[li + ':' + i]) return; seen[li + ':' + i] = 1;
+        if (src[li].n && src[li].n === src[lj].n) return;   // (the same street touching itself is not a corner)
         var A = P[li][i - 1], B = P[li][i], ex = B[0] - A[0], ey = B[1] - A[1], L2 = ex * ex + ey * ey || 1e-9, t = Math.max(0, Math.min(1, ((E[0] - A[0]) * ex + (E[1] - A[1]) * ey) / L2));
         if (Math.hypot(E[0] - A[0] - t * ex, E[1] - A[1] - t * ey) <= 3) addCut(li, i, t);
       });
@@ -38581,7 +38611,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     Object.keys(grid).forEach(function(key){
       var a = grid[key];
       for (var u = 0; u < a.length; u++) for (var v = u + 1; v < a.length; v++) {
-        var l1 = a[u][0], l2 = a[v][0]; if (l1 === l2) continue;
+        var l1 = a[u][0], l2 = a[v][0]; if (l1 === l2 || (src[l1].n && src[l1].n === src[l2].n)) continue;
         var A = P[l1][a[u][1] - 1], B = P[l1][a[u][1]], Cc = P[l2][a[v][1] - 1], D = P[l2][a[v][1]];
         var d1 = [B[0] - A[0], B[1] - A[1]], d2 = [D[0] - Cc[0], D[1] - Cc[1]], den = d1[0] * d2[1] - d1[1] * d2[0]; if (Math.abs(den) < 1e-9) continue;
         var w = [Cc[0] - A[0], Cc[1] - A[1]], t = (w[0] * d2[1] - w[1] * d2[0]) / den, s2 = (w[0] * d1[1] - w[1] * d1[0]) / den;
@@ -38653,14 +38683,67 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       lines = followStreets(lines, w, (g('sharedStreetModes') || []).map(function(m){ return m.points || []; }).filter(function(c){ return c.length > 1; }));
       lines = joinEnds(lines);   // (once more: a street can now run straight on to a stretch added for houses, like Old Mornington Rd to the Nepean Hwy one)
       var ch = lines.length !== base.length || lines.some(function(l, i){ return l !== base[i]; });
-      rec.R2 = cutAll(Object.assign({}, rec.base, { lines: lines }));
+      rec.R2 = cutAll(Object.assign({}, rec.base, { lines: dedupe(lines) }));   // (joining can lay a street over one already there)
       return ch;
     }).catch(function(){ return false; });
   }
   window.lbRunFollow = function(l, w, x){ return followStreets(l, w, x); };   // (test hook)
   window.lbRunStreetsFor = function(k){ return load().then(function(){ return streetsFor(k); }); };   // (test hook)
+  /* ---- the same street drawn twice ----
+     The route maps sometimes hold a street twice (219A Monday: Canterbury Jetty Rd and Fairfax St pieces with the same ends, read
+     off two pages). The copy on top could not be tapped - a tap took the other one - so colouring that stretch never seemed to
+     work. Where a piece runs along another piece of the same street (within 4 m) for 10 m or more, that bit of it is left out;
+     the longer piece stays, and remembers the dropped copy's id so a colour already given to the copy still shows. */
+  function dedupe(src){
+    if (!src || src.length < 2) return src;
+    var lat0 = src[0].c[0][0], lng0 = src[0].c[0][1], MY = 110540, MX = 111320 * Math.cos(lat0 * Math.PI / 180);
+    var xy = function(p){ return [(p[1] - lng0) * MX, (p[0] - lat0) * MY]; };
+    var res = function(c){ var out = []; for (var i = 0; i < c.length; i++) { var P = xy(c[i]); if (i) { var A = xy(c[i - 1]), n = Math.ceil(Math.hypot(P[0] - A[0], P[1] - A[1]) / 3); for (var j = 1; j < n; j++) out.push({ P: [A[0] + (P[0] - A[0]) * j / n, A[1] + (P[1] - A[1]) * j / n], i: i, mid: true }); } out.push({ P: P, i: i, ll: c[i] }); } return out; };
+    var C = 20, grid = {}, put = function(P, rec){ var k = Math.floor(P[0] / C) + ':' + Math.floor(P[1] / C); (grid[k] = grid[k] || []).push(rec); };
+    var near = function(P, name){ var cx = Math.floor(P[0] / C), cy = Math.floor(P[1] / C), hit = null; for (var x = cx - 1; x <= cx + 1 && !hit; x++) for (var y = cy - 1; y <= cy + 1 && !hit; y++) (grid[x + ':' + y] || []).some(function(r){ if (r.n === name && Math.hypot(r.P[0] - P[0], r.P[1] - P[1]) <= 4) { hit = r.line; return true; } return false; }); return hit; };
+    var lenOf = function(c){ var t = 0; for (var i = 1; i < c.length; i++) t += Math.hypot((c[i][0] - c[i - 1][0]) * MY, (c[i][1] - c[i - 1][1]) * MX); return t; };
+    var order = src.map(function(l, i){ return i; }).sort(function(a, b){ return lenOf(src[b].c) - lenOf(src[a].c); });
+    var out = new Array(src.length), changed = false;
+    order.forEach(function(i){
+      var l = src[i]; if (!l.n || l.c.length < 2) { out[i] = [l]; return; }
+      var R2 = res(l.c), own = {}, arc = 0;
+      // also a line that comes back down over itself (one line drawn up a street and back: Melbourne Rd, 219A Monday)
+      var cov = R2.map(function(q, z){
+        if (z) arc += Math.hypot(q.P[0] - R2[z - 1].P[0], q.P[1] - R2[z - 1].P[1]);
+        var hit = near(q.P, l.n), cx = Math.floor(q.P[0] / C), cy = Math.floor(q.P[1] / C);
+        for (var x = cx - 1; x <= cx + 1 && !hit; x++) for (var y = cy - 1; y <= cy + 1 && !hit; y++) (own[x + ':' + y] || []).some(function(o){ if (arc - o[2] > 15 && Math.hypot(o[0] - q.P[0], o[1] - q.P[1]) <= 4) { hit = 'self'; return true; } return false; });
+        var k2 = cx + ':' + cy; (own[k2] = own[k2] || []).push([q.P[0], q.P[1], arc]);
+        return hit;
+      });
+      // only stretches of 10 m (4 steps) or more count as the same street drawn twice (a crossing or a corner touches for a moment)
+      var keep = R2.map(function(){ return true; }), runS = -1;
+      for (var q = 0; q <= R2.length; q++) {
+        if (q < R2.length && cov[q]) { if (runS < 0) runS = q; continue; }
+        if (runS >= 0 && q - runS >= 4) for (var z = runS; z < q; z++) keep[z] = false;
+        runS = -1;
+      }
+      var pieces = [], cur = [], hitBy = null, llq = function(q){ return q.ll || [+(lat0 + q.P[1] / MY).toFixed(6), +(lng0 + q.P[0] / MX).toFixed(6)]; };
+      R2.forEach(function(q, z){
+        // (what stays runs one step into the dropped bit, so it meets the line that covers it - no break in the line)
+        if (keep[z]) { if (!cur.length && z && !keep[z - 1]) cur.push(llq(R2[z - 1])); cur.push(llq(q)); }
+        else { if (!hitBy || hitBy === 'self') hitBy = cov[z]; if (cur.length) { cur.push(llq(q)); if (cur.length > 1) pieces.push(cur); } cur = []; }
+      });
+      if (cur.length > 1) pieces.push(cur);
+      if (hitBy) {
+        changed = true;
+        var id = pid(l); if (hitBy !== 'self') hitBy.alias = (hitBy.alias || []).concat([id]);
+        out[i] = pieces.filter(function(c){ return lenOf(c) > 3; }).map(function(c){ return Object.assign({}, l, { c: c, pid0: id }); });
+      } else out[i] = [l];
+      // what stays of this piece is what later (shorter) pieces are checked against
+      out[i].forEach(function(nl){ nl.alias = nl.alias || null; res(nl.c).forEach(function(q){ put(q.P, { n: l.n, P: q.P, line: nl }); }); });
+    });
+    if (!changed) return src;
+    var flat = []; out.forEach(function(a){ (a || []).forEach(function(x){ flat.push(x); }); });
+    return flat;
+  }
   function route(k){
     var R = DATA && DATA[k]; if (!R || !R.lines) return R;
+    if (!R.dd) { R.lines = dedupe(R.lines); R.dd = 1; }
     var grp = groupFor(parse(k)), hs = [];
     if (grp) grp.sites.forEach(function(s){ var la = +s.lat, ln = +s.lng; if (la && ln) hs.push([la, ln]); });
     if (ROUTES[k] && ROUTES[k].n === hs.length) return ROUTES[k].R2 || ROUTES[k].R;
@@ -38914,11 +38997,12 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     });
     if (mode === 'paint' || mode === 'x') map.on('click', function(ev){
       // the nearest street piece or drawn line to the tap
-      var pt = ev.containerPoint, best = null, bd = 24;
-      shown.forEach(function(x){ var d = distToLine(map, pt, x.l.c); if (d < bd) { bd = d; best = { piece: x }; } });
+      var pt = ev.containerPoint, best = null, bd = 24, ds = [];
+      shown.forEach(function(x){ var d = distToLine(map, pt, x.l.c); ds.push(d); if (d < bd) { bd = d; best = { piece: x }; } });
       E.drawn.forEach(function(d, i){ var dd = distToLine(map, pt, d.c); if (dd <= bd) { bd = dd; best = { drawn: i }; } });
       if (!best) return;
-      if (best.piece) opts.onPiece && opts.onPiece(pid(best.piece.l), best.piece);
+      // every street line right under the finger, not just the nearest (two lines on top of each other change together)
+      if (best.piece) { var all2 = shown.filter(function(x, i){ return ds[i] <= bd + 3 && x.l.n === best.piece.l.n; }); if (opts.onPieces) opts.onPieces(all2); else opts.onPiece && opts.onPiece(pid(best.piece.l), best.piece); }
       else opts.onDrawn && opts.onDrawn(best.drawn);
     });
     if (mode === 'note') map.on('click', function(ev){ opts.onMap && opts.onMap(ev.latlng); });
@@ -39129,7 +39213,11 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       if (!drag) return;
       var moved = drag.moved; drag = null; s.classList.remove('rm-dragging');
       if (map.dragging) map.dragging.enable();
-      if (!moved) return;
+      if (!moved) {
+        // a plain tap on a name is a tap on its street (colour / remove it, or a note there), as if the name wasn't there
+        if (e.type === 'pointerup') { var cp = map.mouseEventToContainerPoint(e); map.fire('click', { latlng: map.containerPointToLatLng(cp), containerPoint: cp, layerPoint: map.containerPointToLayerPoint(cp), originalEvent: e }); }
+        return;
+      }
       var ll = map.mouseEventToLatLng(e);
       st.onLabelMove && st.onLabelMove(id, [+ll.lat.toFixed(6), +ll.lng.toFixed(6)]);
     };
@@ -39390,6 +39478,18 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   function editHandlers(){
     return {
       edit: true, mode: tool, colour: colour,
+      onPieces: function(xs){
+        var E = edits(curKey), first = xs[0], removeAll = tool === 'x' ? ovOf(E, first.l) !== 'x' : false;
+        xs.forEach(function(x){
+          var id = pid(x.l), base = x.l.s || '#16a34a', fromStreet = (x.l.pp && x.l.pid0 && E.pieces[x.l.pid0] !== undefined) || (x.l.alias && x.l.alias.some(function(a){ return E.pieces[a] !== undefined; }));
+          if (tool === 'x') {
+            if (removeAll) E.pieces[id] = 'x';
+            else { delete E.pieces[id]; if (ovOf(E, x.l) === 'x') E.pieces[id] = base; }
+          }
+          else if (colour === base && !fromStreet) delete E.pieces[id]; else E.pieces[id] = colour;
+        });
+        saveEdits(curKey, E); renderView(true);
+      },
       onPiece: function(id, x){
         var E = edits(curKey);
         var base = x.l.s || '#16a34a', fromStreet = x.l.pp && x.l.pid0 && E.pieces[x.l.pid0] !== undefined;
