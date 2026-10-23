@@ -38963,7 +38963,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var used = {};
     var shown = R.lines.map(function(l){ var ov = ovOf(E, l); return { l: l, col: ov && ov !== 'x' ? ov : (l.s || '#16a34a'), gone: ov === 'x' }; });
     shown.forEach(function(x){ if (!x.gone) L.polyline(x.l.c, { color: '#fff', weight: 9, opacity: 1, interactive: false }).addTo(layers); });
-    E.drawn.forEach(function(d){ L.polyline(d.c, { color: '#fff', weight: 9, opacity: 1, interactive: false }).addTo(layers); });
+    E.drawn.forEach(function(d){ if (!d.side) L.polyline(d.c, { color: '#fff', weight: 9, opacity: 1, interactive: false }).addTo(layers); });
     var sideList = [];
     shown.forEach(function(x){
       if (x.gone && !opts.edit) return;
@@ -38982,22 +38982,36 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
         L.polyline(offsetLL(map, x.l.c, -2.8), { color: x.S.l || x.col, weight: opts.edit ? 4.6 : 4, opacity: 1, interactive: false, lineCap: 'butt' }).addTo(xLayer);
         L.polyline(offsetLL(map, x.l.c, 2.8), { color: x.S.r || x.col, weight: opts.edit ? 4.6 : 4, opacity: 1, interactive: false, lineCap: 'butt' }).addTo(xLayer);
       });
+      // lines drawn with Snap to street: along the street, just beside it on the side they were drawn
+      E.drawn.forEach(function(d){
+        if (!d.side) return;
+        var o = d.side === 'r' ? 5.5 : -5.5;
+        L.polyline(offsetLL(map, d.c, o), { color: '#fff', weight: opts.edit ? 8 : 7, opacity: 1, interactive: false, lineCap: 'round', lineJoin: 'round' }).addTo(xLayer);
+        L.polyline(offsetLL(map, d.c, o), { color: d.s, weight: opts.edit ? 4.5 : 4, opacity: 1, interactive: false, lineCap: 'round', lineJoin: 'round' }).addTo(xLayer);
+      });
       E.arrows.forEach(function(a){
+        var ac = a.col || '#111827';
         var A = map.latLngToLayerPoint(a.c[0]), B = map.latLngToLayerPoint(a.c[a.c.length - 1]), dx = B.x - A.x, dy = B.y - A.y, Ln = Math.sqrt(dx * dx + dy * dy) || 1, ux = dx / Ln, uy = dy / Ln, h = 11;
         var back = L.point(B.x - ux * h, B.y - uy * h), w1 = L.point(back.x - uy * h * 0.6, back.y + ux * h * 0.6), w2 = L.point(back.x + uy * h * 0.6, back.y - ux * h * 0.6);
         L.polyline(a.c, { color: '#fff', weight: 7, opacity: 1, interactive: false, lineCap: 'round' }).addTo(xLayer);
-        L.polyline(a.c, { color: '#111827', weight: 3.2, opacity: 1, interactive: false, lineCap: 'round' }).addTo(xLayer);
-        L.polygon([map.layerPointToLatLng(B), map.layerPointToLatLng(w1), map.layerPointToLatLng(w2)], { color: '#fff', weight: 1.5, fillColor: '#111827', fillOpacity: 1, interactive: false }).addTo(xLayer);
+        L.polyline(a.c, { color: ac, weight: 3.2, opacity: 1, interactive: false, lineCap: 'round' }).addTo(xLayer);
+        L.polygon([map.layerPointToLatLng(B), map.layerPointToLatLng(w1), map.layerPointToLatLng(w2)], { color: '#fff', weight: 1.5, fillColor: ac, fillOpacity: 1, interactive: false }).addTo(xLayer);
       });
     };
     map.on('zoomend', paintExtras); setTimeout(function(){ try { paintExtras(); } catch (e) {} }, 0);
     E.points.forEach(function(pt, i){
       var live = mode === 'cp';
-      var mk = L.marker(pt.at, { icon: L.divIcon({ className: '', html: '<div class="rm-cp">C</div>', iconSize: [22, 22], iconAnchor: [11, 11] }), keyboard: false, pane: 'rmPins', interactive: live }).addTo(layers);
-      if (live) mk.on('click', function(ev){ L.DomEvent.stopPropagation(ev); opts.onCpTap && opts.onCpTap(i); });
+      var pc = pt.col || '#111827';
+      var mk = L.marker(pt.at, { icon: L.divIcon({ className: '', html: '<div class="rm-cp" style="border-color:' + pc + ';color:' + pc + '">C</div>', iconSize: [22, 22], iconAnchor: [11, 11] }), keyboard: false, pane: 'rmPins', interactive: live, draggable: live }).addTo(layers);
+      if (live) {
+        if (mk.dragging && mk.dragging._draggable) fixDrag(mk.dragging._draggable, st);
+        mk.on('click', function(ev){ L.DomEvent.stopPropagation(ev); opts.onCpTap && opts.onCpTap(i); });
+        mk.on('dragend', function(){ opts.onCpMove && opts.onCpMove(i, mk.getLatLng()); });
+      }
     });
     E.drawn.forEach(function(d){
       used[d.s] = (used[d.s] || 0) + 1;
+      if (d.side) return;   // (snapped to a street: drawn beside it, below)
       L.polyline(d.c, { color: d.s, weight: opts.edit ? 7 : 5, opacity: 1, interactive: false, lineCap: 'round', lineJoin: 'round' }).addTo(layers);
     });
     // Done (red), piece by piece and side by side (doneParts), drawn over the route; a street with one side done is two lines
@@ -39081,14 +39095,38 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       map.dragging.disable(); map.touchZoom.disable(); map.doubleClickZoom.disable(); map.boxZoom.disable(); if (map.tap) map.tap.disable();
       container.classList.add('rm-drawing');
       var stroke = null, live = null, at = function(e){ return map.mouseEventToLatLng(e); };
+      var moveA = null;
       container.addEventListener('pointerdown', function(e){
         if (e.button > 0 || (e.target.closest && e.target.closest('.rm-card'))) return;
         e.preventDefault();
         try { container.setPointerCapture(e.pointerId); } catch (x) {}
+        if (mode === 'arrow') {
+          var cp0 = map.mouseEventToContainerPoint(e), hitA = null, hd = 16;
+          E.arrows.forEach(function(a, i){
+            var A = map.latLngToContainerPoint(a.c[0]), B = map.latLngToContainerPoint(a.c[a.c.length - 1]);
+            var dA = cp0.distanceTo(A), dB = cp0.distanceTo(B), dS = L.LineUtil.pointToSegmentDistance(cp0, A, B);
+            if (dB < hd) { hd = dB; hitA = { i: i, k: 'b' }; } else if (dA < hd) { hd = dA; hitA = { i: i, k: 'a' }; } else if (dS < hd) { hd = dS; hitA = { i: i, k: 'all' }; }
+          });
+          if (hitA) {
+            var a0 = E.arrows[hitA.i];
+            moveA = { i: hitA.i, k: hitA.k, start: at(e), c: a0.c.map(function(q){ return L.latLng(q[0], q[1]); }), moved: false, x: e.clientX, y: e.clientY };
+            moveA.live = L.polyline(moveA.c, { color: '#111827', weight: 3, opacity: .8, interactive: false, dashArray: '4,4' }).addTo(layers);
+            return;
+          }
+        }
         stroke = [at(e)];
         live = L.polyline(stroke, mode === 'arrow' ? { color: '#111827', weight: 3, opacity: .8, interactive: false, dashArray: '4,4' } : mode === 'erase' ? { color: '#ef4444', weight: 22, opacity: .35, interactive: false, lineCap: 'round', lineJoin: 'round' } : { color: opts.colour, weight: 7, opacity: 1, interactive: false, lineCap: 'round', lineJoin: 'round' }).addTo(layers);
       });
       container.addEventListener('pointermove', function(e){
+        if (moveA) {
+          e.preventDefault();
+          if (!moveA.moved && Math.abs(e.clientX - moveA.x) + Math.abs(e.clientY - moveA.y) < 5) return;
+          moveA.moved = true;
+          var p2 = at(e), dLa = p2.lat - moveA.start.lat, dLn = p2.lng - moveA.start.lng, n = moveA.c.length;
+          moveA.now = moveA.c.map(function(q, j){ var mv = moveA.k === 'all' || (moveA.k === 'a' && j === 0) || (moveA.k === 'b' && j === n - 1); return mv ? L.latLng(q.lat + dLa, q.lng + dLn) : q; });
+          moveA.live.setLatLngs(moveA.now);
+          return;
+        }
         if (!stroke) return;
         e.preventDefault();
         var p = at(e);
@@ -39096,6 +39134,12 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
         stroke.push(p); live.addLatLng(p);
       });
       var end = function(){
+        if (moveA) {
+          var mA = moveA; moveA = null; layers.removeLayer(mA.live);
+          if (!mA.moved) { opts.onArrowTap && opts.onArrowTap(mA.i); return; }
+          opts.onArrowMove && opts.onArrowMove(mA.i, mA.now.map(function(q){ return [+q.lat.toFixed(6), +q.lng.toFixed(6)]; }));
+          return;
+        }
         if (!stroke) return;
         var s = stroke; stroke = null;
         if (mode === 'arrow') {
@@ -39112,6 +39156,33 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
           return;
         }
         if (s.length < 2) { layers.removeLayer(live); return; }
+        if (opts.snap) {
+          // Snap to street: every point of the stroke goes onto the nearest line of the route, and the line is drawn just beside the
+          // street on the side most of the stroke was on - so a second colour can run alongside the street's own (another truck's side)
+          var segs = [];
+          shown.forEach(function(x){ if (x.gone) return; var prev = null; x.l.c.forEach(function(c){ var q = map.latLngToContainerPoint(c); if (prev) segs.push([prev, q]); prev = q; }); });
+          var snapped = [], votes = 0, far = 0;
+          s.forEach(function(ll){
+            var P = map.latLngToContainerPoint(ll), best = null, bd = 40;
+            segs.forEach(function(sg){ var d = L.LineUtil.pointToSegmentDistance(P, sg[0], sg[1]); if (d < bd) { bd = d; best = sg; } });
+            if (!best) { far++; return; }
+            snapped.push(L.LineUtil.closestPointOnSegment(P, best[0], best[1]));
+            var cr = (best[1].x - best[0].x) * (P.y - best[0].y) - (best[1].y - best[0].y) * (P.x - best[0].x);
+            // which side, judged along the way the stroke goes (so a stroke drawn either way round lands on the side it was drawn)
+            votes += cr > 0 ? 1 : -1;
+          });
+          if (snapped.length >= 2 && far <= s.length / 3) {
+            var sp = L.LineUtil.simplify(snapped.filter(function(q, j){ return !j || q.distanceTo(snapped[j - 1]) >= 1; }), 1);
+            if (sp.length >= 2) {
+              // the side relative to the snapped line's own direction
+              var a1 = sp[0], b1 = sp[sp.length - 1], mid = map.latLngToContainerPoint(s[Math.floor(s.length / 2)]);
+              var cr2 = (b1.x - a1.x) * (mid.y - a1.y) - (b1.y - a1.y) * (mid.x - a1.x), side = cr2 > 0 ? 'r' : 'l';
+              if (Math.abs(cr2) < 1e-6) side = votes >= 0 ? 'r' : 'l';
+              opts.onStroke && opts.onStroke(sp.map(function(p){ var ll = map.containerPointToLatLng(p); return [+ll.lat.toFixed(6), +ll.lng.toFixed(6)]; }), side);
+              return;
+            }
+          }
+        }
         var px = L.LineUtil.simplify(s.map(function(ll){ return map.latLngToContainerPoint(ll); }), 1.5);
         opts.onStroke && opts.onStroke(px.map(function(p){ var ll = map.containerPointToLatLng(p); return [+ll.lat.toFixed(6), +ll.lng.toFixed(6)]; }));
       };
@@ -39529,11 +39600,11 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   var HINT = {
     paint: 'Pick a colour, then tap a street to put it in that section. Tap a drawn line to delete it. Drag the map to move it.',
     x: 'Tap a street to take it off the map; tap it again to put it back. Tap a drawn line to delete it.',
-    draw: 'Pick a colour, then drag your finger (or mouse) along the street. The map holds still while drawing - use Colour streets to move it.',
+    draw: 'Pick a colour, then drag your finger (or mouse) along the street. With Snap to street on, the line follows the street and sits just beside it on the side you drew (so two colours can run side by side). The map holds still while drawing - use Colour streets to move it.',
     note: 'Tap the map where the note goes. Tap a note to change or delete it; drag your own notes to move them.',
     side: 'Pick a colour, then tap a street just to one side of its line: only that side takes the colour (tap again with the same colour to take it off). For a side done by another truck.',
-    cp: 'Tap where the bins are put out together to add a collection point (C). Tap a collection point to delete it.',
-    arrow: 'Drag along a street the way the truck goes: an arrow is drawn from where you start to where you lift off. Undo takes the last one away.',
+    cp: 'Tap where the bins are put out together to add a collection point (C), in the colour picked. Drag one to move it; tap one to give it the colour picked (tap again with the same colour to delete it).',
+    arrow: 'Drag along a street the way the truck goes: an arrow from where you start to where you lift off, in the colour picked. Drag an arrow\'s tip or tail to move that end, its middle to move it all; tap one to give it the colour picked (again to delete).',
     recolour: 'Pick the colour to change (only colours on this run are shown), then the new colour, and the name it has in the key. Change does every street, side and drawn line of that colour at once.',
     erase: 'Drag your finger (or mouse) over the bit of line to take off - only what you rub over goes. Undo brings the last rub back. The map holds still - use Colour streets to move it.'
   };
@@ -39549,6 +39620,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       '<label class="rm-sw rm-pick" title="Any colour"><input type="color" data-rmpick="colour" value="' + esc(colour) + '"></label>' +
       btn('paint', 'Colour streets') +
       btn('draw', '<span style="display:inline-block;width:14px;height:4px;vertical-align:middle;margin-right:6px;background:' + colour + '"></span>Draw a line') +
+      (tool === 'draw' ? '<button type="button" data-rm="snap" class="' + (snapDraw ? 'on' : '') + '">Snap to street: ' + (snapDraw ? 'on' : 'off') + '</button>' : '') +
       btn('side', 'One side') + btn('x', 'Remove / put back') + btn('erase', 'Rub out') + btn('cp', 'Collection point') + btn('arrow', 'Arrow') + btn('note', 'Add a note') + btn('recolour', 'Change a colour') +
       '<button type="button" data-rm="undo"' + (E.drawn.length || E.erase.length || E.arrows.length || E.points.length ? '' : ' disabled') + '>Undo</button>' +
       '<button type="button" data-rm="names">Name the sections</button></div>' +
@@ -39556,6 +39628,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   }
   /* ---- Change a colour: every street (and side, and drawn line) of one colour to another at once, and its name in the key ---- */
   var recFrom = null, recTo = null;
+  var snapDraw = lsGet('lbRunMapSnap', true) !== false;
   // the default colours, then any other colour already used on this run (picked with the colour picker), then the one in hand
   function swatchList(E, cur){
     var out = PALETTE.slice();
@@ -39625,11 +39698,16 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       },
       onNoteMove: function(i, ll){ var E = edits(curKey); if (E.notes[i]) { E.notes[i].at = [+ll.lat.toFixed(6), +ll.lng.toFixed(6)]; saveEdits(curKey, E); renderView(true); } },
       onMap: function(ll){ var t = prompt('Note:'); if (!t || !t.trim()) return; var E = edits(curKey); E.notes.push({ text: t.trim(), at: [+ll.lat.toFixed(6), +ll.lng.toFixed(6)] }); saveEdits(curKey, E); renderView(true); },
-      onStroke: function(c){ var E = edits(curKey); E.drawn.push({ c: c, s: colour, ts: Date.now() }); saveEdits(curKey, E); renderView(true); },
+      snap: snapDraw,
+      onStroke: function(c, side){ var E = edits(curKey), d = { c: c, s: colour, ts: Date.now() }; if (side) d.side = side; E.drawn.push(d); saveEdits(curKey, E); renderView(true); },
       onErase: function(c, r){ var E = edits(curKey); E.erase.push({ c: c, r: r, ts: Date.now() }); saveEdits(curKey, E); renderView(true); },
-      onArrow: function(c){ var E = edits(curKey); E.arrows.push({ c: c, ts: Date.now() }); saveEdits(curKey, E); renderView(true); },
-      onCp: function(ll){ var E = edits(curKey); E.points.push({ at: [+ll.lat.toFixed(6), +ll.lng.toFixed(6)], t: 'cp', ts: Date.now() }); saveEdits(curKey, E); renderView(true); },
-      onCpTap: function(i){ if (!confirm('Delete this collection point?')) return; var E = edits(curKey); E.points.splice(i, 1); saveEdits(curKey, E); renderView(true); },
+      onArrow: function(c){ var E = edits(curKey); E.arrows.push({ c: c, col: colour, ts: Date.now() }); saveEdits(curKey, E); renderView(true); },
+      onCp: function(ll){ var E = edits(curKey); E.points.push({ at: [+ll.lat.toFixed(6), +ll.lng.toFixed(6)], t: 'cp', col: colour, ts: Date.now() }); saveEdits(curKey, E); renderView(true); },
+      // tap one: it takes the colour picked above; tapped again with the same colour, it can be deleted
+      onCpTap: function(i){ var E = edits(curKey), pt = E.points[i]; if (!pt) return; if ((pt.col || '#111827') !== colour) pt.col = colour; else { if (!confirm('Delete this collection point?')) return; E.points.splice(i, 1); } saveEdits(curKey, E); renderView(true); },
+      onCpMove: function(i, ll){ var E = edits(curKey); if (E.points[i]) { E.points[i].at = [+ll.lat.toFixed(6), +ll.lng.toFixed(6)]; saveEdits(curKey, E); renderView(true); } },
+      onArrowTap: function(i){ var E = edits(curKey), a = E.arrows[i]; if (!a) return; if ((a.col || '#111827') !== colour) a.col = colour; else { if (!confirm('Delete this arrow?')) return; E.arrows.splice(i, 1); } saveEdits(curKey, E); renderView(true); },
+      onArrowMove: function(i, c){ var E = edits(curKey); if (E.arrows[i]) { E.arrows[i].c = c; saveEdits(curKey, E); renderView(true); } },
       onSide: function(x, side){
         var E = edits(curKey), id = pid(x.l), S = E.sides[id] || {};
         if (S[side] === colour) delete S[side]; else S[side] = colour;   // (the same colour again takes it off that side)
@@ -39666,7 +39744,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       var t2 = e.target; if (!t2 || !t2.getAttribute || !t2.getAttribute('data-rmpick')) return;
       var v = String(t2.value || '').toLowerCase(); if (!/^#[0-9a-f]{6}$/.test(v)) return;
       if (t2.getAttribute('data-rmpick') === 'rto') { recTo = v; paintTools(); return; }
-      colour = v; if (tool !== 'draw' && tool !== 'side') tool = 'paint'; renderView(true);
+      colour = v; if (['draw', 'side', 'cp', 'arrow'].indexOf(tool) < 0) tool = 'paint'; renderView(true);
     });
     el.addEventListener('click', function(e){
       var b = e.target.closest && e.target.closest('[data-rm]'); if (!b || b.disabled) return;
@@ -39698,7 +39776,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       if (a === 'turn') { var pg = pagesCache[curPage] || pagesCache[0]; orientOverride = ((orientOverride || pg.o) === 'land') ? 'port' : 'land'; renderView(true, true); }
       if (a === 'edit') { editing = !editing; if (editing) pagesMode = false; tool = 'paint'; renderView(true, true); }
       if (a === 'tool') { tool = b.getAttribute('data-v'); renderView(true); }
-      if (a === 'colour') { colour = b.getAttribute('data-v'); if (tool !== 'draw' && tool !== 'side') tool = 'paint'; renderView(true); }
+      if (a === 'colour') { colour = b.getAttribute('data-v'); if (['draw', 'side', 'cp', 'arrow'].indexOf(tool) < 0) tool = 'paint'; renderView(true); }
+      if (a === 'snap') { snapDraw = !snapDraw; lsSet('lbRunMapSnap', snapDraw); renderView(true); }
       if (a === 'rfrom') { recFrom = b.getAttribute('data-v'); paintTools(); }
       if (a === 'rto') { recTo = b.getAttribute('data-v'); paintTools(); }
       if (a === 'rgo') { var nm = document.getElementById('rmRecName'); recolourAll(recFrom, recTo || recFrom, nm ? nm.value : null); }
@@ -39971,27 +40050,32 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
         var sideOf = function(m){ var S = (E.sides || {})[pid(m.l)]; return S && (S.l || S.r) ? S : null; };
         x.strokeStyle = '#fff';
         lines.forEach(function(m, i){ var S = sideOf(m); parts[i].forEach(function(pt){ var two = pt.l !== pt.r || (S && !(pt.l && pt.r)); x.lineWidth = two ? 17 : 12; if (two) offs(pt.c, 0); else path(pt.c); }); });
-        E.drawn.forEach(function(d){ x.lineWidth = 12; path(d.c); });
+        E.drawn.forEach(function(d){ if (d.side) return; x.lineWidth = 12; path(d.c); });
         lines.forEach(function(m, i){ var S = sideOf(m), cl = (S && S.l) || m.col, cr = (S && S.r) || m.col; parts[i].forEach(function(pt){
           if (pt.l === pt.r && (pt.l || !S)) { x.strokeStyle = pt.l ? DONE_COL : m.col; x.lineWidth = 7; path(pt.c); return; }
           x.lineWidth = 6;
           x.strokeStyle = pt.l ? DONE_COL : cl; offs(pt.c, -4.5);
           x.strokeStyle = pt.r ? DONE_COL : cr; offs(pt.c, 4.5);
         }); });
-        E.drawn.forEach(function(d){ x.strokeStyle = d.s; x.lineWidth = 7; path(d.c); });
+        E.drawn.forEach(function(d){
+          if (d.side) { var o = d.side === 'r' ? 8 : -8; x.strokeStyle = '#fff'; x.lineWidth = 10; offs(d.c, o); x.strokeStyle = d.s; x.lineWidth = 6; offs(d.c, o); return; }   // (snapped: beside the street)
+          x.strokeStyle = d.s; x.lineWidth = 7; path(d.c);
+        });
         // direction arrows and collection points
         (E.arrows || []).forEach(function(a){
           var A = P(a.c[0]), B = P(a.c[a.c.length - 1]), dx = B[0] - A[0], dy = B[1] - A[1], Ln = Math.sqrt(dx * dx + dy * dy) || 1, ux = dx / Ln, uy = dy / Ln, h = 20;
           x.lineCap = 'round'; x.strokeStyle = '#fff'; x.lineWidth = 10; x.beginPath(); x.moveTo(A[0], A[1]); x.lineTo(B[0] - ux * h * 0.6, B[1] - uy * h * 0.6); x.stroke();
-          x.strokeStyle = '#111827'; x.lineWidth = 5; x.beginPath(); x.moveTo(A[0], A[1]); x.lineTo(B[0] - ux * h * 0.6, B[1] - uy * h * 0.6); x.stroke();
+          var ac = a.col || '#111827';
+          x.strokeStyle = ac; x.lineWidth = 5; x.beginPath(); x.moveTo(A[0], A[1]); x.lineTo(B[0] - ux * h * 0.6, B[1] - uy * h * 0.6); x.stroke();
           var bx = B[0] - ux * h, by = B[1] - uy * h;
           x.beginPath(); x.moveTo(B[0], B[1]); x.lineTo(bx - uy * h * 0.6, by + ux * h * 0.6); x.lineTo(bx + uy * h * 0.6, by - ux * h * 0.6); x.closePath();
-          x.fillStyle = '#111827'; x.fill(); x.strokeStyle = '#fff'; x.lineWidth = 2.5; x.stroke();
+          x.fillStyle = ac; x.fill(); x.strokeStyle = '#fff'; x.lineWidth = 2.5; x.stroke();
         });
         (E.points || []).forEach(function(pt){
           var q = P(pt.at);
-          x.beginPath(); x.arc(q[0], q[1], 15, 0, 7); x.fillStyle = '#fff'; x.fill(); x.lineWidth = 4; x.strokeStyle = '#111827'; x.stroke();
-          x.fillStyle = '#111827'; x.font = 'bold 18px system-ui, Arial, sans-serif'; x.textAlign = 'center'; x.textBaseline = 'middle'; x.fillText('C', q[0], q[1] + 1); x.textAlign = 'left';
+          var pc = pt.col || '#111827';
+          x.beginPath(); x.arc(q[0], q[1], 15, 0, 7); x.fillStyle = '#fff'; x.fill(); x.lineWidth = 4; x.strokeStyle = pc; x.stroke();
+          x.fillStyle = pc; x.font = 'bold 18px system-ui, Arial, sans-serif'; x.textAlign = 'center'; x.textBaseline = 'middle'; x.fillText('C', q[0], q[1] + 1); x.textAlign = 'left';
         });
         x.fillStyle = COL[o.stream] || '#16a34a'; x.fillRect(0, 0, c.width, 14);
         x.fillStyle = '#fff'; x.fillRect(0, 14, c.width, TOP - 14);
