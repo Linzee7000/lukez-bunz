@@ -38342,7 +38342,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var all = lsGet('lbRunMapEdits', {}) || {}; all[key] = E; lsSet('lbRunMapEdits', all);
     try { if (window.lbOutbox && window.lbOutbox.sendPlace) window.lbOutbox.sendPlace({ id: 'rme_' + key.replace(/[^A-Za-z0-9]+/g, '_'), kind: 'runMapEdit', key: key, edits: E, ts: E.ts }); } catch (e) {}
   }
-  function pid(l){ var a = l.c[0], z = l.c[l.c.length - 1]; return (l.n || '') + '|' + a[0].toFixed(4) + ',' + a[1].toFixed(4) + '|' + z[0].toFixed(4) + ',' + z[1].toFixed(4); }
+  function pid(l){ if (l.pid0) return l.pid0; var a = l.c[0], z = l.c[l.c.length - 1]; return (l.n || '') + '|' + a[0].toFixed(4) + ',' + a[1].toFixed(4) + '|' + z[0].toFixed(4) + ',' + z[1].toFixed(4); }
 
   /* ---- drawing the page into a container (the screen view, or the printed page) ----
      Edit modes (opts.mode): 'paint' tap a street to colour it, 'x' tap a street to remove / put back, 'draw' drag to draw a
@@ -38362,12 +38362,63 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
      runs' streets (77 streets the same), so 219A's map and To do PDF showed 225A's streets down to Moorooduc as well. Only the
      stretches of the route near the run's own houses are kept (300 m, so the roads driven between parts of the run stay). */
   var ROUTES = {};
+  /* The route-map streets stop short of the corners (read off the route PDFs, every street piece ends 10-50 m before the street
+     it meets), so the printed maps had gaps at nearly every intersection. Each end of a piece now runs on, straight ahead, to
+     the first other piece it meets within 60 m (the cross street, or the same street's piece on the far side of it); an end
+     that is only a few metres to one side of another piece is joined to its nearest point. A dead end with nothing ahead stays
+     as it is. The pieces keep their own id (pid) for edits. */
+  function joinEnds(src){
+    if (!src || !src.length || !src[0].c || !src[0].c.length) return src;
+    var lat0 = src[0].c[0][0], lng0 = src[0].c[0][1], MY = 110540, MX = 111320 * Math.cos(lat0 * Math.PI / 180);
+    var xy = function(p){ return [(p[1] - lng0) * MX, (p[0] - lat0) * MY]; }, ll = function(P){ return [+(lat0 + P[1] / MY).toFixed(6), +(lng0 + P[0] / MX).toFixed(6)]; };
+    var C = 80, segs = [], grid = {};
+    src.forEach(function(l, li){
+      for (var i = 1; i < l.c.length; i++) {
+        var A = xy(l.c[i - 1]), B = xy(l.c[i]), sg = [A, B, li];
+        var x0 = Math.floor(Math.min(A[0], B[0]) / C), x1 = Math.floor(Math.max(A[0], B[0]) / C), y0 = Math.floor(Math.min(A[1], B[1]) / C), y1 = Math.floor(Math.max(A[1], B[1]) / C);
+        if ((x1 - x0) * (y1 - y0) > 400) continue;
+        for (var x = x0; x <= x1; x++) for (var y = y0; y <= y1; y++) (grid[x + ':' + y] = grid[x + ':' + y] || []).push(sg);
+      }
+    });
+    var REACH = 60, SIDE = 8;
+    var reach = function(li, E, d){   // the nearest point on another piece straight ahead of E (or just beside it)
+      var best = null, bt = REACH + 1, cx = Math.floor(E[0] / C), cy = Math.floor(E[1] / C), seen = [];
+      for (var x = cx - 1; x <= cx + 1; x++) for (var y = cy - 1; y <= cy + 1; y++) (grid[x + ':' + y] || []).forEach(function(sg){
+        if (sg[2] === li || seen.indexOf(sg) >= 0) return; seen.push(sg);
+        var A = sg[0], B = sg[1], ex = B[0] - A[0], ey = B[1] - A[1];
+        // straight ahead: E + t d meets A + u (B - A)
+        var den = d[0] * ey - d[1] * ex;
+        if (Math.abs(den) > 1e-9) {
+          var wx = A[0] - E[0], wy = A[1] - E[1], t = (wx * ey - wy * ex) / den, u = (wx * d[1] - wy * d[0]) / den;
+          if (t >= 0 && t < bt && u >= -0.02 && u <= 1.02) { bt = t; best = [E[0] + d[0] * t, E[1] + d[1] * t]; }
+        }
+        // just beside: the nearest point on the segment, if within a few metres
+        var L2 = ex * ex + ey * ey || 1e-9, s = Math.max(0, Math.min(1, ((E[0] - A[0]) * ex + (E[1] - A[1]) * ey) / L2)), Q = [A[0] + s * ex, A[1] + s * ey], dd = Math.hypot(Q[0] - E[0], Q[1] - E[1]);
+        if (dd <= SIDE && dd < bt) { bt = dd; best = Q; }
+      });
+      return best && bt > 0.8 ? best : null;
+    };
+    return src.map(function(l, li){
+      var c = l.c; if (c.length < 2) return l;
+      var out = c.slice(), changed = false;
+      [0, 1].forEach(function(end){
+        var E = xy(end ? c[c.length - 1] : c[0]), N = null;
+        for (var i = 1; i < c.length && !N; i++) { var Pp = xy(end ? c[c.length - 1 - i] : c[i]); if (Math.hypot(Pp[0] - E[0], Pp[1] - E[1]) > 3) N = Pp; }
+        if (!N) return;
+        var dl = Math.hypot(E[0] - N[0], E[1] - N[1]), d = [(E[0] - N[0]) / dl, (E[1] - N[1]) / dl], Q = reach(li, E, d);
+        if (!Q) return;
+        if (end) out.push(ll(Q)); else out.unshift(ll(Q));
+        changed = true;
+      });
+      return changed ? Object.assign({}, l, { c: out, pid0: pid(l) }) : l;
+    });
+  }
   function route(k){
     var R = DATA && DATA[k]; if (!R || !R.lines) return R;
     var grp = groupFor(parse(k)), hs = [];
     if (grp) grp.sites.forEach(function(s){ var la = +s.lat, ln = +s.lng; if (la && ln) hs.push([la, ln]); });
-    if (hs.length < 5) return R;
     if (ROUTES[k] && ROUTES[k].n === hs.length) return ROUTES[k].R;
+    if (hs.length < 5) { var R0 = Object.assign({}, R, { lines: joinEnds(R.lines) }); ROUTES[k] = { n: hs.length, R: R0 }; return R0; }
     var NEAR = 300, CY = 0.003, CX = 0.0038, grid = {}, mx = 111320 * Math.cos(hs[0][0] * Math.PI / 180);
     hs.forEach(function(h){ var c = Math.floor(h[0] / CY) + ':' + Math.floor(h[1] / CX); (grid[c] = grid[c] || []).push(h); });
     var near = function(p){
@@ -38382,18 +38433,18 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     R.lines.forEach(function(l){
       var f = l.c.map(near), L0 = len(l.c); all += L0;
       if (f.every(Boolean)) { lines.push(l); kept += L0; return; }
-      var cur = [];
+      var cur = [], id0 = pid(l);   // (pieces keep the whole line's id, so its section colour / removal still apply)
       for (var i = 0; i < l.c.length; i++) {
         if (f[i] || f[i - 1] || f[i + 1]) cur.push(l.c[i]);   // (a point beside a near one stays, so a long straight piece isn't cut short)
-        else { if (cur.length > 1) { lines.push(Object.assign({}, l, { c: cur })); kept += len(cur); } cur = []; }
+        else { if (cur.length > 1) { lines.push(Object.assign({}, l, { c: cur, pid0: id0 })); kept += len(cur); } cur = []; }
       }
-      if (cur.length > 1) { lines.push(Object.assign({}, l, { c: cur })); kept += len(cur); }
+      if (cur.length > 1) { lines.push(Object.assign({}, l, { c: cur, pid0: id0 })); kept += len(cur); }
     });
-    var out = R;
+    var out;
     if (lines.length && kept < all * 0.97) {
       var names = {}; lines.forEach(function(l){ if (l.n) names[l.n] = 1; });
-      out = Object.assign({}, R, { lines: lines, streets: (R.streets || []).filter(function(n){ return names[n]; }), km: R.km ? +(R.km * kept / all).toFixed(1) : R.km });
-    }
+      out = Object.assign({}, R, { lines: joinEnds(lines), streets: (R.streets || []).filter(function(n){ return names[n]; }), km: R.km ? +(R.km * kept / all).toFixed(1) : R.km });
+    } else out = Object.assign({}, R, { lines: joinEnds(R.lines) });
     ROUTES[k] = { n: hs.length, R: out };
     return out;
   }
