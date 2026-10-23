@@ -31475,7 +31475,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   function segStats(){
     if (!SH) return null;
     var ts = SH.binTs || [], dd = SH.binD || [];
-    if (!ts.length || dd.length !== ts.length) return null;
+    if (!ts.length) return null;
+    var haveD = dd.length === ts.length;   // (a shift that began before distances were kept still gets the right bins/hour)
     var cuts = (SH.tips || []).slice();
     var cs = clockState(); if (cs && cs.breaks) cs.breaks.forEach(function(b){ if (b && b.s >= SH.start - 60000) cuts.push(b.s); });
     cuts.sort(function(a, b){ return a - b; });
@@ -31486,7 +31487,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       var g2 = groups[k]; if (g2.length < 2) return;
       var a = g2[0], z = g2[g2.length - 1];
       bins += g2.length; ms += ts[z] - ts[a];
-      if (dd[a] == null || dd[z] == null) kmOk = false; else km += Math.max(0, dd[z] - dd[a]) / 1000;
+      if (!haveD || dd[a] == null || dd[z] == null) kmOk = false; else km += Math.max(0, dd[z] - dd[a]) / 1000;
     });
     return { bins: bins, ms: ms, km: kmOk ? km : null };
   }
@@ -42386,7 +42387,7 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
       });
     }
     // speed, and the limit where the map has one
-    var sp = Math.round(+g('currentMapSpeedKmh') || 0), lim = limitNow(), box = $('rbSpd');
+    var sp = Math.round(window.lbSpeedShown != null ? window.lbSpeedShown : (+g('currentMapSpeedKmh') || 0)), lim = limitNow(), box = $('rbSpd');
     txt($('rbSpdN'), sp);
     var lm = $('rbLim'); txt(lm, lim || ''); lm.style.display = lim ? '' : 'none';
     attr(box, 'data-over', (lim && sp > lim + 2) ? '1' : '0');
@@ -42687,10 +42688,31 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
     bn.innerHTML = h;
   }
 
+  // The speedo's own quick painter (the 1-second tick is far too slow for it, Fox: "7 seconds lag stopping and starting").
+  // lb-speedo-fast-script below runs it every screen refresh with a number that runs up or down to the real speed.
+  window.lbSpeedPaint = function(sp){
+    var lim = limitNow(), warn = (lim && sp > lim + 9) ? 2 : (lim && sp > lim + 2) ? 1 : 0;
+    if (skin() === 'rubbish') {
+      var top = $('rbDash'); if (!top || !$('rdSpd')) return;
+      var d = String(Math.min(sp, 999)); d = '   '.slice(d.length) + d;
+      segSet($('rdSpd'), d);
+      attr(top, 'data-warn', warn);
+      var leds = $('rdLed') && $('rdLed').children, lit = Math.min(20, Math.round(sp / 4)), lb = lim ? Math.min(20, Math.round(lim / 4)) - 1 : -1;
+      if (leds && leds.length >= 20) for (var i = 0; i < 20; i++) {
+        var v = (i + 1) * 4, z = (lim && v > lim + 9) ? 'r' : (lim && v > lim + 2) ? 'o' : 'g', cls = z + (i < lit ? ' on' : '') + (i === lb ? ' lim' : '');
+        if (leds[i].className !== cls) leds[i].className = cls;
+      }
+    } else {
+      var box = $('rbSpd'); if (!box) return;
+      txt($('rbSpdN'), sp); attr(box, 'data-over', (lim && sp > lim + 2) ? '1' : '0'); attr(box, 'data-warn', warn);
+      var sbf = box.querySelector('.rb-sbar i'); if (sbf) { var wpc = Math.round(Math.min(1, sp / 80) * 100) + '%'; if (sbf.style.width !== wpc) sbf.style.width = wpc; }
+      var arc = box.querySelector('.rb-arc .a'); if (arc) arc.style.strokeDasharray = Math.round(Math.min(1, sp / 80) * 283) + ' 283';
+    }
+  };
   function paintDash(){
     if (skin() !== 'rubbish') return;
     var top = buildDash(); if (!top) return;
-    var sp = Math.max(0, Math.round(+g('currentMapSpeedKmh') || 0)), lim = limitNow();
+    var sp = Math.max(0, Math.round(window.lbSpeedShown != null ? window.lbSpeedShown : (+g('currentMapSpeedKmh') || 0))), lim = limitNow();
     // speed: three seven-segment digits (the unused leading ones just show their ghost segments)
     var d = String(Math.min(sp, 999)); d = '   '.slice(d.length) + d;
     segSet($('rdSpd'), d);
@@ -50581,6 +50603,29 @@ html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x
 })();
 </script>
 
+<script id="lb-speedo-fast-script">
+/* The speedo number follows the real speed every screen refresh instead of once a second, and runs through every digit on the way
+   (about 90 km/h a second, so 0 to 50 takes just over half a second) rather than jumping. window.lbSpeedShown is what the rest of
+   the dash then shows too. Paused only while a sheet covers the map. */
+(function(){
+  var shown = null, last = 0, RATE = 90;   // km/h per second
+  function target(){ try { return Math.max(0, Math.round(+(new Function('return typeof currentMapSpeedKmh==="undefined"?0:currentMapSpeedKmh'))() || 0)); } catch (e) { return 0; } }
+  var tg = null; function tgt(){ if (tg === null) tg = new Function('return typeof currentMapSpeedKmh==="undefined"?0:currentMapSpeedKmh'); try { return Math.max(0, Math.round(+tg() || 0)); } catch (e) { return 0; } }
+  (function loop(t){
+    requestAnimationFrame(loop);
+    try {
+      var want = tgt(), dt = last ? Math.min(0.25, (t - last) / 1000) : 0; last = t;
+      if (shown === null) shown = want;
+      if (shown !== want) {
+        var step = Math.max(1, Math.round(RATE * dt)); shown = shown < want ? Math.min(want, shown + step) : Math.max(want, shown - step);
+      }
+      window.lbSpeedShown = shown;
+      if (document.hidden || (window.lbCovered && window.lbCovered())) return;
+      if (shown !== loop._p && typeof window.lbSpeedPaint === 'function') { loop._p = shown; window.lbSpeedPaint(shown); }
+    } catch (e) {}
+  })(0);
+})();
+</script>
 <script id="lb-covered-script">
 /* window.lbCovered(): true while a panel / sheet is covering the map, or while a signature is being drawn. The once-a-second
    map furniture tickers (street box, dash, run chip, stats row) stop while it is true: nobody can see them, and on a phone they
