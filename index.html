@@ -38190,6 +38190,11 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   #lbRunMap .rm-bar #rmKey { max-width: 36vw; }
   #lbRunMap .rm-card.rm-key { padding-right: 44px; cursor: grab; touch-action: none; }
   #lbRunMap .rm-card.rm-notes.rm-movable { cursor: grab; touch-action: none; }
+  .rm-cp { width: 22px; height: 22px; border-radius: 50%; background: #fff; border: 2.5px solid #111827; color: #111827; font: 800 12px/17px system-ui, sans-serif; text-align: center; box-sizing: border-box; box-shadow: 0 1px 3px rgba(0,0,0,.35); }
+  #lbRunMap .rm-cp-k { display: inline-block; width: 16px; height: 16px; font-size: 9px; line-height: 11px; border-width: 2px; margin-right: 6px; vertical-align: middle; box-shadow: none; }
+  #lbRunMap .rm-ar-k { display: inline-block; width: 16px; margin-right: 6px; font-weight: 900; color: #111827; text-align: center; }
+  #lbRunMap .rm-rec { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 6px; }
+  #lbRunMap .rm-rec input { font: inherit; padding: 4px 8px; border: 1px solid #cbd5e1; border-radius: 6px; min-width: 140px; }
   #lbRunMap .rm-card.rm-notes.rm-dragging { cursor: grabbing; box-shadow: 0 4px 18px rgba(0,0,0,.3); outline: 2px dashed #64748b; }
   #lbRunMap .rm-lbl.rm-lbl-drag { pointer-events: auto; cursor: grab; touch-action: none; }
   #lbRunMap .rm-lbl.rm-lbl-drag.rm-dragging { cursor: grabbing; outline: 2px dashed #64748b; outline-offset: 2px; }
@@ -38347,7 +38352,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var mine = (lsGet('lbRunMapEdits', {}) || {})[key], fleet = (lsGet('lbRunMapEditsFleet', {}) || {})[key];
     var e = (fleet && (!mine || (fleet.ts || 0) > (mine.ts || 0))) ? fleet : mine;
     e = e || {};
-    return { pieces: e.pieces || {}, drawn: e.drawn || [], erase: e.erase || [], notes: e.notes || [], hide: e.hide || [], names: e.names || {}, labels: e.labels || {}, ts: e.ts || 0 };
+    return { pieces: e.pieces || {}, drawn: e.drawn || [], erase: e.erase || [], sides: e.sides || {}, arrows: e.arrows || [], points: e.points || [], notes: e.notes || [], hide: e.hide || [], names: e.names || {}, labels: e.labels || {}, ts: e.ts || 0 };
   }
   function saveEdits(key, E){
     E.ts = Date.now();
@@ -38873,6 +38878,15 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
      E.erase holds the strokes ({ c: [[lat, lng]...], r: metres, ts }); every part of a route line within r of a stroke is left
      out, the rest of the piece stays (with its colour). Mount Eliza Way's route-map line came out as a loop round the shops
      that the truck never drives; tapping only removes a whole piece, this takes away just the wrong bit. */
+  // a line moved px screen pixels sideways (+ is to the right of its direction: the screen's y runs down)
+  function offsetLL(map, c, px){
+    var q = c.map(function(p){ return map.latLngToLayerPoint(p); }), out = [];
+    for (var i = 0; i < q.length; i++) {
+      var p0 = q[Math.max(0, i - 1)], p1 = q[Math.min(q.length - 1, i + 1)], dx = p1.x - p0.x, dy = p1.y - p0.y, Ln = Math.sqrt(dx * dx + dy * dy) || 1;
+      out.push(map.layerPointToLatLng(L.point(q[i].x - dy / Ln * px, q[i].y + dx / Ln * px)));
+    }
+    return out;
+  }
   function rubOut(lines, E){
     var ER = (E && E.erase) || []; if (!ER.length || !lines.length) return lines;
     var lat0 = lines[0].c[0][0], lng0 = lines[0].c[0][1], MY = 110540, MX = 111320 * Math.cos(lat0 * Math.PI / 180);
@@ -38931,10 +38945,37 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var shown = R.lines.map(function(l){ var ov = ovOf(E, l); return { l: l, col: ov && ov !== 'x' ? ov : (l.s || '#16a34a'), gone: ov === 'x' }; });
     shown.forEach(function(x){ if (!x.gone) L.polyline(x.l.c, { color: '#fff', weight: 9, opacity: 1, interactive: false }).addTo(layers); });
     E.drawn.forEach(function(d){ L.polyline(d.c, { color: '#fff', weight: 9, opacity: 1, interactive: false }).addTo(layers); });
+    var sideList = [];
     shown.forEach(function(x){
       if (x.gone && !opts.edit) return;
+      var S = !x.gone && E.sides[pid(x.l)];
+      if (S && (S.l || S.r)) { x.S = S; sideList.push(x); [S.l || x.col, S.r || x.col].forEach(function(c){ used[c] = (used[c] || 0) + 1; }); return; }
       if (!x.gone) used[x.col] = (used[x.col] || 0) + 1;
       L.polyline(x.l.c, { color: x.gone ? '#94a3b8' : x.col, weight: opts.edit ? 7 : 5, opacity: 1, dashArray: x.gone ? '4,6' : null, interactive: false, lineCap: 'round', lineJoin: 'round' }).addTo(layers);
+    });
+    /* A street with a different colour each side (One side tool: Williams Rd, one side done by another truck) is two lines a few
+       pixels apart; direction arrows have a head the same size at any zoom - both are worked out again after every zoom. */
+    var xLayer = L.layerGroup().addTo(map);
+    var paintExtras = function(){
+      xLayer.clearLayers();
+      sideList.forEach(function(x){
+        L.polyline(offsetLL(map, x.l.c, 0), { color: '#fff', weight: opts.edit ? 13 : 11, opacity: 1, interactive: false, lineCap: 'round' }).addTo(xLayer);
+        L.polyline(offsetLL(map, x.l.c, -2.8), { color: x.S.l || x.col, weight: opts.edit ? 4.6 : 4, opacity: 1, interactive: false, lineCap: 'butt' }).addTo(xLayer);
+        L.polyline(offsetLL(map, x.l.c, 2.8), { color: x.S.r || x.col, weight: opts.edit ? 4.6 : 4, opacity: 1, interactive: false, lineCap: 'butt' }).addTo(xLayer);
+      });
+      E.arrows.forEach(function(a){
+        var A = map.latLngToLayerPoint(a.c[0]), B = map.latLngToLayerPoint(a.c[a.c.length - 1]), dx = B.x - A.x, dy = B.y - A.y, Ln = Math.sqrt(dx * dx + dy * dy) || 1, ux = dx / Ln, uy = dy / Ln, h = 11;
+        var back = L.point(B.x - ux * h, B.y - uy * h), w1 = L.point(back.x - uy * h * 0.6, back.y + ux * h * 0.6), w2 = L.point(back.x + uy * h * 0.6, back.y - ux * h * 0.6);
+        L.polyline(a.c, { color: '#fff', weight: 7, opacity: 1, interactive: false, lineCap: 'round' }).addTo(xLayer);
+        L.polyline(a.c, { color: '#111827', weight: 3.2, opacity: 1, interactive: false, lineCap: 'round' }).addTo(xLayer);
+        L.polygon([map.layerPointToLatLng(B), map.layerPointToLatLng(w1), map.layerPointToLatLng(w2)], { color: '#fff', weight: 1.5, fillColor: '#111827', fillOpacity: 1, interactive: false }).addTo(xLayer);
+      });
+    };
+    map.on('zoomend', paintExtras); setTimeout(function(){ try { paintExtras(); } catch (e) {} }, 0);
+    E.points.forEach(function(pt, i){
+      var live = mode === 'cp';
+      var mk = L.marker(pt.at, { icon: L.divIcon({ className: '', html: '<div class="rm-cp">C</div>', iconSize: [22, 22], iconAnchor: [11, 11] }), keyboard: false, pane: 'rmPins', interactive: live }).addTo(layers);
+      if (live) mk.on('click', function(ev){ L.DomEvent.stopPropagation(ev); opts.onCpTap && opts.onCpTap(i); });
     });
     E.drawn.forEach(function(d){
       used[d.s] = (used[d.s] || 0) + 1;
@@ -38995,6 +39036,17 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
         mk.on('dragend', function(){ if (p.mine != null) opts.onNoteMove && opts.onNoteMove(p.mine, mk.getLatLng()); });
       }
     });
+    if (mode === 'cp') map.on('click', function(ev){ opts.onCp && opts.onCp(ev.latlng); });
+    if (mode === 'side') map.on('click', function(ev){
+      // the nearest street piece, and which side of it the tap is on
+      var pt = ev.containerPoint, best = null, bd = 30, side = 'l';
+      shown.forEach(function(x){
+        if (x.gone) return;
+        var prev = null;
+        x.l.c.forEach(function(c){ var q = map.latLngToContainerPoint(c); if (prev) { var d = L.LineUtil.pointToSegmentDistance(pt, prev, q); if (d < bd) { bd = d; best = x; side = ((q.x - prev.x) * (pt.y - prev.y) - (q.y - prev.y) * (pt.x - prev.x)) > 0 ? 'r' : 'l'; } } prev = q; });
+      });
+      if (best) opts.onSide && opts.onSide(best, side);
+    });
     if (mode === 'paint' || mode === 'x') map.on('click', function(ev){
       // the nearest street piece or drawn line to the tap
       var pt = ev.containerPoint, best = null, bd = 24, ds = [];
@@ -39008,7 +39060,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     if (mode === 'note') map.on('click', function(ev){ opts.onMap && opts.onMap(ev.latlng); });
     // where things were rubbed out, shown faintly while editing (Undo brings the last one back)
     if (opts.edit) E.erase.forEach(function(e2){ L.polyline(e2.c, { color: '#ef4444', weight: 14, opacity: .18, interactive: false, lineCap: 'round', lineJoin: 'round' }).addTo(layers); });
-    if (mode === 'draw' || mode === 'erase') {
+    if (mode === 'draw' || mode === 'erase' || mode === 'arrow') {
       // freehand: the line follows the finger / mouse exactly; the map doesn't move while drawing
       map.dragging.disable(); map.touchZoom.disable(); map.doubleClickZoom.disable(); map.boxZoom.disable(); if (map.tap) map.tap.disable();
       container.classList.add('rm-drawing');
@@ -39018,7 +39070,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
         e.preventDefault();
         try { container.setPointerCapture(e.pointerId); } catch (x) {}
         stroke = [at(e)];
-        live = L.polyline(stroke, mode === 'erase' ? { color: '#ef4444', weight: 22, opacity: .35, interactive: false, lineCap: 'round', lineJoin: 'round' } : { color: opts.colour, weight: 7, opacity: 1, interactive: false, lineCap: 'round', lineJoin: 'round' }).addTo(layers);
+        live = L.polyline(stroke, mode === 'arrow' ? { color: '#111827', weight: 3, opacity: .8, interactive: false, dashArray: '4,4' } : mode === 'erase' ? { color: '#ef4444', weight: 22, opacity: .35, interactive: false, lineCap: 'round', lineJoin: 'round' } : { color: opts.colour, weight: 7, opacity: 1, interactive: false, lineCap: 'round', lineJoin: 'round' }).addTo(layers);
       });
       container.addEventListener('pointermove', function(e){
         if (!stroke) return;
@@ -39030,6 +39082,12 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       var end = function(){
         if (!stroke) return;
         var s = stroke; stroke = null;
+        if (mode === 'arrow') {
+          if (s.length < 2 || map.latLngToContainerPoint(s[0]).distanceTo(map.latLngToContainerPoint(s[s.length - 1])) < 15) { layers.removeLayer(live); return; }
+          var r6 = function(ll){ return [+ll.lat.toFixed(6), +ll.lng.toFixed(6)]; };
+          opts.onArrow && opts.onArrow([r6(s[0]), r6(s[s.length - 1])]);
+          return;
+        }
         if (mode === 'erase') {
           // the rubber is 11 px either side of the finger, kept in metres so it means the same at any zoom
           var c0 = map.getCenter(), p0 = map.latLngToContainerPoint(c0), mpx = map.distance(c0, map.containerPointToLatLng(L.point(p0.x + 100, p0.y))) / 100;
@@ -39048,7 +39106,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var card = document.createElement('div'); card.className = 'rm-card rm-key';
     card.innerHTML = northSvg(st.rot) + '<div class="rm-band" style="background:' + (COL[o.stream] || '#16a34a') + '"></div><div class="rm-title">' + (window.lbStreamIcon ? window.lbStreamIcon(o.stream) + ' ' : '') + 'Run ' + esc(o.run) + ((o.week && /^\d+$/.test(String(o.run))) ? esc(String(o.week).toUpperCase()) : '') + '</div><div class="rm-sub">' + esc(sub) + (opts.pageLabel ? ' \u00b7 <b style="color:#111">' + esc(opts.pageLabel) + '</b>' : '') + '</div>' +
       '<div class="rm-stats"><span><b>' + houses.toLocaleString() + '</b>houses</span><span><b>' + bins.toLocaleString() + '</b>bins</span><span><b>' + esc(R.km) + '</b>km</span></div>' +
-      '<div class="rm-leg">' + legendSections(used, E) + '<div><i style="border-color:#7c3aed"></i>Reverse in</div><div><i style="border-color:#f59e0b"></i>Drive in, back out</div><div><i class="box"></i>School</div><div><i class="dot"></i>House</div><div><i class="num">1</i>Note</div></div>';
+      '<div class="rm-leg">' + legendSections(used, E) + (E.points.length ? '<div><span class="rm-cp rm-cp-k">C</span>Collection point</div>' : '') + (E.arrows.length ? '<div><span class="rm-ar-k">&#10140;</span>Direction of travel</div>' : '') + '<div><i style="border-color:#7c3aed"></i>Reverse in</div><div><i style="border-color:#f59e0b"></i>Drive in, back out</div><div><i class="box"></i>School</div><div><i class="dot"></i>House</div><div><i class="num">1</i>Note</div></div>';
     st.page.appendChild(card);
     st.keyPos = opts.keyPos || null;
     if (opts.onKeyMove) keyDraggable(card, st, opts.onKeyMove);
@@ -39457,6 +39515,10 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     x: 'Tap a street to take it off the map; tap it again to put it back. Tap a drawn line to delete it.',
     draw: 'Pick a colour, then drag your finger (or mouse) along the street. The map holds still while drawing - use Colour streets to move it.',
     note: 'Tap the map where the note goes. Tap a note to change or delete it; drag your own notes to move them.',
+    side: 'Pick a colour, then tap a street just to one side of its line: only that side takes the colour (tap again with the same colour to take it off). For a side done by another truck.',
+    cp: 'Tap where the bins are put out together to add a collection point (C). Tap a collection point to delete it.',
+    arrow: 'Drag along a street the way the truck goes: an arrow is drawn from where you start to where you lift off. Undo takes the last one away.',
+    recolour: 'Pick the colour to change (only colours on this run are shown), then the new colour, and the name it has in the key. Change does every street, side and drawn line of that colour at once.',
     erase: 'Drag your finger (or mouse) over the bit of line to take off - only what you rub over goes. Undo brings the last rub back. The map holds still - use Colour streets to move it.'
   };
   /* edit tools: colour swatches, Colour streets / Draw a line / Remove / Add a note, Undo last line, Name the sections */
@@ -39470,10 +39532,37 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     t.innerHTML = '<div class="rm-trow"><span class="rm-tl">Colour</span>' + PALETTE.map(function(c){ return '<button type="button" data-rm="colour" data-v="' + c + '" class="rm-sw' + (colour === c ? ' on' : '') + '" style="background:' + c + '" title="' + esc(SECTION_NAMES[c]) + '"></button>'; }).join('') +
       btn('paint', 'Colour streets') +
       btn('draw', '<span style="display:inline-block;width:14px;height:4px;vertical-align:middle;margin-right:6px;background:' + colour + '"></span>Draw a line') +
-      btn('x', 'Remove / put back') + btn('erase', 'Rub out') + btn('note', 'Add a note') +
-      '<button type="button" data-rm="undo"' + (E.drawn.length || E.erase.length ? '' : ' disabled') + '>Undo</button>' +
+      btn('side', 'One side') + btn('x', 'Remove / put back') + btn('erase', 'Rub out') + btn('cp', 'Collection point') + btn('arrow', 'Arrow') + btn('note', 'Add a note') + btn('recolour', 'Change a colour') +
+      '<button type="button" data-rm="undo"' + (E.drawn.length || E.erase.length || E.arrows.length || E.points.length ? '' : ' disabled') + '>Undo</button>' +
       '<button type="button" data-rm="names">Name the sections</button></div>' +
-      '<div class="rm-hint">' + esc(HINT[tool] || '') + '</div>';
+      '<div class="rm-hint">' + esc(HINT[tool] || '') + '</div>' + (tool === 'recolour' ? recolourPanel(E) : '');
+  }
+  /* ---- Change a colour: every street (and side, and drawn line) of one colour to another at once, and its name in the key ---- */
+  var recFrom = null, recTo = null;
+  function coloursInUse(E){
+    var R = curKey ? route(curKey) : null, c = {};
+    if (R) R.lines.forEach(function(l){ var ov = ovOf(E, l); if (ov === 'x') return; c[ov || l.s || '#16a34a'] = 1; var S = E.sides[pid(l)]; if (S) { if (S.l) c[S.l] = 1; if (S.r) c[S.r] = 1; } });
+    E.drawn.forEach(function(d){ c[d.s] = 1; });
+    return Object.keys(c);
+  }
+  function recolourPanel(E){
+    var inUse = coloursInUse(E); if (!recFrom || inUse.indexOf(recFrom) < 0) recFrom = inUse[0] || null;
+    var sw = function(kind, c, on){ return '<button type="button" data-rm="' + kind + '" data-v="' + c + '" class="rm-sw' + (on ? ' on' : '') + '" style="background:' + c + '" title="' + esc(E.names[c] || SECTION_NAMES[c] || c) + '"></button>'; };
+    var nm = E.names[recTo || recFrom] || E.names[recFrom] || '';
+    return '<div class="rm-rec"><span class="rm-tl">Every</span>' + inUse.map(function(c){ return sw('rfrom', c, c === recFrom); }).join('') +
+      '<span class="rm-tl">to</span>' + PALETTE.map(function(c){ return sw('rto', c, c === (recTo || recFrom)); }).join('') +
+      '<span class="rm-tl">Name in the key</span><input id="rmRecName" type="text" placeholder="e.g. Other truck" value="' + esc(nm) + '">' +
+      '<button type="button" data-rm="rgo">Change</button></div>';
+  }
+  function recolourAll(from, to, name){
+    if (!from || !curKey) return;
+    var E = edits(curKey), R = route(curKey);
+    if (R) R.lines.forEach(function(l){ var ov = ovOf(E, l); if (ov === 'x') return; if ((ov || l.s || '#16a34a') === from && from !== to) E.pieces[pid(l)] = to; });
+    E.drawn.forEach(function(d){ if (d.s === from) d.s = to; });
+    Object.keys(E.sides).forEach(function(k){ var S = E.sides[k]; if (S.l === from) S.l = to; if (S.r === from) S.r = to; });
+    if (from !== to) { if (E.names[from] && !E.names[to]) E.names[to] = E.names[from]; delete E.names[from]; }
+    if (name != null) { if (String(name).trim()) E.names[to] = String(name).trim(); else delete E.names[to]; }
+    saveEdits(curKey, E); recFrom = to; recTo = null; renderView(true);
   }
   function editHandlers(){
     return {
@@ -39511,7 +39600,16 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       onNoteMove: function(i, ll){ var E = edits(curKey); if (E.notes[i]) { E.notes[i].at = [+ll.lat.toFixed(6), +ll.lng.toFixed(6)]; saveEdits(curKey, E); renderView(true); } },
       onMap: function(ll){ var t = prompt('Note:'); if (!t || !t.trim()) return; var E = edits(curKey); E.notes.push({ text: t.trim(), at: [+ll.lat.toFixed(6), +ll.lng.toFixed(6)] }); saveEdits(curKey, E); renderView(true); },
       onStroke: function(c){ var E = edits(curKey); E.drawn.push({ c: c, s: colour, ts: Date.now() }); saveEdits(curKey, E); renderView(true); },
-      onErase: function(c, r){ var E = edits(curKey); E.erase.push({ c: c, r: r, ts: Date.now() }); saveEdits(curKey, E); renderView(true); }
+      onErase: function(c, r){ var E = edits(curKey); E.erase.push({ c: c, r: r, ts: Date.now() }); saveEdits(curKey, E); renderView(true); },
+      onArrow: function(c){ var E = edits(curKey); E.arrows.push({ c: c, ts: Date.now() }); saveEdits(curKey, E); renderView(true); },
+      onCp: function(ll){ var E = edits(curKey); E.points.push({ at: [+ll.lat.toFixed(6), +ll.lng.toFixed(6)], t: 'cp', ts: Date.now() }); saveEdits(curKey, E); renderView(true); },
+      onCpTap: function(i){ if (!confirm('Delete this collection point?')) return; var E = edits(curKey); E.points.splice(i, 1); saveEdits(curKey, E); renderView(true); },
+      onSide: function(x, side){
+        var E = edits(curKey), id = pid(x.l), S = E.sides[id] || {};
+        if (S[side] === colour) delete S[side]; else S[side] = colour;   // (the same colour again takes it off that side)
+        if (S.l || S.r) E.sides[id] = S; else delete E.sides[id];
+        saveEdits(curKey, E); renderView(true);
+      }
     };
   }
   function editNames(){
@@ -39567,11 +39665,15 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       if (a === 'turn') { var pg = pagesCache[curPage] || pagesCache[0]; orientOverride = ((orientOverride || pg.o) === 'land') ? 'port' : 'land'; renderView(true, true); }
       if (a === 'edit') { editing = !editing; if (editing) pagesMode = false; tool = 'paint'; renderView(true, true); }
       if (a === 'tool') { tool = b.getAttribute('data-v'); renderView(true); }
-      if (a === 'colour') { colour = b.getAttribute('data-v'); if (tool !== 'draw') tool = 'paint'; renderView(true); }
+      if (a === 'colour') { colour = b.getAttribute('data-v'); if (tool !== 'draw' && tool !== 'side') tool = 'paint'; renderView(true); }
+      if (a === 'rfrom') { recFrom = b.getAttribute('data-v'); paintTools(); }
+      if (a === 'rto') { recTo = b.getAttribute('data-v'); paintTools(); }
+      if (a === 'rgo') { var nm = document.getElementById('rmRecName'); recolourAll(recFrom, recTo || recFrom, nm ? nm.value : null); }
       if (a === 'undo') {
         // the last thing drawn or rubbed out, whichever came last
-        var E = edits(curKey), ld = E.drawn.length ? (E.drawn[E.drawn.length - 1].ts || 0) : -1, le = E.erase.length ? (E.erase[E.erase.length - 1].ts || 0) : -1;
-        if (le >= 0 && le >= ld) E.erase.pop(); else if (ld >= 0) E.drawn.pop();
+        var E = edits(curKey), best = null, bt = -2;
+        ['drawn', 'erase', 'arrows', 'points'].forEach(function(f){ var a = E[f]; if (a && a.length) { var t = a[a.length - 1].ts || 0; if (t >= bt) { bt = t; best = f; } } });
+        if (best) E[best].pop();
         saveEdits(curKey, E); renderView(true);
       }
       if (a === 'names') editNames();
@@ -39832,16 +39934,32 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
         };
         // each line as its stretches: both sides done red, neither as the route, one side done as two lines side by side
         var parts = lines.map(function(m, i){ return dp ? dp.lines[i] : [{ c: m.l.c, l: false, r: false }]; });
+        // (a street with its own colour each side - the One side tool - is two lines side by side, like a half-done one)
+        var sideOf = function(m){ var S = (E.sides || {})[pid(m.l)]; return S && (S.l || S.r) ? S : null; };
         x.strokeStyle = '#fff';
-        parts.forEach(function(ps){ ps.forEach(function(pt){ x.lineWidth = (pt.l !== pt.r) ? 17 : 12; if (pt.l !== pt.r) offs(pt.c, 0); else path(pt.c); }); });
+        lines.forEach(function(m, i){ var S = sideOf(m); parts[i].forEach(function(pt){ var two = pt.l !== pt.r || (S && !(pt.l && pt.r)); x.lineWidth = two ? 17 : 12; if (two) offs(pt.c, 0); else path(pt.c); }); });
         E.drawn.forEach(function(d){ x.lineWidth = 12; path(d.c); });
-        lines.forEach(function(m, i){ parts[i].forEach(function(pt){
-          if (pt.l === pt.r) { x.strokeStyle = pt.l ? DONE_COL : m.col; x.lineWidth = 7; path(pt.c); return; }
+        lines.forEach(function(m, i){ var S = sideOf(m), cl = (S && S.l) || m.col, cr = (S && S.r) || m.col; parts[i].forEach(function(pt){
+          if (pt.l === pt.r && (pt.l || !S)) { x.strokeStyle = pt.l ? DONE_COL : m.col; x.lineWidth = 7; path(pt.c); return; }
           x.lineWidth = 6;
-          x.strokeStyle = pt.l ? DONE_COL : m.col; offs(pt.c, -4.5);
-          x.strokeStyle = pt.r ? DONE_COL : m.col; offs(pt.c, 4.5);
+          x.strokeStyle = pt.l ? DONE_COL : cl; offs(pt.c, -4.5);
+          x.strokeStyle = pt.r ? DONE_COL : cr; offs(pt.c, 4.5);
         }); });
         E.drawn.forEach(function(d){ x.strokeStyle = d.s; x.lineWidth = 7; path(d.c); });
+        // direction arrows and collection points
+        (E.arrows || []).forEach(function(a){
+          var A = P(a.c[0]), B = P(a.c[a.c.length - 1]), dx = B[0] - A[0], dy = B[1] - A[1], Ln = Math.sqrt(dx * dx + dy * dy) || 1, ux = dx / Ln, uy = dy / Ln, h = 20;
+          x.lineCap = 'round'; x.strokeStyle = '#fff'; x.lineWidth = 10; x.beginPath(); x.moveTo(A[0], A[1]); x.lineTo(B[0] - ux * h * 0.6, B[1] - uy * h * 0.6); x.stroke();
+          x.strokeStyle = '#111827'; x.lineWidth = 5; x.beginPath(); x.moveTo(A[0], A[1]); x.lineTo(B[0] - ux * h * 0.6, B[1] - uy * h * 0.6); x.stroke();
+          var bx = B[0] - ux * h, by = B[1] - uy * h;
+          x.beginPath(); x.moveTo(B[0], B[1]); x.lineTo(bx - uy * h * 0.6, by + ux * h * 0.6); x.lineTo(bx + uy * h * 0.6, by - ux * h * 0.6); x.closePath();
+          x.fillStyle = '#111827'; x.fill(); x.strokeStyle = '#fff'; x.lineWidth = 2.5; x.stroke();
+        });
+        (E.points || []).forEach(function(pt){
+          var q = P(pt.at);
+          x.beginPath(); x.arc(q[0], q[1], 15, 0, 7); x.fillStyle = '#fff'; x.fill(); x.lineWidth = 4; x.strokeStyle = '#111827'; x.stroke();
+          x.fillStyle = '#111827'; x.font = 'bold 18px system-ui, Arial, sans-serif'; x.textAlign = 'center'; x.textBaseline = 'middle'; x.fillText('C', q[0], q[1] + 1); x.textAlign = 'left';
+        });
         x.fillStyle = COL[o.stream] || '#16a34a'; x.fillRect(0, 0, c.width, 14);
         x.fillStyle = '#fff'; x.fillRect(0, 14, c.width, TOP - 14);
         x.fillStyle = '#111'; x.font = 'bold 44px system-ui, Arial, sans-serif'; x.textBaseline = 'middle';
