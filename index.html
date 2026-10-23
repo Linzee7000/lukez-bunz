@@ -38400,7 +38400,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     };
     return src.map(function(l, li){
       var c = l.c; if (c.length < 2) return l;
-      var out = c.slice(), changed = false;
+      var out = c.slice(), changed = false, joined = [false, false];
       [0, 1].forEach(function(end){
         var E = xy(end ? c[c.length - 1] : c[0]), N = null;
         for (var i = 1; i < c.length && !N; i++) { var Pp = xy(end ? c[c.length - 1 - i] : c[i]); if (Math.hypot(Pp[0] - E[0], Pp[1] - E[1]) > 3) N = Pp; }
@@ -38408,16 +38408,118 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
         var dl = Math.hypot(E[0] - N[0], E[1] - N[1]), d = [(E[0] - N[0]) / dl, (E[1] - N[1]) / dl], Q = reach(li, E, d);
         if (!Q) return;
         if (end) out.push(ll(Q)); else out.unshift(ll(Q));
-        changed = true;
+        changed = true; joined[end] = true;
       });
-      return changed ? Object.assign({}, l, { c: out, pid0: pid(l) }) : l;
+      return changed ? Object.assign({}, l, { c: out, pid0: pid(l), j: joined }) : l;
     });
   }
+  /* ---- a street that stops short with nothing straight ahead: follow the street itself ----
+     joinEnds only looks straight ahead. Where the route data has only a stub of a street that bends before it meets the next
+     one (Charles St, 219A: 120 m of it, 156 m short of Jacksons Rd round the bend), the line was left hanging and the street
+     looked as if it could be missed. The run's streets with their names are fetched once from OpenStreetMap (one request for
+     the run's area, kept on the phone in lbRunMapRoads) and a hanging end follows ITS OWN street, by name, until it meets
+     another street of the route (at most 400 m). A dead end (a court) has no street past it, so it stays as it is. No signal
+     and nothing kept: the map is drawn as before. */
+  var RDB = null, rdQ = {};
+  function roadsDb(){
+    if (RDB) return Promise.resolve(RDB);
+    var ld = g('loadFromDB'); if (!ld) { RDB = {}; return Promise.resolve(RDB); }
+    return Promise.resolve(ld('lbRunMapRoads')).then(function(v){ RDB = (v && typeof v === 'object') ? v : {}; return RDB; }).catch(function(){ RDB = {}; return RDB; });
+  }
+  function namedRoads(k, R){
+    return roadsDb().then(function(db){
+      if (db[k] && db[k].w) return db[k].w;
+      if (rdQ[k]) return rdQ[k];
+      var b = [90, 180, -90, -180]; R.lines.forEach(function(l){ l.c.forEach(function(p){ b[0] = Math.min(b[0], p[0]); b[1] = Math.min(b[1], p[1]); b[2] = Math.max(b[2], p[0]); b[3] = Math.max(b[3], p[1]); }); });
+      var pad = 0.004, q = '[out:json][timeout:25];way["highway"]["name"]["highway"!~"footway|path|steps|cycleway|pedestrian|bridleway|corridor|proposed|construction|platform"](' + [b[0] - pad, b[1] - pad, b[2] + pad, b[3] + pad].map(function(v){ return v.toFixed(4); }).join(',') + ');out geom;';
+      var get = window.lbRunMapRoadsFetch ? Promise.resolve(window.lbRunMapRoadsFetch(q)) : (function(){
+        var urls = ['https://overpass-api.de/api/interpreter', 'https://overpass.kumi.systems/api/interpreter', 'https://overpass.private.coffee/api/interpreter'], i = 0;
+        var one = function(){
+          var ctl = new AbortController(), to = setTimeout(function(){ ctl.abort(); }, 20000);
+          return fetch(urls[i] + '?data=' + encodeURIComponent(q), { signal: ctl.signal }).then(function(r){ clearTimeout(to); if (!r.ok) throw new Error('overpass ' + r.status); return r.json(); })
+            .then(function(d){ return d.elements || []; }, function(e){ clearTimeout(to); if (++i < urls.length) return one(); throw e; });
+        };
+        return one();
+      })();
+      rdQ[k] = get.then(function(els){
+        var w = (els || []).filter(function(e){ return e && e.geometry && e.geometry.length > 1 && e.tags && e.tags.name; })
+          .map(function(e){ return [e.tags.name, e.geometry.map(function(p){ return [+p.lat.toFixed(6), +p.lon.toFixed(6)]; })]; });
+        db[k] = { ts: Date.now(), w: w };
+        var ks = Object.keys(db); if (ks.length > 12) ks.sort(function(a, c){ return db[a].ts - db[c].ts; }).slice(0, ks.length - 12).forEach(function(x){ delete db[x]; });
+        try { var sv = g('saveToDB'); if (sv) sv('lbRunMapRoads', db); } catch (e) {}
+        delete rdQ[k]; return w;
+      }, function(e){ delete rdQ[k]; throw e; });
+      return rdQ[k];
+    });
+  }
+  function followStreets(lines, ways){
+    if (!lines.length || !ways || !ways.length) return lines;
+    var lat0 = lines[0].c[0][0], lng0 = lines[0].c[0][1], MY = 110540, MX = 111320 * Math.cos(lat0 * Math.PI / 180);
+    var xy = function(p){ return [(p[1] - lng0) * MX, (p[0] - lat0) * MY]; }, ll = function(P){ return [+(lat0 + P[1] / MY).toFixed(6), +(lng0 + P[0] / MX).toFixed(6)]; };
+    var segD = function(P, A, B){ var ex = B[0] - A[0], ey = B[1] - A[1], L2 = ex * ex + ey * ey || 1e-9, t = Math.max(0, Math.min(1, ((P[0] - A[0]) * ex + (P[1] - A[1]) * ey) / L2)); return [Math.hypot(P[0] - A[0] - t * ex, P[1] - A[1] - t * ey), [A[0] + t * ex, A[1] + t * ey], t]; };
+    // the route's own pieces, for "has it reached another street of the route yet"
+    var C = 60, grid = {};
+    lines.forEach(function(l, li){ for (var i = 1; i < l.c.length; i++) { var A = xy(l.c[i - 1]), B = xy(l.c[i]), sg = [A, B, li], cx = Math.floor((A[0] + B[0]) / 2 / C), cy = Math.floor((A[1] + B[1]) / 2 / C), r = Math.ceil(Math.hypot(B[0] - A[0], B[1] - A[1]) / 2 / C); for (var x = cx - r; x <= cx + r; x++) for (var y = cy - r; y <= cy + r; y++) (grid[x + ':' + y] = grid[x + ':' + y] || []).push(sg); } });
+    var hit = function(P, li){ var best = null, bd = 10, cx = Math.floor(P[0] / C), cy = Math.floor(P[1] / C); for (var x = cx - 1; x <= cx + 1; x++) for (var y = cy - 1; y <= cy + 1; y++) (grid[x + ':' + y] || []).forEach(function(sg){ if (sg[2] === li) return; var d = segD(P, sg[0], sg[1]); if (d[0] < bd) { bd = d[0]; best = d[1]; } }); return best; };
+    // each street name's ways as one little network
+    var byName = {};
+    ways.forEach(function(w){ var n = normSt(w[0]); (byName[n] = byName[n] || []).push(w[1].map(xy)); });
+    var graphOf = function(n){
+      var ws = byName[n]; if (!ws) return null;
+      var N = [], idx = {}, nid = function(P){ var key = Math.round(P[0] * 2) + ',' + Math.round(P[1] * 2), i = idx[key]; if (i == null) { i = idx[key] = N.length; N.push({ p: P, adj: [] }); } return i; };
+      ws.forEach(function(w){ for (var i = 1; i < w.length; i++) { var a = nid(w[i - 1]), b = nid(w[i]); if (a !== b) { N[a].adj.push(b); N[b].adj.push(a); } } });
+      return N;
+    };
+    var graphs = {};
+    return lines.map(function(l, li){
+      if (!l.n || l.c.length < 2) return l;
+      var n = normSt(l.n), G = graphs[n] !== undefined ? graphs[n] : (graphs[n] = graphOf(n)); if (!G) return l;
+      var out = l.c.slice(), changed = false;
+      [0, 1].forEach(function(end){
+        if (l.j && l.j[end]) return;                                             // joined straight ahead already
+        var E = xy(end ? l.c[l.c.length - 1] : l.c[0]), N0 = xy(end ? l.c[l.c.length - 2] : l.c[1]);
+        var dl = Math.hypot(E[0] - N0[0], E[1] - N0[1]) || 1, d = [(E[0] - N0[0]) / dl, (E[1] - N0[1]) / dl];
+        // where the end sits on its street: the nearest stretch of that street within 25 m
+        var best = null, bd = 25;
+        G.forEach(function(nd, a){ nd.adj.forEach(function(b){ if (b < a) return; var r = segD(E, nd.p, G[b].p); if (r[0] < bd) { bd = r[0]; best = { a: a, b: b, P: r[1] }; } }); });
+        if (!best) return;
+        // go on from there the way the line was heading, taking the straightest way on at each join, until another route street
+        var A = G[best.a].p, B = G[best.b].p, fwd = ((B[0] - A[0]) * d[0] + (B[1] - A[1]) * d[1]) >= 0;
+        var cur = best.P, next = fwd ? best.b : best.a, prev = fwd ? best.a : best.b, path = [], walked = 0, end2 = null, guard = 0;
+        while (next != null && walked < 400 && guard++ < 400) {
+          var T = G[next].p, sl = Math.hypot(T[0] - cur[0], T[1] - cur[1]), steps = Math.max(1, Math.ceil(sl / 4));
+          for (var s2 = 1; s2 <= steps && !end2; s2++) { var Q = [cur[0] + (T[0] - cur[0]) * s2 / steps, cur[1] + (T[1] - cur[1]) * s2 / steps]; if (walked + sl * s2 / steps > 12 || Math.hypot(Q[0] - E[0], Q[1] - E[1]) > 12) { var h = hit(Q, li); if (h) end2 = h; } }
+          if (end2) break;
+          walked += sl; path.push(T); cur = T;
+          var hd = [T[0] - G[prev].p[0], T[1] - G[prev].p[1]], hl = Math.hypot(hd[0], hd[1]) || 1, pick = null, pd = -2;
+          G[next].adj.forEach(function(c2){ if (c2 === prev) return; var v = [G[c2].p[0] - T[0], G[c2].p[1] - T[1]], vl = Math.hypot(v[0], v[1]) || 1, dot = (v[0] * hd[0] + v[1] * hd[1]) / vl / hl; if (dot > pd) { pd = dot; pick = c2; } });
+          if (pick == null || pd < -0.2) break;                                  // the street ends (or only turns right back)
+          prev = next; next = pick;
+        }
+        if (!end2) return;
+        var add = path.concat([end2]).map(ll);
+        if (end) out = out.concat(add); else out = add.reverse().concat(out);
+        changed = true;
+      });
+      return changed ? Object.assign({}, l, { c: out, pid0: pid(l), j: [true, true] }) : l;
+    });
+  }
+  // (async) the run's route with hanging streets followed round to the next street; resolves true when it changed
+  function streetsFor(k){
+    var R = route(k), rec = ROUTES[k]; if (!R || !rec || rec.R2) return Promise.resolve(false);
+    return Promise.race([namedRoads(k, rec.R), new Promise(function(res){ setTimeout(function(){ res(null); }, 15000); })]).then(function(w){
+      if (!w || ROUTES[k] !== rec) return false;
+      var lines = followStreets(rec.R.lines, w);
+      rec.R2 = Object.assign({}, rec.R, { lines: lines });
+      return lines.some(function(l, i){ return l !== rec.R.lines[i]; });
+    }).catch(function(){ return false; });
+  }
+  window.lbRunStreetsFor = function(k){ return load().then(function(){ return streetsFor(k); }); };   // (test hook)
   function route(k){
     var R = DATA && DATA[k]; if (!R || !R.lines) return R;
     var grp = groupFor(parse(k)), hs = [];
     if (grp) grp.sites.forEach(function(s){ var la = +s.lat, ln = +s.lng; if (la && ln) hs.push([la, ln]); });
-    if (ROUTES[k] && ROUTES[k].n === hs.length) return ROUTES[k].R;
+    if (ROUTES[k] && ROUTES[k].n === hs.length) return ROUTES[k].R2 || ROUTES[k].R;
     if (hs.length < 5) { var R0 = Object.assign({}, R, { lines: joinEnds(R.lines) }); ROUTES[k] = { n: hs.length, R: R0 }; return R0; }
     var NEAR = 300, CY = 0.003, CX = 0.0038, grid = {}, mx = 111320 * Math.cos(hs[0][0] * Math.PI / 180);
     hs.forEach(function(h){ var c = Math.floor(h[0] / CY) + ':' + Math.floor(h[1] / CX); (grid[c] = grid[c] || []).push(h); });
@@ -39198,6 +39300,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     doneApply();
   }
   function show(key){
+    setTimeout(function(){ streetsFor(key).then(function(ch){ if (ch && curKey === key && !editing) { pagesCache = pagesFor(route(key)); renderView(true); } }); }, 0);
     curKey = key; curPage = 0; orientOverride = null; pageSize = null;
     doneSync(key);
     fillPickers(parse(key));
@@ -39306,7 +39409,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   // sent to the leading hand. Drawn straight on a canvas, so it needs no screen and no print dialogue. If the street
   // tiles can't be had (no signal, or a browser that won't let the canvas be read back) the route is still drawn, on plain grey.
   window.lbRunMapImage = function(key, o2){
-    return load().then(function(){
+    return load().then(function(){ var k0 = key || currentKey(); return k0 && DATA[k0] ? streetsFor(k0) : null; }).then(function(){
       var k = key || currentKey(); if (!k || !DATA[k]) return null;
       var R = route(k), o = parse(k), E = edits(k), rc = null;
       try { rc = window.lbRunCheck ? window.lbRunCheck() : null; } catch (e) {}
