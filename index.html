@@ -31798,10 +31798,14 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       for (var y = cy - 1; y <= cy + 1; y++) for (var x = cx - 1; x <= cx + 1; x++) { var a = grid[y + ':' + x]; if (a) for (var k = 0; k < a.length; k++) if (dist(la, ln, a[k][0], a[k][1]) <= 35) return true; }
       return false;
     };
+    /* A street is DONE when nothing on it is still to lift. A bin the truck drove past without stopping (pink, 'missed') is a
+       bin that was not put out (or one the driver chose to skip), so it must not keep the street open: with a third of the
+       bins not out every street had a pink one, and the run sheet map showed 3 of 41 streets done after 646 bins. Pink bins
+       stay listed in 'Check my run' (streets / pink) and on the map for a second look, they just don't hold the street. */
     var streets = {}, left = 0, pink = 0, houses = 0, total = 0, noLoc = 0, seen = {}, sc = g('sourceCoords'), ds = g('activeFilterDataSource');
     grp.sites.forEach(function(site){
       var hl = false, sk = skey ? skey(site) : '', st = streets[sk] || (streets[sk] = { key: sk, name: '', left: 0, pink: 0, bins: 0, hs: 0, driven: false, pts: [] });
-      var hLeft = 0, hBins = 0;
+      var hLeft = 0, hBins = 0, hOpen = 0;
       if (!st.name) st.name = String(site.baseStreetLine || '').replace(/^[^A-Za-z]*\d+[A-Za-z]?\s+/, '').trim() || sk;
       // the same bins the map draws a dot for (same Solo / council choice); a bin with no location can't be ticked off by GPS
       [ds === 'council' ? null : site.soloStreams, ds === 'solo' ? null : site.councilStreams].forEach(function(obj){ ((obj || {})[stream] || []).forEach(function(b){
@@ -31810,16 +31814,16 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
         total++; st.bins++; hBins++;
         if (done.has(id)) return;
         if (missed.has(id)) { pink++; st.pink++; hl = true; hLeft++; return; }
-        left++; st.left++; hl = true; hLeft++;
+        left++; st.left++; hl = true; hLeft++; hOpen++;
       }); });
-      if (hBins && site.lat && +site.lat) st.pts.push([+site.lat, +site.lng, hLeft ? 1 : 0]);   // (where each house is and whether anything there is still to do: the run map PDF colours the two sides of a street apart)
+      if (hBins && site.lat && +site.lat) st.pts.push([+site.lat, +site.lng, hOpen ? 1 : 0]);   // (where each house is and whether anything there is still to do: the run map PDF colours the two sides of a street apart)
       if (hl) { st.hs++; houses++; }
       if (!st.driven && site.lat && +site.lat && near(+site.lat, +site.lng)) st.driven = true;
     });
     var list = Object.keys(streets).map(function(k){ return streets[k]; });
     return { run: r, total: total, left: left, pink: pink, houses: houses, noLoc: noLoc,
       streets: list.filter(function(x){ return x.left || x.pink; }).sort(function(a, b){ return (b.left + b.pink) - (a.left + a.pink); }),
-      all: list, doneStreets: list.filter(function(x){ return x.bins && !x.left && !x.pink; }).map(function(x){ return x.name; }),
+      all: list, doneStreets: list.filter(function(x){ return x.bins && !x.left; }).map(function(x){ return x.name; }),
       notDriven: list.filter(function(x){ return !x.driven && x.bins; }), hasTrail: Object.keys(grid).length > 0, streetKeys: Object.keys(streets) };
   }
   window.lbRunCheck = runCheck;   // the run map asks it which streets of the shift's run are finished
@@ -39162,7 +39166,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
         x.fillText('Run ' + String(o.run).toUpperCase() + (o.week || '') + ' · ' + o.day + ' · ' + o.stream, 20, 48);
         var done = dn.length, tot = rc && rc.streetKeys ? rc.streetKeys.length : 0;
         x.font = '28px system-ui, Arial, sans-serif'; x.fillStyle = '#374151';
-        x.fillText((done ? done + (tot ? ' of ' + tot : '') + ' streets done (red) · ' : '') + (split ? split + ' with one side done (red side done, other side still to do) · ' : '') + new Date().toLocaleDateString('en-AU') + ' ' + new Date().toLocaleTimeString('en-AU', { hour: '2-digit', minute: '2-digit' }), 20, 92);
+        x.fillText((done ? done + (tot ? ' of ' + tot : '') + ' streets done (red) · ' : '') + (split ? split + ' with one side done (red side done, other side still to do) · ' : '') + (rc && rc.pink ? rc.pink + ' bins passed, not lifted · ' : '') + new Date().toLocaleDateString('en-AU') + ' ' + new Date().toLocaleTimeString('en-AU', { hour: '2-digit', minute: '2-digit' }), 20, 92);
         return new Promise(function(res){
           try { c.toBlob(function(bl){ if (!bl) { res(null); return; } bl.arrayBuffer().then(function(ab){ res({ jpeg: new Uint8Array(ab), w: c.width, h: c.height }); }, function(){ res(null); }); }, 'image/jpeg', 0.85); }
           catch (e) { res(null); }
@@ -42278,16 +42282,16 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
   var sgKey = '', sgVal = null;
   function streetsToGo(){
     var st = null; try { st = window.lbStreetStats._t.state(); } catch (e) { return null; }
-    var run = st && st.run, done = g('servicedBinSerials');
+    var run = st && st.run, done = g('servicedBinSerials'), miss = g('missedBinSerials');
     if (!run || !run.streets || !done || typeof done.has !== 'function') return null;
-    var key = run.sig + '|' + done.size;
+    var key = run.sig + '|' + done.size + '|' + (miss && miss.size || 0);
     if (key === sgKey) return sgVal;
     var n = 0;
     run.streets.forEach(function(s){
       var items = s.items || [];
       for (var i = 0; i < items.length; i++) {
         var ser = items[i].serials || [];
-        for (var j = 0; j < ser.length; j++) if (!done.has(ser[j])) { n++; return; }
+        for (var j = 0; j < ser.length; j++) if (!done.has(ser[j]) && !(miss && miss.has && miss.has(ser[j]))) { n++; return; }
       }
     });
     sgKey = key; sgVal = n;
