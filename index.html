@@ -38577,7 +38577,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     if (!src || src.length < 2) return src;
     var lat0 = src[0].c[0][0], MX = 111320 * Math.cos(lat0 * Math.PI / 180), d = function(a, b){ return Math.hypot((a[0] - b[0]) * 110540, (a[1] - b[1]) * MX); };
     var lines = src.map(function(l){ return l; }), used = lines.map(function(){ return false; }), out = [];
-    var endsAt = function(P, n, skip){ var r = []; lines.forEach(function(l, i){ if (used[i] || i === skip || l.n !== n || l.c.length < 2) return; if (d(l.c[0], P) <= 3) r.push([i, 0]); else if (d(l.c[l.c.length - 1], P) <= 3) r.push([i, 1]); }); return r; };
+    // (up to 8 m apart: two pieces of a street that stop just short of each other - Grant St, 219A Monday - are one line, the gap closed)
+    var endsAt = function(P, n, skip){ var r = []; lines.forEach(function(l, i){ if (used[i] || i === skip || l.n !== n || l.c.length < 2) return; var a = d(l.c[0], P), z = d(l.c[l.c.length - 1], P); if (a <= 8 && a <= z) r.push([i, 0]); else if (z <= 8) r.push([i, 1]); }); return r; };
     lines.forEach(function(l, i){
       if (used[i]) return; used[i] = true;
       if (!l.n || l.c.length < 2) { out.push(l); return; }
@@ -38588,7 +38589,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
           if (m.length !== 1) break;
           var j = m[0][0], o = lines[j], oc = m[0][1] === 0 ? o.c.slice() : o.c.slice().reverse();   // (oc starts at P)
           used[j] = true; ids.push(pid(o)); if (o.alias) ids = ids.concat(o.alias); grew = true;
-          if (side) c = c.concat(oc.slice(1)); else c = oc.slice(1).reverse().concat(c);
+          var skip1 = d(oc[0], P) <= 1 ? 1 : 0;   // (the same point: drop the copy; a few metres apart: keep both, the gap is bridged)
+          if (side) c = c.concat(oc.slice(skip1)); else c = oc.slice(skip1).reverse().concat(c);
         }
       });
       out.push(grew ? Object.assign({}, l, { c: c, pid0: pid(l), alias: (l.alias || []).concat(ids) }) : l);
@@ -38691,7 +38693,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       lines = followStreets(lines, w, (g('sharedStreetModes') || []).map(function(m){ return m.points || []; }).filter(function(c){ return c.length > 1; }));
       lines = joinEnds(lines);   // (once more: a street can now run straight on to a stretch added for houses, like Old Mornington Rd to the Nepean Hwy one)
       var ch = lines.length !== base.length || lines.some(function(l, i){ return l !== base[i]; });
-      rec.R2 = cutAll(Object.assign({}, rec.base, { lines: dedupe(lines) }));   // (joining can lay a street over one already there)
+      // (joining can lay a street over one already there; taking that out can leave an end a few metres short, so join once more)
+      rec.R2 = cutAll(Object.assign({}, rec.base, { lines: joinEnds(dedupe(lines)) }));
       return ch;
     }).catch(function(){ return false; });
   }
@@ -38978,7 +38981,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var paintExtras = function(){
       xLayer.clearLayers();
       sideList.forEach(function(x){
-        L.polyline(offsetLL(map, x.l.c, 0), { color: '#fff', weight: opts.edit ? 13 : 11, opacity: 1, interactive: false, lineCap: 'round' }).addTo(xLayer);
+        L.polyline(offsetLL(map, x.l.c, 0), { color: '#fff', weight: opts.edit ? 13 : 11, opacity: 1, interactive: false, lineCap: 'butt' }).addTo(xLayer);
         L.polyline(offsetLL(map, x.l.c, -2.8), { color: x.S.l || x.col, weight: opts.edit ? 4.6 : 4, opacity: 1, interactive: false, lineCap: 'butt' }).addTo(xLayer);
         L.polyline(offsetLL(map, x.l.c, 2.8), { color: x.S.r || x.col, weight: opts.edit ? 4.6 : 4, opacity: 1, interactive: false, lineCap: 'butt' }).addTo(xLayer);
       });
@@ -38986,8 +38989,9 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       E.drawn.forEach(function(d){
         if (!d.side) return;
         var o = d.side === 'r' ? 5.5 : -5.5;
-        L.polyline(offsetLL(map, d.c, o), { color: '#fff', weight: opts.edit ? 8 : 7, opacity: 1, interactive: false, lineCap: 'round', lineJoin: 'round' }).addTo(xLayer);
-        L.polyline(offsetLL(map, d.c, o), { color: d.s, weight: opts.edit ? 4.5 : 4, opacity: 1, interactive: false, lineCap: 'round', lineJoin: 'round' }).addTo(xLayer);
+        // (square ends: the white edge runs along the sides only, not round the ends where it cut across the street's own line)
+        L.polyline(offsetLL(map, d.c, o), { color: '#fff', weight: opts.edit ? 8 : 7, opacity: 1, interactive: false, lineCap: 'butt', lineJoin: 'round' }).addTo(xLayer);
+        L.polyline(offsetLL(map, d.c, o), { color: d.s, weight: opts.edit ? 4.5 : 4, opacity: 1, interactive: false, lineCap: 'butt', lineJoin: 'round' }).addTo(xLayer);
       });
       E.arrows.forEach(function(a){
         var ac = a.col || '#111827';
@@ -40049,7 +40053,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
         // (a street with its own colour each side - the One side tool - is two lines side by side, like a half-done one)
         var sideOf = function(m){ var S = (E.sides || {})[pid(m.l)]; return S && (S.l || S.r) ? S : null; };
         x.strokeStyle = '#fff';
-        lines.forEach(function(m, i){ var S = sideOf(m); parts[i].forEach(function(pt){ var two = pt.l !== pt.r || (S && !(pt.l && pt.r)); x.lineWidth = two ? 17 : 12; if (two) offs(pt.c, 0); else path(pt.c); }); });
+        lines.forEach(function(m, i){ var S = sideOf(m); parts[i].forEach(function(pt){ var two = pt.l !== pt.r || (S && !(pt.l && pt.r)); x.lineWidth = two ? 17 : 12; if (two) { x.lineCap = 'butt'; offs(pt.c, 0); x.lineCap = 'round'; } else path(pt.c); }); });
         E.drawn.forEach(function(d){ if (d.side) return; x.lineWidth = 12; path(d.c); });
         lines.forEach(function(m, i){ var S = sideOf(m), cl = (S && S.l) || m.col, cr = (S && S.r) || m.col; parts[i].forEach(function(pt){
           if (pt.l === pt.r && (pt.l || !S)) { x.strokeStyle = pt.l ? DONE_COL : m.col; x.lineWidth = 7; path(pt.c); return; }
@@ -40058,7 +40062,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
           x.strokeStyle = pt.r ? DONE_COL : cr; offs(pt.c, 4.5);
         }); });
         E.drawn.forEach(function(d){
-          if (d.side) { var o = d.side === 'r' ? 8 : -8; x.strokeStyle = '#fff'; x.lineWidth = 10; offs(d.c, o); x.strokeStyle = d.s; x.lineWidth = 6; offs(d.c, o); return; }   // (snapped: beside the street)
+          if (d.side) { var o = d.side === 'r' ? 8 : -8; x.lineCap = 'butt'; x.strokeStyle = '#fff'; x.lineWidth = 10; offs(d.c, o); x.strokeStyle = d.s; x.lineWidth = 6; offs(d.c, o); x.lineCap = 'round'; return; }   // (snapped: beside the street, square ends)
           x.strokeStyle = d.s; x.lineWidth = 7; path(d.c);
         });
         // direction arrows and collection points
