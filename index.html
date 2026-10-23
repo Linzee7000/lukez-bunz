@@ -38189,6 +38189,10 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   #lbRunMap .rm-bar .rm-rot button.rm-fine { padding: 0 8px; min-width: 40px; background: #e5e7eb; }
   #lbRunMap .rm-bar #rmKey { max-width: 36vw; }
   #lbRunMap .rm-card.rm-key { padding-right: 44px; cursor: grab; touch-action: none; }
+  #lbRunMap .rm-card.rm-notes.rm-movable { cursor: grab; touch-action: none; }
+  #lbRunMap .rm-card.rm-notes.rm-dragging { cursor: grabbing; box-shadow: 0 4px 18px rgba(0,0,0,.3); outline: 2px dashed #64748b; }
+  #lbRunMap .rm-lbl.rm-lbl-drag { pointer-events: auto; cursor: grab; touch-action: none; }
+  #lbRunMap .rm-lbl.rm-lbl-drag.rm-dragging { cursor: grabbing; outline: 2px dashed #64748b; outline-offset: 2px; }
   #lbRunMap .rm-card.rm-key.rm-dragging { cursor: grabbing; box-shadow: 0 4px 18px rgba(0,0,0,.3); outline: 2px dashed #64748b; }
   #lbRunMap .rm-north { position: absolute; top: 8px; right: 8px; width: 28px; height: 40px; pointer-events: none; }
   #lbRunMap .rm-north svg { display: block; width: 28px; height: 40px; transform-origin: 50% 50%; }
@@ -38288,7 +38292,14 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   var DATA = null, loading = null;
   function load(){
     if (DATA) return Promise.resolve(DATA);
-    if (!loading) loading = fetch('data/run-routes.json', { cache: 'no-cache' }).then(function(r){ return r.ok ? r.json() : null; }).then(function(d){ DATA = (d && d.runs) || {}; return DATA; }).catch(function(){ DATA = {}; return DATA; });
+    if (!loading) loading = fetch('data/run-routes.json', { cache: 'no-cache' }).then(function(r){ return r.ok ? r.json() : null; }).then(function(d){
+      DATA = (d && d.runs) || {};
+      // Recycling / FOGO entries with no week letter ("Recycling#Friday##219") are scraps of 1-37 street pieces from badly placed
+      // pages, not run maps; opened from a filter with no week they showed instead of the run (219A Monday came up as "Run 219
+      // Friday, 0.7 km"). Left out, so such a key falls through to the run's own A / B map.
+      Object.keys(DATA).forEach(function(k){ var o = parse(k); if (o.stream !== 'Garbage' && !o.week) delete DATA[k]; });
+      return DATA;
+    }).catch(function(){ DATA = {}; return DATA; });
     return loading;
   }
   var COL = { Garbage: '#dc2626', Recycling: '#eab308', FOGO: '#16a34a' };
@@ -38336,7 +38347,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var mine = (lsGet('lbRunMapEdits', {}) || {})[key], fleet = (lsGet('lbRunMapEditsFleet', {}) || {})[key];
     var e = (fleet && (!mine || (fleet.ts || 0) > (mine.ts || 0))) ? fleet : mine;
     e = e || {};
-    return { pieces: e.pieces || {}, drawn: e.drawn || [], notes: e.notes || [], hide: e.hide || [], names: e.names || {}, ts: e.ts || 0 };
+    return { pieces: e.pieces || {}, drawn: e.drawn || [], notes: e.notes || [], hide: e.hide || [], names: e.names || {}, labels: e.labels || {}, ts: e.ts || 0 };
   }
   function saveEdits(key, E){
     E.ts = Date.now();
@@ -38473,6 +38484,10 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     });
   }
   function followStreets(lines, ways, extra){
+    // two goes: the first also lets a street run on to its corner, the second can then meet a street the first carried on
+    return followStreets1(followStreets1(lines, ways, extra, 1), ways, extra, 2);
+  }
+  function followStreets1(lines, ways, extra, pass){
     if (!lines.length || !ways || !ways.length) return lines;
     var lat0 = lines[0].c[0][0], lng0 = lines[0].c[0][1], MY = 110540, MX = 111320 * Math.cos(lat0 * Math.PI / 180);
     var xy = function(p){ return [(p[1] - lng0) * MX, (p[0] - lat0) * MY]; }, ll = function(P){ return [+(lat0 + P[1] / MY).toFixed(6), +(lng0 + P[0] / MX).toFixed(6)]; };
@@ -38486,13 +38501,15 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var mkG = function(ws){
       var N = [], idx = {}, nid = function(P){ var key = Math.round(P[0] * 2) + ',' + Math.round(P[1] * 2), i = idx[key]; if (i == null) { i = idx[key] = N.length; N.push({ p: P, adj: [] }); } return i; };
       ws.forEach(function(w){ for (var i = 1; i < w.length; i++) { var a = nid(w[i - 1]), b = nid(w[i]); if (a !== b) { N[a].adj.push(b); N[b].adj.push(a); } } });
-      return N;
+      N.idx = idx; return N;
     };
     var byName = {}, allW = [];
     ways.forEach(function(w){ var c = w[1].map(xy), n = normSt(w[0]); (byName[n] = byName[n] || []).push(c); allW.push(c); });
     var graphs = {}, gAll = null;
     // from the hanging end E (heading d) along the network G: on at each join the straightest way, until another route street
-    var walk = function(G, E, d, li, maxM, minDot){
+    // corner: when the street itself runs out within 80 m at a junction with another road, end there (Old Mornington Rd's line
+    // stopped 54 m short of the Nepean Hwy lights; the stretch added for the Nepean Hwy houses then meets it)
+    var walk = function(G, E, d, li, maxM, minDot, corner){
       var best = null, bd = 25;
       G.forEach(function(nd, a){ nd.adj.forEach(function(b){ if (b < a) return; var r = segD(E, nd.p, G[b].p); if (r[0] < bd) { bd = r[0]; best = { a: a, b: b, P: r[1] }; } }); });
       if (!best) return null;
@@ -38505,7 +38522,13 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
         walked += sl; path.push(T); cur = T;
         var hd = [T[0] - G[prev].p[0], T[1] - G[prev].p[1]], hl = Math.hypot(hd[0], hd[1]) || 1, pick = null, pd = -2;
         G[next].adj.forEach(function(c2){ if (c2 === prev) return; var v = [G[c2].p[0] - T[0], G[c2].p[1] - T[1]], vl = Math.hypot(v[0], v[1]) || 1, dot = (v[0] * hd[0] + v[1] * hd[1]) / vl / hl; if (dot > pd) { pd = dot; pick = c2; } });
-        if (pick == null || pd < minDot) break;                                // the street ends (or turns too sharply)
+        if (pick == null || pd < minDot) {                                     // the street ends (or turns too sharply)
+          if (corner && pick == null && !end2 && walked >= 5 && walked <= 80) {
+            var gA = gAll || (gAll = mkG(allW)), kk = Math.round(T[0] * 2) + ',' + Math.round(T[1] * 2), ni = gA.idx[kk];
+            if (ni != null && gA[ni].adj.length >= 2) return path;           // a junction: other roads go on from here
+          }
+          break;
+        }
         prev = next; next = pick;
       }
       return end2 ? path.concat([end2]) : null;
@@ -38513,21 +38536,22 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     return lines.map(function(l, li){
       if (l.c.length < 2) return l;
       var n = l.n ? normSt(l.n) : '', G = n ? (graphs[n] !== undefined ? graphs[n] : (graphs[n] = byName[n] ? mkG(byName[n]) : null)) : null;
-      var out = l.c.slice(), changed = false;
+      var out = l.c.slice(), changed = false, jj = [!!(l.j && l.j[0]), !!(l.j && l.j[1])];
       [0, 1].forEach(function(end){
-        if (l.j && l.j[end]) return;                                             // joined straight ahead already
+        if (jj[end]) return;                                                     // joined already
         var E = xy(end ? l.c[l.c.length - 1] : l.c[0]), N0 = xy(end ? l.c[l.c.length - 2] : l.c[1]);
         var dl = Math.hypot(E[0] - N0[0], E[1] - N0[1]) || 1, d = [(E[0] - N0[0]) / dl, (E[1] - N0[1]) / dl];
         // its own street first (round bends, up to 400 m); else any road on ahead (no turn sharper than about 70 degrees, 250 m:
         // St Johns La runs into Mount Eliza Way at 61 degrees)
         var path = G ? walk(G, E, d, li, 400, -0.2) : null;
         if (!path) path = walk(gAll || (gAll = mkG(allW)), E, d, li, 250, 0.33);
+        if (!path && G && pass === 1) path = walk(G, E, d, li, 80, -0.2, true);
         if (!path) return;
         var add = path.map(ll);
         if (end) out = out.concat(add); else out = add.reverse().concat(out);
-        changed = true;
+        changed = true; jj[end] = true;
       });
-      return changed ? Object.assign({}, l, { c: out, pid0: pid(l), j: [true, true] }) : l;
+      return changed ? Object.assign({}, l, { c: out, pid0: pid(l), j: jj }) : l;
     });
   }
   /* ---- every street cut at its corners ----
@@ -38902,7 +38926,10 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       var nc = document.createElement('div'); nc.className = 'rm-card rm-notes';
       nc.innerHTML = '<ol>' + pinned.map(function(p, i){ return '<li><b>' + (i + 1) + '</b><span>' + esc(p.text) + '</span></li>'; }).join('') + '</ol>';
       st.page.appendChild(nc);
+      st.notesPos = opts.notesPos || null;
+      if (opts.onNotesMove) { nc.classList.add('rm-movable'); keyDraggable(nc, st, opts.onNotesMove); }   // (dragged like the key, so it can be moved off the streets)
     }
+    st.lblPos = E.labels || {}; st.onLabelMove = opts.onLabelMove || null;
     var ft = document.createElement('div'); ft.className = 'rm-foot'; ft.textContent = 'Lukez Bunz run map · ' + new Date().toLocaleDateString('en-AU') + ' ' + new Date().toLocaleTimeString('en-AU', { hour: '2-digit', minute: '2-digit', hour12: false }).replace(':', '') + ' · streets © OpenStreetMap contributors';
     st.page.appendChild(ft);
     // taps on the cards stay on the cards (they don't add a note or colour the street underneath)
@@ -39031,6 +39058,38 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   }
 
   /* ---- our own street names: along the street, never upside down, never on top of each other ---- */
+  /* A street name can be dragged off the line it covers (on the screen map; the spot is saved with the run's edits, so the printed
+     map and the other phones show it there too). Double-tap puts it back where it goes by itself. */
+  function lblDrag(st, s, id){
+    var map = st.map, drag = null;
+    s.classList.add('rm-lbl-drag'); s.title = 'Drag to move this name · double-tap to put it back';
+    L.DomEvent.disableClickPropagation(s);
+    s.addEventListener('pointerdown', function(e){
+      if (e.button > 0) return;
+      e.stopPropagation(); e.preventDefault();
+      drag = { id: e.pointerId, moved: false, x: e.clientX, y: e.clientY };
+      try { s.setPointerCapture(e.pointerId); } catch (x) {}
+      if (map.dragging) map.dragging.disable();
+    });
+    s.addEventListener('pointermove', function(e){
+      if (!drag) return;
+      e.stopPropagation(); e.preventDefault();
+      if (!drag.moved && Math.abs(e.clientX - drag.x) + Math.abs(e.clientY - drag.y) < 5) return;
+      drag.moved = true; s.classList.add('rm-dragging');
+      var lp = map.containerPointToLayerPoint(map.mouseEventToContainerPoint(e));
+      s.style.left = lp.x + 'px'; s.style.top = lp.y + 'px';
+    });
+    var end = function(e){
+      if (!drag) return;
+      var moved = drag.moved; drag = null; s.classList.remove('rm-dragging');
+      if (map.dragging) map.dragging.enable();
+      if (!moved) return;
+      var ll = map.mouseEventToLatLng(e);
+      st.onLabelMove && st.onLabelMove(id, [+ll.lat.toFixed(6), +ll.lng.toFixed(6)]);
+    };
+    s.addEventListener('pointerup', end); s.addEventListener('pointercancel', end);
+    s.addEventListener('dblclick', function(e){ e.stopPropagation(); e.preventDefault(); st.onLabelMove && st.onLabelMove(id, null); });
+  }
   function labels(st){
     var map = st.map, R = st.R, pane = map.getPane('rmLabels'); if (!pane) return; pane.innerHTML = '';   // (a map already replaced by a redraw)
     var m = st.page.getBoundingClientRect(), boxes = [];
@@ -39039,11 +39098,31 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var pieces = R.lines.filter(function(l){ return l.n; }).map(function(l){
       var pts = l.c.map(function(c){ return map.latLngToContainerPoint(c); }), len = 0;
       for (var i = 1; i < pts.length; i++) len += pts[i].distanceTo(pts[i - 1]);
-      return { n: l.n, pts: pts, len: len };
+      return { n: l.n, pts: pts, len: len, id: pid(l) };
     }).sort(function(a, b){ return b.len - a.len; });
-    var named = {};
+    var named = {}, LP = st.lblPos || {}, mkLbl = function(p, text, fsz, cx, cy, ang){
+      var s = document.createElement('div'); s.className = 'rm-lbl'; s.textContent = text; s.style.fontSize = fsz + 'px';
+      var lp = map.containerPointToLayerPoint([cx, cy]);
+      s.style.left = lp.x + 'px'; s.style.top = lp.y + 'px';
+      s.style.transform = 'rotate(' + (ang - (st.rot || 0)).toFixed(1) + 'deg) translate(-50%, -50%)';
+      if (st.onLabelMove) lblDrag(st, s, p.id);
+      pane.appendChild(s);
+    };
+    var short = function(n){ return n.replace(/\bRoad$/, 'Rd').replace(/\bStreet$/, 'St').replace(/\bAvenue$/, 'Ave').replace(/\bCourt$/, 'Ct').replace(/\bDrive$/, 'Dr').replace(/\bCrescent$/, 'Cres').replace(/\bParade$/, 'Pde').replace(/\bPlace$/, 'Pl'); };
+    // names the driver dragged somewhere (they stay there, at the angle of their own street, and nothing else lands on them)
+    pieces.forEach(function(p){
+      var at = LP[p.id]; if (!at || named[p.n + '#' + p.id]) return;
+      var q = map.latLngToContainerPoint(at), best = null, bd = Infinity;
+      for (var i = 1; i < p.pts.length; i++) { var d = L.LineUtil.pointToSegmentDistance(q, p.pts[i - 1], p.pts[i]); if (d < bd) { bd = d; best = [p.pts[i - 1], p.pts[i]]; } }
+      var ang = best ? Math.atan2(best[1].y - best[0].y, best[1].x - best[0].x) * 180 / Math.PI + (st.rot || 0) : 0;
+      ang = ((ang % 360) + 540) % 360 - 180; if (ang > 90) ang -= 180; if (ang < -90) ang += 180;
+      var v = toView(st, q.x, q.y), w = short(p.n).length * fs * 0.6 + 6;
+      boxes.push([v.x - w / 2, v.y - fs / 2, v.x + w / 2, v.y + fs / 2]); named[p.n] = 1; named[p.n + '#' + p.id] = 1; p.moved = true;
+      mkLbl(p, short(p.n), fs, q.x, q.y, ang);
+    });
     [[fs, 0.55], [fs - 2, 0.35]].forEach(function(pass){ var fsz = pass[0], need = pass[1];
       pieces.forEach(function(p){
+        if (p.moved) return;
         if (need < 0.5 && named[p.n]) return;
         var text = p.n.replace(/\bRoad$/, 'Rd').replace(/\bStreet$/, 'St').replace(/\bAvenue$/, 'Ave').replace(/\bCourt$/, 'Ct').replace(/\bDrive$/, 'Dr').replace(/\bCrescent$/, 'Cres').replace(/\bParade$/, 'Pde').replace(/\bPlace$/, 'Pl').replace(/\bGrove$/, 'Gr').replace(/\bClose$/, 'Cl').replace(/\bHighway$/, 'Hwy').replace(/\bLane$/, 'La').replace(/\bTerrace$/, 'Tce').replace(/\bBoulevard$/, 'Bvd');
         var w = text.length * fsz * 0.6 + 6;
@@ -39061,11 +39140,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
         var box = [mx - hw, my - hh, mx + hw, my + hh];
         if (boxes.some(function(o){ return !(box[2] < o[0] || box[0] > o[2] || box[3] < o[1] || box[1] > o[3]); })) return;
         boxes.push(box); named[p.n] = 1;
-        var s = document.createElement('div'); s.className = 'rm-lbl'; s.textContent = text; s.style.fontSize = fsz + 'px';
-        var lp = map.containerPointToLayerPoint([cx, cy]);
-        s.style.left = lp.x + 'px'; s.style.top = lp.y + 'px';
-        s.style.transform = 'rotate(' + (ang - (st.rot || 0)).toFixed(1) + 'deg) translate(-50%, -50%)';
-        pane.appendChild(s);
+        mkLbl(p, text, fsz, cx, cy, ang);
       });
     });
   }
@@ -39090,6 +39165,12 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       if (card === keyCard && kp && kp.x != null) {
         card.style.left = Math.max(0, Math.min(W - card.offsetWidth, kp.x * W)) + 'px';
         card.style.top = Math.max(0, Math.min(H - card.offsetHeight, kp.y * H)) + 'px';
+        return;
+      }
+      var np = st.notesPos;
+      if (np && np.x != null && card.classList.contains('rm-notes')) {
+        card.style.left = Math.max(0, Math.min(W - card.offsetWidth, np.x * W)) + 'px';
+        card.style.top = Math.max(0, Math.min(H - card.offsetHeight, np.y * H)) + 'px';
         return;
       }
       card.style[q.charAt(0) === 't' ? 'top' : 'bottom'] = (q.charAt(0) === 't' ? 10 : 22) + 'px';
@@ -39398,6 +39479,14 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     opts.rot = rotFor(curKey);
     opts.keyPos = keyFor(curKey);
     opts.onKeyMove = function(pos){ setKey(pos); };
+    opts.notesPos = keyFor(curKey + '|notes');
+    opts.onNotesMove = function(pos){ var all = lsGet('lbRunMapKey', {}) || {}; if (pos) all[curKey + '|notes'] = pos; else delete all[curKey + '|notes']; lsSet('lbRunMapKey', all); if (view) { view.notesPos = pos; placeCards(view); } };
+    opts.onLabelMove = function(id, ll){
+      var E = edits(curKey); E.labels = E.labels || {};
+      if (ll) E.labels[id] = ll; else delete E.labels[id];
+      saveEdits(curKey, E);
+      if (view) { view.lblPos = E.labels; labels(view); }
+    };
     if (kept) opts.view = kept;
     if (editing && keptOrder) opts.order = keptOrder;
     view = draw(d.map, curKey, R, pg, opts);
@@ -39462,7 +39551,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     sheets.forEach(function(sh){
       var d = pageDiv(sh.o, null); host.appendChild(d.page);
       var v = sh.screen ? (fitPts ? null : { c: c, z: z + Math.log2((d.page.clientWidth || PAGE[sh.o][0] * MM) / screenW) }) : sh.view;
-      var st = draw(d.map, curKey, R, pagesCache[0], { view: v, fitPts: sh.screen ? fitPts : null, order: fitPts ? null : sh.order, rot: rot, keyPos: kp, pageLabel: sh.label });
+      var st = draw(d.map, curKey, R, pagesCache[0], { view: v, fitPts: sh.screen ? fitPts : null, order: fitPts ? null : sh.order, rot: rot, keyPos: kp, notesPos: keyFor(curKey + '|notes'), pageLabel: sh.label });
       if (sh.frames) drawFrames(st, P, false);
       if (sh.page != null) drawLinks(st, P, sh.page);
       printing.push(st);
@@ -39527,7 +39616,9 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       if (k && !DATA[k]) {
         // (opened with no week in the filter, say: "Recycling#Monday##219" is not a key, "Recycling#Monday#A#219" is - it used to open
         // whichever run sorted first instead)
-        var o0 = parse(k), wk0 = ''; try { wk0 = (window.lbShiftRun && window.lbShiftRun() || {}).week || ''; } catch (e) {}
+        var o0 = parse(k), wk0 = '';
+        try { wk0 = (window.lbShiftRun && window.lbShiftRun() || {}).week || ''; } catch (e) {}
+        try { if (!wk0 && typeof getActiveRecycleWeekForDate === 'function') { var rw = getActiveRecycleWeekForDate(new Date()); wk0 = o0.stream === 'FOGO' ? (rw === 'A' ? 'B' : 'A') : rw; } } catch (e) {}   // (this week's letter)
         var near0 = keys().map(parse).filter(function(x){ return x.stream === o0.stream && String(x.run).toLowerCase() === String(o0.run).toLowerCase(); });
         var pick0 = near0.filter(function(x){ return x.day === o0.day && x.week === wk0; })[0] || near0.filter(function(x){ return x.day === o0.day && x.week; })[0] || near0.filter(function(x){ return x.day === o0.day; })[0] || near0[0];
         k = pick0 ? keyOf(pick0) : null;
