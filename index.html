@@ -38394,9 +38394,13 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
         }
         // just beside: the nearest point on the segment, if within a few metres
         var L2 = ex * ex + ey * ey || 1e-9, s = Math.max(0, Math.min(1, ((E[0] - A[0]) * ex + (E[1] - A[1]) * ey) / L2)), Q = [A[0] + s * ex, A[1] + s * ey], dd = Math.hypot(Q[0] - E[0], Q[1] - E[1]);
-        if (dd <= SIDE && dd < bt) { bt = dd; best = Q; }
+        if (dd <= SIDE && dd < bt) { bt = dd; best = Q; best.side = sg[2]; }
       });
-      return best && bt > 0.8 ? best : null;
+      if (!best || bt <= 0.8) return null;
+      // joined just beside the loose END of another piece (Coles Ct onto the start of Edgar Pl, which leaves it there): the two are
+      // both hanging, so this end still counts as loose and followStreets carries it on along its own street
+      if (best.side != null) { var oc = src[best.side].c, e0 = xy(oc[0]), e1 = xy(oc[oc.length - 1]); if (Math.hypot(best[0] - e0[0], best[1] - e0[1]) < 4 || Math.hypot(best[0] - e1[0], best[1] - e1[1]) < 4) best.loose = true; }
+      return best;
     };
     return src.map(function(l, li){
       var c = l.c; if (c.length < 2) return l;
@@ -38408,7 +38412,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
         var dl = Math.hypot(E[0] - N[0], E[1] - N[1]), d = [(E[0] - N[0]) / dl, (E[1] - N[1]) / dl], Q = reach(li, E, d);
         if (!Q) return;
         if (end) out.push(ll(Q)); else out.unshift(ll(Q));
-        changed = true; joined[end] = true;
+        changed = true; joined[end] = !Q.loose;
       });
       return changed ? Object.assign({}, l, { c: out, pid0: pid(l), j: joined }) : l;
     });
@@ -38465,52 +38469,57 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       return rdQ[k];
     });
   }
-  function followStreets(lines, ways){
+  function followStreets(lines, ways, extra){
     if (!lines.length || !ways || !ways.length) return lines;
     var lat0 = lines[0].c[0][0], lng0 = lines[0].c[0][1], MY = 110540, MX = 111320 * Math.cos(lat0 * Math.PI / 180);
     var xy = function(p){ return [(p[1] - lng0) * MX, (p[0] - lat0) * MY]; }, ll = function(P){ return [+(lat0 + P[1] / MY).toFixed(6), +(lng0 + P[0] / MX).toFixed(6)]; };
     var segD = function(P, A, B){ var ex = B[0] - A[0], ey = B[1] - A[1], L2 = ex * ex + ey * ey || 1e-9, t = Math.max(0, Math.min(1, ((P[0] - A[0]) * ex + (P[1] - A[1]) * ey) / L2)); return [Math.hypot(P[0] - A[0] - t * ex, P[1] - A[1] - t * ey), [A[0] + t * ex, A[1] + t * ey], t]; };
-    // the route's own pieces, for "has it reached another street of the route yet"
+    // what a hanging street may join: the route's other pieces, and the reverse-in / drive-in lines on the map (extra, li -1)
     var C = 60, grid = {};
-    lines.forEach(function(l, li){ for (var i = 1; i < l.c.length; i++) { var A = xy(l.c[i - 1]), B = xy(l.c[i]), sg = [A, B, li], cx = Math.floor((A[0] + B[0]) / 2 / C), cy = Math.floor((A[1] + B[1]) / 2 / C), r = Math.ceil(Math.hypot(B[0] - A[0], B[1] - A[1]) / 2 / C); for (var x = cx - r; x <= cx + r; x++) for (var y = cy - r; y <= cy + r; y++) (grid[x + ':' + y] = grid[x + ':' + y] || []).push(sg); } });
+    var addLine = function(c, li){ for (var i = 1; i < c.length; i++) { var A = xy(c[i - 1]), B = xy(c[i]), sg = [A, B, li], cx = Math.floor((A[0] + B[0]) / 2 / C), cy = Math.floor((A[1] + B[1]) / 2 / C), r = Math.ceil(Math.hypot(B[0] - A[0], B[1] - A[1]) / 2 / C); if (r > 20) continue; for (var x = cx - r; x <= cx + r; x++) for (var y = cy - r; y <= cy + r; y++) (grid[x + ':' + y] = grid[x + ':' + y] || []).push(sg); } };
+    lines.forEach(function(l, li){ addLine(l.c, li); });
+    (extra || []).forEach(function(c){ addLine(c, -1); });
     var hit = function(P, li){ var best = null, bd = 10, cx = Math.floor(P[0] / C), cy = Math.floor(P[1] / C); for (var x = cx - 1; x <= cx + 1; x++) for (var y = cy - 1; y <= cy + 1; y++) (grid[x + ':' + y] || []).forEach(function(sg){ if (sg[2] === li) return; var d = segD(P, sg[0], sg[1]); if (d[0] < bd) { bd = d[0]; best = d[1]; } }); return best; };
-    // each street name's ways as one little network
-    var byName = {};
-    ways.forEach(function(w){ var n = normSt(w[0]); (byName[n] = byName[n] || []).push(w[1].map(xy)); });
-    var graphOf = function(n){
-      var ws = byName[n]; if (!ws) return null;
+    var mkG = function(ws){
       var N = [], idx = {}, nid = function(P){ var key = Math.round(P[0] * 2) + ',' + Math.round(P[1] * 2), i = idx[key]; if (i == null) { i = idx[key] = N.length; N.push({ p: P, adj: [] }); } return i; };
       ws.forEach(function(w){ for (var i = 1; i < w.length; i++) { var a = nid(w[i - 1]), b = nid(w[i]); if (a !== b) { N[a].adj.push(b); N[b].adj.push(a); } } });
       return N;
     };
-    var graphs = {};
+    var byName = {}, allW = [];
+    ways.forEach(function(w){ var c = w[1].map(xy), n = normSt(w[0]); (byName[n] = byName[n] || []).push(c); allW.push(c); });
+    var graphs = {}, gAll = null;
+    // from the hanging end E (heading d) along the network G: on at each join the straightest way, until another route street
+    var walk = function(G, E, d, li, maxM, minDot){
+      var best = null, bd = 25;
+      G.forEach(function(nd, a){ nd.adj.forEach(function(b){ if (b < a) return; var r = segD(E, nd.p, G[b].p); if (r[0] < bd) { bd = r[0]; best = { a: a, b: b, P: r[1] }; } }); });
+      if (!best) return null;
+      var A = G[best.a].p, B = G[best.b].p, fwd = ((B[0] - A[0]) * d[0] + (B[1] - A[1]) * d[1]) >= 0;
+      var cur = best.P, next = fwd ? best.b : best.a, prev = fwd ? best.a : best.b, path = [], walked = 0, end2 = null, guard = 0;
+      while (next != null && walked < maxM && guard++ < 400) {
+        var T = G[next].p, sl = Math.hypot(T[0] - cur[0], T[1] - cur[1]), steps = Math.max(1, Math.ceil(sl / 4));
+        for (var s2 = 1; s2 <= steps && !end2; s2++) { var Q = [cur[0] + (T[0] - cur[0]) * s2 / steps, cur[1] + (T[1] - cur[1]) * s2 / steps]; if (Math.hypot(Q[0] - E[0], Q[1] - E[1]) > 12) { var h = hit(Q, li); if (h) end2 = h; } }
+        if (end2) break;
+        walked += sl; path.push(T); cur = T;
+        var hd = [T[0] - G[prev].p[0], T[1] - G[prev].p[1]], hl = Math.hypot(hd[0], hd[1]) || 1, pick = null, pd = -2;
+        G[next].adj.forEach(function(c2){ if (c2 === prev) return; var v = [G[c2].p[0] - T[0], G[c2].p[1] - T[1]], vl = Math.hypot(v[0], v[1]) || 1, dot = (v[0] * hd[0] + v[1] * hd[1]) / vl / hl; if (dot > pd) { pd = dot; pick = c2; } });
+        if (pick == null || pd < minDot) break;                                // the street ends (or turns too sharply)
+        prev = next; next = pick;
+      }
+      return end2 ? path.concat([end2]) : null;
+    };
     return lines.map(function(l, li){
-      if (!l.n || l.c.length < 2) return l;
-      var n = normSt(l.n), G = graphs[n] !== undefined ? graphs[n] : (graphs[n] = graphOf(n)); if (!G) return l;
+      if (l.c.length < 2) return l;
+      var n = l.n ? normSt(l.n) : '', G = n ? (graphs[n] !== undefined ? graphs[n] : (graphs[n] = byName[n] ? mkG(byName[n]) : null)) : null;
       var out = l.c.slice(), changed = false;
       [0, 1].forEach(function(end){
         if (l.j && l.j[end]) return;                                             // joined straight ahead already
         var E = xy(end ? l.c[l.c.length - 1] : l.c[0]), N0 = xy(end ? l.c[l.c.length - 2] : l.c[1]);
         var dl = Math.hypot(E[0] - N0[0], E[1] - N0[1]) || 1, d = [(E[0] - N0[0]) / dl, (E[1] - N0[1]) / dl];
-        // where the end sits on its street: the nearest stretch of that street within 25 m
-        var best = null, bd = 25;
-        G.forEach(function(nd, a){ nd.adj.forEach(function(b){ if (b < a) return; var r = segD(E, nd.p, G[b].p); if (r[0] < bd) { bd = r[0]; best = { a: a, b: b, P: r[1] }; } }); });
-        if (!best) return;
-        // go on from there the way the line was heading, taking the straightest way on at each join, until another route street
-        var A = G[best.a].p, B = G[best.b].p, fwd = ((B[0] - A[0]) * d[0] + (B[1] - A[1]) * d[1]) >= 0;
-        var cur = best.P, next = fwd ? best.b : best.a, prev = fwd ? best.a : best.b, path = [], walked = 0, end2 = null, guard = 0;
-        while (next != null && walked < 400 && guard++ < 400) {
-          var T = G[next].p, sl = Math.hypot(T[0] - cur[0], T[1] - cur[1]), steps = Math.max(1, Math.ceil(sl / 4));
-          for (var s2 = 1; s2 <= steps && !end2; s2++) { var Q = [cur[0] + (T[0] - cur[0]) * s2 / steps, cur[1] + (T[1] - cur[1]) * s2 / steps]; if (walked + sl * s2 / steps > 12 || Math.hypot(Q[0] - E[0], Q[1] - E[1]) > 12) { var h = hit(Q, li); if (h) end2 = h; } }
-          if (end2) break;
-          walked += sl; path.push(T); cur = T;
-          var hd = [T[0] - G[prev].p[0], T[1] - G[prev].p[1]], hl = Math.hypot(hd[0], hd[1]) || 1, pick = null, pd = -2;
-          G[next].adj.forEach(function(c2){ if (c2 === prev) return; var v = [G[c2].p[0] - T[0], G[c2].p[1] - T[1]], vl = Math.hypot(v[0], v[1]) || 1, dot = (v[0] * hd[0] + v[1] * hd[1]) / vl / hl; if (dot > pd) { pd = dot; pick = c2; } });
-          if (pick == null || pd < -0.2) break;                                  // the street ends (or only turns right back)
-          prev = next; next = pick;
-        }
-        if (!end2) return;
-        var add = path.concat([end2]).map(ll);
+        // its own street first (round bends, up to 400 m); else any road straight on (no turn sharper than 60 degrees, 250 m)
+        var path = G ? walk(G, E, d, li, 400, -0.2) : null;
+        if (!path) path = walk(gAll || (gAll = mkG(allW)), E, d, li, 250, 0.5);
+        if (!path) return;
+        var add = path.map(ll);
         if (end) out = out.concat(add); else out = add.reverse().concat(out);
         changed = true;
       });
@@ -38522,11 +38531,12 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var R = route(k), rec = ROUTES[k]; if (!R || !rec || rec.R2) return Promise.resolve(false);
     return Promise.race([namedRoads(k, rec.R), new Promise(function(res){ setTimeout(function(){ res(null); }, 15000); })]).then(function(w){
       if (!w || ROUTES[k] !== rec) return false;
-      var lines = followStreets(rec.R.lines, w);
+      var lines = followStreets(rec.R.lines, w, (g('sharedStreetModes') || []).map(function(m){ return m.points || []; }).filter(function(c){ return c.length > 1; }));
       rec.R2 = Object.assign({}, rec.R, { lines: lines });
       return lines.some(function(l, i){ return l !== rec.R.lines[i]; });
     }).catch(function(){ return false; });
   }
+  window.lbRunFollow = function(l, w, x){ return followStreets(l, w, x); };   // (test hook)
   window.lbRunStreetsFor = function(k){ return load().then(function(){ return streetsFor(k); }); };   // (test hook)
   function route(k){
     var R = DATA && DATA[k]; if (!R || !R.lines) return R;
