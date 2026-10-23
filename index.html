@@ -38244,6 +38244,10 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   #lbRunMap .rm-tools.rm-tools .rm-sw.on { box-shadow: 0 0 0 2px #ffd21f; }
   #lbRunMap .rm-tools.rm-tools .rm-pick { width: 26px; height: 26px; min-height: 26px; align-self: center; border: 2px solid #000; border-radius: 5px; }
   #lbRunMap .rm-tools .rm-dash { display: inline-block; width: 12px; height: 4px; border-radius: 2px; }
+  #lbRunMap .rm-tools .rm-cap { font: 800 10px/1.1 Roboto, system-ui, sans-serif; text-transform: uppercase; letter-spacing: .4px; color: #9ca3af; max-width: 56px; white-space: normal; }
+  #lbRunMap .rm-tools.rm-tools .rm-undo { background: #3a2f12; color: #ffd21f; }
+  #lbRunMap .rm-tools.rm-tools .rm-hint b { color: #fff; }
+  #lbRunMap .rm-lbl.rm-lbl-sel { outline: 3px solid #ffd21f; outline-offset: 2px; background: rgba(255,210,31,.35); }
   #lbRunMap .rm-tools .rm-cp-k { width: 15px; height: 15px; font-size: 8.5px; line-height: 11px; margin: 0; background: #fff; }
   #lbRunMap .rm-tools .rm-ar-k { width: auto; margin: 0; font-style: normal; }
   #lbRunMap .rm-tools.rm-tools .rm-hint { margin-top: 5px; font-size: 11.5px; color: #9ca3af; }
@@ -38375,9 +38379,50 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var mine = (lsGet('lbRunMapEdits', {}) || {})[key], fleet = (lsGet('lbRunMapEditsFleet', {}) || {})[key];
     var e = (fleet && (!mine || (fleet.ts || 0) > (mine.ts || 0))) ? fleet : mine;
     e = e || {};
-    return { pieces: e.pieces || {}, drawn: e.drawn || [], erase: e.erase || [], sides: e.sides || {}, arrows: e.arrows || [], points: e.points || [], notes: e.notes || [], hide: e.hide || [], names: e.names || {}, labels: e.labels || {}, ts: e.ts || 0 };
+    return { pieces: e.pieces || {}, drawn: e.drawn || [], erase: e.erase || [], sides: e.sides || {}, arrows: e.arrows || [], points: e.points || [], notes: e.notes || [], hide: e.hide || [], names: e.names || {}, labels: e.labels || {}, lrot: e.lrot || {}, ts: e.ts || 0 };
+  }
+  /* ---- Undo: every change, in order, with what it was ----
+     Undo used to take back only the last thing drawn / rubbed out / placed, so after removing a street by mistake it undid
+     something else. Each save now keeps the run's edits as they were before it, with a few words saying what the change was
+     (worked out by comparing before and after), and Undo puts back the last one - the button says which. Kept while the run map
+     is open on this phone. */
+  var UNDO = {};
+  function streetOf(id){ var n = String(id || '').split('|')[0]; return id && id.indexOf('mode|') === 0 ? 'a reverse-in line' : (n || 'a street'); }
+  function describeChange(b, a){
+    var out = [], n = function(x){ return x == null ? 0 : (Array.isArray(x) ? x.length : Object.keys(x).length); };
+    var pk = {}; Object.keys(b.pieces || {}).concat(Object.keys(a.pieces || {})).forEach(function(k){ if ((b.pieces || {})[k] !== (a.pieces || {})[k]) pk[k] = 1; });
+    var pks = Object.keys(pk);
+    if (pks.length > 2) out.push('Recolour ' + pks.length + ' streets');
+    else pks.forEach(function(k){ var v = (a.pieces || {})[k], was = (b.pieces || {})[k]; out.push((v === 'x' ? 'Remove ' : was === 'x' ? 'Put back ' : 'Colour ') + streetOf(k)); });
+    var sk = {}; Object.keys(b.sides || {}).concat(Object.keys(a.sides || {})).forEach(function(k){ if (JSON.stringify((b.sides || {})[k]) !== JSON.stringify((a.sides || {})[k])) sk[k] = 1; });
+    Object.keys(sk).slice(0, 1).forEach(function(k){ out.push('One side of ' + streetOf(k)); });
+    var cnt = function(f, add, del, chg){ var x = n(b[f]), y = n(a[f]); if (y > x) out.push(add); else if (y < x) out.push(del); else if (JSON.stringify(b[f]) !== JSON.stringify(a[f])) out.push(chg); };
+    cnt('drawn', 'Draw a line', 'Delete a drawn line', 'Change a drawn line');
+    cnt('erase', 'Rub out', 'Delete a rub out', 'Change a rub out');
+    cnt('arrows', 'Add an arrow', 'Delete an arrow', 'Move / colour an arrow');
+    cnt('points', 'Add a collection point', 'Delete a collection point', 'Move / colour a collection point');
+    cnt('notes', 'Add a note', 'Delete a note', 'Change a note');
+    cnt('labels', 'Move a street name', 'Put a street name back', 'Move a street name');
+    cnt('lrot', 'Turn a street name', 'Straighten a street name', 'Turn a street name');
+    if (JSON.stringify(b.names) !== JSON.stringify(a.names)) out.push('Names in the key');
+    if (JSON.stringify(b.hide) !== JSON.stringify(a.hide)) out.push('Delete a route note');
+    return out.length ? out[0] + (out.length > 1 ? ' and more' : '') : 'last change';
+  }
+  function undoLabel(key){ var h = UNDO[key]; return h && h.length ? h[h.length - 1].label : ''; }
+  function undoLast(key){
+    var h = UNDO[key]; if (!h || !h.length) return false;
+    var it = h.pop(), E = JSON.parse(it.before);
+    writeEdits(key, E);
+    return true;
   }
   function saveEdits(key, E){
+    var before = edits(key);
+    var h = UNDO[key] || (UNDO[key] = []);
+    h.push({ label: describeChange(before, E), before: JSON.stringify(before) });
+    if (h.length > 60) h.shift();
+    writeEdits(key, E);
+  }
+  function writeEdits(key, E){
     E.ts = Date.now();
     var all = lsGet('lbRunMapEdits', {}) || {}; all[key] = E; lsSet('lbRunMapEdits', all);
     try { if (window.lbOutbox && window.lbOutbox.sendPlace) window.lbOutbox.sendPlace({ id: 'rme_' + key.replace(/[^A-Za-z0-9]+/g, '_'), kind: 'runMapEdit', key: key, edits: E, ts: E.ts }); } catch (e) {}
@@ -39038,6 +39083,11 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var xLayer = L.layerGroup().addTo(map);
     var paintExtras = function(){
       xLayer.clearLayers();
+      // what Select has picked, under a yellow glow
+      var SL = opts.sel;
+      if (SL && SL.k === 'drawn' && E.drawn[SL.i]) { var dd = E.drawn[SL.i]; L.polyline(dd.side ? offsetLL(map, dd.c, dd.side === 'r' ? 5.5 : -5.5) : dd.c, { color: '#ffd21f', weight: 16, opacity: .8, interactive: false, lineCap: 'round', lineJoin: 'round' }).addTo(xLayer); }
+      if (SL && SL.k === 'arrow' && E.arrows[SL.i]) L.polyline(E.arrows[SL.i].c, { color: '#ffd21f', weight: 16, opacity: .8, interactive: false, lineCap: 'round' }).addTo(xLayer);
+      if (SL && SL.k === 'point' && E.points[SL.i]) L.circleMarker(E.points[SL.i].at, { radius: 17, stroke: false, fillColor: '#ffd21f', fillOpacity: .85, interactive: false }).addTo(xLayer);
       sideList.forEach(function(x){
         L.polyline(offsetLL(map, x.l.c, 0), { color: '#fff', weight: opts.edit ? 13 : 11, opacity: 1, interactive: false, lineCap: 'butt' }).addTo(xLayer);
         L.polyline(offsetLL(map, x.l.c, -2.8), { color: x.S.l || x.col, weight: opts.edit ? 4.6 : 4, opacity: 1, interactive: false, lineCap: 'butt' }).addTo(xLayer);
@@ -39129,6 +39179,16 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       }
     });
     if (mode === 'cp') map.on('click', function(ev){ opts.onCp && opts.onCp(ev.latlng); });
+    // Select: the nearest rub out, drawn line, arrow or collection point to the tap (names are picked by tapping them)
+    if (mode === 'select') map.on('click', function(ev){
+      var pt = ev.containerPoint, best = null, bd = 16;
+      E.points.forEach(function(p2, i){ var d = pt.distanceTo(map.latLngToContainerPoint(p2.at)); if (d < bd) { bd = d; best = { k: 'point', i: i }; } });
+      E.arrows.forEach(function(a2, i){ var d = distToLine(map, pt, a2.c); if (d < bd) { bd = d; best = { k: 'arrow', i: i }; } });
+      E.drawn.forEach(function(d2, i){ var d = distToLine(map, pt, d2.side ? offsetLL(map, d2.c, d2.side === 'r' ? 5.5 : -5.5) : d2.c); if (d < bd) { bd = d; best = { k: 'drawn', i: i }; } });
+      var mpx = map.distance(map.containerPointToLatLng(L.point(0, 0)), map.containerPointToLatLng(L.point(100, 0))) / 100 || 1;
+      E.erase.forEach(function(e2, i){ var d = e2.c.length > 1 ? distToLine(map, pt, e2.c) : pt.distanceTo(map.latLngToContainerPoint(e2.c[0])); var reach = Math.max(16, (e2.r || 8) / mpx); if (d < reach && d - reach < bd - 16) { bd = d - reach + 16; best = { k: 'erase', i: i }; } });
+      opts.onSelect && opts.onSelect(best);
+    });
     if (mode === 'side') map.on('click', function(ev){
       // the nearest street piece, and which side of it the tap is on
       var pt = ev.containerPoint, best = null, bd = 30, side = 'l';
@@ -39151,7 +39211,10 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     });
     if (mode === 'note') map.on('click', function(ev){ opts.onMap && opts.onMap(ev.latlng); });
     // where things were rubbed out, shown faintly while editing (Undo brings the last one back)
-    if (opts.edit) E.erase.forEach(function(e2){ L.polyline(e2.c, { color: '#ef4444', weight: 14, opacity: .18, interactive: false, lineCap: 'round', lineJoin: 'round' }).addTo(layers); });
+    if (opts.edit) E.erase.forEach(function(e2, i){
+      var picked = opts.sel && opts.sel.k === 'erase' && opts.sel.i === i;
+      L.polyline(e2.c, { color: picked ? '#ffd21f' : '#ef4444', weight: picked ? 20 : 14, opacity: picked ? .75 : .18, interactive: false, lineCap: 'round', lineJoin: 'round' }).addTo(layers);
+    });
     if (mode === 'draw' || mode === 'erase' || mode === 'arrow') {
       // freehand: the line follows the finger / mouse exactly; the map doesn't move while drawing
       map.dragging.disable(); map.touchZoom.disable(); map.doubleClickZoom.disable(); map.boxZoom.disable(); if (map.tap) map.tap.disable();
@@ -39275,6 +39338,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     }
     // (names can't be dragged while drawing, rubbing out or placing arrows: a stroke that starts on a name draws, not moves it)
     st.lblPos = E.labels || {}; st.onLabelMove = (mode === 'draw' || mode === 'erase' || mode === 'arrow') ? null : (opts.onLabelMove || null);
+    st.lrot = E.lrot || {}; st.selLabel = opts.sel && opts.sel.k === 'label' ? opts.sel.id : null; st.onLabelTap = mode === 'select' ? opts.onLabelTap : null;
     var ft = document.createElement('div'); ft.className = 'rm-foot'; ft.textContent = 'Lukez Bunz run map · ' + new Date().toLocaleDateString('en-AU') + ' ' + new Date().toLocaleTimeString('en-AU', { hour: '2-digit', minute: '2-digit', hour12: false }).replace(':', '') + ' · streets © OpenStreetMap contributors';
     st.page.appendChild(ft);
     // taps on the cards stay on the cards (they don't add a note or colour the street underneath)
@@ -39430,6 +39494,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       if (map.dragging) map.dragging.enable();
       if (!moved) {
         // a plain tap on a name is a tap on its street (colour / remove it, or a note there), as if the name wasn't there
+        if (e.type === 'pointerup' && st.onLabelTap) { st.onLabelTap(id); return; }   // (Select: a tap on a name picks the name)
         if (e.type === 'pointerup') { var cp = map.mouseEventToContainerPoint(e); map.fire('click', { latlng: map.containerPointToLatLng(cp), containerPoint: cp, layerPoint: map.containerPointToLayerPoint(cp), originalEvent: e }); }
         return;
       }
@@ -39453,7 +39518,9 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       var s = document.createElement('div'); s.className = 'rm-lbl'; s.textContent = text; s.style.fontSize = fsz + 'px';
       var lp = map.containerPointToLayerPoint([cx, cy]);
       s.style.left = lp.x + 'px'; s.style.top = lp.y + 'px';
+      ang += (st.lrot && st.lrot[p.id]) || 0;   // (turned by hand with Select)
       s.style.transform = 'rotate(' + (ang - (st.rot || 0)).toFixed(1) + 'deg) translate(-50%, -50%)';
+      if (st.selLabel && st.selLabel === p.id) s.classList.add('rm-lbl-sel');
       if (st.onLabelMove) lblDrag(st, s, p.id);
       pane.appendChild(s);
     };
@@ -39667,7 +39734,9 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     b.classList.toggle('on', !!r);
     b.title = r ? 'Turned ' + (r > 180 ? (360 - r) + '\u00b0 left' : r + '\u00b0 right') + ' \u00b7 tap for north up' : 'North up';
   }
+  var TOOLNAME = { paint: 'Colour it:', side: 'One side:', x: 'Remove:', draw: 'Line:', erase: 'Rub out:', arrow: 'Arrow:', cp: 'Collection point:', note: 'Note:', select: 'Select:', recolour: 'Recolour all:' };
   var HINT = {
+    select: 'Tap a rub out, a drawn line, an arrow, a collection point or a street name to pick it (it glows yellow), then use the buttons that come up here.',
     paint: 'Pick a colour, then tap a street to put it in that section. Tap a drawn line to delete it. Drag the map to move it.',
     x: 'Tap a street to take it off the map; tap it again to put it back. Tap a drawn line to delete it.',
     draw: 'Drag along a street. Snap on: the line sits just beside the street, on the side you drew. Wrong side? Tap it, or Swap side. The map holds still - use Colour to move it.',
@@ -39686,23 +39755,40 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     if (!editing) { t.innerHTML = ''; return; }
     var E = edits(curKey);
     var btn = function(v, label){ return '<button type="button" data-rm="tool" data-v="' + v + '" class="' + (tool === v ? 'on' : '') + '">' + label + '</button>'; };
-    var canUndo = E.drawn.length || E.erase.length || E.arrows.length || E.points.length;
-    // one row, grouped like the bar above it: colours | what a tap does | undo and names
+    var ul = undoLabel(curKey);
+    var cap = function(t){ return '<span class="rm-cap">' + t + '</span>'; };
+    // grouped, each group says what it is for: the colour to use | what a tap on a street does | draw and add | fix | undo
     t.innerHTML = '<div class="rm-trow">' +
-      '<span class="rm-grp rm-cols">' + swatchList(E, colour).map(function(c){ return '<button type="button" data-rm="colour" data-v="' + c + '" class="rm-sw' + (colour === c ? ' on' : '') + '" style="background:' + c + '" title="' + esc(E.names[c] || SECTION_NAMES[c] || c) + '" aria-label="' + esc(E.names[c] || SECTION_NAMES[c] || c) + '"></button>'; }).join('') +
+      '<span class="rm-grp rm-cols">' + cap('Colour') + swatchList(E, colour).map(function(c){ return '<button type="button" data-rm="colour" data-v="' + c + '" class="rm-sw' + (colour === c ? ' on' : '') + '" style="background:' + c + '" title="' + esc(E.names[c] || SECTION_NAMES[c] || c) + '" aria-label="' + esc(E.names[c] || SECTION_NAMES[c] || c) + '"></button>'; }).join('') +
       '<label class="rm-sw rm-pick" title="Any colour"><input type="color" data-rmpick="colour" value="' + esc(colour) + '" aria-label="Any colour"></label></span>' +
-      '<span class="rm-grp">' + btn('paint', 'Colour') + btn('side', 'One side') +
-      btn('draw', '<i class="rm-dash" style="background:' + colour + '"></i>Draw') +
+      '<span class="rm-grp">' + cap('Tap a street') + btn('paint', 'Colour it') + btn('side', 'One side') + btn('x', 'Remove') + '</span>' +
+      '<span class="rm-grp">' + cap('Draw / add') + btn('draw', '<i class="rm-dash" style="background:' + colour + '"></i>Line') +
       (tool === 'draw' ? '<button type="button" data-rm="snap" class="rm-sub' + (snapDraw ? ' on' : '') + '">Snap ' + (snapDraw ? 'on' : 'off') + '</button>' +
         (E.drawn.some(function(d){ return d.side; }) ? '<button type="button" data-rm="swap" class="rm-sub" title="Put the last line drawn beside a street on the other side (or tap any such line)">Swap side</button>' : '') : '') +
-      btn('erase', 'Rub out') + btn('x', 'Remove') + btn('cp', '<i class="rm-cp rm-cp-k" style="border-color:' + colour + ';color:' + colour + '">C</i>Point') + btn('arrow', '<i class="rm-ar-k" style="color:' + colour + '">&#10140;</i>Arrow') + btn('note', 'Note') + '</span>' +
-      '<span class="rm-grp">' + btn('recolour', 'Recolour') + '<button type="button" data-rm="names">Names</button>' +
-      '<button type="button" data-rm="undo"' + (canUndo ? '' : ' disabled') + '>Undo</button></span></div>' +
-      '<div class="rm-hint">' + esc(HINT[tool] || '') + '</div>' + (tool === 'recolour' ? recolourPanel(E) : '');
+      btn('erase', 'Rub out') + btn('arrow', '<i class="rm-ar-k" style="color:' + colour + '">&#10140;</i>Arrow') + btn('cp', '<i class="rm-cp rm-cp-k" style="border-color:' + colour + ';color:' + colour + '">C</i>Collection') + btn('note', 'Note') + '</span>' +
+      '<span class="rm-grp">' + cap('Change') + btn('select', 'Select') + btn('recolour', 'Recolour all') + '<button type="button" data-rm="names">Key names</button></span>' +
+      '<span class="rm-grp"><button type="button" data-rm="undo" class="rm-undo"' + (ul ? ' title="Undo: ' + esc(ul) + '"' : ' disabled') + '>&#8630; ' + (ul ? 'Undo: ' + esc(ul.length > 30 ? ul.slice(0, 29) + '\u2026' : ul) : 'Nothing to undo') + '</button></span></div>' +
+      (tool === 'select' ? selectPanel(E) : '') +
+      '<div class="rm-hint"><b>' + esc(TOOLNAME[tool] || '') + '</b> ' + esc(HINT[tool] || '') + '</div>' + (tool === 'recolour' ? recolourPanel(E) : '');
+  }
+  // what Select has picked, and what can be done with it
+  function selectPanel(E){
+    if (!sel) return '<div class="rm-rec"><span class="rm-tl">Nothing picked yet.</span></div>';
+    var what = { erase: 'A rub out', drawn: 'A drawn line', arrow: 'An arrow', point: 'A collection point', label: 'A street name' }[sel.k] || 'Picked';
+    var b2 = function(a, t, title){ return '<button type="button" data-rm="' + a + '"' + (title ? ' title="' + esc(title) + '"' : '') + '>' + t + '</button>'; };
+    var h = '<div class="rm-rec"><span class="rm-tl">' + what + ':</span>';
+    if (sel.k === 'label') h += b2('srotl', '&#8634; Turn', 'Turn 15 degrees') + b2('srotr', '&#8635; Turn', 'Turn 15 degrees the other way') + b2('sreset', 'Put back', 'Back where it goes by itself, straight');
+    else {
+      h += b2('sdel', 'Delete');
+      if (sel.k !== 'erase') h += b2('scol', '<i class="rm-dash" style="background:' + colour + '"></i>Give it this colour');
+      var d = sel.k === 'drawn' ? E.drawn[sel.i] : null; if (d && d.side) h += b2('sswap', 'Swap side');
+    }
+    return h + '</div>';
   }
   /* ---- Change a colour: every street (and side, and drawn line) of one colour to another at once, and its name in the key ---- */
   var recFrom = null, recTo = null;
   var snapDraw = lsGet('lbRunMapSnap', true) !== false;
+  var sel = null;   // what Select has picked: { k: 'erase' | 'drawn' | 'arrow' | 'point', i } or { k: 'label', id }
   // the default colours, then any other colour already used on this run (picked with the colour picker), then the one in hand
   function swatchList(E, cur){
     var out = PALETTE.slice();
@@ -39773,6 +39859,9 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       onNoteMove: function(i, ll){ var E = edits(curKey); if (E.notes[i]) { E.notes[i].at = [+ll.lat.toFixed(6), +ll.lng.toFixed(6)]; saveEdits(curKey, E); renderView(true); } },
       onMap: function(ll){ var t = prompt('Note:'); if (!t || !t.trim()) return; var E = edits(curKey); E.notes.push({ text: t.trim(), at: [+ll.lat.toFixed(6), +ll.lng.toFixed(6)] }); saveEdits(curKey, E); renderView(true); },
       snap: snapDraw,
+      sel: sel,
+      onSelect: function(x){ sel = x; renderView(true); },
+      onLabelTap: function(id){ sel = { k: 'label', id: id }; renderView(true); },
       onSwap: function(i){ var E = edits(curKey), d = E.drawn[i]; if (!d || !d.side) return; d.side = d.side === 'r' ? 'l' : 'r'; saveEdits(curKey, E); renderView(true); },
       onStroke: function(c, side){ var E = edits(curKey), d = { c: c, s: colour, ts: Date.now() }; if (side) d.side = side; E.drawn.push(d); saveEdits(curKey, E); renderView(true); },
       onErase: function(c, r){ var E = edits(curKey); E.erase.push({ c: c, r: r, ts: Date.now() }); saveEdits(curKey, E); renderView(true); },
@@ -39852,18 +39941,22 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       if (a === 'edit') { editing = !editing; if (editing) pagesMode = false; tool = 'paint'; renderView(true, true); }
       if (a === 'tool') { tool = b.getAttribute('data-v'); renderView(true); }
       if (a === 'colour') { colour = b.getAttribute('data-v'); if (['draw', 'side', 'cp', 'arrow'].indexOf(tool) < 0) tool = 'paint'; renderView(true); }
+      if (/^s(del|col|swap|rotl|rotr|reset)$/.test(a) && sel) {
+        var Ex = edits(curKey), list = { erase: Ex.erase, drawn: Ex.drawn, arrow: Ex.arrows, point: Ex.points }[sel.k], it = list ? list[sel.i] : null;
+        if (a === 'sdel') { if (list && it) list.splice(sel.i, 1); else if (sel.k === 'label') { delete Ex.labels[sel.id]; delete Ex.lrot[sel.id]; } sel = null; }
+        if (a === 'scol' && it) { if (sel.k === 'drawn') it.s = colour; else it.col = colour; }
+        if (a === 'sswap' && it && it.side) it.side = it.side === 'r' ? 'l' : 'r';
+        if ((a === 'srotl' || a === 'srotr') && sel.k === 'label') { var r0 = (Ex.lrot[sel.id] || 0) + (a === 'srotl' ? -15 : 15); r0 = ((r0 % 360) + 540) % 360 - 180; if (r0) Ex.lrot[sel.id] = r0; else delete Ex.lrot[sel.id]; }
+        if (a === 'sreset' && sel.k === 'label') { delete Ex.labels[sel.id]; delete Ex.lrot[sel.id]; }
+        saveEdits(curKey, Ex); renderView(true);
+      }
+      if (a === 'tool' && b.getAttribute('data-v') !== 'select') sel = null;
       if (a === 'snap') { snapDraw = !snapDraw; lsSet('lbRunMapSnap', snapDraw); renderView(true); }
       if (a === 'swap') { var Es = edits(curKey); for (var si = Es.drawn.length - 1; si >= 0; si--) if (Es.drawn[si].side) { Es.drawn[si].side = Es.drawn[si].side === 'r' ? 'l' : 'r'; saveEdits(curKey, Es); break; } renderView(true); }
       if (a === 'rfrom') { recFrom = b.getAttribute('data-v'); paintTools(); }
       if (a === 'rto') { recTo = b.getAttribute('data-v'); paintTools(); }
       if (a === 'rgo') { var nm = document.getElementById('rmRecName'); recolourAll(recFrom, recTo || recFrom, nm ? nm.value : null); }
-      if (a === 'undo') {
-        // the last thing drawn or rubbed out, whichever came last
-        var E = edits(curKey), best = null, bt = -2;
-        ['drawn', 'erase', 'arrows', 'points'].forEach(function(f){ var a = E[f]; if (a && a.length) { var t = a[a.length - 1].ts || 0; if (t >= bt) { bt = t; best = f; } } });
-        if (best) E[best].pop();
-        saveEdits(curKey, E); renderView(true);
-      }
+      if (a === 'undo') { undoLast(curKey); sel = null; renderView(true); }   // (the very last change, whatever it was - the button says what)
       if (a === 'names') editNames();
     });
     ['rmStream', 'rmDay', 'rmRun'].forEach(function(id){ document.getElementById(id).addEventListener('change', function(){ pickerChanged(id); }); });
