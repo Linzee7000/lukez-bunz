@@ -38890,6 +38890,21 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     }
     return out;
   }
+  /* The reverse-in / drive-in streets (data/street-modes.json) near this run, as lines of the route: they used to be drawn on top
+     with no way to tap them, so one in the wrong place could not be removed or recoloured. Each has its own id. */
+  function modeLines(R){
+    var all = []; R.lines.forEach(function(l){ all = all.concat(l.c); });
+    var grid = {}; all.forEach(function(p){ grid[Math.round(p[0] / 0.0003) + ':' + Math.round(p[1] / 0.0004)] = 1; });
+    var near = function(p){ var a = Math.round(p[0] / 0.0003), b = Math.round(p[1] / 0.0004); for (var i = -1; i <= 1; i++) for (var j = -1; j <= 1; j++) if (grid[(a + i) + ':' + (b + j)]) return true; return false; };
+    var out = [];
+    (g('sharedStreetModes') || []).forEach(function(m){
+      if (!m.points || m.points.length < 2 || !m.points.every(near)) return;
+      var p0 = m.points[0];
+      out.push({ c: m.points, s: m.type === 'drive-reverse-out' ? '#f59e0b' : '#7c3aed', mode: m.type, pp: 'mode|' + m.type + '|' + (+p0[0]).toFixed(5) + ',' + (+p0[1]).toFixed(5) });
+    });
+    return out;
+  }
+  function withModes(R){ var ml = modeLines(R); return ml.length ? Object.assign({}, R, { lines: R.lines.concat(ml) }) : R; }
   function rubOut(lines, E){
     var ER = (E && E.erase) || []; if (!ER.length || !lines.length) return lines;
     var lat0 = lines[0].c[0][0], lng0 = lines[0].c[0][1], MY = 110540, MX = 111320 * Math.cos(lat0 * Math.PI / 180);
@@ -38925,6 +38940,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   function draw(container, key, R, page, opts){
     opts = opts || {};
     var E = edits(key), mode = opts.edit ? opts.mode : '';
+    R = withModes(R);
     if (E.erase.length) R = Object.assign({}, R, { lines: rubOut(R.lines, E) });
     // the map can be turned (rot, degrees clockwise) inside the page; the page and its cards stay upright
     var st = { R: R, container: container, page: container.parentNode, fixed: opts.order || null, rot: 0, sig: 0 };
@@ -39014,18 +39030,15 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
         setTimeout(function(){ try { paintDone(); } catch (e) {} }, 0);
       }
     }
-    var grid = {}; all.forEach(function(p){ grid[Math.round(p[0] / 0.0003) + ':' + Math.round(p[1] / 0.0004)] = 1; });
-    var near = function(p){ var a = Math.round(p[0] / 0.0003), b = Math.round(p[1] / 0.0004); for (var i = -1; i <= 1; i++) for (var j = -1; j <= 1; j++) if (grid[(a + i) + ':' + (b + j)]) return true; return false; };
-    (g('sharedStreetModes') || []).forEach(function(m){
-      if (!m.points || !m.points.every(near)) return;
-      L.polyline(m.points, { color: m.type === 'drive-reverse-out' ? '#f59e0b' : '#7c3aed', weight: 7, opacity: 1, interactive: false, lineCap: 'round' }).addTo(layers);
-    });
+    // (the reverse-in / drive-in streets are lines of the route now - see modeLines - so they can be tapped, coloured, rubbed out)
     var notes = window.lbRunNotes ? window.lbRunNotes.forRun(key) : [], T = window.lbRunNotes && window.lbRunNotes._t, pinned = [];
     notes.forEach(function(n){
       if (!/^[A-Z0-9*“"]/.test(n.text) || n.text.split(/\s+/).length < 2) return;
       if (E.hide.indexOf(n.text) >= 0) return;          // a route-map note deleted in edit mode
       var at = null;
       if (T) R.lines.some(function(l){ if (l.n && T.mentions(T.norm(n.text), l.n)) { at = l.c[Math.floor(l.c.length / 2)]; return true; } return false; });
+      // a note about a street this run doesn't have came off a page of another run (219A Friday had 225A's Wooralla Dr notes)
+      if (!at && /\u00b7|·/.test(n.text)) return;
       pinned.push({ text: n.text, at: at });
     });
     E.notes.forEach(function(n, i){ pinned.push({ text: n.text, at: n.at, mine: i }); });
@@ -39057,7 +39070,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       E.drawn.forEach(function(d, i){ var dd = distToLine(map, pt, d.c); if (dd <= bd) { bd = dd; best = { drawn: i }; } });
       if (!best) return;
       // every street line right under the finger, not just the nearest (two lines on top of each other change together)
-      if (best.piece) { var all2 = shown.filter(function(x, i){ return ds[i] <= bd + 3 && x.l.n === best.piece.l.n; }); if (opts.onPieces) opts.onPieces(all2); else opts.onPiece && opts.onPiece(pid(best.piece.l), best.piece); }
+      if (best.piece) { var all2 = shown.filter(function(x, i){ return ds[i] <= bd + 3 && (x === best.piece || (x.l.n && x.l.n === best.piece.l.n)); }); if (opts.onPieces) opts.onPieces(all2); else opts.onPiece && opts.onPiece(pid(best.piece.l), best.piece); }
       else opts.onDrawn && opts.onDrawn(best.drawn);
     });
     if (mode === 'note') map.on('click', function(ev){ opts.onMap && opts.onMap(ev.latlng); });
@@ -39909,7 +39922,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   window.lbRunMapImage = function(key, o2){
     return load().then(function(){ var k0 = key || currentKey(); return k0 && DATA[k0] ? streetsFor(k0) : null; }).then(function(){
       var k = key || currentKey(); if (!k || !DATA[k]) return null;
-      var R = route(k), o = parse(k), E = edits(k), rc = null;
+      var R = withModes(route(k)), o = parse(k), E = edits(k), rc = null;
       if (E.erase.length) R = Object.assign({}, R, { lines: rubOut(R.lines, E) });
       try { rc = window.lbRunCheck ? window.lbRunCheck() : null; } catch (e) {}
       // done is worked out piece by piece and side by side (doneParts: the trail and the bins), not a whole street at a time
