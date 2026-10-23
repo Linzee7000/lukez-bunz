@@ -9,7 +9,7 @@ signal and can be tested. Run by the "Run map streets" GitHub workflow (the buil
     python3 tools/streets/fetch_streets.py roads.geojsonseq      # from an osmium export (what the workflow does)
 Format: {version, generated, ways: [[name, [lat, lng, lat, lng, ...]], ...]}  (5 decimals, ~1 m)
 """
-import json, re, time, urllib.request, urllib.parse, datetime, os, sys
+import json, re, time, urllib.request, urllib.parse, datetime, os, sys, math
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 URLS = ['https://overpass-api.de/api/interpreter', 'https://overpass.kumi.systems/api/interpreter', 'https://overpass.private.coffee/api/interpreter']
@@ -36,6 +36,11 @@ def overpass(q):
             log('  retry', url, repr(e)[:200]); time.sleep(5 + attempt * 10)
     return None
 
+RGRID = set()
+def near_route(la, lo):   # within ~300 m of a route line
+    cy, cx = int(math.floor(la / 0.003)), int(math.floor(lo / 0.0038))
+    return any((cy + a, cx + b) in RGRID for a in (-1, 0, 1) for b in (-1, 0, 1))
+
 def from_file(path, names, ways):
     # osmium export -f geojsonseq: one feature per line (some lines start with the RS character)
     n = 0
@@ -44,12 +49,20 @@ def from_file(path, names, ways):
         if not line: continue
         f = json.loads(line); n += 1
         pr = f.get('properties') or {}; nm = pr.get('name'); hw = pr.get('highway') or ''
-        if not nm or norm(nm) not in names or re.match(r'^(footway|path|steps|cycleway|pedestrian|bridleway|corridor|proposed|construction|platform)$', hw): continue
+        if re.match(r'^(footway|path|steps|cycleway|pedestrian|bridleway|corridor|proposed|construction|platform|track)$', hw): continue
         g = f.get('geometry') or {}
         if g.get('type') != 'LineString' or len(g.get('coordinates') or []) < 2: continue
+        if not nm or norm(nm) not in names:
+            # short links with no name (or another name) near the routes: the slip lane from St Johns La onto the Nepean Hwy
+            # service road was missing, so the street could not be followed on. Not driveways / car parks.
+            if pr.get('service') in ('driveway', 'parking_aisle', 'drive-through') or hw == 'service' and pr.get('access') == 'private': continue
+            cs = g['coordinates']; L = sum(math.hypot((cs[i][0] - cs[i-1][0]) * 87500, (cs[i][1] - cs[i-1][1]) * 110540) for i in range(1, len(cs)))
+            if L > 250 or not any(near_route(la, lo) for lo, la in cs): continue
+            nm = ''
+            pr = dict(pr, name='')
         flat = []
         for lo, la in g['coordinates']: flat += [round(la, 5), round(lo, 5)]
-        ways[pr.get('@id') or f.get('id') or len(ways)] = [nm, flat]
+        ways[pr.get('@id') or f.get('id') or len(ways)] = [nm or '', flat]
     log('features', n, 'kept', len(ways))
 
 def main():
@@ -59,7 +72,7 @@ def main():
     for r in runs.values():
         for l in r['lines']:
             if l.get('n'): names.add(norm(l['n']))
-            for p in l['c']: la.append(p[0]); lo.append(p[1])
+            for p in l['c']: la.append(p[0]); lo.append(p[1]); RGRID.add((int(math.floor(p[0] / 0.003)), int(math.floor(p[1] / 0.0038))))
     s, n, w, e = min(la) - 0.01, max(la) + 0.01, min(lo) - 0.01, max(lo) + 0.01
     step = 0.05; ways = {}; failed = []
     y = s
