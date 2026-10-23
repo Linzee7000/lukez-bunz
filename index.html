@@ -5907,29 +5907,28 @@ const STREET_LITTER_SERVICE_LEVELS = {"seasons":[{"key":"tourist1","label":"Tour
   // CSS transform:rotate()) so it points the direction the truck was
   // actually travelling at that point in the trail. Colour matches the
   // trail line itself (#22c55e) so it reads as part of the same trail.
+  // Trail / route arrows are drawn on the map's canvas (the map has preferCanvas), one small triangle each. They used to be
+  // a page element each with two drop-shadow filters: one every 30 m of trail, up to 4,000, so by lunch (80 km) the phone was
+  // repainting ~2,700 shadowed elements every time the track-up map turned, panned or zoomed - the app got slower all day.
+  let LbArrowMarker = null;
   function makeGpsTrailArrowMarker(lat, lng, bearingDeg, color) {
     const c = color || '#22c55e';
-    return L.marker([lat, lng], {
-      icon: L.divIcon({
-        className: 'gps-trail-arrow-icon',
-        html: `
-          <div style="width:16px; height:16px; display:flex; align-items:center; justify-content:center; transform:rotate(${bearingDeg}deg);">
-            <div style="
-              width: 0; height: 0;
-              border-left: 5px solid transparent;
-              border-right: 5px solid transparent;
-              border-bottom: 9px solid ${c};
-              filter: drop-shadow(0 0 1.5px rgba(255,255,255,0.9)) drop-shadow(0 1px 2px rgba(0,0,0,0.4));
-            "></div>
-          </div>
-        `,
-        iconSize: [16, 16],
-        iconAnchor: [8, 8]
-      }),
-      interactive: false,
-      keyboard: false
+    if (!LbArrowMarker) LbArrowMarker = L.CircleMarker.extend({
+      _updatePath: function() {
+        const r = this._renderer;
+        if (!r || !r._ctx) { L.CircleMarker.prototype._updatePath.call(this); return; }   // (an SVG map: a plain dot)
+        if (!r._drawing || this._empty()) return;
+        const ctx = r._ctx, p = this._point, a = (this.options.brg || 0) * Math.PI / 180;
+        ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(a);
+        ctx.beginPath(); ctx.moveTo(0, -5.5); ctx.lineTo(4.6, 3.8); ctx.lineTo(-4.6, 3.8); ctx.closePath();
+        ctx.lineJoin = 'round'; ctx.lineWidth = 2; ctx.strokeStyle = 'rgba(255,255,255,0.85)'; ctx.stroke();
+        ctx.fillStyle = this.options.fillColor; ctx.fill();
+        ctx.restore();
+      }
     });
+    return new LbArrowMarker([lat, lng], { radius: 7, brg: bearingDeg || 0, color: c, fillColor: c, stroke: false, fillOpacity: 1, interactive: false, bubblingMouseEvents: false });
   }
+
 
   // ===== Snail trail age colour + 15-minute time labels =====
   // Fades a trail segment from green (just recorded) to red as it ages,
@@ -7034,8 +7033,10 @@ const STREET_LITTER_SERVICE_LEVELS = {"seasons":[{"key":"tourist1","label":"Tour
     // Throttled persistence so a killed/backgrounded tab doesn't lose the
     // whole trail - only the last few points since the last save.
     gpsTrailPointsSinceSave++;
-    if (gpsTrailPointsSinceSave >= GPS_TRAIL_SAVE_EVERY_N_POINTS) {
-      gpsTrailPointsSinceSave = 0;
+    // (and no more than every 20 s: every save copies the whole day's trail - 40,000 points by lunch - which every 50 m was
+    // a hitch on the phone; going to the background saves straight away, see visibilitychange)
+    if (gpsTrailPointsSinceSave >= GPS_TRAIL_SAVE_EVERY_N_POINTS && now - (window.lbTrailSavedAt || 0) >= 20000) {
+      gpsTrailPointsSinceSave = 0; window.lbTrailSavedAt = now;
       saveToDB('gpsTrailPoints', gpsTrailPoints).catch(() => {});
       saveToDB('gpsTrailBreaks', gpsTrailBreaks).catch(() => {});
       saveToDB('gpsTrailTimes', gpsTrailTimes).catch(() => {});
@@ -9529,6 +9530,12 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
       // start a fresh trail segment on the next fix instead.
       // (The phone app keeps recording in the background, so its trail carries on unbroken.)
       if (!window.lbNativeGps) gpsTrailPendingBreak = true;
+      if (gpsTrailPointsSinceSave > 0) {
+        gpsTrailPointsSinceSave = 0; window.lbTrailSavedAt = Date.now();
+        saveToDB('gpsTrailPoints', gpsTrailPoints).catch(() => {});
+        saveToDB('gpsTrailBreaks', gpsTrailBreaks).catch(() => {});
+        saveToDB('gpsTrailTimes', gpsTrailTimes).catch(() => {});
+      }
       // Also drop the temporary "live tip" segment (see
       // updateGpsTrailLiveTip) - it was stretching to a live position that
       // is now stale, and leaving it on the map would visually bridge
@@ -38350,6 +38357,136 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     }
     return best;
   }
+  /* ---- a run's own route ----
+     Some runs' route-map data was built from the wrong pages: on 23 Oct Recycling 219A Friday and 225A Friday each held BOTH
+     runs' streets (77 streets the same), so 219A's map and To do PDF showed 225A's streets down to Moorooduc as well. Only the
+     stretches of the route near the run's own houses are kept (300 m, so the roads driven between parts of the run stay). */
+  var ROUTES = {};
+  function route(k){
+    var R = DATA && DATA[k]; if (!R || !R.lines) return R;
+    var grp = groupFor(parse(k)), hs = [];
+    if (grp) grp.sites.forEach(function(s){ var la = +s.lat, ln = +s.lng; if (la && ln) hs.push([la, ln]); });
+    if (hs.length < 5) return R;
+    if (ROUTES[k] && ROUTES[k].n === hs.length) return ROUTES[k].R;
+    var NEAR = 300, CY = 0.003, CX = 0.0038, grid = {}, mx = 111320 * Math.cos(hs[0][0] * Math.PI / 180);
+    hs.forEach(function(h){ var c = Math.floor(h[0] / CY) + ':' + Math.floor(h[1] / CX); (grid[c] = grid[c] || []).push(h); });
+    var near = function(p){
+      var cy = Math.floor(p[0] / CY), cx = Math.floor(p[1] / CX);
+      for (var y = cy - 1; y <= cy + 1; y++) for (var x = cx - 1; x <= cx + 1; x++) {
+        var a = grid[y + ':' + x]; if (!a) continue;
+        for (var i = 0; i < a.length; i++) { var dy = (a[i][0] - p[0]) * 110540, dx = (a[i][1] - p[1]) * mx; if (dy * dy + dx * dx <= NEAR * NEAR) return true; }
+      }
+      return false;
+    };
+    var lines = [], len = function(c){ var t = 0; for (var i = 1; i < c.length; i++) t += Math.hypot((c[i][0] - c[i - 1][0]) * 110540, (c[i][1] - c[i - 1][1]) * mx); return t; }, all = 0, kept = 0;
+    R.lines.forEach(function(l){
+      var f = l.c.map(near), L0 = len(l.c); all += L0;
+      if (f.every(Boolean)) { lines.push(l); kept += L0; return; }
+      var cur = [];
+      for (var i = 0; i < l.c.length; i++) {
+        if (f[i] || f[i - 1] || f[i + 1]) cur.push(l.c[i]);   // (a point beside a near one stays, so a long straight piece isn't cut short)
+        else { if (cur.length > 1) { lines.push(Object.assign({}, l, { c: cur })); kept += len(cur); } cur = []; }
+      }
+      if (cur.length > 1) { lines.push(Object.assign({}, l, { c: cur })); kept += len(cur); }
+    });
+    var out = R;
+    if (lines.length && kept < all * 0.97) {
+      var names = {}; lines.forEach(function(l){ if (l.n) names[l.n] = 1; });
+      out = Object.assign({}, R, { lines: lines, streets: (R.streets || []).filter(function(n){ return names[n]; }), km: R.km ? +(R.km * kept / all).toFixed(1) : R.km });
+    }
+    ROUTES[k] = { n: hs.length, R: out };
+    return out;
+  }
+
+  /* ---- what's done, piece by piece (only the run being driven can know) ----
+     The route is cut into ~30 m pieces and each SIDE of a piece is done when
+       - the truck drove along it with that side on its kerb (this shift's trail; trucks keep left, so going up a street does its
+         left side and coming back down does the other; with the "both sides" bins setting one pass does both), or
+       - every house on that side has its bins ticked off (or driven past, not put out).
+     A side with no houses goes with the other side (a park opposite doesn't leave half a street green); a piece with no houses
+     either side (a road only driven along) is done once driven. Ticked bins alone were not enough: GPS only ticks a bin when the
+     truck stops within 12 m on the right side, and on 23 Oct a run with 364 bins lifted had 237 ticked, so the To do map showed
+     streets the truck had been up and down as still to do. Returns, for each line, its stretches with l / r = that side done
+     (left / right of the line's own direction), plus km done. */
+  function doneParts(key, lines){
+    var rc = null; try { rc = (window.lbRunCheck && key === currentKey()) ? window.lbRunCheck() : null; } catch (e) {}
+    if (!rc || !lines.length || !lines[0].length) return null;
+    var lat0 = lines[0][0][0], lng0 = lines[0][0][1], MY = 110540, MX = 111320 * Math.cos(lat0 * Math.PI / 180);
+    var xy = function(p){ return [(p[1] - lng0) * MX, (p[0] - lat0) * MY]; };
+    var segD = function(P, A, B){ var dx = B[0] - A[0], dy = B[1] - A[1], L2 = dx * dx + dy * dy || 1e-9, t = Math.max(0, Math.min(1, ((P[0] - A[0]) * dx + (P[1] - A[1]) * dy) / L2)); return Math.hypot(P[0] - A[0] - t * dx, P[1] - A[1] - t * dy); };
+    var CH = 30, CELL = 40, cellOf = function(P){ return Math.floor(P[0] / CELL) + ':' + Math.floor(P[1] / CELL); };
+    var pcs = [], pgrid = {};
+    var mk = function(li, pts){
+      var a = xy(pts[0]), b = xy(pts[pts.length - 1]), d = Math.hypot(b[0] - a[0], b[1] - a[1]);
+      var pc = { li: li, pts: pts, a: a, b: b, len: d, u: d > 0.01 ? [(b[0] - a[0]) / d, (b[1] - a[1]) / d] : [1, 0], m: [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2], h: { 1: [0, 0], '-1': [0, 0] }, dr: { 1: false, '-1': false } };
+      pcs.push(pc); var c = cellOf(pc.m); (pgrid[c] = pgrid[c] || []).push(pc);
+    };
+    lines.forEach(function(c, li){
+      var cur = [c[0]], acc = 0;
+      for (var i = 1; i < c.length; i++) {
+        var p = c[i - 1], q = c[i], P = xy(p), Q = xy(q), d = Math.hypot(Q[0] - P[0], Q[1] - P[1]), from = 0;
+        while (d - from > 0 && acc + (d - from) >= CH) {
+          from += CH - acc; var t = from / d, m = [p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t];
+          cur.push(m); mk(li, cur); cur = [m]; acc = 0;
+        }
+        acc += d - from; cur.push(q);
+      }
+      if (cur.length > 1 && acc > 0.5) mk(li, cur);
+    });
+    // houses: each goes to the one piece nearest it (so a corner house doesn't hold the cross street too), on its side
+    (rc.all || []).forEach(function(st){ (st.pts || []).forEach(function(h){
+      var H = xy(h), cx = Math.floor(H[0] / CELL), cy = Math.floor(H[1] / CELL), best = null, bd = 60;
+      for (var x = cx - 2; x <= cx + 2; x++) for (var y = cy - 2; y <= cy + 2; y++) (pgrid[x + ':' + y] || []).forEach(function(pc){ var d = segD(H, pc.a, pc.b); if (d < bd) { bd = d; best = pc; } });
+      if (!best) return;
+      var sd = (best.u[0] * (H[1] - best.a[1]) - best.u[1] * (H[0] - best.a[0])) >= 0 ? 1 : -1;
+      best.h[sd][0]++; if (h[2]) best.h[sd][1]++;
+    }); });
+    // this shift's trail, as short steps with their direction
+    var P = g('gpsTrailPoints') || [], T = g('gpsTrailTimes') || [], B = g('gpsTrailBreaks') || [], t0 = 0;
+    try { var sh = JSON.parse(localStorage.getItem('lbShift') || 'null'); t0 = (sh && sh.start) || 0; } catch (e) {}
+    var tgrid = {}, prev = null, any = false;
+    for (var i = 0; i < P.length; i++) {
+      var p = P[i], la = Array.isArray(p) ? p[0] : p && p.lat, ln = Array.isArray(p) ? p[1] : p && p.lng;
+      if (!la || (T[i] || 0) < t0) { prev = null; continue; }
+      var C = xy([+la, +ln]);
+      if (prev && !B[i]) {
+        var dx = C[0] - prev[0], dy = C[1] - prev[1], d = Math.hypot(dx, dy);
+        if (d >= 1 && d <= 120) {
+          var n = Math.ceil(d / 20), u = [dx / d, dy / d];
+          for (var k = 0; k < n; k++) {
+            var A = [prev[0] + dx * k / n, prev[1] + dy * k / n], Bq = [prev[0] + dx * (k + 1) / n, prev[1] + dy * (k + 1) / n];
+            var c = cellOf([(A[0] + Bq[0]) / 2, (A[1] + Bq[1]) / 2]); (tgrid[c] = tgrid[c] || []).push([A, Bq, u]); any = true;
+          }
+        }
+      }
+      prev = C;
+    }
+    var tm = String(g('travelMode') || 'left');
+    if (any) pcs.forEach(function(pc){
+      var cx = Math.floor(pc.m[0] / CELL), cy = Math.floor(pc.m[1] / CELL);
+      for (var x = cx - 1; x <= cx + 1; x++) for (var y = cy - 1; y <= cy + 1; y++) (tgrid[x + ':' + y] || []).forEach(function(s){
+        if (segD(pc.m, s[0], s[1]) > 15) return;
+        var dot = s[2][0] * pc.u[0] + s[2][1] * pc.u[1]; if (Math.abs(dot) < 0.64) return;   // within 50 degrees of along the piece
+        var kerb = dot > 0 ? 1 : -1;                           // the truck's left is this side of the piece
+        if (tm === 'all') { pc.dr[1] = pc.dr[-1] = true; } else pc.dr[tm === 'right' ? -kerb : kerb] = true;
+      });
+    });
+    var side = function(pc, s){
+      var h = pc.h[s], o = pc.h[-s];
+      if (h[0]) return pc.dr[s] || !h[1];
+      if (o[0]) return pc.dr[-s] || !o[1];
+      return pc.dr[1] || pc.dr[-1];
+    };
+    var out = lines.map(function(){ return []; }), km = 0, kmDone = 0;
+    pcs.forEach(function(pc){
+      var l = side(pc, 1), r = side(pc, -1), list = out[pc.li], last = list[list.length - 1];
+      km += pc.len; kmDone += pc.len * ((l ? 1 : 0) + (r ? 1 : 0)) / 2;
+      if (last && last.l === l && last.r === r && last.end === pc.pts[0]) { last.c = last.c.concat(pc.pts.slice(1)); last.end = pc.pts[pc.pts.length - 1]; }
+      else list.push({ c: pc.pts.slice(), l: l, r: r, end: pc.pts[pc.pts.length - 1] });
+    });
+    return { lines: out, km: km / 1000, kmDone: kmDone / 1000, pink: rc.pink || 0 };
+  }
+  window.lbRunDoneParts = doneParts;   // (test hook)
   var doneNames = null, DONE_COL = '#dc2626', doneAvail = null, doneOn = null, doneKey = '', clkT = 0;
   function normSt(n){ return String(n || '').toLowerCase().replace(/\bstreet\b/g, 'st').replace(/\broad\b/g, 'rd').replace(/\bavenue\b/g, 'ave').replace(/\bcourt\b/g, 'ct').replace(/\bdrive\b/g, 'dr').replace(/\bcrescent\b/g, 'cres').replace(/\bplace\b/g, 'pl').replace(/\bboulevard\b/g, 'bvd').replace(/[^a-z0-9]+/g, ''); }
   function draw(container, key, R, page, opts){
@@ -38374,7 +38511,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var all = []; R.lines.forEach(function(l){ all = all.concat(l.c); });
     // the route, each street piece in its section's colour (from the map, or as edited); removed pieces only in edit mode
     var used = {};
-    var shown = R.lines.map(function(l){ var ov = E.pieces[pid(l)]; return { l: l, col: ov && ov !== 'x' ? ov : (doneNames && l.n && doneNames.indexOf(normSt(l.n)) >= 0 ? DONE_COL : (l.s || '#16a34a')), gone: ov === 'x' }; });
+    var shown = R.lines.map(function(l){ var ov = E.pieces[pid(l)]; return { l: l, col: ov && ov !== 'x' ? ov : (l.s || '#16a34a'), gone: ov === 'x' }; });
     shown.forEach(function(x){ if (!x.gone) L.polyline(x.l.c, { color: '#fff', weight: 9, opacity: 1, interactive: false }).addTo(layers); });
     E.drawn.forEach(function(d){ L.polyline(d.c, { color: '#fff', weight: 9, opacity: 1, interactive: false }).addTo(layers); });
     shown.forEach(function(x){
@@ -38386,6 +38523,36 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       used[d.s] = (used[d.s] || 0) + 1;
       L.polyline(d.c, { color: d.s, weight: opts.edit ? 7 : 5, opacity: 1, interactive: false, lineCap: 'round', lineJoin: 'round' }).addTo(layers);
     });
+    // Done (red), piece by piece and side by side (doneParts), drawn over the route; a street with one side done is two lines
+    // a few pixels apart, so they are worked out again after every zoom.
+    if (doneNames && !opts.edit) {
+      var dShown = shown.filter(function(x){ return !x.gone; }), dp = doneParts(key, dShown.map(function(x){ return x.l.c; }));
+      if (dp) {
+        if (!used[DONE_COL]) used[DONE_COL] = 1;
+        var dLayer = L.layerGroup().addTo(map);
+        var offLL = function(c, px){
+          var q = c.map(function(p){ return map.latLngToLayerPoint(p); }), out = [];
+          for (var i = 0; i < q.length; i++) {
+            var p0 = q[Math.max(0, i - 1)], p1 = q[Math.min(q.length - 1, i + 1)], dx = p1.x - p0.x, dy = p1.y - p0.y, Ln = Math.sqrt(dx * dx + dy * dy) || 1;
+            out.push(map.layerPointToLatLng(L.point(q[i].x - dy / Ln * px, q[i].y + dx / Ln * px)));
+          }
+          return out;
+        };
+        var paintDone = function(){
+          dLayer.clearLayers();
+          dp.lines.forEach(function(parts, i){ parts.forEach(function(pt){
+            if (!pt.l && !pt.r) return;
+            if (pt.l && pt.r) { L.polyline(pt.c, { color: DONE_COL, weight: 5, opacity: 1, interactive: false, lineCap: 'round', lineJoin: 'round' }).addTo(dLayer); return; }
+            // (offsets in screen pixels: +px is to the right of the line's direction, as the screen's y runs down)
+            L.polyline(offLL(pt.c, 0), { color: '#fff', weight: 10, opacity: 1, interactive: false, lineCap: 'round' }).addTo(dLayer);
+            L.polyline(offLL(pt.c, -2.6), { color: pt.l ? DONE_COL : dShown[i].col, weight: 3.6, opacity: 1, interactive: false, lineCap: 'butt' }).addTo(dLayer);
+            L.polyline(offLL(pt.c, 2.6), { color: pt.r ? DONE_COL : dShown[i].col, weight: 3.6, opacity: 1, interactive: false, lineCap: 'butt' }).addTo(dLayer);
+          }); });
+        };
+        map.on('zoomend', paintDone); st.paintDone = paintDone; st.doneKm = dp;
+        setTimeout(function(){ try { paintDone(); } catch (e) {} }, 0);
+      }
+    }
     var grid = {}; all.forEach(function(p){ grid[Math.round(p[0] / 0.0003) + ':' + Math.round(p[1] / 0.0004)] = 1; });
     var near = function(p){ var a = Math.round(p[0] / 0.0003), b = Math.round(p[1] / 0.0004); for (var i = -1; i <= 1; i++) for (var j = -1; j <= 1; j++) if (grid[(a + i) + ':' + (b + j)]) return true; return false; };
     (g('sharedStreetModes') || []).forEach(function(m){
@@ -38842,7 +39009,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     };
   }
   function editNames(){
-    var E = edits(curKey), R = DATA[curKey]; if (!R) return;
+    var E = edits(curKey), R = route(curKey); if (!R) return;
     var cols = {}; R.lines.forEach(function(l){ var ov = E.pieces[pid(l)]; cols[ov && ov !== 'x' ? ov : (l.s || '#16a34a')] = 1; }); E.drawn.forEach(function(d){ cols[d.s] = 1; });
     Object.keys(cols).forEach(function(c){
       var t = prompt('Name for the ' + (SECTION_NAMES[c] || c) + ' part of the run (e.g. "Load 1", "Driver 2"):', E.names[c] || '');
@@ -38944,7 +39111,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     host.innerHTML = '';
     paintTools();
     Array.prototype.forEach.call(el.querySelectorAll('[data-rm="edit"]'), function(b){ b.classList.toggle('on', editing); b.textContent = editing ? 'Done editing' : 'Edit'; });
-    var R = DATA[curKey]; if (!R) { host.innerHTML = '<div class="rm-empty">No route map for this run yet.</div>'; return; }
+    var R = route(curKey); if (!R) { host.innerHTML = '<div class="rm-empty">No route map for this run yet.</div>'; return; }
     var pg = pagesCache[0], o = orientOverride || pg.o;
     // the page keeps its size while you edit, so the map never shifts under your finger
     if (!pageSize || !keep || resize || pageSize.o !== o) pageSize = screenSize(o);
@@ -38969,21 +39136,21 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   function doneApply(){
     var b = document.getElementById('rmDone');
     if (b) { b.hidden = !doneAvail; b.classList.toggle('on', !!(doneAvail && doneOn)); }
-    doneNames = doneAvail && doneOn ? doneAvail.map(normSt) : null;
+    doneNames = doneAvail && doneOn ? true : null;
   }
   function doneSync(key){
     var rc = null; try { rc = (window.lbRunCheck && key === currentKey()) ? window.lbRunCheck() : null; } catch (e) {}
-    doneAvail = rc && rc.doneStreets && rc.doneStreets.length ? rc.doneStreets : null;
+    doneAvail = rc && (rc.total - rc.left > 0 || rc.hasTrail) ? true : null;
     if (key !== doneKey) { doneKey = key; if (doneOn !== 'forced') doneOn = null; }
     if (doneOn === 'forced') doneOn = true;
-    else if (doneOn === null) doneOn = !!(rc && rc.streetKeys && rc.streetKeys.length && doneAvail && doneAvail.length / rc.streetKeys.length >= 0.5);
+    else if (doneOn === null) doneOn = !!doneAvail;      // (where the truck has been is what the driver wants to see)
     doneApply();
   }
   function show(key){
     curKey = key; curPage = 0; orientOverride = null; pageSize = null;
     doneSync(key);
     fillPickers(parse(key));
-    pagesCache = DATA[key] ? pagesFor(DATA[key]) : [];
+    pagesCache = DATA[key] ? pagesFor(route(key)) : [];
     renderView();
   }
   // Print what's on screen (same page shape and centre, the zoom scaled up by how much bigger the paper is, the cards
@@ -38991,7 +39158,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   // sits followed by each page, each marked with where it joins its neighbours
   var printing = [];
   function printView(all){
-    var R = DATA[curKey]; if (!R || !view) return;
+    var R = route(curKey); if (!R || !view) return;
     var o = orientOverride || pagesCache[0].o, rot = rotFor(curKey), kp = keyFor(curKey), P = sheetsFor(curKey);
     var screenW = view.page.clientWidth, c = view.map.getCenter(), z = view.map.getZoom(), order = view.order;   // before the screen view is hidden for printing
     var frames = (pagesMode || all) && P.length > 0;
@@ -39090,13 +39257,11 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   window.lbRunMapImage = function(key, o2){
     return load().then(function(){
       var k = key || currentKey(); if (!k || !DATA[k]) return null;
-      var R = DATA[k], o = parse(k), E = edits(k), rc = null;
+      var R = route(k), o = parse(k), E = edits(k), rc = null;
       try { rc = window.lbRunCheck ? window.lbRunCheck() : null; } catch (e) {}
-      var dn = (rc && rc.doneStreets && rc.doneStreets.length) ? rc.doneStreets.map(normSt) : [];
-      // a street with only one side done: the houses of the street (with whether each still has bins to do) are split by which side
-      // of the piece of road they are on; if the two sides differ the piece is drawn twice, the done side red and the other as normal
-      var byName = {}; if (rc && rc.all) rc.all.forEach(function(st){ if (st.pts && st.pts.length) byName[normSt(st.name)] = st.pts; });
-      var lines = R.lines.map(function(l){ var ov = E.pieces[pid(l)]; return { l: l, gone: ov === 'x', col: ov && ov !== 'x' ? ov : (dn.length && l.n && dn.indexOf(normSt(l.n)) >= 0 ? DONE_COL : (l.s || '#16a34a')), pts: (!ov && l.n) ? byName[normSt(l.n)] : null }; }).filter(function(x){ return !x.gone; });
+      // done is worked out piece by piece and side by side (doneParts: the trail and the bins), not a whole street at a time
+      var lines = R.lines.map(function(l){ var ov = E.pieces[pid(l)]; return { l: l, gone: ov === 'x', col: ov && ov !== 'x' ? ov : (l.s || '#16a34a') }; }).filter(function(x){ return !x.gone; });
+      var dp = rc ? doneParts(k, lines.map(function(m){ return m.l.c; })) : null;
       var houses = []; var grp = groupFor(o); if (grp) grp.sites.forEach(function(s){ var la = +s.lat, ln = +s.lng; if (la && ln) houses.push([la, ln]); });
       var pts = []; R.lines.forEach(function(l){ pts = pts.concat(l.c); }); E.drawn.forEach(function(d){ pts = pts.concat(d.c); });
       if (!pts.length) pts = houses;
@@ -39126,26 +39291,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
         x.lineCap = 'round'; x.lineJoin = 'round';
         houses.forEach(function(h){ var q = P(h); x.fillStyle = 'rgba(71,85,105,.75)'; x.beginPath(); x.arc(q[0], q[1], 3, 0, 7); x.fill(); });
         var mpp0 = 40075016 * Math.cos(((b[0] + b[2]) / 2) * Math.PI / 180) / (256 * Math.pow(2, z));   // metres per pixel
-        // which sides of this piece have houses still to do / all done: [side +1 left?, side -1 left?] or null when it is not split
-        var sides = function(m){
-          if (!m.pts || m.col === DONE_COL) return null;
-          var c = m.l.c.map(P), cnt = { 1: [0, 0], '-1': [0, 0] };   // [houses, houses with bins left]
-          m.pts.forEach(function(h){
-            var q = P(h), best = 1e9, sg = 0;
-            for (var i = 1; i < c.length; i++) {
-              var ax = c[i - 1][0], ay = c[i - 1][1], dx = c[i][0] - ax, dy = c[i][1] - ay, L2 = dx * dx + dy * dy || 1, t = Math.max(0, Math.min(1, ((q[0] - ax) * dx + (q[1] - ay) * dy) / L2));
-              var ex = q[0] - (ax + t * dx), ey = q[1] - (ay + t * dy), d = Math.sqrt(ex * ex + ey * ey);
-              if (d < best) { best = d; sg = (-dy * (q[0] - ax) + dx * (q[1] - ay)) >= 0 ? 1 : -1; }
-            }
-            if (best * mpp0 > 60) return;
-            cnt[sg][0]++; if (h[2]) cnt[sg][1]++;
-          });
-          var A = cnt[1], B = cnt['-1'];
-          if (!A[0] || !B[0]) return null;                       // houses on one side only: the street is not split
-          var aDone = !A[1], bDone = !B[1];
-          return aDone === bDone ? null : { a: aDone, b: bDone };
-        };
-        var offs = function(cc, d){   // the piece moved d pixels to its left (the side the houses with a positive sign are on)
+        var offs = function(cc, d){   // the piece moved d pixels sideways (+d is to the right of its direction: the canvas's y runs down)
           var q = cc.map(P), out = [];
           for (var i = 0; i < q.length; i++) {
             var p0 = q[Math.max(0, i - 1)], p1 = q[Math.min(q.length - 1, i + 1)], dx = p1[0] - p0[0], dy = p1[1] - p0[1], L = Math.sqrt(dx * dx + dy * dy) || 1;
@@ -39153,20 +39299,24 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
           }
           x.beginPath(); out.forEach(function(p, i){ if (i) x.lineTo(p[0], p[1]); else x.moveTo(p[0], p[1]); }); x.stroke();
         };
-        var split = 0;
-        x.strokeStyle = '#fff'; x.lineWidth = 12; lines.forEach(function(m){ m.sd = sides(m); if (m.sd) { split++; x.lineWidth = 17; offs(m.l.c, 0); x.lineWidth = 12; } else path(m.l.c); }); E.drawn.forEach(function(d){ path(d.c); });
-        lines.forEach(function(m){
-          if (m.sd) { x.lineWidth = 6; x.strokeStyle = m.sd.a ? DONE_COL : m.col; offs(m.l.c, 4.5); x.strokeStyle = m.sd.b ? DONE_COL : m.col; offs(m.l.c, -4.5); return; }
-          x.strokeStyle = m.col; x.lineWidth = 7; path(m.l.c);
-        });
+        // each line as its stretches: both sides done red, neither as the route, one side done as two lines side by side
+        var parts = lines.map(function(m, i){ return dp ? dp.lines[i] : [{ c: m.l.c, l: false, r: false }]; });
+        x.strokeStyle = '#fff';
+        parts.forEach(function(ps){ ps.forEach(function(pt){ x.lineWidth = (pt.l !== pt.r) ? 17 : 12; if (pt.l !== pt.r) offs(pt.c, 0); else path(pt.c); }); });
+        E.drawn.forEach(function(d){ x.lineWidth = 12; path(d.c); });
+        lines.forEach(function(m, i){ parts[i].forEach(function(pt){
+          if (pt.l === pt.r) { x.strokeStyle = pt.l ? DONE_COL : m.col; x.lineWidth = 7; path(pt.c); return; }
+          x.lineWidth = 6;
+          x.strokeStyle = pt.l ? DONE_COL : m.col; offs(pt.c, -4.5);
+          x.strokeStyle = pt.r ? DONE_COL : m.col; offs(pt.c, 4.5);
+        }); });
         E.drawn.forEach(function(d){ x.strokeStyle = d.s; x.lineWidth = 7; path(d.c); });
         x.fillStyle = COL[o.stream] || '#16a34a'; x.fillRect(0, 0, c.width, 14);
         x.fillStyle = '#fff'; x.fillRect(0, 14, c.width, TOP - 14);
         x.fillStyle = '#111'; x.font = 'bold 44px system-ui, Arial, sans-serif'; x.textBaseline = 'middle';
         x.fillText('Run ' + String(o.run).toUpperCase() + (o.week || '') + ' · ' + o.day + ' · ' + o.stream, 20, 48);
-        var done = dn.length, tot = rc && rc.streetKeys ? rc.streetKeys.length : 0;
         x.font = '28px system-ui, Arial, sans-serif'; x.fillStyle = '#374151';
-        x.fillText((done ? done + (tot ? ' of ' + tot : '') + ' streets done (red) · ' : '') + (split ? split + ' with one side done (red side done, other side still to do) · ' : '') + (rc && rc.pink ? rc.pink + ' bins passed, not lifted · ' : '') + new Date().toLocaleDateString('en-AU') + ' ' + new Date().toLocaleTimeString('en-AU', { hour: '2-digit', minute: '2-digit' }), 20, 92);
+        x.fillText((dp ? 'Red done · green to do · two colours: one side done · ' + dp.kmDone.toFixed(1) + ' of ' + dp.km.toFixed(1) + ' km done · ' : '') + (rc && rc.pink ? rc.pink + ' bins passed, not lifted · ' : '') + new Date().toLocaleDateString('en-AU') + ' ' + new Date().toLocaleTimeString('en-AU', { hour: '2-digit', minute: '2-digit' }), 20, 92);
         return new Promise(function(res){
           try { c.toBlob(function(bl){ if (!bl) { res(null); return; } bl.arrayBuffer().then(function(ab){ res({ jpeg: new Uint8Array(ab), w: c.width, h: c.height }); }, function(){ res(null); }); }, 'image/jpeg', 0.85); }
           catch (e) { res(null); }
@@ -39179,7 +39329,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   };
   window.lbRunMapOpen = open;
   window.lbRunMapDebug = function(){ return { view: view, printing: printing }; };
-  window.lbRunMapPages = function(key){ return DATA && DATA[key] ? pagesFor(DATA[key]) : null; };
+  window.lbRunMapPages = function(key){ return DATA && DATA[key] ? pagesFor(route(key)) : null; };
+  window.lbRunRoute = function(key){ return load().then(function(){ return route(key); }); };   // (test hook)
 })();
 </script>
 
@@ -50488,7 +50639,12 @@ html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x
   'use strict';
   // OFF for now (Fox, 22 Oct): the app ran slow and this lookup of OpenStreetMap addresses for the whole map (not just the run
   // being driven) is the suspect. Change to false to bring it back; nothing else depends on it.
-  var DISABLED = true; if (DISABLED) return;
+  var DISABLED = true;
+  if (DISABLED) {
+    // what it downloaded before it was switched off is only taking up room on the phone (nothing reads it): cleared once
+    try { if (!localStorage.getItem('lbAddrTilesCleared') && typeof saveToDB === 'function') { saveToDB('lbAddrTiles', {}).then(function(){ try { localStorage.setItem('lbAddrTilesCleared', '1'); } catch (e) {} }).catch(function(){}); } } catch (e) {}
+    return;
+  }
   var GF = {};
   function g(n){ try { return (GF[n] || (GF[n] = new Function('return typeof ' + n + ' === "undefined" ? undefined : ' + n)))(); } catch (e) { return undefined; } }
   var TS = 0.005, KEEP = 80, RETRY_MS = 60000, M_LAT = 110540, M_LNG = 111320, REACH_M = 45;
