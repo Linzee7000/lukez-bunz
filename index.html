@@ -40372,22 +40372,25 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
      which it hasn't got): they are called through the bridge by name, like the GPS and notification plugins. Checking
      Capacitor.Plugins is why Print said the app was too old even on the newest app. */
   function nativeHas(n){ var C = window.Capacitor; return !!(C && C.isNativePlatform && C.isNativePlatform() && typeof C.nativePromise === 'function' && (!C.PluginHeaders || C.PluginHeaders.some(function(h){ return h && h.name === n; }))); }
+  /* The phone's PDF is downloaded, not shared: the share sheet never came up in the app (the PDF was made, then nothing). In the
+     app it is written to the phone's Documents folder, "Lukez Bunz" (Files app > Documents), with the Filesystem plugin called
+     through the bridge; in a phone's browser it is an ordinary download. A toast says where it went, or what went wrong. */
   function sharePdf(blob, name, title){
-    var C = window.Capacitor;
+    var C = window.Capacitor, fname = name.replace(/[^A-Za-z0-9 ._-]/g, '');
     if (C && C.isNativePlatform && C.isNativePlatform()) {
-      if (!nativeHas('Filesystem') || !nativeHas('Share')) { note('This copy of the app can\'t share files - install the latest app'); return Promise.resolve(); }
-      // saved to the app's cache, then the share sheet (print, save to Files, email...)
-      return new Promise(function(res, rej){ var fr = new FileReader(); fr.onload = function(){ res(String(fr.result).split(',')[1]); }; fr.onerror = rej; fr.readAsDataURL(blob); })
-        .then(function(b64){ return C.nativePromise('Filesystem', 'writeFile', { path: name.replace(/[^A-Za-z0-9 ._-]/g, ''), data: b64, directory: 'CACHE' }); })
-        .then(function(w){ return C.nativePromise('Share', 'share', { title: title, files: [w.uri], dialogTitle: 'Run map' }); })
-        .catch(function(e){ var m = String(e && (e.message || e.errorMessage) || e); if (/cancel/i.test(m)) return; throw e; });
+      if (!nativeHas('Filesystem')) { note('This copy of the app can\'t save files - install the latest app'); return Promise.resolve(); }
+      var perm = C.nativePromise('Filesystem', 'requestPermissions', {}).catch(function(){ return null; });   // (Android 10 and older ask first; newer ones just say yes)
+      return perm.then(function(){
+        return new Promise(function(res, rej){ var fr = new FileReader(); fr.onload = function(){ res(String(fr.result).split(',')[1]); }; fr.onerror = rej; fr.readAsDataURL(blob); });
+      }).then(function(b64){
+        return C.nativePromise('Filesystem', 'writeFile', { path: 'Lukez Bunz/' + fname, data: b64, directory: 'DOCUMENTS', recursive: true });
+      }).then(function(){ note('Saved: Documents / Lukez Bunz / ' + fname); }, function(e){
+        throw new Error('could not save it to the phone (' + String(e && (e.message || e.errorMessage) || e) + ')');
+      });
     }
-    try {
-      var f = new File([blob], name, { type: 'application/pdf' });
-      if (navigator.canShare && navigator.canShare({ files: [f] })) return navigator.share({ files: [f], title: title }).catch(function(e){ if (e && e.name === 'AbortError') return; throw e; });
-    } catch (e) {}
-    var a2 = document.createElement('a'); a2.href = URL.createObjectURL(blob); a2.download = name; document.body.appendChild(a2); a2.click();
+    var a2 = document.createElement('a'); a2.href = URL.createObjectURL(blob); a2.download = fname; document.body.appendChild(a2); a2.click();
     setTimeout(function(){ URL.revokeObjectURL(a2.href); a2.remove(); }, 4000);
+    note('Downloaded: ' + fname);
     return Promise.resolve();
   }
   function screenSize(o){
@@ -40411,6 +40414,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     host.innerHTML = '';
     paintTools();
     var lead = isLeadNow(); if (!lead) editing = false;
+    Array.prototype.forEach.call(el.querySelectorAll('[data-rm="printview"]'), function(b){ if (!b.disabled) b.textContent = phonePrint() ? 'Download' : 'Print'; });   // (a phone gets the PDF as a download)
     Array.prototype.forEach.call(el.querySelectorAll('[data-rm="edit"]'), function(b){ b.classList.toggle('on', editing); b.textContent = editing ? 'Done editing' : 'Edit'; b.style.display = lead ? '' : 'none'; });
     var R = route(curKey); if (!R) { host.innerHTML = '<div class="rm-empty">No route map for this run yet.</div>'; return; }
     var pg = pagesCache[0], o = orientOverride || phoneOrient() || pg.o;
