@@ -38287,6 +38287,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   #lbRunMap .rm-drawing, #lbRunMap .rm-drawing .leaflet-interactive { cursor: crosshair; touch-action: none; }
   #lbRunMap .rm-bar button.on { background: #fbbf24; }
   body.rm-printing #rmPrint { display: block; }
+  body.rm-pdf #rmPrint { display: block; position: fixed; left: -30000px; top: 0; z-index: -1; pointer-events: none; }
   body.rm-printing #rmView { display: none; }
   #lbRunMap .rm-page { break-after: page; page-break-after: always; }
 
@@ -38377,8 +38378,27 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     return hm > wm * 1.05 ? 'port' : 'land';
   }
   function bboxOf(pts){ var b = [90, 180, -90, -180]; pts.forEach(function(p){ b[0] = Math.min(b[0], p[0]); b[1] = Math.min(b[1], p[1]); b[2] = Math.max(b[2], p[0]); b[3] = Math.max(b[3], p[1]); }); return b; }
+  /* What "Whole run" fits: the run itself, not stray bits. 219A Monday's route data has a 500 m piece of Melbourne Rd 2 km away
+     and bits of Point Nepean Rd, and streets taken off the map still counted, so the run sat small in a corner of a page of
+     empty map. Lines are grouped where they touch (within 40 m); the biggest group, and any group at least a fifth its length,
+     are what is fitted. Everything is still drawn. */
+  function mainPts(lines){
+    lines = (lines || []).filter(function(l){ return l && l.c && l.c.length > 1; });
+    if (lines.length < 2) { var a0 = []; lines.forEach(function(l){ a0 = a0.concat(l.c); }); return a0; }
+    var lat0 = lines[0].c[0][0], MX = 111320 * Math.cos(lat0 * Math.PI / 180), C = 40, grid = {}, par = lines.map(function(l, i){ return i; });
+    var xy = function(p){ return [p[1] * MX, p[0] * 110540]; }, find = function(i){ while (par[i] !== i) { par[i] = par[par[i]]; i = par[i]; } return i; };
+    var len = lines.map(function(l){ var t = 0; for (var i = 1; i < l.c.length; i++) { var A = xy(l.c[i - 1]), B = xy(l.c[i]); t += Math.hypot(B[0] - A[0], B[1] - A[1]); } return t; });
+    lines.forEach(function(l, li){ l.c.forEach(function(p){ var P = xy(p), k = Math.floor(P[0] / C) + ':' + Math.floor(P[1] / C); (grid[k] = grid[k] || []).push([P, li]); }); });
+    lines.forEach(function(l, li){ l.c.forEach(function(p){ var P = xy(p), cx = Math.floor(P[0] / C), cy = Math.floor(P[1] / C);
+      for (var x = cx - 1; x <= cx + 1; x++) for (var y = cy - 1; y <= cy + 1; y++) (grid[x + ':' + y] || []).forEach(function(q){ if (q[1] !== li && Math.hypot(q[0][0] - P[0], q[0][1] - P[1]) <= C) { var a = find(li), b = find(q[1]); if (a !== b) par[a] = b; } });
+    }); });
+    var tot = {}; lines.forEach(function(l, li){ var r = find(li); tot[r] = (tot[r] || 0) + len[li]; });
+    var big = Math.max.apply(null, Object.keys(tot).map(function(k){ return tot[k]; })), out = [];
+    lines.forEach(function(l, li){ if (tot[find(li)] >= big * 0.2) out = out.concat(l.c); });
+    return out.length ? out : lines[0].c;
+  }
   function pagesFor(R){
-    var all = []; R.lines.forEach(function(l){ all = all.concat(l.c); });
+    var all = mainPts(R.lines);
     var b = bboxOf(all);
     return [{ kind: 'all', b: b, o: orient(b) }];
   }
@@ -39554,8 +39574,12 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     // taps on the cards stay on the cards (they don't add a note or colour the street underneath)
     Array.prototype.forEach.call(st.page.querySelectorAll('.rm-card, .rm-foot'), function(c){ L.DomEvent.disableClickPropagation(c); });
     if (opts.view) map.setView(opts.view.c, opts.view.z, { animate: false });
-    else if (opts.fitPts) fitTurned(st, bboxOf(all.concat(opts.fitPts)), all.concat(opts.fitPts));
-    else fitTurned(st, page.b, all);
+    else {
+      var E2 = edits(key), fitAll = mainPts(shown.filter(function(x){ return !x.gone; }).map(function(x){ return x.l; }).concat(E2.drawn));
+      if (!fitAll.length) fitAll = all;
+      if (opts.fitPts) fitTurned(st, bboxOf(fitAll.concat(opts.fitPts)), fitAll.concat(opts.fitPts));
+      else fitTurned(st, bboxOf(fitAll), fitAll);
+    }
     placeCards(st);
     // while editing the cards stay put (so nothing jumps under your finger); otherwise they move to the emptiest corners
     if (opts.edit) st.fixed = st.order;
@@ -40179,7 +40203,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       if (a === 'pprint') printView(true);
       if (a === 'fit') renderView(false);
       if (a === 'done') { doneOn = !doneOn; doneApply(); renderView(true); }
-      if (a === 'turn') { var pg = pagesCache[curPage] || pagesCache[0]; orientOverride = ((orientOverride || phoneOrient() || pg.o) === 'land') ? 'port' : 'land'; renderView(true, true); }
+      if (a === 'turn') { var pg = pagesCache[curPage] || pagesCache[0]; orientOverride = ((orientOverride || phoneOrient() || pg.o) === 'land') ? 'port' : 'land'; var ao = lsGet('lbRunMapOrient', {}) || {}; ao[curKey] = orientOverride; lsSet('lbRunMapOrient', ao); renderView(true, true); }   // (kept per run, like the turn and the key)
       if (a === 'edit') { editing = !editing; if (editing) pagesMode = false; tool = 'paint'; renderView(true, true); }
       if (a === 'tool') { tool = b.getAttribute('data-v'); renderView(true); }
       if (a === 'colour') { colour = b.getAttribute('data-v'); if (['draw', 'side', 'cp', 'arrow', 'area', 'select'].indexOf(tool) < 0) tool = 'paint'; renderView(true); }
@@ -40272,7 +40296,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var t0 = btn && btn.textContent; if (btn) { btn.textContent = 'Making PDF…'; btn.disabled = true; }
     var B = null, done = function(){ if (B) { B.cleanup(); B = null; } if (btn) { btn.textContent = t0; btn.disabled = false; } };
     loadH2C().then(function(h2c){
-      B = buildSheets(pagesMode); if (!B) throw new Error('no map');
+      B = buildSheets(pagesMode, true); if (!B) throw new Error('no map');
       return B.ready.then(function(){
         var pages = Array.prototype.slice.call(B.host.querySelectorAll('.rm-page')), imgs = [];
         return pages.reduce(function(pr, pg){ return pr.then(function(){
@@ -40299,7 +40323,14 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
               return null;
             }));
           }).then(function(){
-          return h2c(pg, { scale: 2, backgroundColor: '#fff', logging: false, useCORS: true }).then(function(cv){
+          if (btn) btn.textContent = 'Making PDF ' + (imgs.length + 1) + '/' + pages.length + '\u2026';
+          /* html2canvas copies the WHOLE page before it draws the bit asked for - in this app that is the main map with thousands
+             of house markers, which on a phone took minutes ("Making PDF..." and nothing). Only the sheet (and what holds it,
+             and the styles) is copied now; and it gives up after 60 s rather than hang. */
+          var keep = function(el){ return el === pg || pg.contains(el) || el.contains(pg); };
+          var shot = h2c(pg, { scale: 2, backgroundColor: '#fff', logging: false, useCORS: true, imageTimeout: 8000,
+            ignoreElements: function(el){ if (keep(el)) return false; var t = el.tagName; if (t === 'HEAD' || t === 'STYLE' || t === 'LINK' || t === 'META' || t === 'TITLE') return false; if (el.closest && el.closest('head')) return false; return true; } });
+          return Promise.race([shot, new Promise(function(r, j){ setTimeout(function(){ j(new Error('took too long')); }, 60000); })]).then(function(cv){
             var url = cv.toDataURL('image/jpeg', .86), bin = atob(url.split(',')[1]), u8 = new Uint8Array(bin.length);
             for (var i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
             imgs.push({ jpeg: u8, w: cv.width, h: cv.height });
@@ -40401,7 +40432,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   }
   function show(key){
     setTimeout(function(){ streetsFor(key).then(function(ch){ if (ch && curKey === key && !editing) { pagesCache = pagesFor(route(key)); renderView(true); } }); }, 0);
-    curKey = key; curPage = 0; orientOverride = null; pageSize = null;
+    curKey = key; curPage = 0; orientOverride = (lsGet('lbRunMapOrient', {}) || {})[key] || null; pageSize = null;
+    lsSet('lbRunMapLast', { k: key, ts: Date.now() });   // (the run looked at last: Run maps opens on it next time)
     doneSync(key);
     fillPickers(parse(key));
     pagesCache = DATA[key] ? pagesFor(route(key)) : [];
@@ -40417,15 +40449,16 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   }
   // the printed sheets (exactly what Print shows: the screen's view, the street names, the cards), laid out in #rmPrint;
   // ready once the street tiles are in. Print hands them to the browser; the phone turns them into a PDF (mobilePrint).
-  function buildSheets(all){
+  function buildSheets(all, pdf){
     var R = route(curKey); if (!R || !view) return null;
+    var CLS = pdf ? 'rm-pdf' : 'rm-printing';   // (for the phone's PDF the sheets are laid out off screen: the map on screen stays as it is)
     var o = orientOverride || pagesCache[0].o, rot = rotFor(curKey), kp = keyFor(curKey), P = sheetsFor(curKey);
     var screenW = view.page.clientWidth, c = view.map.getCenter(), z = view.map.getZoom(), order = view.order;   // before the screen view is hidden for printing
     var frames = (pagesMode || all) && P.length > 0;
     var sheets = [{ o: o, screen: true, order: order, frames: frames, label: frames ? 'Page layout' : '' }];
     if (all) P.forEach(function(f, i){ sheets.push({ o: f.o, view: { c: f.c, z: f.z }, page: i, label: 'Page ' + (i + 1) + ' of ' + P.length }); });
     var host = document.getElementById('rmPrint'); printing.forEach(function(s){ try { s.map.remove(); } catch (e) {} }); printing = []; host.innerHTML = '';
-    document.body.classList.add('rm-printing');
+    document.body.classList.add(CLS);
     // (fallback for browsers without named pages - see @page rmport above) put this after the run sheet's @page
     // rule so it wins while the run map prints, and take it out again afterwards so the run sheet still prints landscape
     // Only where named pages aren't supported: in Chrome a later unnamed @page size beats the named ones, which
@@ -40452,7 +40485,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     // ready once the street tiles are in (up to 15 s - several pages can take a while on a phone)
     return {
       ready: whenTiles(printing, 15000), host: host,
-      cleanup: function(){ try { css.remove(); } catch (e) {} document.body.classList.remove('rm-printing'); printing.forEach(function(s){ try { s.map.remove(); } catch (e) {} }); printing = []; host.innerHTML = ''; }
+      cleanup: function(){ try { css.remove(); } catch (e) {} document.body.classList.remove(CLS); printing.forEach(function(s){ try { s.map.remove(); } catch (e) {} }); printing = []; host.innerHTML = ''; }
     };
   }
   function whenTiles(states, ms){
@@ -40505,7 +40538,15 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     doneOn = o2 && o2.done ? 'forced' : null; doneKey = '';   // from the To Do list: finished streets start red
     build(); el.style.display = '';
     load().then(function(){
-      var k = key || currentKey();
+      /* Run maps from the menu opened on the shift's run every time (350A Friday, when the driver was working on 219A Monday) and
+         everything set up on the other run seemed lost. With no run asked for it opens on the run looked at last - unless a shift
+         has started since, when the run being driven comes first. */
+      var k = key || null;
+      if (!k) {
+        var last = lsGet('lbRunMapLast', null), sh = lsGet('lbShift', null), s0 = (sh && sh.start) || 0;
+        var cur = currentKey();
+        k = last && last.k && DATA[last.k] && (!cur || (last.ts || 0) > s0) ? last.k : cur;
+      }
       if (k && !DATA[k]) {
         // (opened with no week in the filter, say: "Recycling#Monday##219" is not a key, "Recycling#Monday#A#219" is - it used to open
         // whichever run sorted first instead)
