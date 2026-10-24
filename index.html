@@ -38389,7 +38389,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var mine = (lsGet('lbRunMapEdits', {}) || {})[key], fleet = (lsGet('lbRunMapEditsFleet', {}) || {})[key];
     var e = (fleet && (!mine || !isLeadNow() || (fleet.ts || 0) > (mine.ts || 0))) ? fleet : mine;
     e = e || {};
-    return { pieces: e.pieces || {}, drawn: e.drawn || [], erase: e.erase || [], sides: e.sides || {}, arrows: e.arrows || [], points: e.points || [], notes: e.notes || [], hide: e.hide || [], names: e.names || {}, labels: e.labels || {}, lrot: e.lrot || {}, ts: e.ts || 0 };
+    return { pieces: e.pieces || {}, drawn: e.drawn || [], erase: e.erase || [], sides: e.sides || {}, arrows: e.arrows || [], points: e.points || [], notes: e.notes || [], hide: e.hide || [], names: e.names || {}, labels: e.labels || {}, lrot: e.lrot || {}, areas: e.areas || [], pt: e.pt || {}, ts: e.ts || 0 };
   }
   /* ---- Undo: every change, in order, with what it was ----
      Undo used to take back only the last thing drawn / rubbed out / placed, so after removing a street by mistake it undid
@@ -38409,6 +38409,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var cnt = function(f, add, del, chg){ var x = n(b[f]), y = n(a[f]); if (y > x) out.push(add); else if (y < x) out.push(del); else if (JSON.stringify(b[f]) !== JSON.stringify(a[f])) out.push(chg); };
     cnt('drawn', 'Draw a line', 'Delete a drawn line', 'Change a drawn line');
     cnt('erase', 'Rub out', 'Delete a rub out', 'Change a rub out');
+    cnt('areas', 'Change an area', 'Delete an area change', 'Change an area');
     cnt('arrows', 'Add an arrow', 'Delete an arrow', 'Move / colour an arrow');
     cnt('points', 'Add a collection point', 'Delete a collection point', 'Move / colour a collection point');
     cnt('notes', 'Add a note', 'Delete a note', 'Change a note');
@@ -38461,6 +38462,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   // a piece's own edit, else the whole street's (edits made before streets were cut at their corners still apply)
   function ovOf(E, l){
     var v = E.pieces[pid(l)]; if (v !== undefined) return v;
+    if (l.pa && E.pieces[l.pa] !== undefined) return E.pieces[l.pa];   // (the piece's name before its end was put on the corner)
     if (l.pid0 && l.pp && E.pieces[l.pid0] !== undefined) return E.pieces[l.pid0];
     if (l.alias) for (var i = 0; i < l.alias.length; i++) if (E.pieces[l.alias[i]] !== undefined) return E.pieces[l.alias[i]];   // (a dropped copy's colour)
     return undefined;
@@ -38663,6 +38665,62 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       return changed ? Object.assign({}, l, { c: out, pid0: pid(l), j: jj }) : l;
     });
   }
+  /* ---- ends put on the real corner ----
+     A street that stops short is run on to the street it meets (joinEnds), but straight on from the way its last few metres
+     point; the route-map lines are a few degrees out, so the join landed 20-40 m along the cross street from the corner
+     (Paine St met Spencer St 40 m west of the corner, 219A Monday) and Spencer St was cut there - colouring Spencer St then took
+     in a bit past Paine St, and Paine St's line ran along Spencer St to its join. Where a street's end sits on another street of
+     the route and the two really meet (a corner in the street shapes, data/run-streets.json, within 40 m), the end is moved onto
+     that corner: the street is cut back to the point on it nearest the corner (if it ran past it), then meets the other street
+     right at the corner, so the cut in the other street falls at the corner too. */
+  function fixCorners(lines, ways){
+    if (!lines || lines.length < 2 || !ways || !ways.length) return lines;
+    var lat0 = lines[0].c[0][0], lng0 = lines[0].c[0][1], MY = 110540, MX = 111320 * Math.cos(lat0 * Math.PI / 180);
+    var xy = function(p){ return [(p[1] - lng0) * MX, (p[0] - lat0) * MY]; }, ll = function(P){ return [+(lat0 + P[1] / MY).toFixed(6), +(lng0 + P[0] / MX).toFixed(6)]; };
+    var segD = function(P, A, B){ var ex = B[0] - A[0], ey = B[1] - A[1], L2 = ex * ex + ey * ey || 1e-9, t = Math.max(0, Math.min(1, ((P[0] - A[0]) * ex + (P[1] - A[1]) * ey) / L2)); return [Math.hypot(P[0] - A[0] - t * ex, P[1] - A[1] - t * ey), [A[0] + t * ex, A[1] + t * ey]]; };
+    var C = 50;
+    // corners: points of the street shapes on two or more differently named streets
+    var nodes = {};
+    ways.forEach(function(w){ var n = normSt(w[0]); if (!n) return; w[1].forEach(function(p){ var P = xy(p); if (Math.abs(P[0]) > 2e4 || Math.abs(P[1]) > 2e4) return; var k = Math.round(P[0] * 2) + ',' + Math.round(P[1] * 2), o = nodes[k] || (nodes[k] = { P: P, n: {} }); o.n[n] = 1; }); });
+    var jg = {};
+    Object.keys(nodes).forEach(function(k){ var o = nodes[k]; if (Object.keys(o.n).length < 2) return; var c = Math.floor(o.P[0] / C) + ':' + Math.floor(o.P[1] / C); (jg[c] = jg[c] || []).push(o); });
+    var P = lines.map(function(l){ return l.c.map(xy); }), sg = {};
+    P.forEach(function(c, li){ for (var i = 1; i < c.length; i++) { var A = c[i - 1], B = c[i], x0 = Math.floor(Math.min(A[0], B[0]) / C), x1 = Math.floor(Math.max(A[0], B[0]) / C), y0 = Math.floor(Math.min(A[1], B[1]) / C), y1 = Math.floor(Math.max(A[1], B[1]) / C); if ((x1 - x0 + 1) * (y1 - y0 + 1) > 400) continue; for (var x = x0; x <= x1; x++) for (var y = y0; y <= y1; y++) (sg[x + ':' + y] = sg[x + ':' + y] || []).push([li, i]); } });
+    var near = function(grid, Q, f){ var cx = Math.floor(Q[0] / C), cy = Math.floor(Q[1] / C); for (var x = cx - 1; x <= cx + 1; x++) for (var y = cy - 1; y <= cy + 1; y++) (grid[x + ':' + y] || []).forEach(f); };
+    var moved = 0;
+    var out = lines.map(function(l, li){
+      var me = normSt(l.n); if (!me || l.c.length < 2) return l;
+      var c = P[li].slice(), changed = false, e0 = [null, null];
+      [0, 1].forEach(function(end){
+        var E = end ? c[c.length - 1] : c[0];
+        // the other street of the route this end sits on
+        var tgt = -1, td = 2.5;
+        near(sg, E, function(r){ var lj = r[0]; if (lj === li || normSt(lines[lj].n) === me || !normSt(lines[lj].n)) return; var d = segD(E, P[lj][r[1] - 1], P[lj][r[1]])[0]; if (d < td) { td = d; tgt = lj; } });
+        if (tgt < 0) return;
+        var other = normSt(lines[tgt].n), J = null, jd = 40;
+        near(jg, E, function(o){ if (!o.n[me] || !o.n[other]) return; var d = Math.hypot(o.P[0] - E[0], o.P[1] - E[1]); if (d < jd) { jd = d; J = o.P; } });
+        if (!J) return;
+        // the corner on the other street's line (so the end lies on it, and that street is cut right there)
+        var Q = null, qd = Infinity, tc = P[tgt];
+        for (var i = 1; i < tc.length; i++) { var r2 = segD(J, tc[i - 1], tc[i]); if (r2[0] < qd) { qd = r2[0]; Q = r2[1]; } }
+        if (!Q || qd > 12 || Math.hypot(Q[0] - E[0], Q[1] - E[1]) < 2) return;
+        // this street cut back to its point nearest the corner (within its last 80 m), then on to the corner
+        var arr = end ? c.slice() : c.slice().reverse(), arc = 0, bi = -1, bf = null, bdd = 20;
+        for (var k = arr.length - 1; k >= 1 && arc <= 80; k--) {
+          var r3 = segD(Q, arr[k - 1], arr[k]); if (r3[0] < bdd) { bdd = r3[0]; bi = k; bf = r3[1]; }
+          arc += Math.hypot(arr[k][0] - arr[k - 1][0], arr[k][1] - arr[k - 1][1]);
+        }
+        if (bi < 0) return;
+        arr = arr.slice(0, bi); if (Math.hypot(bf[0] - arr[arr.length - 1][0], bf[1] - arr[arr.length - 1][1]) > 0.5) arr.push(bf);
+        if (Math.hypot(Q[0] - bf[0], Q[1] - bf[1]) > 0.5) arr.push(Q);
+        if (arr.length < 2) return;
+        e0[end] = end ? l.c[l.c.length - 1] : l.c[0];
+        c = end ? arr : arr.reverse(); changed = true; moved++;
+      });
+      return changed ? Object.assign({}, l, { c: c.map(ll), pid0: pid(l), e0: e0 }) : l;
+    });
+    return moved ? out : lines;
+  }
   /* ---- every street cut at its corners ----
      A street of the route was one piece end to end, so colouring the end of Daveys Bay Rd (from Denistoun Ave on) coloured all of
      it. Each piece now runs from one corner to the next: wherever another piece of the route starts or ends on it, or crosses it.
@@ -38678,18 +38736,18 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     lines.forEach(function(l, i){
       if (used[i]) return; used[i] = true;
       if (!l.n || l.c.length < 2) { out.push(l); return; }
-      var c = l.c.slice(), ids = [], grew = false;
+      var c = l.c.slice(), ids = [], grew = false, gs = [false, false];
       [1, 0].forEach(function(side){
         for (var guard = 0; guard < 50; guard++) {
           var P = side ? c[c.length - 1] : c[0], m = endsAt(P, l.n, i);
           if (m.length !== 1) break;
           var j = m[0][0], o = lines[j], oc = m[0][1] === 0 ? o.c.slice() : o.c.slice().reverse();   // (oc starts at P)
-          used[j] = true; ids.push(pid(o)); if (o.alias) ids = ids.concat(o.alias); grew = true;
+          used[j] = true; ids.push(pid(o)); if (o.alias) ids = ids.concat(o.alias); grew = true; gs[side] = true;
           var skip1 = d(oc[0], P) <= 1 ? 1 : 0;   // (the same point: drop the copy; a few metres apart: keep both, the gap is bridged)
           if (side) c = c.concat(oc.slice(skip1)); else c = oc.slice(skip1).reverse().concat(c);
         }
       });
-      out.push(grew ? Object.assign({}, l, { c: c, pid0: pid(l), alias: (l.alias || []).concat(ids) }) : l);
+      out.push(grew ? Object.assign({}, l, { c: c, pid0: pid(l), alias: (l.alias || []).concat(ids), e0: l.e0 ? [gs[0] ? null : l.e0[0], gs[1] ? null : l.e0[1]] : null }) : l);
     });
     return out;
   }
@@ -38702,15 +38760,22 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var cutsOf = src.map(function(){ return []; });
     var len = function(c){ var t = [0]; for (var i = 1; i < c.length; i++) t.push(t[i - 1] + Math.hypot(c[i][0] - c[i - 1][0], c[i][1] - c[i - 1][1])); return t; };
     var cum = P.map(len);
-    var addCut = function(li, i, t){ var c = P[li], d = cum[li][i - 1] + t * (cum[li][i] - cum[li][i - 1]); if (d < 6 || d > cum[li][c.length - 1] - 6) return; cutsOf[li].push(d); };
+    var addCut = function(li, i, t, old){ var c = P[li], d = cum[li][i - 1] + t * (cum[li][i] - cum[li][i - 1]); if (d < 6 || d > cum[li][c.length - 1] - 6) return; cutsOf[li].push({ d: d, o: old || null }); };
+    var keyOf = function(Q){ var M = ll(Q); return M[0].toFixed(5) + ',' + M[1].toFixed(5); };
+    // where a piece started before fixCorners moved the end that cuts it there: its colour is still found under that name (pa)
+    var oldKey = function(li, e0){
+      var O = xy(e0), best = null, bd = 4;
+      for (var i = 1; i < P[li].length; i++) { var A = P[li][i - 1], B = P[li][i], ex = B[0] - A[0], ey = B[1] - A[1], L2 = ex * ex + ey * ey || 1e-9, t = Math.max(0, Math.min(1, ((O[0] - A[0]) * ex + (O[1] - A[1]) * ey) / L2)), d = Math.hypot(O[0] - A[0] - t * ex, O[1] - A[1] - t * ey); if (d < bd) { bd = d; best = [A[0] + t * ex, A[1] + t * ey]; } }
+      return best ? keyOf(best) : null;
+    };
     // other pieces' ends lying on a piece
-    P.forEach(function(c, lj){ [c[0], c[c.length - 1]].forEach(function(E){
-      var seen = {}, cx = Math.floor(E[0] / C), cy = Math.floor(E[1] / C);
+    P.forEach(function(c, lj){ [c[0], c[c.length - 1]].forEach(function(E, ei){
+      var seen = {}, cx = Math.floor(E[0] / C), cy = Math.floor(E[1] / C), e0 = src[lj].e0 && src[lj].e0[ei];
       for (var x = cx - 1; x <= cx + 1; x++) for (var y = cy - 1; y <= cy + 1; y++) (grid[x + ':' + y] || []).forEach(function(r){
         var li = r[0], i = r[1]; if (li === lj || seen[li + ':' + i]) return; seen[li + ':' + i] = 1;
         if (src[li].n && src[li].n === src[lj].n) return;   // (the same street touching itself is not a corner)
         var A = P[li][i - 1], B = P[li][i], ex = B[0] - A[0], ey = B[1] - A[1], L2 = ex * ex + ey * ey || 1e-9, t = Math.max(0, Math.min(1, ((E[0] - A[0]) * ex + (E[1] - A[1]) * ey) / L2));
-        if (Math.hypot(E[0] - A[0] - t * ex, E[1] - A[1] - t * ey) <= 3) addCut(li, i, t);
+        if (Math.hypot(E[0] - A[0] - t * ex, E[1] - A[1] - t * ey) <= 3) addCut(li, i, t, e0 ? oldKey(li, e0) : null);
       });
     }); });
     // pieces crossing each other mid-way
@@ -38726,19 +38791,20 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     });
     var out = [];
     src.forEach(function(l, li){
-      var cuts = cutsOf[li].sort(function(a, b){ return a - b; }).filter(function(d, i, arr){ return !i || d - arr[i - 1] > 8; });
-      if (!cuts.length) { out.push(l.pid0 && !l.pp ? Object.assign({}, l, { pp: l.pid0 + '@' + l.c[0][0].toFixed(5) + ',' + l.c[0][1].toFixed(5) }) : l); return; }   // (the parts of a trimmed street get their own ids too)
-      var c = P[li], cm = cum[li], id0 = pid(l), pieces = [], cur = [l.c[0]], ci = 0, startKey = l.c[0][0].toFixed(5) + ',' + l.c[0][1].toFixed(5);
+      var cuts = cutsOf[li].sort(function(a, b){ return a.d - b.d; }).filter(function(q, i, arr){ return !i || q.d - arr[i - 1].d > 8; });
+      var s0 = l.c[0][0].toFixed(5) + ',' + l.c[0][1].toFixed(5), o0 = l.e0 && l.e0[0] ? l.e0[0][0].toFixed(5) + ',' + l.e0[0][1].toFixed(5) : null;
+      if (!cuts.length) { out.push(l.pid0 && !l.pp ? Object.assign({}, l, { pp: l.pid0 + '@' + s0, pa: o0 ? l.pid0 + '@' + o0 : null }) : l); return; }   // (the parts of a trimmed street get their own ids too)
+      var c = P[li], cm = cum[li], id0 = pid(l), pieces = [], cur = [l.c[0]], ci = 0, startKey = s0, startOld = o0;
       for (var i = 1; i < c.length; i++) {
-        while (ci < cuts.length && cuts[ci] <= cm[i]) {
-          var t = (cuts[ci] - cm[i - 1]) / ((cm[i] - cm[i - 1]) || 1), M = ll([c[i - 1][0] + (c[i][0] - c[i - 1][0]) * t, c[i - 1][1] + (c[i][1] - c[i - 1][1]) * t]);
-          cur.push(M); pieces.push([cur, startKey]); cur = [M]; startKey = M[0].toFixed(5) + ',' + M[1].toFixed(5); ci++;
+        while (ci < cuts.length && cuts[ci].d <= cm[i]) {
+          var t = (cuts[ci].d - cm[i - 1]) / ((cm[i] - cm[i - 1]) || 1), M = ll([c[i - 1][0] + (c[i][0] - c[i - 1][0]) * t, c[i - 1][1] + (c[i][1] - c[i - 1][1]) * t]);
+          cur.push(M); pieces.push([cur, startKey, startOld]); cur = [M]; startKey = M[0].toFixed(5) + ',' + M[1].toFixed(5); startOld = cuts[ci].o; ci++;
         }
         cur.push(l.c[i]);
       }
-      if (cur.length > 1) pieces.push([cur, startKey]);
+      if (cur.length > 1) pieces.push([cur, startKey, startOld]);
       var seenK = {};   // (a loop, like a court's turning circle, can start two pieces at the same spot)
-      pieces.forEach(function(pc){ var k2 = id0 + '@' + pc[1]; if (seenK[k2]) k2 += '~' + (++seenK[k2]); else seenK[k2] = 1; out.push(Object.assign({}, l, { c: pc[0], pid0: id0, pp: k2 })); });
+      pieces.forEach(function(pc){ var k2 = id0 + '@' + pc[1]; if (seenK[k2]) k2 += '~' + (++seenK[k2]); else seenK[k2] = 1; out.push(Object.assign({}, l, { c: pc[0], pid0: id0, pp: k2, pa: pc[2] && pc[2] !== pc[1] ? id0 + '@' + pc[2] : null })); });
     });
     return Object.assign({}, R, { lines: out });
   }
@@ -38790,7 +38856,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       lines = joinEnds(lines);   // (once more: a street can now run straight on to a stretch added for houses, like Old Mornington Rd to the Nepean Hwy one)
       var ch = lines.length !== base.length || lines.some(function(l, i){ return l !== base[i]; });
       // (joining can lay a street over one already there; taking that out can leave an end a few metres short, so join once more)
-      rec.R2 = cutAll(Object.assign({}, rec.base, { lines: joinEnds(dedupe(lines)) }));
+      rec.R2 = cutAll(Object.assign({}, rec.base, { lines: fixCorners(joinEnds(dedupe(lines)), w) }));
       return ch;
     }).catch(function(){ return false; });
   }
@@ -39010,7 +39076,9 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   function visibleDrawn(E, pieces){
     var src = E.drawn.map(function(d, i){ return Object.assign({}, d, { idx: i }); }).filter(function(d){ return d.c && d.c.length > 1; });
     if (!src.length) return [];
-    if (E.erase.length) src = rubOut(src, E);
+    if (E.erase.length) src = rubOut(src, E, function(d){ return d.ts; });
+    // (an area changes drawn lines made before it too: colour, or taken off)
+    if (E.areas && E.areas.length) src = areaPaint(src, E, function(d){ return d.ts; }).filter(function(d){ return !(d.ar && d.ar.a === 'x'); }).map(function(d){ return d.ar && d.ar.a === 'col' && d.ar.col ? Object.assign({}, d, { s: d.ar.col }) : d; });
     if (!src.length || !pieces.length) return src;
     var lat0 = src[0].c[0][0], lng0 = src[0].c[0][1], MY = 110540, MX = 111320 * Math.cos(lat0 * Math.PI / 180);
     var xy = function(p){ return [(p[1] - lng0) * MX, (p[0] - lat0) * MY]; }, ll = function(P){ return [+(lat0 + P[1] / MY).toFixed(6), +(lng0 + P[0] / MX).toFixed(6)]; };
@@ -39041,14 +39109,19 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     });
     return out;
   }
-  function rubOut(lines, E){
+  /* A rub out takes off what was there when it was made: a line drawn AFTER it goes over it (a line drawn later across an old rub
+     out on Spencer St, 219A Monday, just stopped there). tsOf(line) gives a drawn line's time; route streets have none, so every
+     rub out applies to them. */
+  function rubOut(lines, E, tsOf){
     var ER = (E && E.erase) || []; if (!ER.length || !lines.length) return lines;
     var lat0 = lines[0].c[0][0], lng0 = lines[0].c[0][1], MY = 110540, MX = 111320 * Math.cos(lat0 * Math.PI / 180);
     var xy = function(p){ return [(p[1] - lng0) * MX, (p[0] - lat0) * MY]; }, ll = function(P){ return [+(lat0 + P[1] / MY).toFixed(6), +(lng0 + P[0] / MX).toFixed(6)]; };
-    var strokes = ER.map(function(e){ var c = e.c.map(xy), b = [Infinity, Infinity, -Infinity, -Infinity]; c.forEach(function(P){ b[0] = Math.min(b[0], P[0]); b[1] = Math.min(b[1], P[1]); b[2] = Math.max(b[2], P[0]); b[3] = Math.max(b[3], P[1]); }); return { c: c, r: e.r || 8, b: b }; });
+    var strokes = ER.map(function(e){ var c = e.c.map(xy), b = [Infinity, Infinity, -Infinity, -Infinity]; c.forEach(function(P){ b[0] = Math.min(b[0], P[0]); b[1] = Math.min(b[1], P[1]); b[2] = Math.max(b[2], P[0]); b[3] = Math.max(b[3], P[1]); }); return { c: c, r: e.r || 8, b: b, ts: e.ts || 0 }; });
+    var t0 = 0;
     var gone = function(P){
       for (var k = 0; k < strokes.length; k++) {
-        var S = strokes[k], r = S.r; if (P[0] < S.b[0] - r || P[0] > S.b[2] + r || P[1] < S.b[1] - r || P[1] > S.b[3] + r) continue;
+        var S = strokes[k], r = S.r; if (t0 && S.ts && S.ts <= t0) continue;
+        if (P[0] < S.b[0] - r || P[0] > S.b[2] + r || P[1] < S.b[1] - r || P[1] > S.b[3] + r) continue;
         if (S.c.length === 1 && Math.hypot(P[0] - S.c[0][0], P[1] - S.c[0][1]) <= r) return true;
         for (var i = 1; i < S.c.length; i++) { var A = S.c[i - 1], B = S.c[i], ex = B[0] - A[0], ey = B[1] - A[1], L2 = ex * ex + ey * ey || 1e-9, t = Math.max(0, Math.min(1, ((P[0] - A[0]) * ex + (P[1] - A[1]) * ey) / L2)); if (Math.hypot(P[0] - A[0] - t * ex, P[1] - A[1] - t * ey) <= r) return true; }
       }
@@ -39056,6 +39129,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     };
     var out = [];
     lines.forEach(function(l){
+      t0 = tsOf ? (tsOf(l) || 0) : 0;
       var c = l.c.map(xy), pts = [], cut = false;
       // 2 m steps, so a rub across the middle of a long straight takes out just that bit
       for (var i = 0; i < c.length; i++) {
@@ -39073,11 +39147,55 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     });
     return out;
   }
+  /* ---- Area: a shape drawn round part of the map (freehand, or corner to corner with straight sides) ----
+     Whatever of the route lies inside it takes the area's change - a colour ('col'), removed ('x') or back to its own colour
+     ('reset') - only the part inside, cut where the line crosses the edge. So the colour no longer has to stop at a piece's end:
+     a corner where a piece ran on past the cross street is fixed by drawing round just that bit. E.areas: [{ p: [[lat, lng]...],
+     a, col, ts }], later ones over earlier. A tap on a piece after the area (E.pt[pid] = when) wins over it on that piece. */
+  function inPoly(P, poly){
+    var ins = false;
+    for (var i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+      var A = poly[i], B = poly[j];
+      if (((A[1] > P[1]) !== (B[1] > P[1])) && (P[0] < (B[0] - A[0]) * (P[1] - A[1]) / ((B[1] - A[1]) || 1e-12) + A[0])) ins = !ins;
+    }
+    return ins;
+  }
+  // lines cut into the bits inside / outside each area; a bit inside carries .ar (the area that has the last word there)
+  function areaPaint(lines, E, tsOf){
+    var AR = (E && E.areas) || []; if (!AR.length || !lines.length) return lines;
+    var lat0 = lines[0].c[0][0], lng0 = lines[0].c[0][1], MY = 110540, MX = 111320 * Math.cos(lat0 * Math.PI / 180);
+    var xy = function(p){ return [(p[1] - lng0) * MX, (p[0] - lat0) * MY]; }, ll = function(P){ return [+(lat0 + P[1] / MY).toFixed(6), +(lng0 + P[0] / MX).toFixed(6)]; };
+    var polys = AR.map(function(a, i){ var p = (a.p || []).map(xy), b = [Infinity, Infinity, -Infinity, -Infinity]; p.forEach(function(P){ b[0] = Math.min(b[0], P[0]); b[1] = Math.min(b[1], P[1]); b[2] = Math.max(b[2], P[0]); b[3] = Math.max(b[3], P[1]); }); return { p: p, b: b, a: a, i: i }; }).filter(function(x){ return x.p.length >= 3; });
+    var out = [];
+    lines.forEach(function(l){
+      var t0 = tsOf ? (tsOf(l) || 0) : 0;
+      var mine = polys.filter(function(q){ return !(q.a.ts && t0 && q.a.ts <= t0); });
+      if (!mine.length) { out.push(l); return; }
+      var c = l.c.map(xy), lb = [Infinity, Infinity, -Infinity, -Infinity];
+      c.forEach(function(P){ lb[0] = Math.min(lb[0], P[0]); lb[1] = Math.min(lb[1], P[1]); lb[2] = Math.max(lb[2], P[0]); lb[3] = Math.max(lb[3], P[1]); });
+      mine = mine.filter(function(q){ return !(lb[2] < q.b[0] || lb[0] > q.b[2] || lb[3] < q.b[1] || lb[1] > q.b[3]); });
+      if (!mine.length) { out.push(l); return; }
+      var pts = [];   // 1 m steps, so the line is cut close to the area's edge
+      for (var i = 0; i < c.length; i++) { if (i) { var A = c[i - 1], B = c[i], n = Math.ceil(Math.hypot(B[0] - A[0], B[1] - A[1])); for (var j = 1; j < n; j++) pts.push([A[0] + (B[0] - A[0]) * j / n, A[1] + (B[1] - A[1]) * j / n, 1]); } pts.push([c[i][0], c[i][1], 0]); }
+      var tag = pts.map(function(P){ var w = -1; mine.forEach(function(q){ if (q.i > w && P[0] >= q.b[0] && P[0] <= q.b[2] && P[1] >= q.b[1] && P[1] <= q.b[3] && inPoly(P, q.p)) w = q.i; }); return w; });
+      if (tag.every(function(t){ return t < 0; })) { out.push(l); return; }
+      var cur = [], ct = tag[0];
+      var flush = function(){ if (cur.length > 1) out.push(ct >= 0 ? Object.assign({}, l, { c: cur, ar: AR[ct] }) : Object.assign({}, l, { c: cur })); };
+      for (var q = 0; q < pts.length; q++) {
+        if (tag[q] !== ct) { var M = ll(pts[q]); cur.push(M); flush(); cur = [M]; ct = tag[q]; continue; }   // (the bits share the point where they meet: no gap)
+        if (!pts[q][2] || q === pts.length - 1) cur.push(ll(pts[q]));
+        else if (q + 1 < pts.length && tag[q + 1] !== ct) cur.push(ll(pts[q]));
+      }
+      flush();
+    });
+    return out;
+  }
   function draw(container, key, R, page, opts){
     opts = opts || {};
     var E = edits(key), mode = opts.edit ? opts.mode : '';
     R = withModes(R);
     if (E.erase.length) R = Object.assign({}, R, { lines: rubOut(R.lines, E) });
+    if (E.areas.length) R = Object.assign({}, R, { lines: areaPaint(R.lines, E, function(l){ return E.pt[pid(l)] || (l.pid0 && E.pt[l.pid0]) || 0; }) });
     // the map can be turned (rot, degrees clockwise) inside the page; the page and its cards stay upright
     var st = { R: R, container: container, page: container.parentNode, fixed: opts.order || null, rot: 0, sig: 0 };
     setGeom(st, opts.rot || 0);
@@ -39097,14 +39215,17 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var all = []; R.lines.forEach(function(l){ all = all.concat(l.c); });
     // the route, each street piece in its section's colour (from the map, or as edited); removed pieces only in edit mode
     var used = {};
-    var shown = R.lines.map(function(l){ var ov = ovOf(E, l); return { l: l, col: ov && ov !== 'x' ? ov : (l.s || '#16a34a'), gone: ov === 'x' }; });
+    var shown = R.lines.map(function(l){
+      if (l.ar) return { l: l, col: l.ar.a === 'col' && l.ar.col ? l.ar.col : (l.s || '#16a34a'), gone: l.ar.a === 'x', inArea: true };
+      var ov = ovOf(E, l); return { l: l, col: ov && ov !== 'x' ? ov : (l.s || '#16a34a'), gone: ov === 'x' };
+    });
     shown.forEach(function(x){ if (!x.gone) L.polyline(x.l.c, { color: '#fff', weight: 9, opacity: 1, interactive: false }).addTo(layers); });
-    var DRV = visibleDrawn(E, shown.filter(function(x){ return !x.gone; }).map(function(x){ return { c: x.l.c, col: x.col, S: E.sides[pid(x.l)] || null }; }));
+    var DRV = visibleDrawn(E, shown.filter(function(x){ return !x.gone; }).map(function(x){ return { c: x.l.c, col: x.col, S: (!x.inArea && E.sides[pid(x.l)]) || null }; }));
     DRV.forEach(function(d){ if (!d.side) L.polyline(d.c, { color: '#fff', weight: 9, opacity: 1, interactive: false }).addTo(layers); });
     var sideList = [];
     shown.forEach(function(x){
       if (x.gone && !opts.edit) return;
-      var S = !x.gone && E.sides[pid(x.l)];
+      var S = !x.gone && !x.inArea && E.sides[pid(x.l)];
       if (S && (S.l || S.r)) { x.S = S; sideList.push(x); [S.l || x.col, S.r || x.col].forEach(function(c){ used[c] = (used[c] || 0) + 1; }); return; }
       if (!x.gone) used[x.col] = (used[x.col] || 0) + 1;
       L.polyline(x.l.c, { color: x.gone ? '#94a3b8' : x.col, weight: opts.edit ? 7 : 5, opacity: 1, dashArray: x.gone ? '4,6' : null, interactive: false, lineCap: 'round', lineJoin: 'round' }).addTo(layers);
@@ -39218,6 +39339,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       E.drawn.forEach(function(d2, i){ var d = distToLine(map, pt, d2.side ? offsetLL(map, d2.c, d2.side === 'r' ? 5.5 : -5.5) : d2.c); if (d < bd) { bd = d; best = { k: 'drawn', i: i }; } });
       var mpx = map.distance(map.containerPointToLatLng(L.point(0, 0)), map.containerPointToLatLng(L.point(100, 0))) / 100 || 1;
       E.erase.forEach(function(e2, i){ var d = e2.c.length > 1 ? distToLine(map, pt, e2.c) : pt.distanceTo(map.latLngToContainerPoint(e2.c[0])); var reach = Math.max(16, (e2.r || 8) / mpx); if (d < reach && d - reach < bd - 16) { bd = d - reach + 16; best = { k: 'erase', i: i }; } });
+      // nothing else there: an area the tap is inside (the newest one)
+      if (!best) E.areas.forEach(function(a2, i){ if (a2.p && a2.p.length >= 3 && inPoly([ev.latlng.lat, ev.latlng.lng], a2.p)) best = { k: 'area', i: i }; });
       opts.onSelect && opts.onSelect(best);
     });
     if (mode === 'side') map.on('click', function(ev){
@@ -39241,6 +39364,55 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       else opts.onDrawn && opts.onDrawn(best.drawn);
     });
     if (mode === 'note') map.on('click', function(ev){ opts.onMap && opts.onMap(ev.latlng); });
+    // areas already made, as faint dashed outlines while editing (Select picks one by a tap inside it)
+    if (opts.edit) E.areas.forEach(function(a, i){
+      var picked = opts.sel && opts.sel.k === 'area' && opts.sel.i === i;
+      L.polygon(a.p, { color: picked ? '#eab308' : '#475569', weight: picked ? 3 : 1.4, opacity: picked ? 1 : .55, dashArray: '5,5', fillColor: a.a === 'col' && a.col ? a.col : '#94a3b8', fillOpacity: picked ? .22 : .05, interactive: false }).addTo(layers);
+    });
+    if (mode === 'area') {
+      // Area: tap corner after corner (straight sides between them), or drag round freehand - or both; tap the first corner (or
+      // Close) to finish. A freehand loop started on an empty area closes itself when the finger lifts.
+      map.dragging.disable(); map.touchZoom.disable(); map.doubleClickZoom.disable(); map.boxZoom.disable(); if (map.tap) map.tap.disable();
+      container.classList.add('rm-drawing');
+      var aLayer = L.layerGroup().addTo(map);
+      var paintArea = function(extra){
+        aLayer.clearLayers(); var pts = areaPts.concat(extra || []); if (!pts.length) return;
+        if (areaClosed) { L.polygon(pts, { color: '#2563eb', weight: 2.5, dashArray: '6,5', fillColor: '#2563eb', fillOpacity: .13, interactive: false }).addTo(aLayer); return; }
+        L.polyline(pts, { color: '#2563eb', weight: 2.5, dashArray: '6,5', interactive: false }).addTo(aLayer);
+        areaPts.forEach(function(p, i){ L.circleMarker(p, { radius: i ? 4 : 7, color: '#2563eb', weight: 2, fillColor: '#fff', fillOpacity: 1, interactive: false }).addTo(aLayer); });
+      };
+      paintArea();
+      var dn = null, r6a = function(ll){ return [+ll.lat.toFixed(6), +ll.lng.toFixed(6)]; };
+      container.addEventListener('pointerdown', function(e){
+        if (e.button > 0 || (e.target.closest && e.target.closest('.rm-card')) || areaClosed) return;
+        e.preventDefault(); try { container.setPointerCapture(e.pointerId); } catch (x) {}
+        dn = { x: e.clientX, y: e.clientY, pts: [map.mouseEventToLatLng(e)], free: false };
+      });
+      container.addEventListener('pointermove', function(e){
+        if (!dn) return; e.preventDefault();
+        if (!dn.free && Math.abs(e.clientX - dn.x) + Math.abs(e.clientY - dn.y) < 8) return;
+        dn.free = true;
+        var p = map.mouseEventToLatLng(e); if (map.latLngToContainerPoint(p).distanceTo(map.latLngToContainerPoint(dn.pts[dn.pts.length - 1])) < 3) return;
+        dn.pts.push(p); paintArea(dn.pts.map(r6a));
+      });
+      var aEnd = function(){
+        if (!dn) return; var d = dn; dn = null;
+        var first = areaPts.length ? map.latLngToContainerPoint(areaPts[0]) : null;
+        if (d.free) {
+          var wasEmpty = !areaPts.length;
+          var px = L.LineUtil.simplify(d.pts.map(function(ll){ return map.latLngToContainerPoint(ll); }), 2);
+          areaPts = areaPts.concat(px.map(function(q){ return r6a(map.containerPointToLatLng(q)); }));
+          var last = px[px.length - 1], f0 = first || px[0];
+          if (areaPts.length >= 3 && (wasEmpty || last.distanceTo(f0) < 24)) areaClosed = true;
+        } else {
+          var tp = map.latLngToContainerPoint(d.pts[0]);
+          if (areaPts.length >= 3 && first && tp.distanceTo(first) < 18) areaClosed = true;
+          else areaPts.push(r6a(d.pts[0]));
+        }
+        paintArea(); opts.onAreaChange && opts.onAreaChange();
+      };
+      container.addEventListener('pointerup', aEnd); container.addEventListener('pointercancel', aEnd);
+    }
     // where things were rubbed out, shown faintly while editing (Undo brings the last one back)
     if (opts.edit) E.erase.forEach(function(e2, i){
       var picked = opts.sel && opts.sel.k === 'erase' && opts.sel.i === i;
@@ -39770,9 +39942,10 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     b.classList.toggle('on', !!r);
     b.title = r ? 'Turned ' + (r > 180 ? (360 - r) + '\u00b0 left' : r + '\u00b0 right') + ' \u00b7 tap for north up' : 'North up';
   }
-  var TOOLNAME = { paint: 'Colour it:', side: 'One side:', x: 'Remove:', draw: 'Line:', erase: 'Rub out:', arrow: 'Arrow:', cp: 'Collection point:', note: 'Note:', select: 'Select:', recolour: 'Recolour all:' };
+  var TOOLNAME = { paint: 'Colour it:', side: 'One side:', x: 'Remove:', draw: 'Line:', erase: 'Rub out:', arrow: 'Arrow:', cp: 'Collection point:', note: 'Note:', select: 'Select:', recolour: 'Recolour all:', area: 'Area:' };
   var HINT = {
-    select: 'Tap a rub out, a drawn line, an arrow, a collection point or a street name to pick it (it glows yellow), then use the buttons that come up here.',
+    area: 'Tap corner after corner (straight sides), or drag round freehand - or mix them. Tap the first corner, or Close it, to finish. Then change only what is inside: the lines are cut at the edge. The map holds still - use Colour to move it.',
+    select:'Tap a rub out, a drawn line, an arrow, a collection point or a street name to pick it (it glows yellow), then use the buttons that come up here.',
     paint: 'Pick a colour, then tap a street to put it in that section. Tap a drawn line to delete it. Drag the map to move it.',
     x: 'Tap a street to take it off the map; tap it again to put it back. Tap a drawn line to delete it.',
     draw: 'Drag along a street. Snap on: the line sits just beside the street, on the side you drew. Wrong side? Tap it, or Swap side. The map holds still - use Colour to move it.',
@@ -39802,15 +39975,15 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       (tool === 'draw' ? '<button type="button" data-rm="snap" class="rm-sub' + (snapDraw ? ' on' : '') + '">Snap ' + (snapDraw ? 'on' : 'off') + '</button>' +
         (E.drawn.some(function(d){ return d.side; }) ? '<button type="button" data-rm="swap" class="rm-sub" title="Put the last line drawn beside a street on the other side (or tap any such line)">Swap side</button>' : '') : '') +
       btn('erase', 'Rub out') + btn('arrow', '<i class="rm-ar-k" style="color:' + colour + '">&#10140;</i>Arrow') + btn('cp', '<i class="rm-cp rm-cp-k" style="border-color:' + colour + ';color:' + colour + '">C</i>Collection') + btn('note', 'Note') + '</span>' +
-      '<span class="rm-grp">' + cap('Change') + btn('select', 'Select') + btn('recolour', 'Recolour all') + '<button type="button" data-rm="names">Key names</button></span>' +
+      '<span class="rm-grp">' + cap('Change') + btn('select', 'Select') + btn('area', 'Area') + btn('recolour', 'Recolour all') + '<button type="button" data-rm="names">Key names</button></span>' +
       '<span class="rm-grp"><button type="button" data-rm="undo" class="rm-undo"' + (ul ? ' title="Undo: ' + esc(ul) + '"' : ' disabled') + '>&#8630; ' + (ul ? 'Undo: ' + esc(ul.length > 30 ? ul.slice(0, 29) + '\u2026' : ul) : 'Nothing to undo') + '</button></span></div>' +
-      (tool === 'select' ? selectPanel(E) : '') +
+      (tool === 'select' ? selectPanel(E) : '') + (tool === 'area' ? areaPanel() : '') +
       '<div class="rm-hint"><b>' + esc(TOOLNAME[tool] || '') + '</b> ' + esc(HINT[tool] || '') + '</div>' + (tool === 'recolour' ? recolourPanel(E) : '');
   }
   // what Select has picked, and what can be done with it
   function selectPanel(E){
     if (!sel) return '<div class="rm-rec"><span class="rm-tl">Nothing picked yet.</span></div>';
-    var what = { erase: 'A rub out', drawn: 'A drawn line', arrow: 'An arrow', point: 'A collection point', label: 'A street name' }[sel.k] || 'Picked';
+    var what = { erase: 'A rub out', drawn: 'A drawn line', arrow: 'An arrow', point: 'A collection point', label: 'A street name', area: 'An area' }[sel.k] || 'Picked';
     var b2 = function(a, t, title){ return '<button type="button" data-rm="' + a + '"' + (title ? ' title="' + esc(title) + '"' : '') + '>' + t + '</button>'; };
     var h = '<div class="rm-rec"><span class="rm-tl">' + what + ':</span>';
     if (sel.k === 'label') h += b2('srotl', '&#8634; Turn', 'Turn 15 degrees') + b2('srotr', '&#8635; Turn', 'Turn 15 degrees the other way') + b2('sreset', 'Put back', 'Back where it goes by itself, straight');
@@ -39824,6 +39997,17 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   /* ---- Change a colour: every street (and side, and drawn line) of one colour to another at once, and its name in the key ---- */
   var recFrom = null, recTo = null;
   var snapDraw = lsGet('lbRunMapSnap', true) !== false;
+  var areaPts = [], areaClosed = false;   // the Area being drawn ([[lat, lng]...]) and whether it is closed yet
+  function areaPanel(){
+    var b2 = function(a, t, title){ return '<button type="button" data-rm="' + a + '"' + (title ? ' title="' + esc(title) + '"' : '') + '>' + t + '</button>'; };
+    if (!areaClosed) return '<div class="rm-rec"><span class="rm-tl">' + (areaPts.length ? areaPts.length + ' corner' + (areaPts.length === 1 ? '' : 's') : 'No area yet') + '</span>' +
+      (areaPts.length >= 3 ? b2('afin', 'Close it') : '') + (areaPts.length ? b2('anew', 'Start again') : '') + '</div>';
+    return '<div class="rm-rec"><span class="rm-tl">Inside the area:</span>' +
+      b2('acol', '<i class="rm-dash" style="background:' + colour + '"></i>Colour', 'Every line inside takes the colour picked') +
+      b2('ax', 'Remove', 'Take the lines inside off the map') + b2('areset', 'Own colour', 'Lines inside go back to their own colour') +
+      b2('aclear', 'Clear rub outs', 'Delete the rub outs (and earlier areas) inside, so what they hid comes back') +
+      b2('adel', 'Delete drawn', 'Delete the drawn lines, arrows and collection points inside') + b2('anew', 'New area') + '</div>';
+  }
   var sel = null;   // what Select has picked: { k: 'erase' | 'drawn' | 'arrow' | 'point', i } or { k: 'label', id }
   // the default colours, then any other colour already used on this run (picked with the colour picker), then the one in hand
   function swatchList(E, cur){
@@ -39871,6 +40055,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
             else { delete E.pieces[id]; if (ovOf(E, x.l) === 'x') E.pieces[id] = base; }
           }
           else if (colour === base && !fromStreet) delete E.pieces[id]; else E.pieces[id] = colour;
+          E.pt[id] = Date.now();   // (a tap after an area change wins over it on this piece)
         });
         saveEdits(curKey, E); renderView(true);
       },
@@ -39882,6 +40067,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
           else E.pieces[id] = 'x';
         }
         else if (colour === base && !fromStreet) delete E.pieces[id]; else E.pieces[id] = colour;
+        E.pt[id] = Date.now();
         saveEdits(curKey, E); renderView(true);
       },
       onDrawn: function(i){ if (!confirm('Delete this drawn line?')) return; var E = edits(curKey); E.drawn.splice(i, 1); saveEdits(curKey, E); renderView(true); },
@@ -39896,6 +40082,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       onMap: function(ll){ var t = prompt('Note:'); if (!t || !t.trim()) return; var E = edits(curKey); E.notes.push({ text: t.trim(), at: [+ll.lat.toFixed(6), +ll.lng.toFixed(6)] }); saveEdits(curKey, E); renderView(true); },
       snap: snapDraw,
       sel: sel,
+      onAreaChange: function(){ paintTools(); },
       onSelect: function(x){ sel = x; renderView(true); },
       onLabelTap: function(id){ sel = { k: 'label', id: id }; renderView(true); },
       onSwap: function(i){ var E = edits(curKey), d = E.drawn[i]; if (!d || !d.side) return; d.side = d.side === 'r' ? 'l' : 'r'; saveEdits(curKey, E); renderView(true); },
@@ -39948,7 +40135,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       var t2 = e.target; if (!t2 || !t2.getAttribute || !t2.getAttribute('data-rmpick')) return;
       var v = String(t2.value || '').toLowerCase(); if (!/^#[0-9a-f]{6}$/.test(v)) return;
       if (t2.getAttribute('data-rmpick') === 'rto') { recTo = v; paintTools(); return; }
-      colour = v; if (['draw', 'side', 'cp', 'arrow'].indexOf(tool) < 0) tool = 'paint'; renderView(true);
+      colour = v; if (['draw', 'side', 'cp', 'arrow', 'area', 'select'].indexOf(tool) < 0) tool = 'paint'; renderView(true);
     });
     el.addEventListener('click', function(e){
       var b = e.target.closest && e.target.closest('[data-rm]'); if (!b || b.disabled) return;
@@ -39982,17 +40169,37 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       if (a === 'turn') { var pg = pagesCache[curPage] || pagesCache[0]; orientOverride = ((orientOverride || phoneOrient() || pg.o) === 'land') ? 'port' : 'land'; renderView(true, true); }
       if (a === 'edit') { editing = !editing; if (editing) pagesMode = false; tool = 'paint'; renderView(true, true); }
       if (a === 'tool') { tool = b.getAttribute('data-v'); renderView(true); }
-      if (a === 'colour') { colour = b.getAttribute('data-v'); if (['draw', 'side', 'cp', 'arrow'].indexOf(tool) < 0) tool = 'paint'; renderView(true); }
+      if (a === 'colour') { colour = b.getAttribute('data-v'); if (['draw', 'side', 'cp', 'arrow', 'area', 'select'].indexOf(tool) < 0) tool = 'paint'; renderView(true); }
       if (/^s(del|col|swap|rotl|rotr|reset)$/.test(a) && sel) {
-        var Ex = edits(curKey), list = { erase: Ex.erase, drawn: Ex.drawn, arrow: Ex.arrows, point: Ex.points }[sel.k], it = list ? list[sel.i] : null;
+        var Ex = edits(curKey), list = { erase: Ex.erase, drawn: Ex.drawn, arrow: Ex.arrows, point: Ex.points, area: Ex.areas }[sel.k], it = list ? list[sel.i] : null;
         if (a === 'sdel') { if (list && it) list.splice(sel.i, 1); else if (sel.k === 'label') { delete Ex.labels[sel.id]; delete Ex.lrot[sel.id]; } sel = null; }
-        if (a === 'scol' && it) { if (sel.k === 'drawn') it.s = colour; else it.col = colour; }
+        if (a === 'scol' && it) { if (sel.k === 'drawn') it.s = colour; else it.col = colour; if (sel.k === 'area') { it.a = 'col'; it.ts = Date.now(); } }
         if (a === 'sswap' && it && it.side) it.side = it.side === 'r' ? 'l' : 'r';
         if ((a === 'srotl' || a === 'srotr') && sel.k === 'label') { var r0 = (Ex.lrot[sel.id] || 0) + (a === 'srotl' ? -15 : 15); r0 = ((r0 % 360) + 540) % 360 - 180; if (r0) Ex.lrot[sel.id] = r0; else delete Ex.lrot[sel.id]; }
         if (a === 'sreset' && sel.k === 'label') { delete Ex.labels[sel.id]; delete Ex.lrot[sel.id]; }
         saveEdits(curKey, Ex); renderView(true);
       }
       if (a === 'tool' && b.getAttribute('data-v') !== 'select') sel = null;
+      if (a === 'tool' && b.getAttribute('data-v') !== 'area') { areaPts = []; areaClosed = false; }
+      if (/^a(fin|new|col|x|reset|clear|del)$/.test(a)) {
+        if (a === 'anew') { areaPts = []; areaClosed = false; renderView(true); return; }
+        if (a === 'afin') { if (areaPts.length >= 3) areaClosed = true; renderView(true); return; }
+        if (!areaClosed || areaPts.length < 3) return;
+        var Ea = edits(curKey), poly = areaPts.map(function(p){ return [p[0], p[1]]; }), ats = Date.now(), inside = function(p){ return inPoly(p, poly); };
+        if (a === 'acol') Ea.areas.push({ p: poly, a: 'col', col: colour, ts: ats });
+        if (a === 'ax') Ea.areas.push({ p: poly, a: 'x', ts: ats });
+        if (a === 'areset') Ea.areas.push({ p: poly, a: 'reset', ts: ats });
+        if (a === 'aclear') { Ea.erase = Ea.erase.filter(function(e2){ return !e2.c.some(inside); }); Ea.areas = Ea.areas.filter(function(a2){ return !a2.p.every(inside); }); }
+        if (a === 'adel') {
+          // drawn lines are cut at the edge (what is outside stays); arrows with an end inside and points inside go
+          var nd = [];
+          Ea.drawn.forEach(function(d){ if (!d.c || d.c.length < 2) return; areaPaint([d], { areas: [{ p: poly, a: 'x' }] }).forEach(function(part){ if (!part.ar) { var cp = Object.assign({}, part); delete cp.ar; nd.push(cp); } }); });
+          Ea.drawn = nd;
+          Ea.arrows = Ea.arrows.filter(function(a2){ return !inside(a2.c[0]) && !inside(a2.c[a2.c.length - 1]); });
+          Ea.points = Ea.points.filter(function(p2){ return !inside(p2.at); });
+        }
+        saveEdits(curKey, Ea); renderView(true); return;
+      }
       if (a === 'snap') { snapDraw = !snapDraw; lsSet('lbRunMapSnap', snapDraw); renderView(true); }
       if (a === 'swap') { var Es = edits(curKey); for (var si = Es.drawn.length - 1; si >= 0; si--) if (Es.drawn[si].side) { Es.drawn[si].side = Es.drawn[si].side === 'r' ? 'l' : 'r'; saveEdits(curKey, Es); break; } renderView(true); }
       if (a === 'rfrom') { recFrom = b.getAttribute('data-v'); paintTools(); }
@@ -40260,9 +40467,10 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       var k = key || currentKey(); if (!k || !DATA[k]) return null;
       var R = withModes(route(k)), o = parse(k), E = edits(k), rc = null;
       if (E.erase.length) R = Object.assign({}, R, { lines: rubOut(R.lines, E) });
+      if (E.areas.length) R = Object.assign({}, R, { lines: areaPaint(R.lines, E, function(l){ return E.pt[pid(l)] || (l.pid0 && E.pt[l.pid0]) || 0; }) });
       try { rc = window.lbRunCheck ? window.lbRunCheck() : null; } catch (e) {}
       // done is worked out piece by piece and side by side (doneParts: the trail and the bins), not a whole street at a time
-      var lines = R.lines.map(function(l){ var ov = ovOf(E, l); return { l: l, gone: ov === 'x', col: ov && ov !== 'x' ? ov : (l.s || '#16a34a') }; }).filter(function(x){ return !x.gone; });
+      var lines = R.lines.map(function(l){ if (l.ar) return { l: l, gone: l.ar.a === 'x', col: l.ar.a === 'col' && l.ar.col ? l.ar.col : (l.s || '#16a34a') }; var ov = ovOf(E, l); return { l: l, gone: ov === 'x', col: ov && ov !== 'x' ? ov : (l.s || '#16a34a') }; }).filter(function(x){ return !x.gone; });
       var dp = rc ? doneParts(k, lines.map(function(m){ return m.l.c; })) : null;
       var houses = []; var grp = groupFor(o); if (grp) grp.sites.forEach(function(s){ var la = +s.lat, ln = +s.lng; if (la && ln) houses.push([la, ln]); });
       var pts = []; R.lines.forEach(function(l){ pts = pts.concat(l.c); }); E.drawn.forEach(function(d){ pts = pts.concat(d.c); });
