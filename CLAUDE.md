@@ -38,7 +38,7 @@ Because the file is huge, use `grep -n` and read line ranges rather than opening
 
 The file is a stack of `<script>`/`<style>` blocks sharing one global scope, in load order:
 
-1. Custom dialog helpers (`customAlert/Confirm/Prompt`, Promise-based). Use these, never native `alert/confirm/prompt`.
+1. Custom dialog helpers (`customAlert/Confirm/Prompt`, Promise-based). Use these, never native `alert/confirm/prompt`. Once `ux2-script` loads, `customAlert` is a toast (no box, no buttons), so use it only for messages; ask with `customConfirm` only when the answer matters, and prefer Undo over "Are you sure?".
 2. `street-litter-*` data blocks (above).
 3. **Main script** (~4833-13113, plus a continuation to ~18209): `SCRIPT_URL`, `buildBinsAtAddress`, IndexedDB helpers, filters, GPS snail trail, KMZ/KML import, geofences, Street Litter layers, run boundaries, property inspector, sync, boot.
 4. `unified-clean-script`: the run/stream/day filter modal and map rotation (IIFE-local scope).

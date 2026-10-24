@@ -31174,10 +31174,15 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     tEl.innerHTML = '<span>' + esc(msg) + '</span>' + (act ? '<button type="button">' + esc(actLabel) + '</button>' : '');
     tEl.classList.add('on');
     var b = tEl.querySelector('button'); if (b) b.onclick = function(){ tEl.classList.remove('on'); act(); };
-    clearTimeout(tT); tT = setTimeout(function(){ tEl.classList.remove('on'); }, act ? 9000 : 4500);
+    clearTimeout(tT); tT = setTimeout(function(){ tEl.classList.remove('on'); }, act ? 9000 : Math.min(9000, 3500 + String(msg).length * 40));
   }
 
   window.uxToast = toast;
+  /* A message that only tells the driver something (saved, sent, couldn't do it) came up as a box in the middle of the screen,
+     over the buttons, with OK and Cancel (the Cancel showed too: the app's dialog style makes both buttons show) - tapped away
+     every time for nothing. It is a toast now, at the bottom, gone by itself. Questions that need an answer (customConfirm)
+     still ask. */
+  window.customAlert = function(m){ try { toast(String(m == null ? '' : m)); } catch (e) {} return Promise.resolve(true); };
   // what the outbox says about a report (delivered / no signal / …), or a fallback line
   function sendNote(id, fallback){ try { var l = window.lbOutbox && window.lbOutbox.label(id); if (l) return l; } catch (e) {} return fallback || ''; }
 
@@ -38323,6 +38328,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     body.rm-printing #lbRunMap { position: static; overflow: visible; background: #fff; }
     body.rm-printing #lbRunMap .rm-head { display: none; }
     body.rm-printing #lbRunMap .rm-page { margin: 0; box-shadow: none; }
+    /* (a shadow prints as a solid grey square on a Mac: behind every collection point and the key) */
+    body.rm-printing #lbRunMap .rm-card, body.rm-printing #lbRunMap .rm-cp, body.rm-printing #lbRunMap .rm-note-pin { box-shadow: none !important; }
   }
 </style>
 <script id="lb-runmap-script">
@@ -39199,10 +39206,10 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     // the map can be turned (rot, degrees clockwise) inside the page; the page and its cards stay upright
     var st = { R: R, container: container, page: container.parentNode, fixed: opts.order || null, rot: 0, sig: 0 };
     setGeom(st, opts.rot || 0);
-    var o = parse(key), map = L.map(container, { zoomControl: false, attributionControl: false, zoomSnap: 0.1, zoomDelta: 0.5, fadeAnimation: false, zoomAnimation: false });
+    var o = parse(key), map = L.map(container, { preferCanvas: !!opts.canvas, zoomControl: false, attributionControl: false, zoomSnap: 0.1, zoomDelta: 0.5, fadeAnimation: false, zoomAnimation: false });
     st.map = map;
     turnAware(st);
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, crossOrigin: 'anonymous' }).addTo(map);   // (crossOrigin: the phone's PDF reads them back)
     map.createPane('rmLabels').style.zIndex = 650; map.createPane('rmPins').style.zIndex = 660;
     var layers = L.layerGroup().addTo(map);
     var grp = groupFor(o), houses = 0, bins = 0;
@@ -39672,6 +39679,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   /* ---- our own street names: along the street, never upside down, never on top of each other ---- */
   /* A street name can be dragged off the line it covers (on the screen map; the spot is saved with the run's edits, so the printed
      map and the other phones show it there too). Double-tap puts it back where it goes by itself. */
+  function lblAt(s, x, y){ s.style.left = (x - s.offsetWidth / 2) + 'px'; s.style.top = (y - s.offsetHeight / 2) + 'px'; }
   function lblDrag(st, s, id){
     var map = st.map, drag = null;
     s.classList.add('rm-lbl-drag'); s.title = 'Drag to move this name · double-tap to put it back';
@@ -39689,7 +39697,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       if (!drag.moved && Math.abs(e.clientX - drag.x) + Math.abs(e.clientY - drag.y) < 5) return;
       drag.moved = true; s.classList.add('rm-dragging');
       var lp = map.containerPointToLayerPoint(map.mouseEventToContainerPoint(e));
-      s.style.left = lp.x + 'px'; s.style.top = lp.y + 'px';
+      lblAt(s, lp.x, lp.y);
     });
     var end = function(e){
       if (!drag) return;
@@ -39721,12 +39729,14 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var named = {}, LP = st.lblPos || {}, mkLbl = function(p, text, fsz, cx, cy, ang){
       var s = document.createElement('div'); s.className = 'rm-lbl'; s.textContent = text; s.style.fontSize = fsz + 'px';
       var lp = map.containerPointToLayerPoint([cx, cy]);
-      s.style.left = lp.x + 'px'; s.style.top = lp.y + 'px';
       ang += (st.lrot && st.lrot[p.id]) || 0;   // (turned by hand with Select)
-      s.style.transform = 'rotate(' + (ang - (st.rot || 0)).toFixed(1) + 'deg) translate(-50%, -50%)';
+      // turned about its own middle, placed by its top left corner: the phone's PDF maker (html2canvas) got
+      // "rotate() translate(-50%, -50%)" from a corner wrong and put every name half its width off its street
+      s.style.transform = 'rotate(' + (ang - (st.rot || 0)).toFixed(1) + 'deg)'; s.style.transformOrigin = '50% 50%';
       if (st.selLabel && st.selLabel === p.id) s.classList.add('rm-lbl-sel');
       if (st.onLabelMove) lblDrag(st, s, p.id);
       pane.appendChild(s);
+      lblAt(s, lp.x, lp.y);
     };
     var short = function(n){ return n.replace(/\bRoad$/, 'Rd').replace(/\bStreet$/, 'St').replace(/\bAvenue$/, 'Ave').replace(/\bCourt$/, 'Ct').replace(/\bDrive$/, 'Dr').replace(/\bCrescent$/, 'Cres').replace(/\bParade$/, 'Pde').replace(/\bPlace$/, 'Pl'); };
     // names the driver dragged somewhere (they stay there, at the angle of their own street, and nothing else lands on them)
@@ -40070,16 +40080,16 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
         E.pt[id] = Date.now();
         saveEdits(curKey, E); renderView(true);
       },
-      onDrawn: function(i){ if (!confirm('Delete this drawn line?')) return; var E = edits(curKey); E.drawn.splice(i, 1); saveEdits(curKey, E); renderView(true); },
+      onDrawn: function(i){ var E = edits(curKey); E.drawn.splice(i, 1); saveEdits(curKey, E); renderView(true); },
       onNote: function(p){
         var E = edits(curKey);
-        var t = prompt('Note (leave empty to delete it):', p.text); if (t === null) return;
-        if (p.mine != null) { if (t.trim()) E.notes[p.mine].text = t.trim(); else E.notes.splice(p.mine, 1); }
-        else { E.hide.push(p.text); if (t.trim()) E.notes.push({ text: t.trim(), at: p.at }); }
-        saveEdits(curKey, E); renderView(true);
+        ask('Note (leave empty to delete it):', p.text).then(function(t){ if (t === null || t === undefined) return;
+          if (p.mine != null) { if (t.trim()) E.notes[p.mine].text = t.trim(); else E.notes.splice(p.mine, 1); }
+          else { E.hide.push(p.text); if (t.trim()) E.notes.push({ text: t.trim(), at: p.at }); }
+          saveEdits(curKey, E); renderView(true); });
       },
       onNoteMove: function(i, ll){ var E = edits(curKey); if (E.notes[i]) { E.notes[i].at = [+ll.lat.toFixed(6), +ll.lng.toFixed(6)]; saveEdits(curKey, E); renderView(true); } },
-      onMap: function(ll){ var t = prompt('Note:'); if (!t || !t.trim()) return; var E = edits(curKey); E.notes.push({ text: t.trim(), at: [+ll.lat.toFixed(6), +ll.lng.toFixed(6)] }); saveEdits(curKey, E); renderView(true); },
+      onMap: function(ll){ ask('Note:', '').then(function(t){ if (!t || !t.trim()) return; var E = edits(curKey); E.notes.push({ text: t.trim(), at: [+ll.lat.toFixed(6), +ll.lng.toFixed(6)] }); saveEdits(curKey, E); renderView(true); }); },
       snap: snapDraw,
       sel: sel,
       onAreaChange: function(){ paintTools(); },
@@ -40091,9 +40101,9 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       onArrow: function(c){ var E = edits(curKey); E.arrows.push({ c: c, col: colour, ts: Date.now() }); saveEdits(curKey, E); renderView(true); },
       onCp: function(ll){ var E = edits(curKey); E.points.push({ at: [+ll.lat.toFixed(6), +ll.lng.toFixed(6)], t: 'cp', col: colour, ts: Date.now() }); saveEdits(curKey, E); renderView(true); },
       // tap one: it takes the colour picked above; tapped again with the same colour, it can be deleted
-      onCpTap: function(i){ var E = edits(curKey), pt = E.points[i]; if (!pt) return; if ((pt.col || '#111827') !== colour) pt.col = colour; else { if (!confirm('Delete this collection point?')) return; E.points.splice(i, 1); } saveEdits(curKey, E); renderView(true); },
+      onCpTap: function(i){ var E = edits(curKey), pt = E.points[i]; if (!pt) return; if ((pt.col || '#111827') !== colour) pt.col = colour; else E.points.splice(i, 1); saveEdits(curKey, E); renderView(true); },
       onCpMove: function(i, ll){ var E = edits(curKey); if (E.points[i]) { E.points[i].at = [+ll.lat.toFixed(6), +ll.lng.toFixed(6)]; saveEdits(curKey, E); renderView(true); } },
-      onArrowTap: function(i){ var E = edits(curKey), a = E.arrows[i]; if (!a) return; if ((a.col || '#111827') !== colour) a.col = colour; else { if (!confirm('Delete this arrow?')) return; E.arrows.splice(i, 1); } saveEdits(curKey, E); renderView(true); },
+      onArrowTap: function(i){ var E = edits(curKey), a = E.arrows[i]; if (!a) return; if ((a.col || '#111827') !== colour) a.col = colour; else E.arrows.splice(i, 1); saveEdits(curKey, E); renderView(true); },
       onArrowMove: function(i, c){ var E = edits(curKey); if (E.arrows[i]) { E.arrows[i].c = c; saveEdits(curKey, E); renderView(true); } },
       onSide: function(x, side){
         var E = edits(curKey), id = pid(x.l), S = E.sides[id] || {};
@@ -40103,14 +40113,17 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       }
     };
   }
+  // the app's own question box (the browser's one shows the web address in its title)
+  function ask(q, v){ return window.customPrompt ? Promise.resolve(window.customPrompt(q, v || '')) : Promise.resolve(prompt(q, v || '')); }
   function editNames(){
     var E = edits(curKey), R = route(curKey); if (!R) return;
     var cols = {}; R.lines.forEach(function(l){ var ov = ovOf(E, l); cols[ov && ov !== 'x' ? ov : (l.s || '#16a34a')] = 1; }); E.drawn.forEach(function(d){ cols[d.s] = 1; });
-    Object.keys(cols).forEach(function(c){
-      var t = prompt('Name for the ' + (SECTION_NAMES[c] || c) + ' part of the run (e.g. "Load 1", "Driver 2"):', E.names[c] || '');
-      if (t === null) return; if (t.trim()) E.names[c] = t.trim(); else delete E.names[c];
-    });
-    saveEdits(curKey, E); renderView(true);
+    Object.keys(cols).reduce(function(pr, c){ return pr.then(function(go){
+      if (!go) return false;
+      return ask('Name for the ' + (SECTION_NAMES[c] || c) + ' part of the run (e.g. "Load 1", "Driver 2"):', E.names[c] || '').then(function(t){
+        if (t === null || t === undefined) return false; if (t.trim()) E.names[c] = t.trim(); else delete E.names[c]; return true;
+      });
+    }); }, Promise.resolve(true)).then(function(){ saveEdits(curKey, E); renderView(true); });
   }
   function build(){
     if (el) return;
@@ -40238,36 +40251,81 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   function phoneOrient(){ return window.innerWidth <= 700 && window.innerHeight > window.innerWidth ? 'port' : null; }
   // Print on a phone (or in the phone app, which can't print a web page): the run map as a PDF, handed to the phone's share sheet
   function phonePrint(){ try { return !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform()) || (window.matchMedia && matchMedia('(pointer: coarse)').matches && window.innerWidth <= 1000); } catch (e) { return false; } }
-  function mobilePrint(btn){
-    if (!curKey || !window.lbRunMapImage || !window.lbMedia || !window.lbMedia.pdfBlob) { printView(false); return; }
-    var o = parse(curKey), title = 'Run ' + String(o.run).toUpperCase() + (o.week || '') + ' ' + o.day + ' ' + o.stream, name = title.replace(/\s+/g, ' ') + ' run map.pdf';
-    var t0 = btn && btn.textContent; if (btn) { btn.textContent = 'Making PDF\u2026'; btn.disabled = true; }
-    var done = function(){ if (btn) { btn.textContent = t0; btn.disabled = false; } };
-    window.lbRunMapImage(curKey).then(function(img){
-      if (!img) throw new Error('no picture');
-      var blob = window.lbMedia.pdfBlob(title, '', [img]);
-      return sharePdf(blob, name, title);
-    }).then(done, function(e){ done(); try { (window.customAlert || alert)('Could not make the PDF: ' + (e && e.message || e)); } catch (x) {} });
+  /* Print on a phone: the very sheets Print makes on a computer (buildSheets: what is on screen, with the street names and the
+     key), each drawn to a picture with html2canvas and put in a PDF, then handed to the share sheet. It used to be drawn
+     separately (lbRunMapImage: the whole run, no street names, not the part of the map on screen), so the phone's PDF and
+     the computer's print were two different maps. */
+  function loadH2C(){
+    if (window.html2canvas) return Promise.resolve(window.html2canvas);
+    return new Promise(function(res, rej){
+      var sc = document.createElement('script'), t = setTimeout(function(){ rej(new Error('no signal to load the PDF maker')); }, 15000);
+      sc.src = 'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js';
+      sc.onload = function(){ clearTimeout(t); window.html2canvas ? res(window.html2canvas) : rej(new Error('PDF maker missing')); };
+      sc.onerror = function(){ clearTimeout(t); rej(new Error('no signal to load the PDF maker')); };
+      document.head.appendChild(sc);
+    });
   }
-  function sharePdf(blob, name, title){
-    var C = window.Capacitor, P = C && C.Plugins;
-    // an app installed before the share sheet was added can't hand a file to anything: email it to the leading hand instead
-    if (C && C.isNativePlatform && C.isNativePlatform() && !(P && P.Filesystem && P.Share)) {
-      var ask = window.customConfirm ? window.customConfirm('This copy of the app can\'t print or share files yet (install the latest app to print). Email the run map PDF to the leading hand instead?') : Promise.resolve(confirm('Email the run map PDF to the leading hand?'));
-      return Promise.resolve(ask).then(function(ok){
-        if (!ok || !window.lbOutbox || !window.lbMedia || !window.lbMedia.put) return;
-        var id = 'f_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-        return window.lbMedia.put({ id: id, kind: 'file', type: 'application/pdf', blob: blob, ts: Date.now(), synced: false }).then(function(){
-          window.lbOutbox.send({ rid: 'rm_' + id, kind: 'run-map', urgent: false, to: ['lead'], subject: title + ' run map', text: title + ' - run map PDF from the app', data: { run: title, ts: Date.now() }, media: [id], delayMs: 0 });
-          try { (window.customAlert || alert)('Sending the run map PDF to the leading hand\'s email.'); } catch (e) {}
-        });
+  function note(m){ try { if (window.uxToast) window.uxToast(m); } catch (e) {} }
+  function mobilePrint(btn){
+    if (!curKey || !view || !window.lbMedia || !window.lbMedia.pdfBlob) { printView(false); return; }
+    var o = parse(curKey), title = 'Run ' + String(o.run).toUpperCase() + (o.week || '') + ' ' + o.day + ' ' + o.stream, name = title.replace(/\s+/g, ' ') + ' run map.pdf';
+    var t0 = btn && btn.textContent; if (btn) { btn.textContent = 'Making PDF…'; btn.disabled = true; }
+    var B = null, done = function(){ if (B) { B.cleanup(); B = null; } if (btn) { btn.textContent = t0; btn.disabled = false; } };
+    loadH2C().then(function(h2c){
+      B = buildSheets(pagesMode); if (!B) throw new Error('no map');
+      return B.ready.then(function(){
+        var pages = Array.prototype.slice.call(B.host.querySelectorAll('.rm-page')), imgs = [];
+        return pages.reduce(function(pr, pg){ return pr.then(function(){
+          // (html2canvas can't do CSS filters: the stream logo, made black with a filter, came out blank - drawn black here first,
+          // waiting for each picture to load, before and after, or it is copied before it is there)
+          var loaded = function(im){ return im.complete && im.naturalWidth ? Promise.resolve() : new Promise(function(r){ im.onload = im.onerror = function(){ r(); }; setTimeout(r, 3000); }); };
+          var imgsF = Array.prototype.filter.call(pg.querySelectorAll('img'), function(im){ return /brightness\(0/.test(im.style.filter || ''); });
+          // the street tiles are greyed with a CSS filter too: each drawn grey on a canvas in its place (one the browser won't let be
+          // read back - no CORS - is left as it is, in colour, rather than spoil the whole picture)
+          Array.prototype.forEach.call(pg.querySelectorAll('img.leaflet-tile'), function(im){
+            if (!im.complete || !im.naturalWidth) return;
+            try {
+              var c3 = document.createElement('canvas'); c3.width = im.naturalWidth; c3.height = im.naturalHeight; var x3 = c3.getContext('2d');
+              x3.filter = 'grayscale(1) contrast(.85) brightness(1.1)'; x3.drawImage(im, 0, 0); x3.getImageData(0, 0, 1, 1);
+              c3.className = im.className; c3.style.cssText = im.style.cssText; c3.style.width = (im.offsetWidth || 256) + 'px'; c3.style.height = (im.offsetHeight || 256) + 'px';
+              im.parentNode.replaceChild(c3, im);
+            } catch (e) {}
+          });
+          return Promise.all(imgsF.map(loaded)).then(function(){
+            return Promise.all(imgsF.map(function(im){
+              // (as a canvas in its place: html2canvas left even a ready-made picture out here, but copies a canvas as it is)
+              try { var c2 = document.createElement('canvas'); c2.width = im.naturalWidth || 32; c2.height = im.naturalHeight || 32; var x2 = c2.getContext('2d'); x2.filter = im.style.filter; x2.drawImage(im, 0, 0);
+                c2.style.cssText = 'width:' + (im.offsetWidth || 16) + 'px;height:' + (im.offsetHeight || 16) + 'px;display:block;position:relative;z-index:2'; im.parentNode.replaceChild(c2, im); } catch (e) {}
+              return null;
+            }));
+          }).then(function(){
+          return h2c(pg, { scale: 2, backgroundColor: '#fff', logging: false, useCORS: true }).then(function(cv){
+            var url = cv.toDataURL('image/jpeg', .86), bin = atob(url.split(',')[1]), u8 = new Uint8Array(bin.length);
+            for (var i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+            imgs.push({ jpeg: u8, w: cv.width, h: cv.height });
+          });
+          });
+        }); }, Promise.resolve()).then(function(){ return imgs; });
       });
-    }
-    // the phone app: saved to the app's cache, then the share sheet (print, save to Files, email...)
-    if (C && C.isNativePlatform && C.isNativePlatform() && P && P.Filesystem && P.Share) {
+    }).then(function(imgs){
+      var blob = window.lbMedia.pdfBlob(title, '', imgs);
+      if (B) { B.cleanup(); B = null; }
+      return sharePdf(blob, name, title);
+    }).then(done, function(e){ done(); note('Could not make the PDF: ' + (e && e.message || e)); });
+  }
+  /* The app opens the web site, so the plugins are not on Capacitor.Plugins (that is filled by the app's own bundled code,
+     which it hasn't got): they are called through the bridge by name, like the GPS and notification plugins. Checking
+     Capacitor.Plugins is why Print said the app was too old even on the newest app. */
+  function nativeHas(n){ var C = window.Capacitor; return !!(C && C.isNativePlatform && C.isNativePlatform() && typeof C.nativePromise === 'function' && (!C.PluginHeaders || C.PluginHeaders.some(function(h){ return h && h.name === n; }))); }
+  function sharePdf(blob, name, title){
+    var C = window.Capacitor;
+    if (C && C.isNativePlatform && C.isNativePlatform()) {
+      if (!nativeHas('Filesystem') || !nativeHas('Share')) { note('This copy of the app can\'t share files - install the latest app'); return Promise.resolve(); }
+      // saved to the app's cache, then the share sheet (print, save to Files, email...)
       return new Promise(function(res, rej){ var fr = new FileReader(); fr.onload = function(){ res(String(fr.result).split(',')[1]); }; fr.onerror = rej; fr.readAsDataURL(blob); })
-        .then(function(b64){ return P.Filesystem.writeFile({ path: name.replace(/[^A-Za-z0-9 ._-]/g, ''), data: b64, directory: 'CACHE' }); })
-        .then(function(w){ return P.Share.share({ title: title, files: [w.uri], dialogTitle: 'Run map' }); });
+        .then(function(b64){ return C.nativePromise('Filesystem', 'writeFile', { path: name.replace(/[^A-Za-z0-9 ._-]/g, ''), data: b64, directory: 'CACHE' }); })
+        .then(function(w){ return C.nativePromise('Share', 'share', { title: title, files: [w.uri], dialogTitle: 'Run map' }); })
+        .catch(function(e){ var m = String(e && (e.message || e.errorMessage) || e); if (/cancel/i.test(m)) return; throw e; });
     }
     try {
       var f = new File([blob], name, { type: 'application/pdf' });
@@ -40354,7 +40412,13 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   // sits followed by each page, each marked with where it joins its neighbours
   var printing = [];
   function printView(all){
-    var R = route(curKey); if (!R || !view) return;
+    var B = buildSheets(all); if (!B) return;
+    B.ready.then(function(){ setTimeout(function(){ try { window.print(); } catch (x) {} setTimeout(B.cleanup, 800); }, 400); });
+  }
+  // the printed sheets (exactly what Print shows: the screen's view, the street names, the cards), laid out in #rmPrint;
+  // ready once the street tiles are in. Print hands them to the browser; the phone turns them into a PDF (mobilePrint).
+  function buildSheets(all){
+    var R = route(curKey); if (!R || !view) return null;
     var o = orientOverride || pagesCache[0].o, rot = rotFor(curKey), kp = keyFor(curKey), P = sheetsFor(curKey);
     var screenW = view.page.clientWidth, c = view.map.getCenter(), z = view.map.getZoom(), order = view.order;   // before the screen view is hidden for printing
     var frames = (pagesMode || all) && P.length > 0;
@@ -40380,18 +40444,16 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     sheets.forEach(function(sh){
       var d = pageDiv(sh.o, null); host.appendChild(d.page);
       var v = sh.screen ? (fitPts ? null : { c: c, z: z + Math.log2((d.page.clientWidth || PAGE[sh.o][0] * MM) / screenW) }) : sh.view;
-      var st = draw(d.map, curKey, R, pagesCache[0], { view: v, fitPts: sh.screen ? fitPts : null, order: fitPts ? null : sh.order, rot: rot, keyPos: kp, notesPos: keyFor(curKey + '|notes'), pageLabel: sh.label });
+      var st = draw(d.map, curKey, R, pagesCache[0], { view: v, fitPts: sh.screen ? fitPts : null, order: fitPts ? null : sh.order, rot: rot, keyPos: kp, notesPos: keyFor(curKey + '|notes'), pageLabel: sh.label, canvas: true });
       if (sh.frames) drawFrames(st, P, false);
       if (sh.page != null) drawLinks(st, P, sh.page);
       printing.push(st);
     });
-    // print once the street tiles are in (up to 15 s - several pages can take a while on a phone)
-    whenTiles(printing, 15000).then(function(){
-      setTimeout(function(){
-        try { window.print(); } catch (x) {}
-        setTimeout(function(){ try { css.remove(); } catch (e) {} document.body.classList.remove('rm-printing'); printing.forEach(function(s){ try { s.map.remove(); } catch (e) {} }); printing = []; host.innerHTML = ''; }, 800);
-      }, 400);
-    });
+    // ready once the street tiles are in (up to 15 s - several pages can take a while on a phone)
+    return {
+      ready: whenTiles(printing, 15000), host: host,
+      cleanup: function(){ try { css.remove(); } catch (e) {} document.body.classList.remove('rm-printing'); printing.forEach(function(s){ try { s.map.remove(); } catch (e) {} }); printing = []; host.innerHTML = ''; }
+    };
   }
   function whenTiles(states, ms){
     return new Promise(function(done){
