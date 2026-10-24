@@ -21,6 +21,7 @@ public class MainActivity extends BridgeActivity {
     @Override
     public void onCreate(Bundle savedInstanceState) {
         registerPlugin(LbNotifyPlugin.class);   // the run notification with the break buttons
+        registerPlugin(LbFilesPlugin.class);    // saving the run map PDF to Downloads, with a Downloaded notification
         super.onCreate(savedInstanceState);
     }
 
