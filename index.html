@@ -39743,8 +39743,11 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var map = st.map, R = st.R, pane = map.getPane('rmLabels'); if (!pane) return; pane.innerHTML = '';   // (a map already replaced by a redraw)
     var m = st.page.getBoundingClientRect(), boxes = [];
     Array.prototype.forEach.call(st.page.querySelectorAll('.rm-card'), function(c){ var r = c.getBoundingClientRect(); boxes.push([r.left - m.left, r.top - m.top, r.right - m.left, r.bottom - m.top]); });
-    var zoom = map.getZoom(), fs = zoom >= 17 ? 14 : zoom >= 16 ? 13 : 12, W = st.page.clientWidth, H = st.page.clientHeight;
-    var small = W < 640; if (small) fs = Math.min(fs, 10.5);   // (a phone: smaller names, and only where a street has room - below)
+    // names grow and shrink with the zoom (they were 12-14 px at any zoom, so zoomed in they were lost beside the streets and zoomed
+    // out they covered them): about 1.4 times bigger for each step in
+    var zoom = map.getZoom(), W = st.page.clientWidth, H = st.page.clientHeight, small = W < 640;
+    var fs = Math.max(8, Math.min(small ? 18 : 24, (small ? 10 : 12.5) * Math.pow(2, (zoom - 16) * 0.5)));
+    fs = Math.round(fs * 2) / 2;   // (a phone: smaller names, and only where a street has room - below)
     var pieces = R.lines.filter(function(l){ return l.n; }).map(function(l){
       var pts = l.c.map(function(c){ return map.latLngToContainerPoint(c); }), len = 0;
       for (var i = 1; i < pts.length; i++) len += pts[i].distanceTo(pts[i - 1]);
@@ -39774,7 +39777,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       boxes.push([v.x - w / 2, v.y - fs / 2, v.x + w / 2, v.y + fs / 2]); named[p.n] = 1; named[p.n + '#' + p.id] = 1; p.moved = true;
       mkLbl(p, short(p.n), fs, q.x, q.y, ang);
     });
-    (small ? [[fs, 0.75]] : [[fs, 0.55], [fs - 2, 0.35]]).forEach(function(pass){ var fsz = pass[0], need = pass[1];
+    (small ? [[fs, 0.75]] : [[fs, 0.55], [Math.max(7, fs * 0.85), 0.35]]).forEach(function(pass){ var fsz = pass[0], need = pass[1];
       pieces.forEach(function(p){
         if (p.moved) return;
         if (need < 0.5 && named[p.n]) return;
@@ -40373,20 +40376,25 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
      Capacitor.Plugins is why Print said the app was too old even on the newest app. */
   function nativeHas(n){ var C = window.Capacitor; return !!(C && C.isNativePlatform && C.isNativePlatform() && typeof C.nativePromise === 'function' && (!C.PluginHeaders || C.PluginHeaders.some(function(h){ return h && h.name === n; }))); }
   /* The phone's PDF is downloaded, not shared: the share sheet never came up in the app (the PDF was made, then nothing). In the
-     app it is written to the phone's Documents folder, "Lukez Bunz" (Files app > Documents), with the Filesystem plugin called
+     app it is written to the phone's Download folder (else Documents/Lukez Bunz), with the Filesystem plugin called
      through the bridge; in a phone's browser it is an ordinary download. A toast says where it went, or what went wrong. */
   function sharePdf(blob, name, title){
     var C = window.Capacitor, fname = name.replace(/[^A-Za-z0-9 ._-]/g, '');
     if (C && C.isNativePlatform && C.isNativePlatform()) {
-      if (!nativeHas('Filesystem')) { note('This copy of the app can\'t save files - install the latest app'); return Promise.resolve(); }
-      var perm = C.nativePromise('Filesystem', 'requestPermissions', {}).catch(function(){ return null; });   // (Android 10 and older ask first; newer ones just say yes)
-      return perm.then(function(){
-        return new Promise(function(res, rej){ var fr = new FileReader(); fr.onload = function(){ res(String(fr.result).split(',')[1]); }; fr.onerror = rej; fr.readAsDataURL(blob); });
-      }).then(function(b64){
-        return C.nativePromise('Filesystem', 'writeFile', { path: 'Lukez Bunz/' + fname, data: b64, directory: 'DOCUMENTS', recursive: true });
-      }).then(function(){ note('Saved: Documents / Lukez Bunz / ' + fname); }, function(e){
-        throw new Error('could not save it to the phone (' + String(e && (e.message || e.errorMessage) || e) + ')');
-      });
+      if (!nativeHas('Filesystem')) { note('Can\'t save: this copy of the app has no file saving - install the latest app'); return Promise.resolve(); }
+      // every step says what it is doing, and none can wait for ever (a call the phone never answers used to leave nothing at all)
+      var step = function(what, pr){ return Promise.race([pr, new Promise(function(r, j){ setTimeout(function(){ j(new Error(what + ': no answer from the phone')); }, 15000); })]); };
+      var b64;
+      return new Promise(function(res, rej){ var fr = new FileReader(); fr.onload = function(){ res(String(fr.result).split(',')[1]); }; fr.onerror = rej; fr.readAsDataURL(blob); })
+        .then(function(d){ b64 = d; return step('asking to save', C.nativePromise('Filesystem', 'requestPermissions', {})).catch(function(){ return null; }); })
+        // the phone's Download folder first (where a download is looked for), then Documents
+        .then(function(){ return step('saving', C.nativePromise('Filesystem', 'writeFile', { path: 'Download/' + fname, data: b64, directory: 'EXTERNAL_STORAGE', recursive: true })).then(function(){ return 'Download'; }); })
+        .catch(function(e1){
+          return step('saving', C.nativePromise('Filesystem', 'writeFile', { path: 'Lukez Bunz/' + fname, data: b64, directory: 'DOCUMENTS', recursive: true })).then(function(){ return 'Documents / Lukez Bunz'; }, function(e2){
+            throw new Error('could not save it to the phone (' + String(e2 && (e2.message || e2.errorMessage) || e2) + ' / ' + String(e1 && (e1.message || e1.errorMessage) || e1) + ')');
+          });
+        })
+        .then(function(where){ note('Saved in ' + where + ': ' + fname + ' (open the Files app)'); });
     }
     var a2 = document.createElement('a'); a2.href = URL.createObjectURL(blob); a2.download = fname; document.body.appendChild(a2); a2.click();
     setTimeout(function(){ URL.revokeObjectURL(a2.href); a2.remove(); }, 4000);
