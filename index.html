@@ -34090,6 +34090,58 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     if (!list.length) note('No run boundaries for this stream yet. Edit & settings > Data > Rebuild boundaries.');
     else note('');
   }
+  /* ---- Service days as a PDF ----
+     What the map shows (the stream, the week, All or one day), drawn straight onto a picture: grey street tiles, the run areas in
+     their colours with their names, a title and the key. Downloaded like the run maps (window.lbDownloadPdf). */
+  function daysPdf(btn){
+    if (!window.lbMedia || !window.lbMedia.pdfBlob) return;
+    var list = runsNow.slice(); if (!list.length) { try { window.uxToast && window.uxToast('No runs on the map yet - wait for the boundaries to load'); } catch (e) {} return; }
+    var t0 = btn.innerHTML; btn.textContent = 'PDF\u2026'; btn.disabled = true;
+    var colOf = st.day ? neighbourColours(list.filter(function(r){ return r.day === st.day; })) : null;
+    var shown = list.filter(function(r){ return !st.day || r.day === st.day; });
+    var b = [90, 180, -90, -180]; shown.forEach(function(r){ r.rings.forEach(function(ring){ ring.forEach(function(p){ b[0] = Math.min(b[0], p[0]); b[1] = Math.min(b[1], p[1]); b[2] = Math.max(b[2], p[0]); b[3] = Math.max(b[3], p[1]); }); }); });
+    var padLa = (b[2] - b[0]) * .04 + .0005, padLn = (b[3] - b[1]) * .04 + .0006; b = [b[0] - padLa, b[1] - padLn, b[2] + padLa, b[3] + padLn];
+    var wx = function(lng, z){ return (lng + 180) / 360 * 256 * Math.pow(2, z); };
+    var wy = function(lat, z){ var r = lat * Math.PI / 180; return (1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2 * 256 * Math.pow(2, z); };
+    var MAXPX = 2600, z = 18;
+    while (z > 8 && Math.max(wx(b[3], z) - wx(b[1], z), wy(b[0], z) - wy(b[2], z)) > MAXPX) z -= 0.1;
+    var x0 = wx(b[1], z), y0 = wy(b[2], z), W = Math.round(wx(b[3], z) - x0), H = Math.round(wy(b[0], z) - y0), TOP = 96;
+    var zt = Math.max(1, Math.min(19, Math.floor(z))), sc = Math.pow(2, z - zt), TS = 256 * sc, tiles = [];
+    for (var tx = Math.floor(x0 / TS); tx <= Math.floor((x0 + W) / TS); tx++) for (var ty = Math.floor(y0 / TS); ty <= Math.floor((y0 + H) / TS); ty++) tiles.push([tx, ty]);
+    var loadTile = function(t){ return new Promise(function(res){ var im = new Image(); im.crossOrigin = 'anonymous'; var to = setTimeout(function(){ res(null); }, 9000); im.onload = function(){ clearTimeout(to); res({ t: t, im: im }); }; im.onerror = function(){ clearTimeout(to); res(null); }; im.src = 'https://tile.openstreetmap.org/' + zt + '/' + t[0] + '/' + t[1] + '.png'; }); };
+    Promise.all(tiles.map(loadTile)).then(function(got){
+      var c = document.createElement('canvas'); c.width = W; c.height = H + TOP; var x = c.getContext('2d');
+      x.fillStyle = '#e5e7eb'; x.fillRect(0, 0, c.width, c.height);
+      try { x.filter = 'grayscale(1) contrast(.85) brightness(1.1)'; } catch (e) {}
+      x.globalAlpha = .7; got.forEach(function(g2){ if (g2) x.drawImage(g2.im, g2.t[0] * TS - x0, g2.t[1] * TS - y0 + TOP, TS, TS); }); x.globalAlpha = 1;
+      try { x.filter = 'none'; } catch (e) {}
+      var P = function(p){ return [wx(p[1], z) - x0, wy(p[0], z) - y0 + TOP]; };
+      var path = function(ring){ x.beginPath(); ring.forEach(function(p, i){ var q = P(p); if (i) x.lineTo(q[0], q[1]); else x.moveTo(q[0], q[1]); }); x.closePath(); };
+      list.forEach(function(r){ if (st.day && r.day !== st.day) { x.setLineDash([3, 6]); x.strokeStyle = 'rgba(100,116,139,.6)'; x.lineWidth = 1.5; r.rings.forEach(function(ring){ path(ring); x.stroke(); }); x.setLineDash([]); } });
+      shown.forEach(function(r){ var col = st.day ? colOf[r.key] : DAYCOL[r.day]; r.rings.forEach(function(ring){ path(ring); x.globalAlpha = st.day ? .5 : .42; x.fillStyle = col; x.fill(); x.globalAlpha = 1; x.strokeStyle = '#0b0f14'; x.lineWidth = 2; x.stroke(); }); });
+      // names: biggest areas first, none on top of another
+      var taken = [], fs = 24;
+      shown.slice().sort(function(a1, a2){ return area(a2.rings.slice().sort(function(u, v){ return area(v) - area(u); })[0]) - area(a1.rings.slice().sort(function(u, v){ return area(v) - area(u); })[0]); }).forEach(function(r){
+        var big = r.rings.slice().sort(function(a1, a2){ return area(a2) - area(a1); })[0], q = P(labelPoint(big)), txt = String(r.label);
+        x.font = '800 ' + fs + 'px system-ui, sans-serif'; var w = x.measureText(txt).width + 8, h = fs + 6, bx = [q[0] - w / 2, q[1] - h / 2, q[0] + w / 2, q[1] + h / 2];
+        if (taken.some(function(t){ return bx[0] < t[2] && bx[2] > t[0] && bx[1] < t[3] && bx[3] > t[1]; })) return;
+        taken.push(bx); x.textAlign = 'center'; x.textBaseline = 'middle'; x.lineWidth = 4; x.strokeStyle = '#fff'; x.strokeText(txt, q[0], q[1]); x.fillStyle = '#0b0f14'; x.fillText(txt, q[0], q[1]);
+      });
+      // title and key
+      x.fillStyle = '#fff'; x.fillRect(0, 0, W, TOP); x.fillStyle = '#e5e7eb'; x.fillRect(0, TOP - 2, W, 2);
+      x.textAlign = 'left'; x.textBaseline = 'alphabetic'; x.fillStyle = '#0b0f14'; x.font = '800 30px system-ui, sans-serif';
+      x.fillText('Service days \u00b7 ' + st.stream + (st.week ? ' week ' + st.week : '') + (st.day ? ' \u00b7 ' + st.day : ''), 16, 40);
+      x.font = '600 16px system-ui, sans-serif'; x.fillStyle = '#475569'; x.fillText(new Date().toLocaleDateString('en-AU') + ' \u00b7 ' + shown.length + ' runs \u00b7 streets \u00a9 OpenStreetMap contributors', 16, 66);
+      var kx = 16, ky = 86, items = st.day ? [] : DAYS.map(function(d){ return [DAYCOL[d], d]; });
+      if (!st.day) { x.font = '700 15px system-ui, sans-serif'; var kx2 = Math.max(16, W - 16 - items.reduce(function(s2, it){ return s2 + x.measureText(it[1]).width + 40; }, 0)); items.forEach(function(it){ x.fillStyle = it[0]; x.globalAlpha = .6; x.fillRect(kx2, 30, 22, 16); x.globalAlpha = 1; x.strokeStyle = '#0b0f14'; x.lineWidth = 1.5; x.strokeRect(kx2, 30, 22, 16); x.fillStyle = '#0b0f14'; x.fillText(it[1], kx2 + 28, 44); kx2 += x.measureText(it[1]).width + 40; }); }
+      var url, ok = true; try { url = c.toDataURL('image/jpeg', .86); } catch (e) { ok = false; }
+      if (!ok) throw new Error('the street tiles could not be read');
+      var bin = atob(url.split(',')[1]), u8 = new Uint8Array(bin.length); for (var i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+      var title = 'Service days ' + st.stream + (st.week ? ' ' + st.week : '') + (st.day ? ' ' + st.day : '');
+      var blob = window.lbMedia.pdfBlob(title, '', [{ jpeg: u8, w: c.width, h: c.height }]);
+      return window.lbDownloadPdf ? window.lbDownloadPdf(blob, title + '.pdf', title) : null;
+    }).then(function(){ btn.innerHTML = t0; btn.disabled = false; }, function(e){ btn.innerHTML = t0; btn.disabled = false; try { window.uxToast && window.uxToast('Could not make the PDF: ' + (e && e.message || e)); } catch (x2) {} });
+  }
   // runs that share a line get different colours (they share exact points, so a shared point means neighbours)
   function neighbourColours(list){
     var at = {}, nb = {}, out = {};
@@ -34136,6 +34188,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       var t = ev.target.closest ? ev.target.closest('[data-uxd]') : null; if (!t) return;
       var a = t.getAttribute('data-uxd'), v = t.getAttribute('data-v');
       if (a === 'x') { close(); return; }
+      if (a === 'pdf') { daysPdf(t); return; }
       if (a === 'stream') { st.stream = v; st.sel = null; if (v === 'Garbage') st.week = ''; }
       if (a === 'day') { st.day = v; st.sel = null; }
       if (a === 'week') { st.week = v; st.sel = null; }
@@ -34154,7 +34207,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     };
     var html = '<div class="uxd-top"><b>Service days</b><span class="uxd-sub" id="uxdSub">' + esc(sub(houseCache[st.stream])) + '</span><button type="button" class="uxd-x" data-uxd="x" aria-label="Close">' + X + '</button></div>' +
       '<div class="uxd-row">' + STREAMS.map(function(s){ return chip('', (window.lbStreamIcon ? window.lbStreamIcon(s[0]) : s[1]), st.stream === s[0], '', 'data-uxd="stream" data-v="' + s[0] + '" aria-label="' + s[1] + '"'); }).join('') +
-      (st.stream !== 'Garbage' ? '<span class="uxd-gap"></span>' + [['', 'A+B'], ['A', 'A'], ['B', 'B']].map(function(w){ return chip('', w[1], st.week === w[0], '', 'data-uxd="week" data-v="' + w[0] + '"'); }).join('') : '') + '</div>' +
+      (st.stream !== 'Garbage' ? '<span class="uxd-gap"></span>' + [['', 'A+B'], ['A', 'A'], ['B', 'B']].map(function(w){ return chip('', w[1], st.week === w[0], '', 'data-uxd="week" data-v="' + w[0] + '"'); }).join('') : '') +
+      '<span class="uxd-gap"></span>' + chip('', 'PDF', false, '', 'data-uxd="pdf" title="Download this map as a PDF"') + '</div>' +
       '<div class="uxd-row uxd-days">' + chip('', 'All', !st.day, '', 'data-uxd="day" data-v=""') +
       DAYS.map(function(d){ var n = (perDay[d] || []).length; return chip('', SHORT[d] + '<i>' + n + '</i>', st.day === d, DAYCOL[d], 'data-uxd="day" data-v="' + d + '"'); }).join('') + '</div>' +
       '<div class="uxd-note" id="uxdNote"></div>';
@@ -39684,6 +39738,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       '<div class="rm-stats"><span><b>' + houses.toLocaleString() + '</b>houses</span><span><b>' + bins.toLocaleString() + '</b>bins</span><span><b>' + esc(R.km) + '</b>km</span></div>' +
       '<div class="rm-leg">' + legendSections(used, R.runNames ? Object.assign({}, E, { names: Object.assign({}, R.runNames, E.names) }) : E) + (E.points.length ? '<div><span class="rm-cp rm-cp-k">C</span>Collection point</div>' : '') + (E.arrows.length ? '<div><span class="rm-ar-k">&#10140;</span>Direction of travel</div>' : '') + '<div><i style="border-color:#7c3aed"></i>Reverse in</div><div><i style="border-color:#f59e0b"></i>Drive in, back out</div><div><i class="box"></i>School</div><div><i class="dot"></i>House</div><div><i class="num">1</i>Note</div></div>';
     st.page.appendChild(card);
+    if (opts.noKey) card.style.display = 'none';   // (a page of several: the key is on the overview sheet, and each page says which it is in its corner)
+    if (opts.noKey && opts.pageLabel) { var pl = document.createElement('div'); pl.className = 'rm-plabel'; pl.style.cssText = 'position:absolute;z-index:800;left:6px;top:6px;padding:4px 8px;font:800 13px system-ui,sans-serif;background:#fff;border:1px solid #cbd5e1;border-radius:6px;color:#111'; pl.textContent = opts.pageLabel; st.page.appendChild(pl); }
     st.keyPos = opts.keyPos || null;
     if (opts.onKeyMove) keyDraggable(card, st, opts.onKeyMove);
     if (pinned.length) {
@@ -40698,7 +40754,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     sheets.forEach(function(sh){
       var d = pageDiv(sh.o, null); host.appendChild(d.page);
       var v = sh.screen ? (fitPts ? null : { c: c, z: z + Math.log2((d.page.clientWidth || pmm(sh.o)[0] * MM) / screenW) }) : sh.view;
-      var st = draw(d.map, curKey, R, pagesCache[0], { view: v, fitPts: sh.screen ? fitPts : null, order: fitPts ? null : sh.order, rot: rot, keyPos: kp, notesPos: keyFor(curKey + '|notes'), pageLabel: sh.label, canvas: true });
+      var st = draw(d.map, curKey, R, pagesCache[0], { view: v, fitPts: sh.screen ? fitPts : null, order: fitPts ? null : sh.order, rot: rot, keyPos: kp, notesPos: keyFor(curKey + '|notes'), pageLabel: sh.label, canvas: true, noKey: sh.page != null });   // (the key on the overview sheet only)
       if (sh.frames) drawFrames(st, P, false);
       if (sh.page != null) drawLinks(st, P, sh.page);
       printing.push(st);
