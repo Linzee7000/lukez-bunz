@@ -32276,6 +32276,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
         return '<div class="drv-hrow"><div><b>' + esc(dateStr(s.start)) + ' · ' + esc(clock(s.start)) + '–' + esc(clock(s.end)) + '</b><span>' + esc([s.driver, s.truck].filter(Boolean).join(' · ')) + ' · worked ' + hm(s.worked) + ' · ' + (s.bins || 0) + ' bins' + (s.perHr != null ? ' · ' + s.perHr + '/h' : '') + (s.defects && s.defects.length ? ' · ' + s.defects.length + ' defect' + (s.defects.length > 1 ? 's' : '') : '') + '</span></div>' +
           (s.trail ? '<button type="button" data-a="trail" data-id="' + s.trail + '" data-lbl="' + esc(dateStr(s.start)) + '" aria-label="Show trail">' + I.route + '</button><button type="button" data-a="kml" data-id="' + s.trail + '" data-lbl="' + esc(s.start) + '" aria-label="Trail as KML">KML</button>' : '<i></i>') +
           (window.lbRunSheet ? '<button type="button" data-a="rs:main" data-id="' + s.id + '" aria-label="Run sheet">Run sheet</button>' : '') +
+          '<button type="button" data-a="pdf" data-id="' + s.id + '" aria-label="Download the shift as a PDF">PDF</button>' +
           '<button type="button" data-a="share" data-id="' + s.id + '" aria-label="Share">' + I.share + '</button></div>';
       }).join('') + '</div>' : '<div class="drv-empty">No finished shifts on this phone yet.</div>') +
         '<div class="drv-foot"><button type="button" class="drv-btn" data-a="back">Back</button><button type="button" class="drv-btn" data-a="csv">' + I.share + 'All shifts (CSV)</button></div>';
@@ -32670,6 +32671,20 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       checkKmHrs(); return;
     }
     if (a === 'share') { var s = history().filter(function(x){ return x.id === b.getAttribute('data-id'); })[0]; if (s) shareText(summaryText(s), 'Shift ' + dateStr(s.start)); return; }
+    /* A past shift as a PDF, downloaded: the company run sheet form (as filled in) and the shift summary. Saved like the run map
+       (window.lbDownloadPdf: the Download folder in the app, a download in a browser). */
+    if (a === 'pdf') {
+      var sp = history().filter(function(x){ return x.id === b.getAttribute('data-id'); })[0]; if (!sp || !window.lbMedia || !window.lbMedia.pdfBlob) return;
+      var t0p = b.textContent; b.textContent = '\u2026'; b.disabled = true;
+      var ttl = 'Shift ' + dateStr(sp.start) + (sp.run ? ' - run ' + sp.run : '') + (sp.driver ? ' - ' + sp.driver : '');
+      var formP = (window.lbRunSheet && window.lbRunSheet.formImage) ? Promise.race([window.lbRunSheet.formImage({ live: false, s: sp }), new Promise(function(r){ setTimeout(function(){ r(null); }, 30000); })]).catch(function(){ return null; }) : Promise.resolve(null);
+      formP.then(function(img){
+        var txt = summaryText(sp); try { if (window.lbRunSheet && window.lbRunSheet.text) txt += '\n\n' + window.lbRunSheet.text(sp.id); } catch (e) {}
+        var blob = window.lbMedia.pdfBlob(ttl, txt, img ? [img] : []), nm = ttl.replace(/[^A-Za-z0-9 ._-]+/g, ' ').replace(/\s+/g, ' ').trim() + '.pdf';
+        return window.lbDownloadPdf ? window.lbDownloadPdf(blob, nm, ttl) : null;
+      }).then(function(){ b.textContent = t0p; b.disabled = false; }, function(e){ b.textContent = t0p; b.disabled = false; (window.uxToast || function(){})('Could not make the PDF: ' + (e && e.message || e)); });
+      return;
+    }
     if (a === 'runcheck') { view = 'runcheck'; paint(); return; }
     if (a === 'todo') { view = 'todo'; todoAll = false; paint(); return; }
     if (a === 'todoall') { todoAll = !todoAll; paint(); return; }
@@ -38348,6 +38363,10 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       // pages, not run maps; opened from a filter with no week they showed instead of the run (219A Monday came up as "Run 219
       // Friday, 0.7 km"). Left out, so such a key falls through to the run's own A / B map.
       Object.keys(DATA).forEach(function(k){ var o = parse(k); if (o.stream !== 'Garbage' && !o.week) delete DATA[k]; });
+      // "All runs": every run of one stream on one day (and week) on the one map, each run its own colour (see allRoute)
+      var byDay = {};
+      Object.keys(DATA).forEach(function(k){ var o = parse(k); var g = keyOf({ stream: o.stream, day: o.day, week: o.week, run: 'ALL' }); (byDay[g] = byDay[g] || []).push(k); });
+      Object.keys(byDay).forEach(function(g){ if (byDay[g].length > 1) DATA[g] = { all: true, lines: [], runs: byDay[g].sort(function(a, b){ return parse(a).run.localeCompare(parse(b).run, undefined, { numeric: true }); }) }; });
       return DATA;
     }).catch(function(){ DATA = {}; return DATA; });
     return loading;
@@ -38366,6 +38385,11 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     return null;
   }
   function groupFor(o){
+    if (String(o.run).toUpperCase() === 'ALL' && DATA) {   // (all runs: every run's houses)
+      var A = DATA[keyOf(o)], sites = [];
+      if (A && A.runs) A.runs.forEach(function(rk){ var g2 = groupFor(parse(rk)); if (g2 && g2.sites) sites = sites.concat(g2.sites); });
+      return sites.length ? { sites: sites } : null;
+    }
     try { return (window.lbRunGroups(o.stream) || []).filter(function(x){ return String(x.run).toLowerCase() === String(o.run).toLowerCase() && String(x.day).toLowerCase() === o.day.toLowerCase() && (!o.week || !x.week || String(x.week).toUpperCase() === o.week); })[0] || null; } catch (e) { return null; }
   }
   function mPerDegLng(lat){ return 111320 * Math.cos(lat * Math.PI / 180); }
@@ -38874,6 +38898,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   }
   // (async) the run's route with hanging streets followed round to the next street; resolves true when it changed
   function streetsFor(k){
+    if (DATA && DATA[k] && DATA[k].all) return Promise.all(DATA[k].runs.map(streetsFor)).then(function(r){ return r.some(Boolean); });   // (all runs: each run's own)
     var R = route(k), rec = ROUTES[k]; if (!R || !rec || rec.R2) return Promise.resolve(false);
     return Promise.race([namedRoads(k, rec.base), new Promise(function(res){ setTimeout(function(){ res(null); }, 15000); })]).then(function(w){
       if (!w || ROUTES[k] !== rec) return false;
@@ -38941,8 +38966,29 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var flat = []; out.forEach(function(a){ (a || []).forEach(function(x){ flat.push(x); }); });
     return flat;
   }
+  /* ---- All runs of a stream on a day, on one map ----
+     Each run's own route (clipped to its houses, corners joined, streets followed - exactly as on its own map), all in one, a
+     colour per run, named in the key ("Run 219A"). The run's own section colours are left out here: the colour IS the run. */
+  var RUNCOL = ['#e6194b', '#2563eb', '#16a34a', '#f58231', '#0891b2', '#d946ef', '#84cc16', '#7f1d1d', '#111827', '#1e3a8a', '#0f766e', '#ca8a04', '#9a3412', '#4d7c0f', '#be123c', '#a21caf'];   // (none close to reverse-in purple or drive-in amber)
+  var ALLR = {};
+  function allRoute(k){
+    var A = DATA[k], parts = A.runs.map(function(rk){ return route(rk); });
+    var c = ALLR[k]; if (c && c.parts.length === parts.length && c.parts.every(function(p, i){ return p === parts[i]; })) return c.R;
+    var lines = [], names = {}, km = 0, streets = {};
+    parts.forEach(function(r, i){
+      if (!r || !r.lines) return;
+      var o = parse(A.runs[i]), col = RUNCOL[i % RUNCOL.length], tag = String(o.run).toUpperCase() + (o.week || '');
+      names[col] = 'Run ' + tag; km += +r.km || 0;
+      (r.streets || []).forEach(function(n){ streets[n] = 1; });
+      r.lines.forEach(function(l){ lines.push(Object.assign({}, l, { s: col, rn: tag, pp: tag + '|' + pid(l), pid0: null, alias: null, pa: null })); });
+    });
+    var R = { lines: lines, km: +km.toFixed(1), streets: Object.keys(streets), runNames: names, all: true };
+    ALLR[k] = { parts: parts, R: R };
+    return R;
+  }
   function route(k){
-    var R = DATA && DATA[k]; if (!R || !R.lines) return R;
+    var R = DATA && DATA[k]; if (R && R.all) return allRoute(k);
+    if (!R || !R.lines) return R;
     if (!R.dd) { R.lines = dedupe(R.lines); R.dd = 1; }
     var grp = groupFor(parse(k)), hs = [];
     if (grp) grp.sites.forEach(function(s){ var la = +s.lat, ln = +s.lng; if (la && ln) hs.push([la, ln]); });
@@ -39553,9 +39599,9 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     // cards: title + legend, and the notes
     var sub = o.day;   // the stream is the colour band and its logo; the week letter rides on the run number
     var card = document.createElement('div'); card.className = 'rm-card rm-key';
-    card.innerHTML = northSvg(st.rot) + '<div class="rm-band" style="background:' + (COL[o.stream] || '#16a34a') + '"></div><div class="rm-title">' + (window.lbStreamIcon ? window.lbStreamIcon(o.stream) + ' ' : '') + 'Run ' + esc(o.run) + ((o.week && /^\d+$/.test(String(o.run))) ? esc(String(o.week).toUpperCase()) : '') + '</div><div class="rm-sub">' + esc(sub) + (opts.pageLabel ? ' \u00b7 <b style="color:#111">' + esc(opts.pageLabel) + '</b>' : '') + '</div>' +
+    card.innerHTML = northSvg(st.rot) + '<div class="rm-band" style="background:' + (COL[o.stream] || '#16a34a') + '"></div><div class="rm-title">' + (window.lbStreamIcon ? window.lbStreamIcon(o.stream) + ' ' : '') + (o.run === 'ALL' ? 'All runs' + (o.week ? ' ' + esc(o.week) : '') : 'Run ' + esc(o.run) + ((o.week && /^\d+$/.test(String(o.run))) ? esc(String(o.week).toUpperCase()) : '')) + '</div><div class="rm-sub">' + esc(sub) + (opts.pageLabel ? ' \u00b7 <b style="color:#111">' + esc(opts.pageLabel) + '</b>' : '') + '</div>' +
       '<div class="rm-stats"><span><b>' + houses.toLocaleString() + '</b>houses</span><span><b>' + bins.toLocaleString() + '</b>bins</span><span><b>' + esc(R.km) + '</b>km</span></div>' +
-      '<div class="rm-leg">' + legendSections(used, E) + (E.points.length ? '<div><span class="rm-cp rm-cp-k">C</span>Collection point</div>' : '') + (E.arrows.length ? '<div><span class="rm-ar-k">&#10140;</span>Direction of travel</div>' : '') + '<div><i style="border-color:#7c3aed"></i>Reverse in</div><div><i style="border-color:#f59e0b"></i>Drive in, back out</div><div><i class="box"></i>School</div><div><i class="dot"></i>House</div><div><i class="num">1</i>Note</div></div>';
+      '<div class="rm-leg">' + legendSections(used, R.runNames ? Object.assign({}, E, { names: Object.assign({}, R.runNames, E.names) }) : E) + (E.points.length ? '<div><span class="rm-cp rm-cp-k">C</span>Collection point</div>' : '') + (E.arrows.length ? '<div><span class="rm-ar-k">&#10140;</span>Direction of travel</div>' : '') + '<div><i style="border-color:#7c3aed"></i>Reverse in</div><div><i style="border-color:#f59e0b"></i>Drive in, back out</div><div><i class="box"></i>School</div><div><i class="dot"></i>House</div><div><i class="num">1</i>Note</div></div>';
     st.page.appendChild(card);
     st.keyPos = opts.keyPos || null;
     if (opts.onKeyMove) keyDraggable(card, st, opts.onKeyMove);
@@ -40319,7 +40365,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   function note(m){ try { if (window.uxToast) window.uxToast(m); } catch (e) {} }
   function mobilePrint(btn){
     if (!curKey || !view || !window.lbMedia || !window.lbMedia.pdfBlob) { printView(false); return; }
-    var o = parse(curKey), title = 'Run ' + String(o.run).toUpperCase() + (o.week || '') + ' ' + o.day + ' ' + o.stream, name = title.replace(/\s+/g, ' ') + ' run map.pdf';
+    var o = parse(curKey), title = (o.run === 'ALL' ? 'All runs ' + (o.week || '') : 'Run ' + String(o.run).toUpperCase() + (o.week || '')) + ' ' + o.day + ' ' + o.stream, name = title.replace(/\s+/g, ' ') + ' run map.pdf';
     var t0 = btn && btn.textContent; if (btn) { btn.textContent = 'Making PDF…'; btn.disabled = true; }
     var B = null, done = function(){ if (B) { B.cleanup(); B = null; } if (btn) { btn.textContent = t0; btn.disabled = false; } };
     loadH2C().then(function(h2c){
@@ -40407,6 +40453,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     note('Downloaded: ' + fname);
     return Promise.resolve();
   }
+  window.lbDownloadPdf = function(blob, name, title){ return sharePdf(blob, name, title); };   // (the past shifts' PDF uses it too)
   function screenSize(o){
     var dock = el.classList.contains('rm-dock'), head = el.querySelector(dock ? '.rm-bar' : '.rm-head'), hh = head ? head.offsetHeight : 60;
     var pw = dock ? ((document.getElementById('rmTools') || {}).offsetWidth || 300) : 0;   // (the edit panel docked on the left)
@@ -40561,7 +40608,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var dv = o.stream === 'Garbage' ? o.day : o.day + '|' + o.week;
     D.innerHTML = dayOpts.map(function(x){ return '<option value="' + x[0] + '"' + (x[0] === dv ? ' selected' : '') + '>' + x[1] + '</option>'; }).join('');
     var runs = ks.filter(function(k){ return k.stream === o.stream && k.day === o.day && (o.stream === 'Garbage' || k.week === o.week); }).map(function(k){ return k.run; }).sort(function(a, b){ return a.localeCompare(b, undefined, { numeric: true }); });
-    Rr.innerHTML = runs.map(function(r){ return '<option' + (r === o.run ? ' selected' : '') + '>' + esc(r) + '</option>'; }).join('');
+    runs = (runs.indexOf('ALL') >= 0 ? ['ALL'] : []).concat(runs.filter(function(r){ return r !== 'ALL'; }));   // ("All runs" first)
+    Rr.innerHTML = runs.map(function(r){ return '<option value="' + esc(r) + '"' + (r === o.run ? ' selected' : '') + '>' + (r === 'ALL' ? 'All runs' : esc(r)) + '</option>'; }).join('');
   }
   function pickerChanged(id){
     var S = document.getElementById('rmStream').value, Dv = document.getElementById('rmDay').value, Rv = document.getElementById('rmRun').value;
