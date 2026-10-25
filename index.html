@@ -34195,6 +34195,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       var a = t.getAttribute('data-uxd'), v = t.getAttribute('data-v');
       if (a === 'x') { close(); return; }
       if (a === 'pdf') { daysPdf(t); return; }
+      if (a === 'pages') { var dk = st.stream === 'Garbage' ? 'Garbage#' + (st.day || 'All') + '#DAYS' : st.stream + '#' + (st.day || 'All') + '#' + (st.week || '') + '#DAYS'; close(); if (window.lbRunMapOpen) window.lbRunMapOpen(dk); return; }
       if (a === 'stream') { st.stream = v; st.sel = null; if (v === 'Garbage') st.week = ''; }
       if (a === 'day') { st.day = v; st.sel = null; }
       if (a === 'week') { st.week = v; st.sel = null; }
@@ -34215,7 +34216,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       '<div class="uxd-top"><b>Service days</b><span class="uxd-sub" id="uxdSub">' + esc(sub(houseCache[st.stream])) + '</span><button type="button" class="uxd-x" data-uxd="x" aria-label="Close">' + X + '</button></div>' +
       '<div class="uxd-row">' + STREAMS.map(function(s){ return chip('welcome-chip btn-3d ' + ({ Garbage: 'stream-gar', Recycling: 'stream-rec', FOGO: 'stream-fog' }[s[0]] || '') + (st.stream === s[0] ? ' active' : ''), '<img class="icon-img" src="' + ({ Garbage: 'bin.png', Recycling: 'recycle.png', FOGO: 'fogo.png' }[s[0]] || 'bin.png') + '" alt="">', st.stream === s[0], '', 'data-uxd="stream" data-v="' + s[0] + '" aria-label="' + s[1] + '"'); }).join('') +
       (st.stream !== 'Garbage' ? '<span class="uxd-gap"></span>' + [['', 'A+B'], ['A', 'A'], ['B', 'B']].map(function(w){ return chip('', w[1], st.week === w[0], '', 'data-uxd="week" data-v="' + w[0] + '"'); }).join('') : '') +
-      '<span class="uxd-gap"></span>' + chip('', 'PDF', false, '', 'data-uxd="pdf" title="Download this map as a PDF"') + '</div>' +
+      '<span class="uxd-gap"></span>' + chip('', 'PDF', false, '', 'data-uxd="pdf" title="Download this map as a PDF"') + chip('', 'Pages &amp; print', false, '', 'data-uxd="pages" title="Open it in the run maps: zoom, turn, Auto pages, Print, PDF"') + '</div>' +
       '<div class="uxd-row uxd-days">' + chip('', 'All', !st.day, '', 'data-uxd="day" data-v=""') +
       DAYS.map(function(d){ var n = (perDay[d] || []).length; return chip('', SHORT[d] + '<i>' + n + '</i>', st.day === d, DAYCOL[d], 'data-uxd="day" data-v="' + d + '"'); }).join('') + '</div>' +
       '<div class="uxd-note" id="uxdNote"></div>';
@@ -34273,6 +34274,9 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   }
   window.uxDaysOpen = function(){ if (st.on) return; open(0); };
   window.uxDaysClose = close;
+  // (the run maps draw Service days too: as a layer under a run, and as a page of its own with Pages / Print / PDF)
+  window.uxDaysLib = { list: function(stream){ var s0 = st.stream; st.stream = stream; try { return collect(); } finally { st.stream = s0; } },
+    DAYCOL: DAYCOL, neighbourColours: neighbourColours, labelPoint: labelPoint, area: area };
   // anything that takes the map somewhere else ends the view
   ['openRunDirectlyOnMap', 'switchMainTab'].forEach(function(n){
     var o = window[n]; if (typeof o !== 'function') return;
@@ -38367,6 +38371,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   body.rm-printing #rmView { display: none; }
   #lbRunMap .rm-page { break-after: page; page-break-after: always; }
 
+  .rm-dlbl span { position: absolute; transform: translate(-50%, -50%); white-space: nowrap; font: 800 12px/1 system-ui, sans-serif; color: #0b0f14; text-shadow: -2px 0 #fff, 2px 0 #fff, 0 -2px #fff, 0 2px #fff; pointer-events: none; }
   .rm-note-pin { width: 22px; height: 22px; border-radius: 50%; background: #111; color: #fff; font: 700 12px/22px system-ui; text-align: center; border: 2px solid #fff; box-shadow: 0 1px 4px rgba(0,0,0,.5); }
   .rm-lbl { position: absolute; white-space: nowrap; font: 800 12px/1 system-ui, -apple-system, 'Segoe UI', sans-serif; color: #0f172a; letter-spacing: .1px; pointer-events: none;
     text-shadow: -2px 0 #fff, 2px 0 #fff, 0 -2px #fff, 0 2px #fff, -1.5px -1.5px #fff, 1.5px 1.5px #fff, -1.5px 1.5px #fff, 1.5px -1.5px #fff; transform-origin: 0 0; }
@@ -39026,6 +39031,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   }
   // (async) the run's route with hanging streets followed round to the next street; resolves true when it changed
   function streetsFor(k){
+    if (DATA && DATA[k] && DATA[k].days) return Promise.resolve(false);
     if (DATA && DATA[k] && DATA[k].all) return Promise.all(DATA[k].runs.map(streetsFor)).then(function(r){ return r.some(Boolean); });   // (all runs: each run's own)
     var R = route(k), rec = ROUTES[k]; if (!R || !rec || rec.R2) return Promise.resolve(false);
     return Promise.race([namedRoads(k, rec.base), new Promise(function(res){ setTimeout(function(){ res(null); }, 15000); })]).then(function(w){
@@ -39102,7 +39108,9 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   // a map of the runs picked ("Recycling#Monday#A#219+223+227"): made on the fly, like All runs
   function comboKey(k){
     if (!DATA || DATA[k]) return k;
-    var o = parse(k); if (String(o.run).indexOf('+') < 0) return k;
+    var o = parse(k);
+    if (o.run === 'DAYS') { DATA[k] = { days: true, lines: [] }; return k; }   // (Service days, as a run map page)
+    if (String(o.run).indexOf('+') < 0) return k;
     var runs = String(o.run).split('+').map(function(r){ return keyOf({ stream: o.stream, day: o.day, week: o.week, run: r }); }).filter(function(rk){ return DATA[rk] && !DATA[rk].all; });
     if (runs.length) DATA[k] = { all: true, combo: true, lines: [], runs: runs };
     return k;
@@ -39127,9 +39135,54 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     ALLR[k] = { parts: parts, R: R, sig: sig };
     return R;
   }
+  /* ---- Service days in the run maps ----
+     The run boundaries of a stream (window.uxDaysLib, from the Service days view): on a "DAYS" page (Stream#Monday#A#DAYS, or
+     #All#) the areas are the map - their outlines are its lines, so Whole run, Auto pages, zoom, turning, Print and PDF all work
+     on it - coloured by day (All) or a colour per run (one day, the other days faint); and on any run map the same areas can be
+     shown underneath as a layer (Service days, under More). */
+  var DAYSR = {};
+  function daysList(o){ try { return (window.uxDaysLib ? window.uxDaysLib.list(o.stream) : []).filter(function(r){ return !o.week || !r.week || r.week === o.week; }); } catch (e) { return []; } }
+  function daysCols(o, list){
+    var L0 = window.uxDaysLib; if (!L0) return {};
+    var one = DAYS.indexOf(o.day) >= 0, cols = {};
+    if (one) { var nc = L0.neighbourColours(list.filter(function(r){ return r.day === o.day; })); Object.keys(nc).forEach(function(k){ cols[k] = nc[k]; }); }
+    else list.forEach(function(r){ cols[r.key] = L0.DAYCOL[r.day]; });
+    return cols;
+  }
+  function daysRoute(k){
+    var o = parse(k), list = daysList(o), sig = list.length + ':' + list.map(function(r){ return r.rings.length; }).join('');
+    if (DAYSR[k] && DAYSR[k].sig === sig) return DAYSR[k].R;
+    var one = DAYS.indexOf(o.day) >= 0, cols = daysCols(o, list), lines = [], names = {};
+    list.forEach(function(r){
+      if (one && r.day !== o.day) return;
+      var col = cols[r.key] || '#64748b';
+      names[col] = one ? (names[col] ? names[col] + ', ' : '') + r.label : r.day;
+      r.rings.forEach(function(ring, i){ lines.push({ c: ring.concat([ring[0]]), s: col, pp: 'days|' + r.key + '|' + i, dayRun: r }); });
+    });
+    var R = { lines: lines, km: 0, streets: [], runNames: names, days: true, dayList: list, dayCols: cols };
+    DAYSR[k] = { sig: sig, R: R };
+    return R;
+  }
+  function daysLayerOn(){ return lsGet('lbRunMapDaysLayer', false) === true; }
+  function drawDays(map, layer, o, R){
+    var L0 = window.uxDaysLib; if (!L0) return;
+    var view = !!R.days, list = view ? R.dayList : daysList(o), one = DAYS.indexOf(o.day) >= 0, cols = view ? R.dayCols : (function(){ var c = {}; list.forEach(function(r){ c[r.key] = L0.DAYCOL[r.day]; }); return c; })();
+    list.forEach(function(r){
+      var mine = !one || r.day === o.day, col = cols[r.key] || L0.DAYCOL[r.day] || '#64748b';
+      var style = view
+        ? (mine ? { color: '#0b0f14', weight: 1, opacity: .6, fillColor: col, fillOpacity: one ? .45 : .4, interactive: false } : { color: '#64748b', weight: 1, opacity: .5, dashArray: '2 4', fill: false, interactive: false })
+        : { color: col, weight: mine ? 1.6 : 1, opacity: mine ? .7 : .35, dashArray: mine ? null : '3 4', fillColor: col, fillOpacity: mine ? .16 : .06, interactive: false };
+      L.polygon(r.rings.map(function(x){ return [x]; }), style).addTo(layer);
+      if (view ? mine : (one && r.day === o.day)) {
+        var big = r.rings.slice().sort(function(a, c){ return L0.area(c) - L0.area(a); })[0], lp = L0.labelPoint(big);
+        L.marker(lp, { icon: L.divIcon({ className: 'rm-dlbl', html: '<span>' + esc(r.label) + '</span>', iconSize: [0, 0] }), pane: 'rmPins', interactive: false, keyboard: false }).addTo(layer);
+      }
+    });
+  }
   function route(k){
-    if (DATA && !DATA[k] && String(k).indexOf('+') >= 0) comboKey(k);
-    var R = DATA && DATA[k]; if (R && R.all) return allRoute(k);
+    if (DATA && !DATA[k] && (String(k).indexOf('+') >= 0 || /#DAYS$/.test(k))) comboKey(k);
+    var R = DATA && DATA[k]; if (R && R.days) return daysRoute(k);
+    if (R && R.all) return allRoute(k);
     if (!R || !R.lines) return R;
     if (!R.dd) { R.lines = dedupe(R.lines); R.dd = 1; }
     var grp = groupFor(parse(k)), hs = [];
@@ -39408,7 +39461,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   function draw(container, key, R, page, opts){
     opts = opts || {};
     var E = edits(key), mode = opts.edit ? opts.mode : '';
-    R = withModes(R);
+    if (!R.days) R = withModes(R);
     if (E.erase.length) R = Object.assign({}, R, { lines: rubOut(R.lines, E) });
     if (E.areas.length) R = Object.assign({}, R, { lines: areaPaint(R.lines, E, function(l){ return E.pt[pid(l)] || (l.pid0 && E.pt[l.pid0]) || 0; }) });
     // the map can be turned (rot, degrees clockwise) inside the page; the page and its cards stay upright
@@ -39420,7 +39473,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, crossOrigin: 'anonymous' }).addTo(map);   // (crossOrigin: the phone's PDF reads them back)
     map.createPane('rmLabels').style.zIndex = 650; map.createPane('rmPins').style.zIndex = 660;
     var layers = L.layerGroup().addTo(map);
-    var grp = groupFor(o), houses = 0, bins = 0;
+    if (R.days || daysLayerOn()) { try { drawDays(map, layers, o, R); } catch (e) {} }
+    var grp = R.days ? null : groupFor(o), houses = 0, bins = 0;
     if (grp) grp.sites.forEach(function(s){
       var la = +s.lat, ln = +s.lng; if (!la || !ln) return; houses++;
       bins += ((s.soloStreams || {})[o.stream] || []).length || ((s.councilStreams || {})[o.stream] || []).length;
@@ -39739,11 +39793,11 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       container.addEventListener('pointerup', end); container.addEventListener('pointercancel', end);
     }
     // cards: title + legend, and the notes
-    var sub = o.day;   // the stream is the colour band and its logo; the week letter rides on the run number
+    var sub = o.day === 'All' ? 'Monday to Friday' : o.day;   // the stream is the colour band and its logo; the week letter rides on the run number
     var card = document.createElement('div'); card.className = 'rm-card rm-key';
-    card.innerHTML = northSvg(st.rot) + '<div class="rm-band" style="background:' + (COL[o.stream] || '#16a34a') + '"></div><div class="rm-title">' + (window.lbStreamIcon ? window.lbStreamIcon(o.stream) + ' ' : '') + (o.run === 'ALL' ? 'All runs' + (o.week ? ' ' + esc(o.week) : '') : String(o.run).indexOf('+') >= 0 ? 'Runs ' + esc(String(o.run).split('+').map(function(r){ return r + (o.week || ''); }).join(', ')) : 'Run ' + esc(o.run) + ((o.week && /^\d+$/.test(String(o.run))) ? esc(String(o.week).toUpperCase()) : '')) + '</div><div class="rm-sub">' + esc(sub) + (opts.pageLabel ? ' \u00b7 <b style="color:#111">' + esc(opts.pageLabel) + '</b>' : '') + '</div>' +
-      '<div class="rm-stats"><span><b>' + houses.toLocaleString() + '</b>houses</span><span><b>' + bins.toLocaleString() + '</b>bins</span><span><b>' + esc(R.km) + '</b>km</span></div>' +
-      '<div class="rm-leg">' + legendSections(used, R.runNames ? Object.assign({}, E, { names: Object.assign({}, R.runNames, E.names) }) : E) + (E.points.length ? '<div><span class="rm-cp rm-cp-k">C</span>Collection point</div>' : '') + (E.arrows.length ? '<div><span class="rm-ar-k">&#10140;</span>Direction of travel</div>' : '') + '<div><i style="border-color:#7c3aed"></i>Reverse in</div><div><i style="border-color:#f59e0b"></i>Drive in, back out</div><div><i class="box"></i>School</div><div><i class="dot"></i>House</div><div><i class="num">1</i>Note</div></div>';
+    card.innerHTML = northSvg(st.rot) + '<div class="rm-band" style="background:' + (COL[o.stream] || '#16a34a') + '"></div><div class="rm-title">' + (window.lbStreamIcon ? window.lbStreamIcon(o.stream) + ' ' : '') + (o.run === 'DAYS' ? 'Service days' + (o.week ? ' ' + esc(o.week) : '') : o.run === 'ALL' ? 'All runs' + (o.week ? ' ' + esc(o.week) : '') : String(o.run).indexOf('+') >= 0 ? 'Runs ' + esc(String(o.run).split('+').map(function(r){ return r + (o.week || ''); }).join(', ')) : 'Run ' + esc(o.run) + ((o.week && /^\d+$/.test(String(o.run))) ? esc(String(o.week).toUpperCase()) : '')) + '</div><div class="rm-sub">' + esc(sub) + (opts.pageLabel ? ' \u00b7 <b style="color:#111">' + esc(opts.pageLabel) + '</b>' : '') + '</div>' +
+      (R.days ? '<div class="rm-stats"><span><b>' + R.lines.filter(function(l){ return /\|0$/.test(l.pp); }).length + '</b>runs</span></div>' : '<div class="rm-stats"><span><b>' + houses.toLocaleString() + '</b>houses</span><span><b>' + bins.toLocaleString() + '</b>bins</span><span><b>' + esc(R.km) + '</b>km</span></div>') +
+      '<div class="rm-leg">' + legendSections(used, R.runNames ? Object.assign({}, E, { names: Object.assign({}, R.runNames, E.names) }) : E) + (R.days ? '</div>' : (E.points.length ? '<div><span class="rm-cp rm-cp-k">C</span>Collection point</div>' : '') + (E.arrows.length ? '<div><span class="rm-ar-k">&#10140;</span>Direction of travel</div>' : '') + '<div><i style="border-color:#7c3aed"></i>Reverse in</div><div><i style="border-color:#f59e0b"></i>Drive in, back out</div><div><i class="box"></i>School</div><div><i class="dot"></i>House</div><div><i class="num">1</i>Note</div></div>');   // (Service days: just its days or runs)
     st.page.appendChild(card);
     if (opts.noKey) card.style.display = 'none';   // (a page of several: the key is on the overview sheet, and each page says which it is in its corner)
     if (opts.noKey && opts.pageLabel) { var pl = document.createElement('div'); pl.className = 'rm-plabel'; pl.style.cssText = 'position:absolute;z-index:800;left:6px;top:6px;padding:4px 8px;font:800 13px system-ui,sans-serif;background:#fff;border:1px solid #cbd5e1;border-radius:6px;color:#111'; pl.textContent = opts.pageLabel; st.page.appendChild(pl); }
@@ -40413,12 +40467,12 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       '<button type="button" data-rm="rot0" title="North up">N</button>' +
       '<button type="button" class="rm-fine" data-rm="rotR" data-step="1" title="Turn the map 1\u00b0 right" aria-label="Turn the map 1 degree right">1\u00b0</button><button type="button" data-rm="rotR" data-step="5" title="Turn the map 5\u00b0 right" aria-label="Turn the map 5 degrees right">5\u00b0 \u21bb</button></span>' +
       '<select id="rmKey" title="Where the key goes (or drag the key on the map)"><option value="auto">Key: auto</option><option value="tl">Key: top left</option><option value="tr">Key: top right</option><option value="bl">Key: bottom left</option><option value="br">Key: bottom right</option><option value="drag" hidden>Key: where dragged</option></select>' +
-      '<button type="button" data-rm="done" id="rmDone" hidden title="Draw the streets you have finished in red">Done streets</button><button type="button" data-rm="fit" title="Show the whole run">Whole run</button><button type="button" data-rm="turn" title="Portrait / landscape">Turn page</button><button type="button" data-rm="edit">Edit</button><button type="button" data-rm="pages" title="Split the run over several printed pages">Pages</button><select id="rmPaper" title="Paper size for Print / Download"><option>A4</option><option>A3</option><option>A2</option><option>A1</option></select><button type="button" data-rm="printview" title="Prints exactly what is on screen">Print</button><button type="button" data-rm="close">Close</button></div>' +
+      '<button type="button" data-rm="done" id="rmDone" hidden title="Draw the streets you have finished in red">Done streets</button><button type="button" data-rm="fit" title="Show the whole run">Whole run</button><button type="button" data-rm="turn" title="Portrait / landscape">Turn page</button><button type="button" data-rm="edit">Edit</button><button type="button" data-rm="pages" title="Split the run over several printed pages">Pages</button><select id="rmPaper" title="Paper size for Print / Download"><option>A4</option><option>A3</option><option>A2</option><option>A1</option></select><button type="button" data-rm="dlayer" title="Show the Service days areas under the run">Service days</button><button type="button" data-rm="printview" title="Prints exactly what is on screen">Print</button><button type="button" data-rm="pdf" title="Download what is on screen as a PDF">PDF</button><button type="button" data-rm="close">Close</button></div>' +
       '<div id="rmTools" class="rm-tools"></div></div><div id="rmView"></div><div id="rmPrint"></div>';
     document.body.appendChild(el);
     // On a phone the bar above the map took half the screen: turning, where the key goes, Turn page and Pages (not needed often)
     // fold away behind More.
-    ['.rm-rot', '#rmKey', '[data-rm="turn"]', '[data-rm="pages"]'].forEach(function(q){ var x = el.querySelector('.rm-head ' + q); if (x) x.classList.add('rm-more'); });
+    ['.rm-rot', '#rmKey', '[data-rm="turn"]', '[data-rm="pages"]', '[data-rm="dlayer"]'].forEach(function(q){ var x = el.querySelector('.rm-head ' + q); if (x) x.classList.add('rm-more'); });
     (function(){ var eb = el.querySelector('.rm-head [data-rm="edit"]'); if (!eb) return; var mb = document.createElement('button'); mb.type = 'button'; mb.setAttribute('data-rm', 'more'); mb.className = 'rm-morebtn'; mb.textContent = 'More \u25be'; eb.parentNode.insertBefore(mb, eb); })();
     // the title bar's clock (hours in the accent colour, no colon) on this page too
     function clk(){ var c = document.getElementById('rmClk'); if (!c || el.style.display === 'none' || typeof window.lbClk !== 'function') return; var d = new Date(); c.innerHTML = window.lbClk(d.getHours(), d.getMinutes(), d.getSeconds()); }
@@ -40437,6 +40491,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       if (a === 'edit' && !isLeadNow()) return;
       if (a === 'more') { var on = el.classList.toggle('rm-showmore'); b.textContent = on ? 'Less \u25b4' : 'More \u25be'; return; }
       if (a === 'printview') { if (phonePrint()) { mobilePrint(b); } else printView(false); }
+      if (a === 'pdf') mobilePrint(b);   // (a computer: the same PDF a phone downloads)
+      if (a === 'dlayer') { lsSet('lbRunMapDaysLayer', !daysLayerOn()); renderView(true); }
       if (a === 'pages') { pagesMode = !pagesMode; if (pagesMode) editing = false; selPage = 0; renderView(true, true); }
       if (a === 'pauto' && view) { var PA = autoPages(view); if (PA.length) { selPage = 0; pagesChanged(PA); } else note('Nothing to cover'); }
       if (a === 'padd' && view) {
@@ -40550,7 +40606,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   function note(m){ try { if (window.uxToast) window.uxToast(m); } catch (e) {} }
   function mobilePrint(btn){
     if (!curKey || !view || !window.lbMedia || !window.lbMedia.pdfBlob) { printView(false); return; }
-    var o = parse(curKey), title = (o.run === 'ALL' ? 'All runs ' + (o.week || '') : String(o.run).indexOf('+') >= 0 ? 'Runs ' + String(o.run).split('+').join(' ') + (o.week || '') : 'Run ' + String(o.run).toUpperCase() + (o.week || '')) + ' ' + o.day + ' ' + o.stream, name = title.replace(/\s+/g, ' ') + ' run map ' + paperName() + '.pdf';
+    var o = parse(curKey), title = (o.run === 'DAYS' ? 'Service days ' + (o.week || '') : o.run === 'ALL' ? 'All runs ' + (o.week || '') : String(o.run).indexOf('+') >= 0 ? 'Runs ' + String(o.run).split('+').join(' ') + (o.week || '') : 'Run ' + String(o.run).toUpperCase() + (o.week || '')) + ' ' + o.day + ' ' + o.stream, name = title.replace(/\s+/g, ' ') + ' run map ' + paperName() + '.pdf';
     var t0 = btn && btn.textContent; if (btn) { btn.textContent = 'Making PDF…'; btn.disabled = true; }
     var B = null, done = function(){ if (B) { B.cleanup(); B = null; } if (btn) { btn.textContent = t0; btn.disabled = false; } };
     loadH2C().then(function(h2c){
@@ -40669,9 +40725,11 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     if (view) { try { view.map.remove(); } catch (e) {} view = null; }
     host.innerHTML = '';
     paintTools();
-    var lead = isLeadNow(); if (!lead) editing = false;
+    var lead = isLeadNow(); if (!lead || /#DAYS$/.test(curKey || '')) editing = false;
     Array.prototype.forEach.call(el.querySelectorAll('[data-rm="printview"]'), function(b){ if (!b.disabled) b.textContent = phonePrint() ? 'Download' : 'Print'; });   // (a phone gets the PDF as a download)
-    Array.prototype.forEach.call(el.querySelectorAll('[data-rm="edit"]'), function(b){ b.classList.toggle('on', editing); b.textContent = editing ? 'Done editing' : 'Edit'; b.style.display = lead ? '' : 'none'; });
+    Array.prototype.forEach.call(el.querySelectorAll('[data-rm="pdf"]'), function(b){ b.style.display = phonePrint() ? 'none' : ''; });   // (a computer has both Print and PDF)
+    Array.prototype.forEach.call(el.querySelectorAll('[data-rm="dlayer"]'), function(b){ b.classList.toggle('on', daysLayerOn()); b.style.display = /#DAYS$/.test(curKey || '') ? 'none' : ''; });
+    Array.prototype.forEach.call(el.querySelectorAll('[data-rm="edit"]'), function(b){ b.classList.toggle('on', editing); b.textContent = editing ? 'Done editing' : 'Edit'; b.style.display = lead && !/#DAYS$/.test(curKey || '') ? '' : 'none'; });
     var R = route(curKey); if (!R) { host.innerHTML = '<div class="rm-empty">No route map for this run yet.</div>'; return; }
     var pg = pagesCache[0], o = orientOverride || phoneOrient() || pg.o;
     // the page keeps its size while you edit, so the map never shifts under your finger
@@ -40803,13 +40861,15 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       if (o.stream === 'Garbage') { if (ks.some(function(k){ return k.stream === 'Garbage' && k.day === d; })) dayOpts.push([d, d]); }
       else ['A', 'B'].forEach(function(w){ if (ks.some(function(k){ return k.stream === o.stream && k.day === d && k.week === w; })) dayOpts.push([d + '|' + w, d + ' ' + w]); });
     });
+    if (o.day === 'All') dayOpts.unshift([o.stream === 'Garbage' ? 'All' : 'All|' + o.week, 'All days' + (o.week ? ' ' + o.week : '')]);
     var dv = o.stream === 'Garbage' ? o.day : o.day + '|' + o.week;
     D.innerHTML = dayOpts.map(function(x){ return '<option value="' + x[0] + '"' + (x[0] === dv ? ' selected' : '') + '>' + x[1] + '</option>'; }).join('');
     var runs = ks.filter(function(k){ return k.stream === o.stream && k.day === o.day && (o.stream === 'Garbage' || k.week === o.week); }).map(function(k){ return k.run; }).sort(function(a, b){ return a.localeCompare(b, undefined, { numeric: true }); });
     runs = runs.filter(function(r){ return r.indexOf('+') < 0; });
     runs = (runs.indexOf('ALL') >= 0 ? ['ALL'] : []).concat(runs.filter(function(r){ return r !== 'ALL'; }));   // ("All runs" first)
     if (String(o.run).indexOf('+') >= 0) runs.unshift(o.run);
-    Rr.innerHTML = runs.map(function(r){ return '<option value="' + esc(r) + '"' + (r === o.run ? ' selected' : '') + '>' + (r === 'ALL' ? 'All runs' : r.indexOf('+') >= 0 ? esc(r.split('+').join(' + ')) : esc(r)) + '</option>'; }).join('') +
+    runs.push('DAYS');   // (Service days for this day)
+    Rr.innerHTML = runs.map(function(r){ return '<option value="' + esc(r) + '"' + (r === o.run ? ' selected' : '') + '>' + (r === 'ALL' ? 'All runs' : r === 'DAYS' ? 'Service days' : r.indexOf('+') >= 0 ? esc(r.split('+').join(' + ')) : esc(r)) + '</option>'; }).join('') +
       '<option value="PICK">Pick runs\u2026</option>';
   }
   /* Pick runs: the run numbers as tiles, tap the ones wanted (219, 223, 227...), Show puts them on one map, each its own colour
@@ -40839,6 +40899,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   function pickerChanged(id){
     var S = document.getElementById('rmStream').value, Dv = document.getElementById('rmDay').value, Rv = document.getElementById('rmRun').value;
     if (id === 'rmRun' && Rv === 'PICK') { pickRuns(); return; }
+    if (id === 'rmRun' && Rv === 'DAYS') { var pd = Dv.split('|'); var kd = keyOf({ stream: S, day: pd[0], week: pd[1] || '', run: 'DAYS' }); comboKey(kd); show(kd); return; }
+    if (id === 'rmDay' && /^All/.test(Dv)) { var pa = Dv.split('|'); var ka = keyOf({ stream: S, day: 'All', week: pa[1] || '', run: 'DAYS' }); comboKey(ka); show(ka); return; }
     var pkb = document.getElementById('rmPick'); if (pkb) pkb.style.display = 'none';
     var ks = keys().map(parse), o;
     if (id === 'rmStream') o = ks.filter(function(k){ return k.stream === S; })[0];
