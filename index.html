@@ -34066,6 +34066,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     runsNow = list;
     layer = L.layerGroup().addTo(m); labels = L.layerGroup().addTo(m);
     var bounds = null, colOf = st.day ? neighbourColours(list.filter(function(r){ return r.day === st.day; })) : null;
+    if (colOf && window.lbRunColour) list.forEach(function(r){ if (r.day === st.day) colOf[r.key] = window.lbRunColour(st.stream, r.day, r.week, r.run); });   // (each run its own colour for the whole week)
     list.forEach(function(r){
       var show = !st.day || r.day === st.day, col = st.day ? colOf[r.key] : DAYCOL[r.day];
       var parts = r.rings.map(function(x){ return [x]; });            // each separate part is its own polygon, not a hole of the others
@@ -34099,6 +34100,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var list = runsNow.slice(); if (!list.length) { try { window.uxToast && window.uxToast('No runs on the map yet - wait for the boundaries to load'); } catch (e) {} return; }
     var t0 = btn.innerHTML; btn.textContent = 'PDF\u2026'; btn.disabled = true;
     var colOf = st.day ? neighbourColours(list.filter(function(r){ return r.day === st.day; })) : null;
+    if (colOf && window.lbRunColour) list.forEach(function(r){ if (r.day === st.day) colOf[r.key] = window.lbRunColour(st.stream, r.day, r.week, r.run); });   // (each run its own colour for the whole week)
     var shown = list.filter(function(r){ return !st.day || r.day === st.day; });
     var b = [90, 180, -90, -180]; shown.forEach(function(r){ r.rings.forEach(function(ring){ ring.forEach(function(p){ b[0] = Math.min(b[0], p[0]); b[1] = Math.min(b[1], p[1]); b[2] = Math.max(b[2], p[0]); b[3] = Math.max(b[3], p[1]); }); }); });
     var padLa = (b[2] - b[0]) * .04 + .0005, padLn = (b[3] - b[1]) * .04 + .0006; b = [b[0] - padLa, b[1] - padLn, b[2] + padLa, b[3] + padLn];
@@ -39123,7 +39125,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var lines = [], names = {}, km = 0, streets = {};
     parts.forEach(function(r, i){
       if (!r || !r.lines) return;
-      var o = parse(A.runs[i]), col = RUNCOL[i % RUNCOL.length], tag = String(o.run).toUpperCase() + (o.week || '');
+      var o = parse(A.runs[i]), col = window.lbRunColour ? window.lbRunColour(o.stream, o.day, o.week, o.run) : RUNCOL[i % RUNCOL.length], tag = String(o.run).toUpperCase() + (o.week || '');
+      if (names[col] && window.lbRunColour) col = RUNCOL[i % RUNCOL.length];   // (two runs the same colour on one map: the second gets a spare one)
       names[col] = 'Run ' + tag; km += +r.km || 0;
       (r.streets || []).forEach(function(n){ streets[n] = 1; });
       var E1 = Es[i], own = r.lines.filter(function(l){ return ovOf(E1, l) !== 'x'; });
@@ -39131,9 +39134,77 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       if (E1.areas.length) own = areaPaint(own, { areas: E1.areas.filter(function(a){ return a.a === 'x'; }) }).filter(function(l){ return !l.ar; });
       own.forEach(function(l){ lines.push(Object.assign({}, l, { s: col, rn: tag, pp: tag + '|' + pid(l), pid0: null, alias: null, pa: null, ar: null })); });
     });
+    var housesOf = {}; A.runs.forEach(function(rk){ var o2 = parse(rk), g2 = groupFor(o2), hs = []; if (g2) g2.sites.forEach(function(s2){ var la = +s2.lat, ln = +s2.lng; if (la && ln) hs.push([la, ln]); }); housesOf[String(o2.run).toUpperCase() + (o2.week || '')] = hs; });
+    try { lines = sideBySide(lines, housesOf); } catch (e) {}
     var R = { lines: lines, km: +km.toFixed(1), streets: Object.keys(streets), runNames: names, all: true };
     ALLR[k] = { parts: parts, R: R, sig: sig };
     return R;
+  }
+  /* ---- two runs on one street, a side each ----
+     On All runs / picked runs a street done by two runs (one does each side) had both lines on top of each other, so only one
+     showed. Where a run's line runs along another run's (within 4 m, the same way or back, for 10 m or more) that stretch is cut
+     out and drawn beside the street (.off: -1 left / +1 right of the line's own direction, worked out in draw at every zoom),
+     on the side of that run's own houses there; with no houses of its own near, the runs are put either side in run order. */
+  function sideBySide(lines, housesOf){
+    if (!lines || lines.length < 2) return lines;
+    var lat0 = lines[0].c[0][0], lng0 = lines[0].c[0][1], MY = 110540, MX = 111320 * Math.cos(lat0 * Math.PI / 180);
+    var xy = function(p){ return [(p[1] - lng0) * MX, (p[0] - lat0) * MY]; }, ll = function(P){ return [+(lat0 + P[1] / MY).toFixed(6), +(lng0 + P[0] / MX).toFixed(6)]; };
+    var C = 8, grid = {};
+    var S = lines.map(function(l, li){
+      var c = l.c.map(xy), pts = [];
+      for (var i = 1; i < c.length; i++) {
+        var A = c[i - 1], B = c[i], L0 = Math.hypot(B[0] - A[0], B[1] - A[1]); if (L0 < 0.01) continue;
+        var dx = (B[0] - A[0]) / L0, dy = (B[1] - A[1]) / L0, n = Math.max(1, Math.ceil(L0 / 2));
+        for (var j = (pts.length ? 1 : 0); j <= n; j++) pts.push({ x: A[0] + (B[0] - A[0]) * j / n, y: A[1] + (B[1] - A[1]) * j / n, dx: dx, dy: dy });
+      }
+      pts.forEach(function(q){ var k = Math.floor(q.x / C) + ':' + Math.floor(q.y / C); (grid[k] = grid[k] || []).push([li, q]); });
+      return pts;
+    });
+    var HG = {}, HC = 40;
+    Object.keys(housesOf).forEach(function(t){ (housesOf[t] || []).forEach(function(h){ var H = xy(h), k = Math.floor(H[0] / HC) + ':' + Math.floor(H[1] / HC); (HG[k] = HG[k] || []).push([t, H]); }); });
+    var out = [];
+    lines.forEach(function(l, li){
+      var pts = S[li]; if (pts.length < 2) { out.push(l); return; }
+      var other = pts.map(function(q){
+        var cx = Math.floor(q.x / C), cy = Math.floor(q.y / C), hit = null;
+        for (var x = cx - 1; x <= cx + 1 && !hit; x++) for (var y = cy - 1; y <= cy + 1 && !hit; y++) (grid[x + ':' + y] || []).some(function(e){
+          var o = lines[e[0]]; if (o.rn === l.rn) return false;
+          var p = e[1]; if (Math.hypot(p.x - q.x, p.y - q.y) > 4 || Math.abs(p.dx * q.dx + p.dy * q.dy) < 0.7) return false;
+          hit = o.rn; return true;
+        });
+        return hit;
+      });
+      var shared = other.map(function(h){ return !!h; }), runS = -1;
+      for (var q = 0; q <= pts.length; q++) { if (q < pts.length && shared[q]) { if (runS < 0) runS = q; continue; } if (runS >= 0 && q - runS < 5) for (var z = runS; z < q; z++) shared[z] = false; runS = -1; }
+      if (!shared.some(Boolean)) { out.push(l); return; }
+      var cur = [], cs = shared[0], from = 0;
+      var flush = function(to){
+        if (cur.length < 2) return;
+        var part = Object.assign({}, l, { c: cur });
+        if (cs) {
+          // which side: this run's houses near this stretch
+          var sum = 0, oth = null;
+          for (var i = from; i <= to && i < pts.length; i++) { if (other[i]) oth = other[i]; }
+          for (var i2 = from; i2 <= to && i2 < pts.length; i2 += 3) {
+            var P = pts[i2], cx = Math.floor(P.x / HC), cy = Math.floor(P.y / HC);
+            for (var x = cx - 1; x <= cx + 1; x++) for (var y = cy - 1; y <= cy + 1; y++) (HG[x + ':' + y] || []).forEach(function(e){
+              if (e[0] !== l.rn) return; var H = e[1], d = Math.hypot(H[0] - P.x, H[1] - P.y); if (d > 40 || d < 1) return;
+              sum += (P.dx * (H[1] - P.y) - P.dy * (H[0] - P.x)) > 0 ? -1 : 1;   // (houses to the left: draw it on the left)
+            });
+          }
+          if (!sum) { var P0 = pts[from], canon = (P0.dx > 0.01 || (Math.abs(P0.dx) <= 0.01 && P0.dy > 0)) ? 1 : -1; sum = (String(l.rn) < String(oth || '') ? 1 : -1) * canon; }
+          part.off = sum > 0 ? 1 : -1;
+        }
+        out.push(part);
+      };
+      for (var q2 = 0; q2 < pts.length; q2++) {
+        var P2 = ll([pts[q2].x, pts[q2].y]);
+        if (q2 && shared[q2] !== cs) { cur.push(P2); flush(q2); cur = [P2]; cs = shared[q2]; from = q2; continue; }
+        if (!q2 || q2 === pts.length - 1 || shared[q2 + 1] !== cs || q2 % 5 === 0) cur.push(P2);
+      }
+      flush(pts.length - 1);
+    });
+    return out;
   }
   /* ---- Service days in the run maps ----
      The run boundaries of a stream (window.uxDaysLib, from the Service days view): on a "DAYS" page (Stream#Monday#A#DAYS, or
@@ -39145,7 +39216,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   function daysCols(o, list){
     var L0 = window.uxDaysLib; if (!L0) return {};
     var one = DAYS.indexOf(o.day) >= 0, cols = {};
-    if (one) { var nc = L0.neighbourColours(list.filter(function(r){ return r.day === o.day; })); Object.keys(nc).forEach(function(k){ cols[k] = nc[k]; }); }
+    if (one) { var nc = L0.neighbourColours(list.filter(function(r){ return r.day === o.day; })); Object.keys(nc).forEach(function(k){ cols[k] = nc[k]; });
+      if (window.lbRunColour) list.forEach(function(r){ if (r.day === o.day) cols[r.key] = window.lbRunColour(o.stream, r.day, r.week, r.run); }); }   // (each run its colour for the week)
     else list.forEach(function(r){ cols[r.key] = L0.DAYCOL[r.day]; });
     return cols;
   }
@@ -39488,7 +39560,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       if (l.ar) return { l: l, col: l.ar.a === 'col' && l.ar.col ? l.ar.col : (l.s || '#16a34a'), gone: l.ar.a === 'x', inArea: true };
       var ov = ovOf(E, l); return { l: l, col: ov && ov !== 'x' ? ov : (l.s || '#16a34a'), gone: ov === 'x' };
     });
-    shown.forEach(function(x){ if (!x.gone) L.polyline(x.l.c, { color: '#fff', weight: 9, opacity: 1, interactive: false }).addTo(layers); });
+    shown.forEach(function(x){ if (!x.gone && !x.l.off) L.polyline(x.l.c, { color: '#fff', weight: 9, opacity: 1, interactive: false }).addTo(layers); });
+    var offList = shown.filter(function(x){ return !x.gone && x.l.off; });   // (two runs, a side each: drawn beside the street in paintExtras)
     var DRV = visibleDrawn(E, shown.filter(function(x){ return !x.gone; }).map(function(x){ return { c: x.l.c, col: x.col, S: (!x.inArea && E.sides[pid(x.l)]) || null }; }));
     DRV.forEach(function(d){ if (!d.side) L.polyline(d.c, { color: '#fff', weight: 9, opacity: 1, interactive: false }).addTo(layers); });
     var sideList = [];
@@ -39496,6 +39569,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       if (x.gone && !opts.edit) return;
       var S = !x.gone && !x.inArea && E.sides[pid(x.l)];
       if (S && (S.l || S.r)) { x.S = S; sideList.push(x); [S.l || x.col, S.r || x.col].forEach(function(c){ used[c] = (used[c] || 0) + 1; }); return; }
+      if (x.l.off && !x.gone) { used[x.col] = (used[x.col] || 0) + 1; return; }
       if (!x.gone) used[x.col] = (used[x.col] || 0) + 1;
       L.polyline(x.l.c, { color: x.gone ? '#94a3b8' : x.col, weight: opts.edit ? 7 : 5, opacity: 1, dashArray: x.gone ? '4,6' : null, interactive: false, lineCap: 'round', lineJoin: 'round' }).addTo(layers);
     });
@@ -39509,6 +39583,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       if (SL && SL.k === 'drawn' && E.drawn[SL.i]) { var dd = E.drawn[SL.i]; L.polyline(dd.side ? offsetLL(map, dd.c, dd.side === 'r' ? 5.5 : -5.5) : dd.c, { color: '#ffd21f', weight: 16, opacity: .8, interactive: false, lineCap: 'round', lineJoin: 'round' }).addTo(xLayer); }
       if (SL && SL.k === 'arrow' && E.arrows[SL.i]) L.polyline(E.arrows[SL.i].c, { color: '#ffd21f', weight: 16, opacity: .8, interactive: false, lineCap: 'round' }).addTo(xLayer);
       if (SL && SL.k === 'point' && E.points[SL.i]) L.circleMarker(E.points[SL.i].at, { radius: 17, stroke: false, fillColor: '#ffd21f', fillOpacity: .85, interactive: false }).addTo(xLayer);
+      offList.forEach(function(x){ L.polyline(offsetLL(map, x.l.c, x.l.off * 3), { color: '#fff', weight: 7, opacity: 1, interactive: false, lineCap: 'butt', lineJoin: 'round' }).addTo(xLayer); });
+      offList.forEach(function(x){ L.polyline(offsetLL(map, x.l.c, x.l.off * 3), { color: x.col, weight: 4, opacity: 1, interactive: false, lineCap: 'butt', lineJoin: 'round' }).addTo(xLayer); });
       sideList.forEach(function(x){
         L.polyline(offsetLL(map, x.l.c, 0), { color: '#fff', weight: opts.edit ? 13 : 11, opacity: 1, interactive: false, lineCap: 'butt' }).addTo(xLayer);
         L.polyline(offsetLL(map, x.l.c, -2.8), { color: x.S.l || x.col, weight: opts.edit ? 4.6 : 4, opacity: 1, interactive: false, lineCap: 'butt' }).addTo(xLayer);
@@ -48015,22 +48091,43 @@ document.addEventListener('click', function(ev){
     if (h < 60) { r = c; gg = x; } else if (h < 120) { r = x; gg = c; } else if (h < 180) { gg = c; b = x; } else if (h < 240) { gg = x; b = c; } else if (h < 300) { r = x; b = c; } else { r = c; b = x; }
     return '#' + [r, gg, b].map(function(v){ var t = Math.round((v + m) * 255).toString(16); return t.length < 2 ? '0' + t : t; }).join('');
   }
-  function autoColour(stream, run){
-    var st = mk(stream);
-    if (!STREAM_COL[st]) { try { var ks = g('kmzStreamForRun'); st = mk(ks ? ks(run) : ''); } catch (e) {} }
-    var base = STREAM_COL[st] || '#60a5fa', n = parseInt(String(run).replace(/\D/g, ''), 10) || 0, c = toHsl(base);
-    return toHex(c[0] + [0, 6, -6][n % 3], c[1], Math.max(34, Math.min(80, c[2] + [0, -10, 9, -5, 14][n % 5])));
+  /* ONE colour per run number for the whole week: 219A is red on every day it runs, 219B a lighter red; 220A blue, 220B baby
+     blue... (it used to be a shade of the stream's own colour, so a day's runs were all near the same red / yellow / green and
+     every map picked its own colours). The number picks a colour from a ring of clearly different ones (next numbers differ); week
+     B is the same colour, lighter. A colour picked in Edit the map (runColorMap) for a run counts for that run number and week on
+     every day, and a colour picked for the A week also gives the B week its lighter version. Used by the main map's run
+     outlines, the run maps (All runs, picked runs) and Service days. */
+  var RING = ['#e11d48', '#2563eb', '#16a34a', '#ea580c', '#9333ea', '#0891b2', '#c026d3', '#854d0e', '#65a30d', '#1e3a8a', '#0f766e', '#be185d', '#ca8a04', '#4338ca', '#475569', '#15803d'];   // (not the reverse-in purple or drive-in amber)
+  function weekB(hex){ var c = toHsl(hex); return toHex(c[0], c[1] < 10 ? c[1] : Math.max(45, c[1] - 5), Math.min(78, c[2] + 22)); }
+  function autoColour(stream, run, week){
+    var n = parseInt(String(run).replace(/\D/g, ''), 10);
+    var base = isFinite(n) ? RING[(((n - 219) % RING.length) + RING.length) % RING.length] : (STREAM_COL[mk(stream)] || '#60a5fa');   // (counted from 219, so 219 is red and 220 blue, as Fox asked)
+    return String(week).toUpperCase() === 'B' ? weekB(base) : base;
   }
   function ownColour(key){
     var map = g('runColorMap') || {}, v = map[mk(key)];
     if (v === 'auto') return '';
     if (v) return String(v);
-    v = map[mk(keyParts(key).run)];
+    var k = keyParts(key), st = mk(k.stream), run = mk(k.run), wk = String(k.week || '').toUpperCase();
+    // the same run number and week, picked on another day
+    var same = null, fromA = null;
+    Object.keys(map).forEach(function(mkk){
+      var pp = String(mkk).split('#'), val = map[mkk]; if (pp.length < 3) return;   // (the map's keys are lower case: read by position, not by keyParts)
+      var q = pp.length === 4 ? { stream: pp[0], day: pp[1], week: pp[2], run: pp[3] } : { stream: pp[0], day: pp[1], week: '', run: pp[2] };
+      if (!val || val === 'auto' || mk(q.run) !== run || mk(q.stream) !== st) return;
+      var qw = String(q.week || '').toUpperCase();
+      if (qw === wk) same = same || val; else if (wk === 'B' && qw === 'A') fromA = fromA || val;
+    });
+    if (same) return String(same);
+    if (fromA) return weekB(String(fromA));
+    v = map[run];
     var pre = g('PRESET_COLORS') || [];
     return v && pre.indexOf(String(v).toLowerCase()) < 0 ? String(v) : '';
   }
-  function colourOfKey(key, stream, run){ var k = keyParts(key); return ownColour(key) || autoColour(stream || k.stream, run || k.run); }
+  function colourOfKey(key, stream, run){ var k = keyParts(key); return ownColour(key) || autoColour(stream || k.stream, run || k.run, k.week); }
   window.lbColourOfKey = colourOfKey;
+  // (the run maps and Service days ask by its parts)
+  window.lbRunColour = function(stream, day, week, run){ return colourOfKey(String(stream) === 'Garbage' ? stream + '#' + day + '#' + run : stream + '#' + day + '#' + (week || '') + '#' + run, stream, run); };
   function setColour(key, hex, quiet){
     var map = g('runColorMap'); if (!map || !key) return;
     var nm = map[mk(keyParts(key).run)], pre = g('PRESET_COLORS') || [];
