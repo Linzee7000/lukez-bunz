@@ -15024,6 +15024,23 @@ window.addEventListener('DOMContentLoaded', async () => {
   // Every run of one stream, split the way run boundaries are stored (stream / day / week / run),
   // with the storage key(s) each one is saved under. Used by the property-line boundary builder
   // (lb-parcels-script) - it needs ALL runs of the stream so neighbours can be found.
+  /* ---- split runs (data/split-runs.json, made by tools/route-maps/split_run.py) ----
+     A run made of bits of other runs: 227B Monday takes parts of 219B, 220B, 221B and 223B (and the houses the master list keeps
+     under codes the app doesn't show, 222 / 232 / 234). Short a driver, the full runs do it all and 227B doesn't run - so the
+     houses STAY in their own runs, and are also in the split run: its group (run maps, boundaries, Service days) and the map
+     filter (choosing 227 on Monday B shows them). Keyed Stream#Day#Week#Run, a list of Site Ids. */
+  window.lbSplitRuns = {};
+  fetch('data/split-runs.json', { cache: 'no-cache' }).then(r => r.ok ? r.json() : null).then(d => {
+    const out = {};
+    Object.keys((d && d.runs) || {}).forEach(k => { const p = k.split('#'); if (p.length !== 4) return; out[k] = { stream: p[0], day: dayKey(p[1]), week: p[2].toUpperCase(), run: lower(p[3]), sites: new Set((d.runs[k].sites || []).map(String)) }; });
+    window.lbSplitRuns = out;
+  }).catch(() => {});
+  // the split runs this site is also in, for a stream
+  window.lbSplitOf = function(stream, site, item) {
+    const S = window.lbSplitRuns || {}, id = String(site && site.siteId), it = item || getSiteRuns(site), out = [];
+    Object.keys(S).forEach(k => { const x = S[k]; if (x.stream === stream && x.sites.has(id) && x.day === it.day && x.week === it.week) out.push(x); });
+    return out;
+  };
   window.lbRunGroups = function(stream) {
     const groups = new Map();
     getRecordsArray().forEach(site => {
@@ -15038,6 +15055,18 @@ window.addEventListener('DOMContentLoaded', async () => {
       const gk = [stream, day, week, lower(runVal)].join('|');
       if (!groups.has(gk)) groups.set(gk, { key: gk, stream, run: runVal, day, week, sites: [] });
       groups.get(gk).sites.push(site);
+    });
+    // the split runs' houses, in the split run as well (see lbSplitRuns)
+    const SR = window.lbSplitRuns || {};
+    if (Object.keys(SR).length) getRecordsArray().forEach(site => {
+      const id = String(site.siteId); let item = null;
+      Object.keys(SR).forEach(k => {
+        const x = SR[k]; if (x.stream !== stream || !x.sites.has(id)) return;
+        item = item || getSiteRuns(site); if (item.day !== x.day || item.week !== x.week) return;
+        const gk = [stream, x.day, x.week, x.run].join('|');
+        if (!groups.has(gk)) groups.set(gk, { key: gk, stream, run: k.split('#')[3], day: x.day, week: x.week, sites: [] });
+        const gg = groups.get(gk); if (gg.sites.indexOf(site) < 0) gg.sites.push(site);
+      });
     });
     const list = [...groups.values()];
     const count = fn => { const m = new Map(); list.forEach(g => { const k = fn(g); m.set(k, (m.get(k) || 0) + 1); }); return m; };
@@ -17003,7 +17032,10 @@ window.addEventListener('DOMContentLoaded', async () => {
     if ((stream === 'Recycling' || stream === 'FOGO') && activeFilterWeek && item.week !== weekFilter) return false;
 
     if (selectedRunsSet && selectedRunsSet.size > 0) {
-      const matchesRun = (
+      // (a house in a split run - 227B Monday - shows with that run as well as its own: see lbSplitRuns)
+      const inSplit = (st === 'Recycling' || st === 'FOGO' || st === 'Garbage' || !st) && window.lbSplitOf && Object.keys(window.lbSplitRuns || {}).length &&
+        ['Recycling', 'FOGO', 'Garbage'].some(s2 => (!st || st === s2) && window.lbSplitOf(s2, site, item).some(x => selectedRunsSet.has(x.run)));
+      const matchesRun = inSplit || (
         (st === 'Garbage' && selectedRunsSet.has(lower(item.garRun))) ||
         (st === 'Recycling' && selectedRunsSet.has(lower(item.recRun)) && isValidRecycleRun(item.recRun, item.day, item.week)) ||
         (st === 'SummerRecycling' && selectedRunsSet.has(lower(item.summerRun))) ||
