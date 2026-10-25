@@ -52502,7 +52502,7 @@ html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x
    (about 90 km/h a second, so 0 to 50 takes just over half a second) rather than jumping. window.lbSpeedShown is what the rest of
    the dash then shows too. Paused only while a sheet covers the map. */
 (function(){
-  var shown = null, last = 0, RATE = 90;   // km/h per second
+  var shown = null, fl = null, last = 0, RATE = 90;   // (RATE is no longer used: the number eases)
   function target(){ try { return Math.max(0, Math.round(+(new Function('return typeof currentMapSpeedKmh==="undefined"?0:currentMapSpeedKmh'))() || 0)); } catch (e) { return 0; } }
   var tg = null; function tgt(){ if (tg === null) tg = new Function('return typeof currentMapSpeedKmh==="undefined"?0:currentMapSpeedKmh'); try { return Math.max(0, Math.round(+tg() || 0)); } catch (e) { return 0; } }
   (function loop(t){
@@ -52510,12 +52510,49 @@ html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x
     try {
       var want = tgt(), dt = last ? Math.min(0.25, (t - last) / 1000) : 0; last = t;
       if (shown === null) shown = want;
-      if (shown !== want) {
-        var step = Math.max(1, Math.round(RATE * dt)); shown = shown < want ? Math.min(want, shown + step) : Math.max(want, shown - step);
-      }
+      // eases towards the real speed (a fraction of the gap each frame, about 0.45 s to cover most of it) instead of
+      // stepping a fixed amount: a one-off GPS jump of 10 km/h glides in rather than ticking, and the last km/h settle gently
+      if (fl === null) fl = shown;
+      if (fl !== want) { fl += (want - fl) * (1 - Math.exp(-dt / 0.45)); if (Math.abs(want - fl) < 0.35) fl = want; }
+      shown = Math.round(fl);
       window.lbSpeedShown = shown;
       if (document.hidden || (window.lbCovered && window.lbCovered())) return;
       if (shown !== loop._p && typeof window.lbSpeedPaint === 'function') { loop._p = shown; window.lbSpeedPaint(shown); }
+    } catch (e) {}
+  })(0);
+})();
+</script>
+<script id="lb-truck-glide-script">
+/* The truck (and the map while it follows the truck) glides from one GPS fix to the next instead of jumping the whole step at once.
+   GPS gives a fix about once a second; the marker and the follow-centre are moved every screen refresh along the line from where
+   the truck was drawn to the new fix, so it runs about one fix behind the real position but moves smoothly. A jump of more than
+   150 m (first fix, GPS came back after a gap) is taken at once. Nothing else reads the drawn position: userCurrentLocation stays the real fix. */
+(function(){
+  'use strict';
+  function g(n){ try { return (new Function('return typeof ' + n + ' !== "undefined" ? ' + n + ' : undefined'))(); } catch (e) { return undefined; } }
+  var disp = null, from = null, to = null, t0 = 0, dur = 1000, lastKey = '', lastFixAt = 0;
+  function dist(a, b){ var dx = (b.lng - a.lng) * 111320 * Math.cos(a.lat * Math.PI / 180), dy = (b.lat - a.lat) * 110574; return Math.sqrt(dx * dx + dy * dy); }
+  (function loop(t){
+    requestAnimationFrame(loop);
+    try {
+      if (document.hidden) return;
+      var loc = g('userCurrentLocation'), m = g('leafletMap'), mk = g('mapTruckMarker');
+      if (!loc || !m || !mk || !isFinite(loc.lat) || !isFinite(loc.lng)) return;
+      var now = performance.now(), key = loc.lat + ',' + loc.lng;
+      if (key !== lastKey) {
+        lastKey = key;
+        var gap = lastFixAt ? now - lastFixAt : 1000; lastFixAt = now;
+        if (!disp || dist(disp, loc) > 150) { disp = { lat: loc.lat, lng: loc.lng }; from = to = null; }
+        else { from = { lat: disp.lat, lng: disp.lng }; to = { lat: loc.lat, lng: loc.lng }; t0 = now; dur = Math.max(400, Math.min(1500, gap)); }
+      }
+      if (to) {
+        var p = Math.min(1, (now - t0) / dur);
+        disp = { lat: from.lat + (to.lat - from.lat) * p, lng: from.lng + (to.lng - from.lng) * p };
+        if (p >= 1) to = null;
+      }
+      if (!disp) return;
+      mk.setLatLng([disp.lat, disp.lng]);
+      if (g('isTruckFollowEnabled') && !g('mapManualOverrideActive') && g('hasAutoCenteredTruck') && !(window.lbCovered && window.lbCovered())) m.panTo([disp.lat, disp.lng], { animate: false });
     } catch (e) {}
   })(0);
 })();
