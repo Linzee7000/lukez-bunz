@@ -34008,7 +34008,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   var layer = null, labels = null, bar = null, card = null, polys = [], runsNow = [], houseCache = {}, mapClick = null, lblZoom = null;
 
   function dayName(d){ d = String(d || ''); return d ? d.charAt(0).toUpperCase() + d.slice(1).toLowerCase() : ''; }
-  function collect(){
+  function collect(raw){
     var b = g('customRunBorders') || {}, out = [];
     Object.keys(b).forEach(function(k){
       var p = k.split('#'); if (p[0] !== st.stream) return;
@@ -34020,10 +34020,86 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       var rings = [ring];
       try { if (window.lbExtraRings) rings = rings.concat(window.lbExtraRings(k)); } catch (e) {}
       try { if (window.lbParcels && window.lbParcels.extraRings) rings = rings.concat(window.lbParcels.extraRings(k)); } catch (e) {}
-      out.push({ key: k, day: day, week: week, run: run, label: run + week, rings: rings });
+      var r0 = { key: k, day: day, week: week, run: run, label: run + week, rings: rings }, ex = EXT[k];
+      if (!raw && ex && ex.sig === ringSig(rings)) r0.rings = ex.rings;
+      out.push(r0);
     });
     out.sort(function(a, c){ return (parseInt(a.run, 10) - parseInt(c.run, 10)) || String(a.label).localeCompare(String(c.label)); });
     return out;
+  }
+  /* ---- the whole run inside its area ----
+     A run's boundary is drawn round its houses, so roads it drives with no houses of its own (201 Monday: Browns Rd, Dundas St,
+     round the golf course) were outside it and Service days didn't cover the whole run. Each run's route (as its run map draws
+     it, window.lbRunLines) is checked against its area: any stretch outside gets 20 m either side added, except where that
+     ground is another run's (same day and week) - so empty ground is taken in and no other run's area is. Worked out in the
+     background, one run at a time, kept for the session, and the map redrawn when a stream is done. Needs Turf (loaded). */
+  var EXT = {}, extBusy = {}, extWait = {};
+  function ringSig(rings){ return rings.length + ':' + rings.map(function(r){ return r.length + ',' + r[0]; }).join('|'); }
+  function coverRun(r, lines, list){
+    var T = window.turf; if (!T || !lines || !lines.length) return null;
+    var inOwn = function(p){ return r.rings.some(function(ring){ return inRing(p[1], p[0], ring); }); };
+    var mx = 111320 * Math.cos(r.rings[0][0][0] * Math.PI / 180), dist = function(a, b){ return Math.hypot((a[0] - b[0]) * 110540, (a[1] - b[1]) * mx); };
+    var pieces = [];
+    lines.forEach(function(c){
+      var pts = [];
+      for (var i = 0; i < c.length; i++) { if (i) { var n = Math.ceil(dist(c[i - 1], c[i]) / 8); for (var j = 1; j < n; j++) pts.push([c[i - 1][0] + (c[i][0] - c[i - 1][0]) * j / n, c[i - 1][1] + (c[i][1] - c[i - 1][1]) * j / n]); } pts.push(c[i]); }
+      var cur = [];
+      pts.forEach(function(p, j){ if (!inOwn(p)) { if (!cur.length && j) cur.push(pts[j - 1]); cur.push(p); } else if (cur.length) { cur.push(p); pieces.push(cur); cur = []; } });
+      if (cur.length) pieces.push(cur);
+    });
+    pieces = pieces.filter(function(cc){ var L0 = 0; for (var i = 1; i < cc.length; i++) L0 += dist(cc[i - 1], cc[i]); return cc.length > 1 && L0 >= 15; });
+    if (!pieces.length) return null;
+    var buf = T.buffer(T.multiLineString(pieces.map(function(cc){ return cc.map(function(p){ return [p[1], p[0]]; }); })), 20, { units: 'meters' });
+    var toT = function(ring){ var cc = ring.map(function(p){ return [p[1], p[0]]; }); var a = cc[0], z = cc[cc.length - 1]; if (a[0] !== z[0] || a[1] !== z[1]) cc.push(a); return cc; };
+    var bb = T.bbox(buf);
+    list.forEach(function(o){
+      if (!buf || o.key === r.key || o.day !== r.day || (o.week || '') !== (r.week || '')) return;
+      o.rings.forEach(function(ring){
+        if (!buf) return;
+        var la0 = 90, la1 = -90, ln0 = 180, ln1 = -180; ring.forEach(function(p){ la0 = Math.min(la0, p[0]); la1 = Math.max(la1, p[0]); ln0 = Math.min(ln0, p[1]); ln1 = Math.max(ln1, p[1]); });
+        if (ln1 < bb[0] || ln0 > bb[2] || la1 < bb[1] || la0 > bb[3]) return;
+        try { buf = T.difference(buf, T.polygon([toT(ring)])); } catch (e) {}
+      });
+    });
+    if (!buf) return null;
+    var res = buf;
+    r.rings.forEach(function(ring){ try { res = T.union(res, T.polygon([toT(ring)])) || res; } catch (e) {} });
+    try { res = T.simplify(res, { tolerance: 0.00003, highQuality: false }); } catch (e) {}   // (about 3 m: the buffer's round ends have a lot of points)
+    var gm = res.geometry, polys = gm.type === 'Polygon' ? [gm.coordinates] : gm.coordinates, out = [];
+    polys.forEach(function(pc){ if (pc[0] && pc[0].length > 3) out.push(pc[0].map(function(q){ return [+q[1].toFixed(6), +q[0].toFixed(6)]; })); });
+    return out.length ? out : null;
+  }
+  // (kept on the phone - IndexedDB lbDaysCover - so each run is only worked out once, until its boundary changes)
+  var extLoaded = null, extSaveT = 0;
+  function extLoad(){
+    if (extLoaded) return extLoaded;
+    var ld = g('loadFromDB');
+    extLoaded = ld ? Promise.resolve(ld('lbDaysCover')).then(function(v){ if (v && typeof v === 'object') Object.keys(v).forEach(function(k){ if (!EXT[k]) EXT[k] = v[k]; }); }).catch(function(){}) : Promise.resolve();
+    return extLoaded;
+  }
+  function extSave(){ clearTimeout(extSaveT); extSaveT = setTimeout(function(){ try { var sv = g('saveToDB'); if (sv) sv('lbDaysCover', EXT); } catch (e) {} }, 1500); }
+  function extendRuns(stream, done, day){
+    if (done) (extWait[stream] = extWait[stream] || []).push(done);
+    if (!window.turf || !window.lbRunLines || extBusy[stream]) return;
+    extBusy[stream] = true;
+    extLoad().then(function(){ extBusy[stream] = false; extendRuns2(stream, day); });
+  }
+  function extendRuns2(stream, day){
+    if (extBusy[stream]) return;
+    var s0 = st.stream; st.stream = stream; var list; try { list = collect(true); } finally { st.stream = s0; }
+    // only the runs on the map now: one day's runs when a day is shown (all five days is ~60 runs, a minute's work on a phone)
+    var todo = list.filter(function(r){ var e = EXT[r.key]; return (!day || r.day === day) && (!e || e.sig !== ringSig(r.rings)); });
+    if (!todo.length) { (extWait[stream] || []).splice(0).forEach(function(f){ try { f(false); } catch (e) {} }); return; }
+    extBusy[stream] = true;
+    var i = 0, changed = false;
+    (function next(){
+      if (i >= todo.length) { extBusy[stream] = false; (extWait[stream] || []).splice(0).forEach(function(f){ try { f(changed); } catch (e) {} }); return; }
+      var r = todo[i++], sig = ringSig(r.rings);
+      window.lbRunLines(r.key).then(function(lines){
+        var ex = null; try { ex = coverRun(r, lines, list); } catch (e) {}
+        EXT[r.key] = { sig: sig, rings: ex || r.rings }; if (ex) changed = true; extSave();
+      }, function(){ EXT[r.key] = { sig: sig, rings: r.rings }; }).then(function(){ setTimeout(next, 0); });
+    })();
   }
   function inRing(x, y, r){
     var c = false; for (var i = 0, j = r.length - 1; i < r.length; j = i++) { var yi = r[i][0], xi = r[i][1], yj = r[j][0], xj = r[j][1]; if (((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi)) c = !c; } return c;
@@ -34063,6 +34139,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var m = g('leafletMap'); if (!m || !window.L) return;
     ensurePanes(m); clearLayers();
     var all = collect(), list = all.filter(function(r){ return !st.week || !r.week || r.week === st.week; });
+    var sNow = st.stream; extendRuns(sNow, function(ch){ if (ch && st.on && st.stream === sNow) draw(false); }, st.day || null);   // (each run's area grown to its whole route - see coverRun)
     runsNow = list;
     layer = L.layerGroup().addTo(m); labels = L.layerGroup().addTo(m);
     var bounds = null, colOf = st.day ? neighbourColours(list.filter(function(r){ return r.day === st.day; })) : null;
@@ -34277,7 +34354,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   window.uxDaysOpen = function(){ if (st.on) return; open(0); };
   window.uxDaysClose = close;
   // (the run maps draw Service days too: as a layer under a run, and as a page of its own with Pages / Print / PDF)
-  window.uxDaysLib = { list: function(stream){ var s0 = st.stream; st.stream = stream; try { return collect(); } finally { st.stream = s0; } },
+  window.uxDaysLib = { extend: extendRuns, list: function(stream){ var s0 = st.stream; st.stream = stream; try { return collect(); } finally { st.stream = s0; } },
     DAYCOL: DAYCOL, neighbourColours: neighbourColours, labelPoint: labelPoint, area: area };
   // anything that takes the map somewhere else ends the view
   ['openRunDirectlyOnMap', 'switchMainTab'].forEach(function(n){
@@ -39050,6 +39127,14 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   }
   window.lbRunFollow = function(l, w, x){ return followStreets(l, w, x); };   // (test hook)
   window.lbRunStreetsFor = function(k){ return load().then(function(){ return streetsFor(k); }); };   // (test hook)
+  // a run's route lines as its run map draws them (streets followed, its own removals left out) - Service days covers them
+  window.lbRunLines = function(k){
+    return load().then(function(){
+      if (!DATA || !DATA[k]) { var o = parse(k); k = keyOf({ stream: o.stream, day: o.day.charAt(0).toUpperCase() + o.day.slice(1).toLowerCase(), week: String(o.week || '').toUpperCase(), run: o.run }); }
+      if (!DATA[k]) return null;
+      return Promise.race([streetsFor(k), new Promise(function(r){ setTimeout(r, 20000); })]).catch(function(){}).then(function(){ var R = route(k), E = edits(k); return R && R.lines ? R.lines.filter(function(l){ return ovOf(E, l) !== 'x'; }).map(function(l){ return l.c; }) : null; });
+    });
+  };
   /* ---- the same street drawn twice ----
      The route maps sometimes hold a street twice (219A Monday: Canterbury Jetty Rd and Fairfax St pieces with the same ends, read
      off two pages). The copy on top could not be tapped - a tap took the other one - so colouring that stretch never seemed to
@@ -39238,6 +39323,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   function daysLayerOn(){ return lsGet('lbRunMapDaysLayer', false) === true; }
   function drawDays(map, layer, o, R){
     var L0 = window.uxDaysLib; if (!L0) return;
+    var kNow = curKey; if (L0.extend) L0.extend(o.stream, function(ch){ if (ch && curKey === kNow && el && el.style.display !== 'none') { DAYSR = {}; renderView(true); } }, DAYS.indexOf(o.day) >= 0 ? o.day : null);
     var view = !!R.days, list = view ? R.dayList : daysList(o), one = DAYS.indexOf(o.day) >= 0, cols = view ? R.dayCols : (function(){ var c = {}; list.forEach(function(r){ c[r.key] = L0.DAYCOL[r.day]; }); return c; })();
     list.forEach(function(r){
       var mine = !one || r.day === o.day, col = cols[r.key] || L0.DAYCOL[r.day] || '#64748b';
