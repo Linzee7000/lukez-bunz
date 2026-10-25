@@ -18,6 +18,9 @@ ROUTE_COL = {'green': (0.0, 68.99, 31.4), 'orange': (100.0, 75.3, 0.0), 'purple'
 # colour the app draws it in.
 SECTION_COL = {'#0000ff': (0.0, 0.0, 100.0), '#00b0f0': (0.0, 69.0, 94.1), '#ff0000': (100.0, 0.0, 0.0), '#ff006b': (100.0, 0.0, 42.0),
                '#ff0073': (100.0, 0.0, 45.0), '#ff9900': (100.0, 60.0, 0.0), '#e3702b': (89.0, 44.0, 17.0), '#0070c0': (0.0, 44.0, 75.0)}
+# Some pages draw a section as filled outlines of the thick line, not as a stroke (Monday Week A 226: the bit 227A
+# takes is #fb8f23 shapes). Read as the same section; the outline lies a couple of metres either side of the line.
+SECTION_FILL = {'#ff9900': (98.43, 56.08, 13.73)}
 LAT0, LNG0 = -38.30, 144.95
 KX = 111320 * math.cos(math.radians(LAT0)); KY = 110540.0
 def to_m(lat, lng): return ((lng - LNG0) * KX, (lat - LAT0) * KY)
@@ -137,6 +140,11 @@ def page_routes(pdf, page, sections=False):
         m2 = mul(m, parse_matrix(el.get('transform')))
         if el.tag.split('}')[-1] == 'path':
             cn = color_name(el.get('stroke')) or (section_name(el.get('stroke')) if sections else None)
+            if not cn and sections:
+                mm = re.match(r'rgb\(([\d.]+)%,\s*([\d.]+)%,\s*([\d.]+)%\)', el.get('fill') or '')
+                if mm:
+                    v = tuple(float(x) for x in mm.groups())
+                    cn = next((n for n, c in SECTION_FILL.items() if all(abs(v[i] - c[i]) < 1.5 for i in range(3))), None)
             if cn and cn not in lines: lines[cn] = []
             if cn and el.get('d'):
                 for sub in parse_d(el.get('d')):

@@ -36,7 +36,7 @@ for p in range(1, page_count(pdf) + 1):
     t = subprocess.run(['pdftotext', '-f', str(p), '-l', str(p), os.path.join(DL, pdf), '-'], capture_output=True, text=True).stdout
     m = TITLE.search(t)
     if m and m.group(1) == day and m.group(3) == week: pages.setdefault(m.group(2), p)
-split_page = int(sys.argv[6]) if len(sys.argv) > 6 else pages.get(run)
+split_page = int(sys.argv[6]) if len(sys.argv) > 6 and sys.argv[6].isdigit() else pages.get(run)
 print('pages', pages, 'split page', split_page)
 
 parts, greens = [], []
@@ -122,13 +122,15 @@ if '--write' in sys.argv:
     def takes(xy):
         d = tree.query(xy)[0]
         return d <= 20 and (tg is None or d < tg.query(xy)[0])
-    mine = {r: [sid for sid, xy in H[r] if takes(xy)] for r in H}
+    # only the full runs' own houses: a run number with no week letter (222, 232, 234...) is a summer recycle run, not part of it
+    mine = {r: [sid for sid, xy in H[r] if takes(xy)] for r in froms}
     mine = {r: v for r, v in mine.items() if v}
     sp_path = os.path.join(os.path.dirname(S), '..', '..', 'data', 'split-runs.json')
     sp = json.load(open(sp_path)) if os.path.exists(sp_path) else {'version': 1, 'runs': {}}
     sp['note'] = 'Runs made of bits of other runs (227B Monday takes parts of 219B, 220B, 221B, 223B; short a driver, the full runs do it all). The houses stay in their own runs too. Made by tools/route-maps/split_run.py from the route-map PDF.'
     sp['generated'] = rr['generated']
-    sp['runs'][res['key']] = {'from': froms, 'sites': sorted(set(s for v in mine.values() for s in v))}
-    json.dump(sp, open(sp_path, 'w'), indent=0)
+    if '--route-only' not in sys.argv:   # (227A Monday: its houses are already under 227 in the master list - only its route is needed)
+        sp['runs'][res['key']] = {'from': froms, 'sites': sorted(set(s for v in mine.values() for s in v))}
+        json.dump(sp, open(sp_path, 'w'), indent=0)
     print('wrote', len(lines_out), 'street pieces,', round(km / 1000, 1), 'km;', sum(len(v) for v in mine.values()), 'houses', {r: len(v) for r, v in mine.items()})
     print(sorted(streets))
