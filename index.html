@@ -32940,10 +32940,53 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     } catch (e) { console.warn('auto send', e); return null; }
   }
   window.lbAutoSendReports = autoSendReports;
+
+  /* ---- Live runs: how far through the run this truck is, for the leading hand (Fox, 26 Oct) ----
+     Every 2 minutes while on a kerbside run, and at a break and the end of the shift, one small place goes to the script:
+     the run, driver, truck, houses lifted / passed (not put out) / still to do, streets done, what the truck is doing, and
+     the run map's pieces done (window.lbRunDoneState) so the leading hand's phone draws the same red / green map. One row
+     per shift (id lr_<shift>), written over each time; no queue (see postPlace). Street litter runs have no house list. */
+  var liveBusy = false, liveLast = 0;
+  function liveStatus(){
+    try { var v = window.lbBreakClock && window.lbBreakClock.view ? window.lbBreakClock.view() : null; if (v && v.mode === 'break') return { k: 'brk', t: v.elapsed != null ? Date.now() - v.elapsed : null }; } catch (e) {}
+    var loc = here();
+    try { if (loc && window.lbKnownPlaces) { var tp = window.lbKnownPlaces.tips(); for (var i = 0; i < tp.length; i++) if (tp[i].lat != null && Math.hypot((tp[i].lng - loc.lng) * 87000, (tp[i].lat - loc.lat) * 110540) < 400) return { k: 'tip', n: tp[i].name }; } } catch (e) {}
+    // (only text that reads like a street: with no GPS those boxes hold hints such as "check filter")
+    var stn = '', RX = /\b(RD|ROAD|ST|STREET|AVE?|AVENUE|CT|COURT|DR|DRIVE|CRES|CRESCENT|PDE|PARADE|GR|GROVE|PL|PLACE|WAY|LANE|LN|HWY|HIGHWAY|CL|CLOSE|BVD|BLVD|TCE|TERRACE|CIR|CIRCUIT|RISE|WALK|ESP|ESPLANADE)\b/i;
+    if (loc) ['mapLiveStreet', 'hudStreetName', 'mapStreetOverlay'].some(function(id){ var e = document.getElementById(id); var t = e ? String(e.textContent || '').replace(/\s+/g, ' ').trim() : ''; if (t && t.length < 40 && RX.test(t)) { stn = t; return true; } return false; });
+    return { k: 'drv', n: stn };
+  }
+  function liveSnap(fin){
+    if (!SH || !SH.run || isStreet(SH.stream)) return null;
+    var tc = runCheck(); if (!tc) return null;
+    var d2 = me(), loc = here(), all = tc.all || [], hsAll = 0;
+    all.forEach(function(x){ hsAll += x.pts ? x.pts.length : 0; });
+    var stDone = all.filter(function(x){ return x.bins && !x.tHs; }).length, stAll = all.filter(function(x){ return x.bins; }).length;
+    return { id: 'lr_' + SH.id, kind: 'liveRun', ts: Date.now(), start: SH.start, fin: fin ? Date.now() : 0,
+      stream: SH.stream, run: String(SH.run), day: SH.day || '', week: SH.week || '', driver: d2.name || SH.driver || '', truck: SH.truck || '',
+      bins: tc.total, lifted: Math.max(0, tc.total - tc.left - tc.pink), passed: tc.passed, binsLeft: tc.todoBins,
+      houses: hsAll, housesLeft: tc.todoHouses, streets: stAll, streetsDone: stDone,
+      todo: (tc.todo || []).slice(0, 40).map(function(x){ return [x.name, x.tHs]; }),
+      status: fin ? { k: 'fin' } : liveStatus(), loc: loc ? { lat: +loc.lat.toFixed(5), lng: +loc.lng.toFixed(5) } : null, _tc: tc };
+  }
+  function liveSend(fin){
+    if (liveBusy || !window.lbOutbox || !window.lbOutbox.postPlace) return;
+    var p = liveSnap(fin); if (!p) return;
+    var tc = p._tc; delete p._tc; liveBusy = true; liveLast = Date.now();
+    var mk = null; try { mk = window.lbRunMapKey ? window.lbRunMapKey() : null; } catch (e) {}
+    var ds = (mk && window.lbRunDoneState) ? window.lbRunDoneState(mk, tc, SH.start).catch(function(){ return null; }) : Promise.resolve(null);
+    ds.then(function(d){
+      if (d) { p.key = d.key; p.km = d.km; p.kmDone = d.kmDone; p.st = d.st; }
+      return window.lbOutbox.postPlace(p);
+    }).then(function(){ liveBusy = false; }, function(){ liveBusy = false; });
+  }
+  setInterval(function(){ try { if (SH && Date.now() - liveLast >= 120000) liveSend(false); } catch (e) { liveBusy = false; } }, 15000);
+  window.lbLiveSend = liveSend;   // (test hook; also sent at a break)
   function doFinish(){
     var e = endDraft;
     // (what's left on the run is taken before the shift is closed - it needs it running; the email goes once it is closed)
     var sendEnd = null; try { sendEnd = autoSendReports('End of shift', { later: true, photos: e.photo ? [e.photo] : [] }); } catch (x) {}
+    try { liveBusy = false; liveSend(true); } catch (x) {}   // (Live runs: Finished, with the time)
     if (SH && SH.leg) { closeLeg(SH.leg, e.truckBinCount); SH.leg = null; }
     var shRun0 = SH && SH.run != null ? String(SH.run) : '';
     lastRec = finishShift({ km: num(e.km), hrs: num(e.hrs), photo: e.photo, note: (e.note || '').trim() });
@@ -33240,6 +33283,12 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var e = { rid: 'pl_' + key + '_' + uid(), kind: 'place', raw: { type: 'place', key: key, place: place }, src: { key: 'lbPlaces', id: key }, ts: Date.now(), tries: 0 };
     Q.push(e); save(); flush();
   }
+  // One post, no queue and no check that it landed: for progress that is sent again in two minutes anyway (Live runs).
+  // Checking costs a download of every place each time, which every two minutes from every truck is too much.
+  function postPlace(place){
+    if (!scriptUrl() || navigator.onLine === false || !place || !place.id) return Promise.resolve(false);
+    return post({ type: 'place', key: place.id, place: place }).then(function(){ return true; }, function(){ return false; });
+  }
   function cancel(rid){ var e = findE(rid); if (e && !(e.s && e.s.msg)) { e.cancelled = true; save(); fire(); } }
 
   /* ---- public: how is it going? ---- */
@@ -33300,6 +33349,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       // truck lines drawn on other phones: straight to the editor's own store (too big for localStorage)
       try { if (window.lbTruckLines) window.lbTruckLines.fleet(Object.keys(r.places).map(function(k){ return r.places[k]; }).filter(function(p){ return p && p.kind === 'truckLine' && p.key; })); } catch (e) {}
       try { document.dispatchEvent(new CustomEvent('lb-house-access')); } catch (e) {}
+      try { document.dispatchEvent(new CustomEvent('lb-places', { detail: r.places })); } catch (e) {}   // (Live runs, runs sent to a driver)
     }).catch(function(){});
   }
 
@@ -33377,7 +33427,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     return null;
   }
 
-  window.lbOutbox = { send: send, sendPlace: sendPlace, cancel: cancel, flush: function(){ return flush(true); }, status: status, label: label, pending: function(){ return unsent().length; },
+  window.lbOutbox = { send: send, sendPlace: sendPlace, postPlace: postPlace, cancel: cancel, flush: function(){ return flush(true); }, status: status, label: label, pending: function(){ return unsent().length; },
     on: function(f){ listeners.push(f); }, config: config, refreshConfig: refreshConfig, pullPlaces: pullPlaces, report: report, list: function(){ return Q.slice(); }, hasUrl: function(){ return !!scriptUrl(); } };
 
   window.addEventListener('online', function(){ flush(true); refreshConfig(); });
@@ -39619,9 +39669,12 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
      streets the truck had been up and down as still to do. Returns, for each line, its stretches with l / r = that side done
      (left / right of the line's own direction), plus km done. */
   // (rc0 / t0: the run check and shift start taken by the caller - the end of shift email draws the map after the shift has closed)
-  function doneParts(key, lines, rc0, t0in){
-    var rc = rc0 || null; if (!rc) try { rc = (window.lbRunCheck && key === currentKey()) ? window.lbRunCheck() : null; } catch (e) {}
-    if (!rc || !lines.length || !lines[0].length) return null;
+  // st (Live runs): what each piece of each line was, as another phone worked it out - one digit per 30 m piece, 1 = the left
+  // side done, 2 = the right, 3 = both - so the leading hand's phone draws the driver's map without the driver's trail. The
+  // pieces are cut the same way from the same route, so the digits line up; a line whose count doesn't match is left as to do.
+  function doneParts(key, lines, rc0, t0in, st){
+    var rc = rc0 || null; if (!rc && !st) try { rc = (window.lbRunCheck && key === currentKey()) ? window.lbRunCheck() : null; } catch (e) {}
+    if ((!rc && !st) || !lines.length || !lines[0].length) return null;
     var lat0 = lines[0][0][0], lng0 = lines[0][0][1], MY = 110540, MX = 111320 * Math.cos(lat0 * Math.PI / 180);
     var xy = function(p){ return [(p[1] - lng0) * MX, (p[0] - lat0) * MY]; };
     var segD = function(P, A, B){ var dx = B[0] - A[0], dy = B[1] - A[1], L2 = dx * dx + dy * dy || 1e-9, t = Math.max(0, Math.min(1, ((P[0] - A[0]) * dx + (P[1] - A[1]) * dy) / L2)); return Math.hypot(P[0] - A[0] - t * dx, P[1] - A[1] - t * dy); };
@@ -39644,6 +39697,11 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       }
       if (cur.length > 1 && acc > 0.5) mk(li, cur);
     });
+    if (st) {
+      var nOf = {}; pcs.forEach(function(pc){ nOf[pc.li] = (nOf[pc.li] || 0) + 1; });
+      var at = {}; pcs.forEach(function(pc){ var s0 = String(st[pc.li] || ''), k = at[pc.li] = (at[pc.li] || 0); at[pc.li]++; var v = s0.length === nOf[pc.li] ? +s0.charAt(k) || 0 : 0; pc.fl = !!(v & 1); pc.fr = !!(v & 2); });
+      rc = { all: [], pink: 0 };
+    }
     // houses: each goes to the one piece nearest it (so a corner house doesn't hold the cross street too), on its side
     (rc.all || []).forEach(function(st){ (st.pts || []).forEach(function(h){
       var H = xy(h), cx = Math.floor(H[0] / CELL), cy = Math.floor(H[1] / CELL), best = null, bd = 60;
@@ -39653,7 +39711,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       best.h[sd][0]++; if (h[2]) best.h[sd][1]++;
     }); });
     // this shift's trail, as short steps with their direction
-    var P = g('gpsTrailPoints') || [], T = g('gpsTrailTimes') || [], B = g('gpsTrailBreaks') || [], t0 = t0in || 0, prevT = 0;
+    var P = st ? [] : (g('gpsTrailPoints') || []), T = g('gpsTrailTimes') || [], B = g('gpsTrailBreaks') || [], t0 = t0in || 0, prevT = 0;
     if (!t0) try { var sh = JSON.parse(localStorage.getItem('lbShift') || 'null'); t0 = (sh && sh.start) || 0; } catch (e) {}
     var tgrid = {}, prev = null, any = false;
     for (var i = 0; i < P.length; i++) {
@@ -39689,14 +39747,15 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       if (o[0]) return pc.dr[-s] || !o[1];
       return pc.dr[1] || pc.dr[-1];
     };
-    var out = lines.map(function(){ return []; }), km = 0, kmDone = 0;
+    var out = lines.map(function(){ return []; }), sts = lines.map(function(){ return ''; }), km = 0, kmDone = 0;
     pcs.forEach(function(pc){
-      var l = side(pc, 1), r = side(pc, -1), list = out[pc.li], last = list[list.length - 1];
+      var l = st ? pc.fl : side(pc, 1), r = st ? pc.fr : side(pc, -1), list = out[pc.li], last = list[list.length - 1];
+      sts[pc.li] += String((l ? 1 : 0) + (r ? 2 : 0));
       km += pc.len; kmDone += pc.len * ((l ? 1 : 0) + (r ? 1 : 0)) / 2;
       if (last && last.l === l && last.r === r && last.end === pc.pts[0]) { last.c = last.c.concat(pc.pts.slice(1)); last.end = pc.pts[pc.pts.length - 1]; }
       else list.push({ c: pc.pts.slice(), l: l, r: r, end: pc.pts[pc.pts.length - 1] });
     });
-    return { lines: out, km: km / 1000, kmDone: kmDone / 1000, pink: rc.pink || 0 };
+    return { lines: out, km: km / 1000, kmDone: kmDone / 1000, pink: rc.pink || 0, st: sts };
   }
   window.lbRunDoneParts = doneParts;   // (test hook)
   var doneNames = null, DONE_COL = '#dc2626', doneAvail = null, doneOn = null, doneKey = '', clkT = 0;
@@ -41356,16 +41415,35 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   // The run map as a picture (street tiles, the route, the houses, finished streets red) for the To do PDF and what is
   // sent to the leading hand. Drawn straight on a canvas, so it needs no screen and no print dialogue. If the street
   // tiles can't be had (no signal, or a browser that won't let the canvas be read back) the route is still drawn, on plain grey.
+  // the run's lines as the run map draws them (rubbed out bits gone, painted areas coloured): the picture and the Live runs
+  // progress both cut these into the same pieces
+  function imgLines(R, E){
+    return R.lines.map(function(l){ if (l.ar) return { l: l, gone: l.ar.a === 'x', col: l.ar.a === 'col' && l.ar.col ? l.ar.col : (l.s || '#16a34a') }; var ov = ovOf(E, l); return { l: l, gone: ov === 'x', col: ov && ov !== 'x' ? ov : (l.s || '#16a34a') }; }).filter(function(x){ return !x.gone; });
+  }
+  function routeFor(k){
+    var R = withModes(route(k)), E = edits(k);
+    if (E.erase.length) R = Object.assign({}, R, { lines: rubOut(R.lines, E) });
+    if (E.areas.length) R = Object.assign({}, R, { lines: areaPaint(R.lines, E, function(l){ return E.pt[pid(l)] || (l.pid0 && E.pt[l.pid0]) || 0; }) });
+    return { R: R, E: E };
+  }
+  // Live runs: how much of the run is done, piece by piece (a short string per line) and in km, for the leading hand's screen
+  window.lbRunDoneState = function(key, rc, t0){
+    return load().then(function(){ var k0 = key || currentKey(); return k0 && DATA[k0] ? streetsFor(k0) : null; }).then(function(){   // (the same street lines the picture waits for, or the pieces don't line up)
+      var k = key || currentKey(); if (!k || !DATA[k] || !rc) return null;
+      var F = routeFor(k), lines = imgLines(F.R, F.E), dp = doneParts(k, lines.map(function(m){ return m.l.c; }), rc, t0);
+      return dp ? { key: k, km: +dp.km.toFixed(2), kmDone: +dp.kmDone.toFixed(2), st: dp.st } : null;
+    });
+  };
   window.lbRunMapImage = function(key, o2){
     return load().then(function(){ var k0 = key || currentKey(); return k0 && DATA[k0] ? streetsFor(k0) : null; }).then(function(){
       var k = key || currentKey(); if (!k || !DATA[k]) return null;
-      var R = withModes(route(k)), o = parse(k), E = edits(k), rc = null;
-      if (E.erase.length) R = Object.assign({}, R, { lines: rubOut(R.lines, E) });
-      if (E.areas.length) R = Object.assign({}, R, { lines: areaPaint(R.lines, E, function(l){ return E.pt[pid(l)] || (l.pid0 && E.pt[l.pid0]) || 0; }) });
-      if (o2 && o2.rc) rc = o2.rc; else try { rc = window.lbRunCheck ? window.lbRunCheck() : null; } catch (e) {}
+      var F0 = routeFor(k), R = F0.R, o = parse(k), E = F0.E, rc = null;
+      if (o2 && o2.rc) rc = o2.rc; else if (!(o2 && o2.state)) try { rc = window.lbRunCheck ? window.lbRunCheck() : null; } catch (e) {}
       // done is worked out piece by piece and side by side (doneParts: the trail and the bins), not a whole street at a time
-      var lines = R.lines.map(function(l){ if (l.ar) return { l: l, gone: l.ar.a === 'x', col: l.ar.a === 'col' && l.ar.col ? l.ar.col : (l.s || '#16a34a') }; var ov = ovOf(E, l); return { l: l, gone: ov === 'x', col: ov && ov !== 'x' ? ov : (l.s || '#16a34a') }; }).filter(function(x){ return !x.gone; });
-      var dp = rc ? doneParts(k, lines.map(function(m){ return m.l.c; }), o2 && o2.rc, o2 && o2.t0) : null;
+      var lines = imgLines(R, E);
+      // o2.state: the pieces done as another phone sent them (Live runs) instead of this phone's own trail
+      var dp = (o2 && o2.state) ? doneParts(k, lines.map(function(m){ return m.l.c; }), null, 0, o2.state) : rc ? doneParts(k, lines.map(function(m){ return m.l.c; }), o2 && o2.rc, o2 && o2.t0) : null;
+      var passedN = o2 && o2.passed != null ? o2.passed : rc ? (rc.passed != null ? rc.passed : rc.pink) : 0, stampT = new Date((o2 && o2.ts) || Date.now());
       var houses = []; var grp = groupFor(o); if (grp) grp.sites.forEach(function(s){ var la = +s.lat, ln = +s.lng; if (la && ln) houses.push([la, ln]); });
       var pts = []; R.lines.forEach(function(l){ pts = pts.concat(l.c); }); E.drawn.forEach(function(d){ pts = pts.concat(d.c); });
       if (!pts.length) pts = houses;
@@ -41442,7 +41520,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
         x.fillStyle = '#111'; x.font = 'bold 44px system-ui, Arial, sans-serif'; x.textBaseline = 'middle';
         x.fillText('Run ' + String(o.run).toUpperCase() + (o.week || '') + ' · ' + o.day + ' · ' + o.stream, 20, 48);
         x.font = '28px system-ui, Arial, sans-serif'; x.fillStyle = '#374151';
-        x.fillText((dp ? 'Red done · green to do · two colours: one side done · ' + dp.kmDone.toFixed(1) + ' of ' + dp.km.toFixed(1) + ' km done · ' : '') + (rc && (rc.passed != null ? rc.passed : rc.pink) ? (rc.passed != null ? rc.passed : rc.pink) + ' bins passed, not put out · ' : '') + new Date().toLocaleDateString('en-AU') + ' ' + new Date().toLocaleTimeString('en-AU', { hour: '2-digit', minute: '2-digit' }), 20, 92);
+        x.fillText((dp ? 'Red done · green to do · two colours: one side done · ' + dp.kmDone.toFixed(1) + ' of ' + dp.km.toFixed(1) + ' km done · ' : '') + (passedN ? passedN + ' bins passed, not put out · ' : '') + stampT.toLocaleDateString('en-AU') + ' ' + stampT.toLocaleTimeString('en-AU', { hour: '2-digit', minute: '2-digit' }), 20, 92);
         return new Promise(function(res){
           try { c.toBlob(function(bl){ if (!bl) { res(null); return; } bl.arrayBuffer().then(function(ab){ res({ jpeg: new Uint8Array(ab), w: c.width, h: c.height }); }, function(){ res(null); }); }, 'image/jpeg', 0.85); }
           catch (e) { res(null); }
@@ -53428,6 +53506,334 @@ html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x
     else { ['--rb-a', '--ui-accent', '--ui-accent-fg', '--rb-lab'].forEach(function(v){ b.style.removeProperty(v); }); }
   }
   setInterval(accent, 400);
+})();
+</script>
+<style id="lb-live-style">
+/* Live runs (leading hands): every truck out today, how far through its run it is, and its run map. Colours, borders,
+   fonts and shadows are the menu's (--mn-*), so the page wears whichever skin is on. */
+#lbLive{display:none;position:fixed;inset:0;z-index:20600;background:var(--mn-bg,#15181d);color:var(--mn-text,#f3f4f6);flex-direction:column;font-family:system-ui,-apple-system,"Segoe UI",sans-serif;padding-top:var(--ux-safe-t,env(safe-area-inset-top,0px))}
+#lbLive.open{display:flex}
+body.lb-pc #lbLive{top:var(--pc-bar-h,92px);padding-top:0}
+#lbLive .lv-head{flex:none;display:flex;align-items:center;flex-wrap:wrap;gap:6px;padding:8px 10px;border-bottom:var(--mn-bd)}
+#lbLive .lv-ttl{font-family:var(--mn-font);font-weight:var(--mn-fw);text-transform:var(--mn-tr);font-size:18px;margin-right:auto;color:var(--accent-title,var(--ui-accent,#ffd21f))}
+#lbLive .lv-up{font-size:12px;font-weight:700;color:var(--mn-text2)}
+#lbLive .lv-x{display:none;width:38px;height:38px;flex:none;align-items:center;justify-content:center;background:#ff8a1f;border:var(--mn-bd);border-radius:var(--mn-rad);box-shadow:var(--mn-sh);color:#000;cursor:pointer;padding:0}
+body.lb-pc #lbLive .lv-x{display:inline-flex}
+#lbLive .lv-x svg{width:18px;height:18px;stroke:#000}
+#lbLive .lv-flt{display:flex;flex-wrap:wrap;gap:6px;width:100%}
+#lbLive .lv-f{display:inline-flex;align-items:center;gap:4px;height:32px;padding:0 10px;background:var(--mn-tile);border:var(--mn-bd);border-radius:var(--mn-rad);box-shadow:var(--mn-sh);color:var(--mn-text);font:inherit;font-size:13px;font-weight:800;cursor:pointer}
+#lbLive .lv-f.on{background:var(--ui-accent,#ffd21f);color:#000}
+#lbLive .lv-f img{width:18px;height:18px}
+#lbLive .lv-f.on img{filter:brightness(0)}
+#lbLive .lv-wrap{flex:1;min-height:0;display:flex;gap:12px;padding:10px}
+#lbLive .lv-list{flex:1;min-width:0;overflow:auto;-webkit-overflow-scrolling:touch;display:flex;flex-direction:column;gap:8px;padding-bottom:12px}
+#lbLive .lv-det{display:none;flex:1;min-width:0;min-height:0;overflow:auto;-webkit-overflow-scrolling:touch;flex-direction:column;gap:8px;padding-bottom:12px}
+#lbLive.det .lv-list{display:none}
+#lbLive .lv-det > *,#lbLive .lv-list > *{flex:none}
+#lbLive.det .lv-det{display:flex}
+@media (min-width:900px){
+  #lbLive .lv-list{flex:none;width:400px;display:flex !important}
+  #lbLive .lv-det{display:flex}
+}
+#lbLive .lv-card{display:flex;flex-direction:column;gap:6px;width:100%;text-align:left;padding:8px 10px;margin:0;background:var(--mn-tile);border:var(--mn-bd);border-radius:var(--mn-rad);box-shadow:var(--mn-sh);color:var(--mn-text);font:inherit;cursor:pointer}
+#lbLive .lv-card.sel{outline:3px solid var(--ui-accent,#ffd21f);outline-offset:-5px}
+#lbLive .lv-r1{display:flex;align-items:center;gap:8px;min-width:0}
+#lbLive .lv-who{flex:1;min-width:0;display:flex;flex-direction:column}
+#lbLive .lv-who b{font-size:14px;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#lbLive .lv-who small{font-size:11.5px;font-weight:600;color:var(--mn-text2)}
+#lbLive .lv-pc{font-family:var(--mn-font);font-weight:var(--mn-fw);font-size:22px;line-height:1}
+#lbLive .lv-bar{display:flex;height:10px;border:var(--mn-bd);border-radius:4px;overflow:hidden;background:var(--mn-bar)}
+#lbLive .lv-bar i{display:block;height:100%}
+#lbLive .lv-bar .l{background:var(--lv-c,#ffd21f)}
+#lbLive .lv-bar .n{background:repeating-linear-gradient(135deg,#8b9099 0 4px,#5d6168 4px 8px)}
+#lbLive .lv-r3{display:flex;flex-wrap:wrap;gap:2px 10px;font-size:11.5px;font-weight:700;color:var(--mn-text2)}
+#lbLive .lv-r3 b{color:var(--mn-text);font-weight:800}
+#lbLive .lv-st{align-self:flex-start;display:inline-flex;align-items:center;gap:5px;height:22px;padding:0 7px;border:var(--mn-bd);border-radius:5px;font-size:11px;font-weight:800;color:#000;white-space:nowrap;max-width:100%;overflow:hidden;text-overflow:ellipsis}
+#lbLive .lv-st.drv{background:#2ecc62}#lbLive .lv-st.brk{background:#ff8a1f}#lbLive .lv-st.tip{background:#c8ccd4}#lbLive .lv-st.fin{background:var(--mn-bar);color:var(--mn-text)}#lbLive .lv-st.old{background:#ff4b3e}
+#lbLive .lv-empty{padding:16px 6px;font-size:14px;line-height:1.45;color:var(--mn-text2)}
+#lbLive .lv-dh{display:flex;align-items:center;gap:6px}
+#lbLive .lv-dh .lv-who{flex:1 1 0;min-width:0}
+#lbLive .lv-dh .lv-who small{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#lbLive .lv-ib{width:44px;height:44px;flex:none;display:inline-flex;align-items:center;justify-content:center;padding:0;background:var(--mn-tile);border:var(--mn-bd);border-radius:var(--mn-rad);box-shadow:var(--mn-sh);color:var(--mn-text);cursor:pointer}
+#lbLive .lv-ib.go{background:var(--ui-accent,#ffd21f);color:#000}
+#lbLive .lv-ib svg{width:22px;height:22px;stroke:currentColor;fill:none;stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round}
+#lbLive .lv-tiles{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}
+#lbLive .lv-tile{display:flex;flex-direction:column;gap:3px;padding:6px 10px;background:var(--mn-tile);border:var(--mn-bd);border-radius:var(--mn-rad);box-shadow:var(--mn-sh)}
+#lbLive .lv-tile i{font-style:normal;font-size:9.5px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:var(--mn-text2)}
+#lbLive .lv-tile b{font-family:var(--mn-font);font-weight:var(--mn-fw);font-size:20px;line-height:1}
+#lbLive .lv-map{position:relative;flex:none;min-height:220px;background:#e5e7eb;border:var(--mn-bd);border-radius:var(--mn-rad);box-shadow:var(--mn-sh);overflow:hidden;display:flex;align-items:center;justify-content:center;color:#374151;font-size:13px;font-weight:700}
+#lbLive .lv-map:has(img){display:block;min-height:0}
+#lbLive .lv-map img{display:block;width:100%;height:auto}
+#lbLive .lv-k{font-size:10.5px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:var(--mn-text2);margin-top:2px}
+#lbLive .lv-row{display:flex;align-items:center;gap:8px;min-height:30px;padding:4px 10px;background:var(--mn-tile);border:var(--mn-bd);border-radius:var(--mn-rad);box-shadow:var(--mn-sh)}
+#lbLive .lv-row b{flex:1;min-width:0;font-size:13px}
+#lbLive .lv-row span{font-size:12px;font-weight:800;white-space:nowrap}
+#lbLive .lv-send{display:flex;flex-direction:column;gap:8px;padding:10px;background:var(--mn-bar);border:var(--mn-bd);border-radius:var(--mn-rad);box-shadow:var(--mn-sh)}
+#lbLive .lv-send .lv-chs{display:flex;flex-wrap:wrap;gap:6px}
+#lbLive .lv-send input{height:40px;padding:0 10px;font:inherit;font-size:16px;background:var(--mn-bg);color:var(--mn-text);border:var(--mn-bd);border-radius:var(--mn-rad);min-width:0}
+#lbLive .lv-send .lv-go{align-self:flex-end;display:inline-flex;align-items:center;gap:8px;height:40px;padding:0 16px;background:var(--ui-accent,#ffd21f);color:#000;border:var(--mn-bd);border-radius:var(--mn-rad);box-shadow:var(--mn-sh);font:inherit;font-weight:800;cursor:pointer}
+#lbLive .lv-send .lv-go svg{width:20px;height:20px;stroke:#000;fill:none;stroke-width:2.2}
+/* a run sent to this driver: a card at the bottom, over nothing important, no OK button needed */
+#lbHandover{position:fixed;left:10px;right:10px;bottom:calc(10px + var(--ux-safe-b,env(safe-area-inset-bottom,0px)));z-index:20700;max-width:460px;margin:0 auto;display:flex;flex-direction:column;gap:8px;padding:10px;background:var(--mn-bg,#15181d);color:var(--mn-text,#f3f4f6);border:var(--mn-bd);border-top:5px solid var(--ui-accent,#ffd21f);border-radius:var(--mn-rad);box-shadow:var(--mn-sh,0 8px 30px rgba(0,0,0,.4));font-family:system-ui,-apple-system,"Segoe UI",sans-serif}
+#lbHandover .ho-r{display:flex;align-items:center;gap:8px}
+#lbHandover .ho-t{flex:1;min-width:0;font-size:13.5px;font-weight:700;line-height:1.3}
+#lbHandover .ho-t small{display:block;color:var(--mn-text2);font-weight:600;font-size:12px}
+#lbHandover .ho-b{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:38px;padding:0 12px;background:var(--mn-tile);color:var(--mn-text);border:var(--mn-bd);border-radius:var(--mn-rad);box-shadow:var(--mn-sh);font:inherit;font-weight:800;font-size:13px;cursor:pointer}
+#lbHandover .ho-b.go{background:var(--ui-accent,#ffd21f);color:#000}
+#lbHandover .ho-x{width:38px;height:38px;flex:none;display:inline-flex;align-items:center;justify-content:center;padding:0;background:#ff8a1f;border:var(--mn-bd);border-radius:var(--mn-rad);box-shadow:var(--mn-sh);cursor:pointer}
+#lbHandover .ho-x svg{width:18px;height:18px;stroke:#000}
+</style>
+<script id="lb-live-script">
+/* =====================================================================
+   LIVE RUNS (Fox, 26 Oct): for leading hands, a button in the menu (phone and PC) opens every truck out today with its
+   run, driver, truck, how much is done (houses lifted or passed, streets done), what it is doing, and - tapped - its run
+   map (finished streets red, what is left green) to download as a PDF, share, or send to another driver.
+   Each driver's phone sends its progress every 2 minutes as a place (kind liveRun, see the shift script); this page pulls
+   places every 2 minutes while it is open. A run sent to a driver is a place too (kind runHandover); the driver's phone
+   shows it as a card when its places next come in (when the app starts, and every 10 minutes).
+   ===================================================================== */
+(function(){
+  'use strict';
+  function $(id){ return document.getElementById(id); }
+  function esc(v){ return String(v == null ? '' : v).replace(/[&<>"']/g, function(c){ return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+  function lsGet(k, d){ try { var v = JSON.parse(localStorage.getItem(k)); return v == null ? d : v; } catch (e) { return d; } }
+  function lsSet(k, v){ try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
+  function uid(){ return Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
+  function toast(m){ try { if (window.uxToast) window.uxToast(m); } catch (e) {} }
+  function isLead(){ try { return typeof window.uxIsLead === 'function' && !!window.uxIsLead(); } catch (e) { return false; } }
+  function clk(ts){ var d = new Date(ts); return window.lbClk ? window.lbClk(d.getHours(), d.getMinutes()) : (d.getHours() + ':' + ('0' + d.getMinutes()).slice(-2)); }
+  function chip(p){ try { return window.lbRunChip ? window.lbRunChip(p.stream, p.run, p.week, '') : esc(p.run); } catch (e) { return esc(p.run); } }
+  function dayChip(p){ try { return window.lbRunChip ? window.lbRunChip(p.stream, p.run, p.week, String(p.day || '').slice(0, 3)) : esc(p.run); } catch (e) { return esc(p.run); } }
+  var COL = { Garbage: '#ff4b3e', Recycling: '#ffd21f', SummerRecycling: '#ffd21f', FOGO: '#2ecc62' };
+  var SV = function(p){ return '<svg viewBox="0 0 24 24" aria-hidden="true">' + p + '</svg>'; };
+  var I = { pdf: SV('<path d="M12 4v11M7 10l5 5 5-5M5 20h14"/>'), share: SV('<path d="M12 15V3M7 8l5-5 5 5M5 13v7h14v-7"/>'), send: SV('<path d="M4 12 20 4l-6 16-3-7-7-1Z"/>'),
+    x: '<svg viewBox="0 0 24 24" fill="none" stroke-width="2.6" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg>',
+    tile: '<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" aria-hidden="true"><path d="M3 20h18"/><path d="M5 20V10M10 20V5M15 20v-7M20 20v-11"/></svg>' };
+  // the working day: from 3:30 this morning (same cut as the break clock)
+  function dayStart(){ var d = new Date(), c = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 3, 30, 0, 0).getTime(); return Date.now() >= c ? c : c - 86400000; }
+
+  /* ---- what has come in ---- */
+  var RUNS = {}, HO = [], lastPull = 0;
+  document.addEventListener('lb-places', function(ev){
+    var P = (ev && ev.detail) || {}, cut = dayStart(), runs = {}, ho = [];
+    Object.keys(P).forEach(function(k){
+      var p = P[k]; if (!p || typeof p !== 'object') return;
+      if (p.kind === 'liveRun' && (p.ts || 0) >= cut) runs[p.id || k] = p;
+      if (p.kind === 'runHandover' && (p.ts || 0) >= Date.now() - 86400000) ho.push(p);
+    });
+    RUNS = runs; HO = ho; lastPull = Date.now();
+    if (isOpen()) paint(true);
+    try { checkHandover(); } catch (e) {}
+  });
+  function pull(){ try { if (window.lbOutbox && window.lbOutbox.pullPlaces) return window.lbOutbox.pullPlaces(); } catch (e) {} return Promise.resolve(); }
+
+  /* ---- the menu button (leading hands only) ---- */
+  function addTile(){
+    var hub = $('lbMenuHub'); if (!hub) return;
+    var have = hub.querySelector('[data-live]');
+    if (!isLead()) { if (have) { var g0 = have.closest('.mn-grid'); if (g0 && g0.previousElementSibling && g0.previousElementSibling.classList.contains('mn-h')) g0.previousElementSibling.remove(); if (g0) g0.remove(); } return; }
+    if (have) return;
+    var grids = hub.querySelectorAll('.mn-grid'); if (!grids.length) return;
+    var h = document.createElement('div'); h.className = 'mn-h'; h.textContent = 'Leading hand';
+    var gr = document.createElement('div'); gr.className = 'mn-grid';
+    gr.innerHTML = '<button type="button" class="mn-tile" data-live="1"><span class="mn-i">' + I.tile + '</span><span>Live runs</span></button>';
+    var after = grids[0]; after.parentNode.insertBefore(h, after.nextSibling); h.parentNode.insertBefore(gr, h.nextSibling);
+  }
+  setInterval(function(){ try { addTile(); } catch (e) {} }, 700);
+  document.addEventListener('click', function(ev){
+    var t = ev.target && ev.target.closest ? ev.target.closest('#lbMenuHub [data-live]') : null; if (!t) return;
+    ev.preventDefault(); ev.stopPropagation();
+    try { if (window.lbCloseDrawer) window.lbCloseDrawer(); } catch (e) {}
+    open();
+  }, true);
+
+  /* ---- the page ---- */
+  var el = null, sel = null, flt = 'all', timer = null, imgCache = {}, sendOpen = false;
+  function isOpen(){ return !!(el && el.classList.contains('open')); }
+  function build(){
+    if (el) return;
+    el = document.createElement('div'); el.id = 'lbLive'; el.setAttribute('data-mntop', '1');
+    el.innerHTML = '<div class="mn-top"><div class="mn-top-row"><b class="mn-top-title">Lukez Bunz</b>' + (window.lbMnFour ? window.lbMnFour() : '') + '</div></div>' +
+      '<div class="lv-head"><span class="lv-ttl">Live runs</span><span class="lv-up" id="lvUp"></span><button type="button" class="lv-x" data-lv="close" aria-label="Close">' + I.x + '</button><div class="lv-flt" id="lvFlt"></div></div>' +
+      '<div class="lv-wrap"><div class="lv-list" id="lvList"></div><div class="lv-det" id="lvDet"></div></div>';
+    document.body.appendChild(el);
+    el.addEventListener('click', onClick);
+  }
+  function open(){
+    build(); el.classList.add('open'); el.classList.remove('det'); sendOpen = false;
+    paint(); pull().then(function(){ paint(); });
+    clearInterval(timer);
+    timer = setInterval(function(){ if (!isOpen()) { clearInterval(timer); return; } if (Date.now() - lastPull >= 120000) pull(); else paint(true); }, 30000);
+  }
+  function close(){ if (el) el.classList.remove('open'); clearInterval(timer); }
+  window.lbLiveRuns = { open: open, close: close, _t: { runs: function(){ return RUNS; }, set: function(r){ RUNS = r; lastPull = Date.now(); if (isOpen()) paint(); }, ho: function(){ return HO; }, check: function(){ checkHandover(); } } };
+
+  function list(){
+    return Object.keys(RUNS).map(function(k){ return RUNS[k]; }).filter(function(p){
+      if (flt === 'all') return true;
+      if (flt === 'open') return !p.fin;
+      return (p.stream === 'SummerRecycling' ? 'Recycling' : p.stream) === flt;
+    }).sort(function(a, b){ return (a.fin ? 1 : 0) - (b.fin ? 1 : 0) || String(a.run).localeCompare(String(b.run), undefined, { numeric: true }); });
+  }
+  function pct(p){ var h = +p.houses || 0; return h ? Math.round((h - (+p.housesLeft || 0)) / h * 100) : 0; }
+  function status(p){
+    var s = p.status || {}, age = Date.now() - (p.ts || 0);
+    if (p.fin || s.k === 'fin') return '<span class="lv-st fin">Finished ' + clk(p.fin || p.ts) + '</span>';
+    if (age > 10 * 60000) return '<span class="lv-st old">No signal ' + Math.round(age / 60000) + ' min</span>';
+    if (s.k === 'brk') return '<span class="lv-st brk">On break' + (s.t ? ' ' + clk(s.t) : '') + '</span>';
+    if (s.k === 'tip') return '<span class="lv-st tip">At the tip' + (s.n ? ' · ' + esc(s.n) : '') + '</span>';
+    return '<span class="lv-st drv">Driving' + (s.n ? ' · ' + esc(s.n) : '') + '</span>';
+  }
+  function card(p){
+    var b = +p.bins || 0, lw = b ? Math.round((+p.lifted || 0) / b * 100) : 0, nw = b ? Math.round((+p.passed || 0) / b * 100) : 0;
+    return '<button type="button" class="lv-card' + (sel === p.id ? ' sel' : '') + '" data-lv="pick" data-id="' + esc(p.id) + '" style="--lv-c:' + (COL[p.stream] || '#ffd21f') + '">' +
+      '<span class="lv-r1">' + chip(p) + '<span class="lv-who"><b>' + esc(p.driver || 'Driver') + '</b><small>Truck ' + esc(p.truck || '?') + '</small></span><span class="lv-pc">' + pct(p) + '%</span></span>' +
+      '<span class="lv-bar"><i class="l" style="width:' + lw + '%"></i><i class="n" style="width:' + nw + '%"></i></span>' +
+      '<span class="lv-r3"><span><b>' + (+p.streetsDone || 0) + ' of ' + (+p.streets || 0) + '</b> streets</span><span><b>' + (+p.lifted || 0) + '</b> lifted</span><span><b>' + (+p.passed || 0) + '</b> not out</span><span><b>' + (+p.binsLeft || 0) + '</b> left</span></span>' +
+      status(p) + '</button>';
+  }
+  function filters(){
+    var f = function(k, inner, lab){ return '<button type="button" class="lv-f' + (flt === k ? ' on' : '') + '" data-lv="flt" data-f="' + k + '" aria-label="' + lab + '">' + inner + '</button>'; };
+    var im = function(src){ return '<img src="' + src + '" alt="">'; };
+    return f('all', 'All', 'All runs') + f('Garbage', im('garbage.png'), 'Garbage') + f('Recycling', im('recycle.png'), 'Recycle') + f('FOGO', im('fogo.png'), 'FOGO') + f('open', 'Not finished', 'Not finished');
+  }
+  function paint(soft){
+    if (!el) return;
+    var L = list();
+    $('lvUp').innerHTML = lastPull ? 'Updated ' + clk(lastPull) : 'Getting the runs…';
+    $('lvFlt').innerHTML = filters();
+    $('lvList').innerHTML = L.length ? L.map(card).join('') :
+      '<div class="lv-empty">' + (lastPull ? 'No trucks have sent anything today yet. A truck shows here once its driver starts a shift on a run (garbage, recycle or FOGO) with the app.' : 'Getting the runs…') + '</div>';
+    if (!sel && L.length && window.matchMedia && window.matchMedia('(min-width:900px)').matches) sel = L[0].id;
+    if (!soft || !$('lvDet').innerHTML) detail();
+    else { var p = RUNS[sel]; if (p && !sendOpen && $('lvDet').getAttribute('data-ts') !== String(p.ts)) detail(); }
+  }
+  function todoText(p){
+    var t = p.todo || [];
+    return 'Run ' + String(p.run).toUpperCase() + (p.week || '') + ' ' + String(p.day || '').slice(0, 3).toUpperCase() + ' · ' + (p.driver || '') + ' · truck ' + (p.truck || '') + '\n' +
+      pct(p) + '% of houses done · ' + (p.streetsDone || 0) + ' of ' + (p.streets || 0) + ' streets · ' + (p.passed || 0) + ' bins not put out\n' +
+      (t.length ? 'Still to do: ' + (p.housesLeft || 0) + ' houses\n' + t.map(function(x){ return '- ' + x[0] + ': ' + x[1] + ' house' + (x[1] === 1 ? '' : 's'); }).join('\n') : 'Nothing left to do');
+  }
+  function detail(){
+    var d = $('lvDet'), p = sel ? RUNS[sel] : null;
+    if (!p) { d.innerHTML = '<div class="lv-empty">Pick a run to see its map.</div>'; d.removeAttribute('data-ts'); return; }
+    d.setAttribute('data-ts', String(p.ts));
+    var others = Object.keys(RUNS).map(function(k){ return RUNS[k]; }).filter(function(x){ return x.id !== p.id && x.driver; }).map(function(x){ return x.driver; }).filter(function(n, i, a){ return a.indexOf(n) === i; });
+    d.style.setProperty('--ui-accent', COL[p.stream] || '');
+    d.innerHTML = '<div class="lv-dh">' + dayChip(p) + '<span class="lv-who"><b>' + esc(p.driver || 'Driver') + ' · Truck ' + esc(p.truck || '?') + '</b><small>' + (p.km ? (+p.kmDone || 0).toFixed(1) + ' of ' + (+p.km).toFixed(1) + ' km driven · ' : '') + 'sent ' + clk(p.ts) + '</small></span>' +
+        '<button type="button" class="lv-ib" data-lv="pdf" aria-label="Download the map as a PDF" title="Download the map as a PDF">' + I.pdf + '</button>' +
+        '<button type="button" class="lv-ib" data-lv="share" aria-label="Share the map" title="Share the map">' + I.share + '</button>' +
+        '<button type="button" class="lv-ib go" data-lv="send" aria-label="Send to another driver" title="Send to another driver">' + I.send + '</button></div>' +
+      (sendOpen ? '<div class="lv-send"><span class="lv-k">Send to</span><div class="lv-chs">' + others.map(function(n){ return '<button type="button" class="lv-f" data-lv="to" data-n="' + esc(n) + '">' + esc(n) + '</button>'; }).join('') + '</div>' +
+        '<input type="text" id="lvTo" placeholder="Driver’s name" autocomplete="off" aria-label="Driver’s name">' +
+        '<div class="lv-chs"><button type="button" class="lv-f on" data-lv="what" data-w="left">What is left</button><button type="button" class="lv-f" data-lv="what" data-w="all">Whole run</button></div>' +
+        '<button type="button" class="lv-go" data-lv="dosend">' + I.send + 'Send</button></div>' : '') +
+      '<div class="lv-tiles"><div class="lv-tile"><i>Houses done</i><b>' + pct(p) + '%</b></div><div class="lv-tile"><i>Streets done</i><b>' + (+p.streetsDone || 0) + '/' + (+p.streets || 0) + '</b></div><div class="lv-tile"><i>Houses left</i><b>' + (+p.housesLeft || 0) + '</b></div></div>' +
+      status(p) +
+      '<div class="lv-map" id="lvMap">' + (p.key ? 'Drawing the map…' : 'No run map for this run') + '</div>' +
+      ((p.todo || []).length ? '<span class="lv-k">Still to do</span>' + p.todo.map(function(x){ return '<div class="lv-row"><b>' + esc(x[0]) + '</b><span>' + x[1] + ' house' + (x[1] === 1 ? '' : 's') + '</span></div>'; }).join('') : '');
+    if (p.key) mapImg(p).then(function(im){ var m = $('lvMap'); if (!m || sel !== p.id) return; m.innerHTML = im ? '<img alt="Run map: finished streets red, what is left green" src="' + im.url + '">' : 'The run map could not be drawn'; });
+  }
+  function mapImg(p){
+    var ck = p.id + '@' + p.ts; if (imgCache[ck]) return imgCache[ck];
+    if (!window.lbRunMapImage) return Promise.resolve(null);
+    imgCache[ck] = window.lbRunMapImage(p.key, { state: p.st || [], passed: p.passed || 0, ts: p.ts }).then(function(im){
+      if (!im) return null; im.url = URL.createObjectURL(new Blob([im.jpeg], { type: 'image/jpeg' })); return im;
+    }).catch(function(){ delete imgCache[p.id + '@' + p.ts]; return null; });
+    return imgCache[ck];
+  }
+  function pdfOf(p){
+    return mapImg(p).then(function(im){
+      if (!window.lbMedia || !window.lbMedia.pdfBlob) throw new Error('no PDF maker');
+      var ttl = 'Run ' + String(p.run).toUpperCase() + (p.week || '') + ' ' + String(p.day || '').slice(0, 3).toUpperCase() + ' - ' + (p.driver || 'driver');
+      return { blob: window.lbMedia.pdfBlob(ttl, todoText(p), im ? [im] : []), name: ttl.replace(/[^A-Za-z0-9 ._-]+/g, ' ').replace(/\s+/g, ' ').trim() + '.pdf', title: ttl };
+    });
+  }
+  var what = 'left';
+  function onClick(ev){
+    var b = ev.target.closest ? ev.target.closest('[data-lv],[data-ctx]') : null; if (!b) return;
+    var c = b.getAttribute('data-ctx');
+    if (c) {
+      ev.preventDefault(); ev.stopPropagation();
+      if (c === 'back' && el.classList.contains('det') && !(window.matchMedia && window.matchMedia('(min-width:900px)').matches)) { el.classList.remove('det'); return; }
+      close();
+      if (c === 'menu' || c === 'back') { try { window.lbOpenDrawer(); } catch (e) {} }
+      if (c === 'layers') { try { window.lbOpenLayers(); } catch (e) {} }
+      return;
+    }
+    var a = b.getAttribute('data-lv');
+    if (a === 'close') { close(); return; }
+    if (a === 'flt') { flt = b.getAttribute('data-f'); paint(); return; }
+    if (a === 'pick') { sel = b.getAttribute('data-id'); sendOpen = false; el.classList.add('det'); paint(); try { $('lvDet').scrollTop = 0; } catch (e) {} return; }
+    var p = sel ? RUNS[sel] : null; if (!p) return;
+    if (a === 'pdf' || a === 'share') {
+      toast('Making the PDF…');
+      pdfOf(p).then(function(f){
+        if (a === 'share') {
+          try { var file = new File([f.blob], f.name, { type: 'application/pdf' }); if (navigator.canShare && navigator.canShare({ files: [file] })) return navigator.share({ files: [file], title: f.title, text: todoText(p) }).catch(function(){}); } catch (e) {}
+        }
+        if (window.lbDownloadPdf) return window.lbDownloadPdf(f.blob, f.name, f.title);
+        var u = URL.createObjectURL(f.blob), an = document.createElement('a'); an.href = u; an.download = f.name; document.body.appendChild(an); an.click(); setTimeout(function(){ an.remove(); URL.revokeObjectURL(u); }, 4000);
+      }).catch(function(e){ toast('Could not make the PDF: ' + (e && e.message || e)); });
+      return;
+    }
+    if (a === 'send') { sendOpen = !sendOpen; what = 'left'; detail(); var i0 = $('lvTo'); if (i0) try { i0.focus(); } catch (e) {} return; }
+    if (a === 'to') { var i1 = $('lvTo'); if (i1) i1.value = b.getAttribute('data-n'); [].forEach.call(el.querySelectorAll('[data-lv="to"]'), function(x){ x.classList.toggle('on', x === b); }); return; }
+    if (a === 'what') { what = b.getAttribute('data-w'); [].forEach.call(el.querySelectorAll('[data-lv="what"]'), function(x){ x.classList.toggle('on', x === b); }); return; }
+    if (a === 'dosend') {
+      var to = String(($('lvTo') || {}).value || '').trim(); if (!to) { toast('Type or pick the driver to send it to'); return; }
+      var me = (lsGet('lbDriver', {}) || {}).name || 'Leading hand';
+      var h = { id: 'ho_' + uid(), kind: 'runHandover', ts: Date.now(), to: to, from: me, key: p.key || '', stream: p.stream, run: p.run, day: p.day, week: p.week,
+        whole: what === 'all', st: what === 'all' ? null : (p.st || null), passed: p.passed || 0, todo: what === 'all' ? [] : (p.todo || []), housesLeft: what === 'all' ? null : p.housesLeft, of: p.driver || '' };
+      try { window.lbOutbox.sendPlace(h); } catch (e) { toast('Could not send it'); return; }
+      sendOpen = false; detail();
+      toast('Sent to ' + to + '. It shows on their phone the next time it checks in (within 10 minutes).');
+      return;
+    }
+  }
+
+  /* ---- a run sent to this driver ---- */
+  function myName(){
+    var n = (lsGet('lbDriver', {}) || {}).name || '';
+    try { var s = window.uxShiftState ? window.uxShiftState() : null; if (s && s.driver) n = n || s.driver; } catch (e) {}
+    return String(n).trim().toLowerCase();
+  }
+  function checkHandover(){
+    var me = myName(); if (!me || $('lbHandover')) return;
+    var seen = lsGet('lbHandoverSeen', []) || [];
+    var h = HO.filter(function(x){ return x && String(x.to || '').trim().toLowerCase() === me && seen.indexOf(x.id) < 0; }).sort(function(a, b){ return (b.ts || 0) - (a.ts || 0); })[0];
+    if (!h) return;
+    var box = document.createElement('div'); box.id = 'lbHandover'; box.style.setProperty('--ui-accent', COL[h.stream] || '');
+    var n = (h.todo || []).length;
+    box.innerHTML = '<div class="ho-r">' + dayChip(h) + '<span class="ho-t">' + esc(h.from || 'Your leading hand') + ' sent you this run' +
+      '<small>' + (h.whole ? 'The whole run' : !n ? 'Nothing left on it' : n + ' street' + (n === 1 ? '' : 's') + ', ' + (h.housesLeft || 0) + ' houses left' + (h.of ? ' (from ' + esc(h.of) + ')' : '')) + '</small></span>' +
+      '<button type="button" class="ho-x" data-ho="x" aria-label="Close">' + I.x + '</button></div>' +
+      '<div class="ho-r" style="justify-content:flex-end"><button type="button" class="ho-b" data-ho="pdf">' + 'Map PDF</button><button type="button" class="ho-b go" data-ho="map">Show on my map</button></div>';
+    document.body.appendChild(box);
+    var done = function(){ seen.push(h.id); lsSet('lbHandoverSeen', seen.slice(-100)); box.remove(); };
+    box.addEventListener('click', function(ev){
+      var b = ev.target.closest ? ev.target.closest('[data-ho]') : null; if (!b) return;
+      var a = b.getAttribute('data-ho');
+      if (a === 'x') { done(); return; }
+      if (a === 'map') {
+        done();
+        try { if (typeof window.switchMainTab === 'function') window.switchMainTab('map'); } catch (e) {}
+        try { window.openRunDirectlyOnMap(h.run, h.stream === 'SummerRecycling' ? 'Recycling' : h.stream, h.day, h.week, h.stream === 'SummerRecycling'); } catch (e) {}
+        if (!h.whole && n) toast('Still to do: ' + h.todo.slice(0, 6).map(function(x){ return x[0]; }).join(', ') + (n > 6 ? ' and ' + (n - 6) + ' more' : ''));
+        return;
+      }
+      if (a === 'pdf') {
+        if (!h.key || !window.lbRunMapImage) { toast('No run map for this run'); return; }
+        toast('Making the PDF…');
+        window.lbRunMapImage(h.key, { state: h.whole ? [] : (h.st || []), passed: h.passed || 0, ts: h.ts }).then(function(im){
+          var ttl = 'Run ' + String(h.run).toUpperCase() + (h.week || '') + ' ' + String(h.day || '').slice(0, 3).toUpperCase() + ' - sent by ' + (h.from || 'leading hand');
+          var txt = h.whole ? 'The whole run' : 'Still to do:\n' + (h.todo || []).map(function(x){ return '- ' + x[0] + ': ' + x[1] + ' houses'; }).join('\n');
+          var blob = window.lbMedia.pdfBlob(ttl, txt, im ? [im] : []), nm = ttl.replace(/[^A-Za-z0-9 ._-]+/g, ' ').replace(/\s+/g, ' ').trim() + '.pdf';
+          return window.lbDownloadPdf ? window.lbDownloadPdf(blob, nm, ttl) : null;
+        }).catch(function(e){ toast('Could not make the PDF: ' + (e && e.message || e)); });
+      }
+    });
+  }
 })();
 </script>
 </body>
