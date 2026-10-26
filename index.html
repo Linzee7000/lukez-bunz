@@ -12297,6 +12297,41 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
     }
   });
 
+  /* Split-run "homes" (data/split-runs.json, tools/route-maps/split_run.py --homes): the master list codes 1,102 Monday A
+     houses as Recycling 227, but 227A is not a run of its own - it is the orange FULL RUN bits of 219A, 221A, 223A, 225A
+     and 226A (226 does Erlandsen Ave, Holyrood Ave...). Each such house goes back to the full run whose route-map page draws
+     its street, the same way 227B's houses already sit in their full runs; 227A then shows them as a split run (lbSplitRuns).
+     Only a house still coded exactly the split run's number on that day and week is moved, so a run picked by hand stays. */
+  let lbRunHomes = null;
+  const lbRunHomesReady = fetch('data/split-runs.json', { cache: 'no-cache' }).then(r => r.ok ? r.json() : null).then(d => {
+    lbRunHomes = [];
+    Object.keys((d && d.runs) || {}).forEach(k => {
+      const p = k.split('#'), h = d.runs[k].homes; if (p.length !== 4 || p[0] !== 'Recycling' || !h) return;
+      lbRunHomes.push({ day: p[1].toLowerCase(), week: p[2].toUpperCase(), run: String(p[3]), homes: h });
+    });
+    return lbRunHomes;
+  }).catch(() => { lbRunHomes = []; return lbRunHomes; });
+  function lbApplyRunHomes(records) {
+    if (!lbRunHomes || !lbRunHomes.length || !records || !records.length) return 0;
+    let n = 0;
+    records.forEach(site => {
+      const s = site && site.soloSchedule; if (!s) return;
+      const run = String(s.recRun || '').trim(); if (!run) return;
+      const day = String(s.day || '').trim().toLowerCase(), wk = String(s.weekLetter || '').trim().toUpperCase();
+      lbRunHomes.forEach(x => {
+        if (x.run !== run || x.day !== day || x.week !== wk) return;
+        const home = x.homes[String(site.siteId)];
+        if (home && home !== run) { s.recRun = home; s.recHomeFrom = run; n++; }
+      });
+    });
+    return n;
+  }
+  lbRunHomesReady.then(() => {
+    if (typeof siteRecords !== 'undefined' && siteRecords && siteRecords.length && lbApplyRunHomes(siteRecords)) {
+      try { if (typeof renderMapData === 'function' && typeof leafletMap !== 'undefined' && leafletMap) renderMapData(); } catch (e) {}
+    }
+  });
+
   // Placeholder bins: thousands of houses carry a made-up bin named after the property ("R27133" = Recycling,
   // property 27133; "G..." for Garbage) from before their real bin was recorded, and kept it after - so the house had
   // two bins, the run's bin count was nearly double, and the placeholder's dot stayed on the map. A placeholder is
@@ -12319,6 +12354,7 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
   }
   function mergeEditsIntoRecords(records, edits) {
     lbApplyBinFixes(records);
+    lbApplyRunHomes(records);
     if (!edits || edits.length === 0) return lbDropPlaceholderBins(records);
 
     edits.forEach(ed => {
@@ -15014,12 +15050,22 @@ window.addEventListener('DOMContentLoaded', async () => {
     const d = lower(dayStr);
     const w = clean(weekStr).toUpperCase();
 
-    if (r === 228) return d === 'thursday' && w === 'B';
-    if (r < 219 || r > 227) return false;
-    if (w === 'B' && r === 222 && (d === 'monday' || d === 'tuesday')) return false;
-    if (w === 'A' && (r === 220 || r === 222) && d === 'monday') return false;
-    return true;
+    // The regular (year-round) recycle runs, as Fox set them out. A run with no week letter is a SUMMER run (the six weeks
+    // from the Monday before Christmas: 219-225 and 228-234, 235 on Thursday too) and lives in the summer run field - so
+    // 229-235, and 232 / 233 / 234 coded with a week letter in the master list, are not week runs and are not shown as one.
+    if (d === 'saturday' || d === 'sunday') return false;
+    if (w === 'A') {
+      if (d === 'monday') return [219, 221, 223, 224, 225, 226, 227].indexOf(r) >= 0;
+      return r >= 219 && r <= 227;
+    }
+    if (w === 'B') {
+      if (d === 'monday' || d === 'tuesday') return r >= 219 && r <= 227 && r !== 222;
+      if (d === 'thursday') return r >= 219 && r <= 228;
+      return r >= 219 && r <= 227;
+    }
+    return false;
   }
+  window.lbValidRecRun = isValidRecycleRun;
 
   // Every run of one stream, split the way run boundaries are stored (stream / day / week / run),
   // with the storage key(s) each one is saved under. Used by the property-line boundary builder
@@ -38540,6 +38586,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       // pages, not run maps; opened from a filter with no week they showed instead of the run (219A Monday came up as "Run 219
       // Friday, 0.7 km"). Left out, so such a key falls through to the run's own A / B map.
       Object.keys(DATA).forEach(function(k){ var o = parse(k); if (o.stream !== 'Garbage' && !o.week) delete DATA[k]; });
+      // recycle runs that are not week runs on that day (232B / 233B Tuesday were summer codes in the master list) are left out
+      Object.keys(DATA).forEach(function(k){ var o = parse(k); if (o.stream === 'Recycling' && window.lbValidRecRun && !window.lbValidRecRun(o.run, o.day, o.week)) delete DATA[k]; });
       // "All runs": every run of one stream on one day (and week) on the one map, each run its own colour (see allRoute)
       var byDay = {};
       Object.keys(DATA).forEach(function(k){ var o = parse(k); var g = keyOf({ stream: o.stream, day: o.day, week: o.week, run: 'ALL' }); (byDay[g] = byDay[g] || []).push(k); });

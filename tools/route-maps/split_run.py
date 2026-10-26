@@ -52,6 +52,29 @@ for r in froms:
     if fm <= 20: parts += rm[SEC]; greens += rm['green']
 if not parts: sys.exit('no split lines placed')
 
+# --homes: houses the master list keeps under the split run's own code (227A Monday: 1,102 of them) go back to the full run
+# whose page draws their street - every full-run page of that day and week is placed by its own run's houses and each such
+# house goes to the run with the nearest line. Then they are treated like the full runs' own houses (227A takes the ones
+# along its orange bits), and the app shows them in that full run (split-runs.json "homes").
+homes = {}
+if '--homes' in sys.argv and H.get(run):
+    trees = {}
+    for r, p in pages.items():
+        if r == run or not H.get(r): continue
+        L = page_routes(pdf, p, sections=True)
+        allp = L['green'] + L['orange'] + L['purple'] + L.get(SEC, [])
+        fm, prm = fit(densify(allp), np.array([h[1] for h in H[r]]))
+        if fm > 20: print('homes: page', p, 'for', r, 'fits badly', round(fm, 1)); continue
+        rm = transform_routes({'all': allp}, prm)
+        trees[r] = cKDTree(densify(rm['all'], 3.0))
+    for sid, xy in H[run]:
+        d = {r: t.query(xy)[0] for r, t in trees.items()}
+        if d: homes[sid] = min(d, key=d.get)
+    from collections import Counter
+    print('homes:', dict(Counter(homes.values())))
+    for sid, xy in H[run]:
+        if sid in homes: H.setdefault(homes[sid], []).append((sid, xy))
+
 # houses along the split lines (from the full-run pages)
 seg = densify(parts, 2.0); tree = cKDTree(seg)
 near = [(r, sid, xy) for r in froms for sid, xy in H[r] if tree.query(xy)[0] <= 25]
@@ -127,10 +150,11 @@ if '--write' in sys.argv:
     mine = {r: v for r, v in mine.items() if v}
     sp_path = os.path.join(os.path.dirname(S), '..', '..', 'data', 'split-runs.json')
     sp = json.load(open(sp_path)) if os.path.exists(sp_path) else {'version': 1, 'runs': {}}
-    sp['note'] = 'Runs made of bits of other runs (227B Monday takes parts of 219B, 220B, 221B, 223B; short a driver, the full runs do it all). The houses stay in their own runs too. Made by tools/route-maps/split_run.py from the route-map PDF.'
+    sp['note'] = 'Runs made of bits of other runs (227A / 227B Monday take parts of the full runs; short a driver, the full runs do it all). The houses stay in their own runs too. homes: houses the master list codes under the split run itself, and the full run they belong to (shown there). Made by tools/route-maps/split_run.py from the route-map PDF.'
     sp['generated'] = rr['generated']
     if '--route-only' not in sys.argv:   # (227A Monday: its houses are already under 227 in the master list - only its route is needed)
         sp['runs'][res['key']] = {'from': froms, 'sites': sorted(set(s for v in mine.values() for s in v))}
+        if homes: sp['runs'][res['key']]['homes'] = {k: homes[k] for k in sorted(homes)}
         json.dump(sp, open(sp_path, 'w'), indent=0)
     print('wrote', len(lines_out), 'street pieces,', round(km / 1000, 1), 'km;', sum(len(v) for v in mine.values()), 'houses', {r: len(v) for r, v in mine.items()})
     print(sorted(streets))
