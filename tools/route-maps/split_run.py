@@ -53,7 +53,7 @@ for p in range(1, page_count(pdf) + 1):
 split_page = int(sys.argv[6]) if len(sys.argv) > 6 and sys.argv[6].isdigit() else pages.get(run)
 print('pages', pages, 'split page', split_page)
 
-parts, greens = [], []
+parts, greens, PARTS = [], [], {}
 for r in froms:
     p = pages.get(r)
     if not p: print('no page for', r); continue
@@ -71,8 +71,24 @@ for r in froms:
             print(f'  {r}: refit with {len(extra_h)} houses coded {run}: {fm:.1f} -> {fm2_:.1f} m'); fm, prm = fm2_, prm2_
     rm = transform_routes({SEC: L.get(SEC, []), 'green': L['green']}, prm)
     print(f'{r}: page {p}, fit {fm:.1f} m, {len(rm[SEC])} split lines')
-    if fm <= 20: parts += rm[SEC]; greens += rm['green']
+    if fm <= 20: parts += rm[SEC]; greens += rm['green']; PARTS[r] = rm[SEC]
 if not parts: sys.exit('no split lines placed')
+
+def street_of(sid):
+    m_ = re.search(r'^[^,]*?\s([A-Z][A-Z ]+?),', ADDR.get(sid, ''))
+    return re.sub(r'^ST ', 'SAINT ', m_.group(1).strip()) if m_ else ''
+# --orange-names <json> {run: {street name: weight}} (the streets each page's orange pieces follow, by name): a full-run house
+# counts with the split run when its street is one of those names and it is within 25 m of that page's orange - by NAME, so a
+# piece placed 10-20 m off can't take the next street over (Wilson Rd, Allan St, Ibis Way did)
+NAMED = {}
+if '--orange-names' in sys.argv:
+    ON = json.load(open(sys.argv[sys.argv.index('--orange-names') + 1]))
+    SKIP = {'SAINT JOHNS WOOD ROAD'}   # (runs right beside Melbourne Rd: an orange Melbourne Rd reads as it too)
+    for r, names in ON.items():
+        if r not in PARTS or not PARTS[r]: continue
+        tp = cKDTree(densify(PARTS[r], 2.0)); nm = {re.sub(r'^ST ', 'SAINT ', n.upper()) for n in names} - SKIP
+        NAMED[r] = [sid for sid, xy in H.get(r, []) if street_of(sid) in nm and tp.query(xy)[0] <= 25 and not kept(sid)]
+    print('by street name:', {r: len(v) for r, v in NAMED.items()})
 
 # --homes: houses the master list keeps under the split run's own code (227A Monday: 1,102 of them) go back to the full run
 # whose page draws their street - every full-run page of that day and week is placed by its own run's houses and each such
@@ -136,12 +152,13 @@ if '--write' in sys.argv:
         # and the streets the split run's coded houses are on (a street piece of that name within 40 m of them)
         from shapely.geometry import MultiPoint
         bystreet = {}
-        for sid, xy in H.get(run, []):
+        for sid, xy in H.get(run, []) + [h for r_ in NAMED for h in H.get(r_, []) if h[0] in set(NAMED[r_])]:
             if kept(sid): continue
             m_ = re.search(r'^[^,]*?\s([A-Z][A-Z ]+?),', ADDR.get(sid, ''))
-            if m_: bystreet.setdefault(m_.group(1).strip(), []).append(xy)
+            if m_: bystreet.setdefault(re.sub(r'^ST ', 'SAINT ', m_.group(1).strip()), []).append(xy)
         CODED = {k: MultiPoint(v).buffer(40) for k, v in bystreet.items()}
     else: CODED = {}
+    if '--coded-only' in sys.argv: own = [LineString([(0, 0), (0, 1e-6)])]   # route: only the streets of the coded houses
     tr = STRtree(own)
     lines_out, streets, km = [], set(), 0.0
     for name, flat in ways:
@@ -155,7 +172,8 @@ if '--write' in sys.argv:
         sm.append(pts[-1])
         from shapely.geometry import Point
         near_f = [min((g.distance(Point(p)) for g in [own[i] for i in tr.query(Point(p).buffer(18))]), default=99) <= 18 for p in sm]
-        if name.upper() in CODED: near_f = [ok or CODED[name.upper()].contains(Point(p)) for ok, p in zip(near_f, sm)]
+        nk = re.sub(r'^ST ', 'SAINT ', name.upper())
+        if nk in CODED: near_f = [ok or CODED[nk].contains(Point(p)) for ok, p in zip(near_f, sm)]
         cur = []
         def flush():
             global km
@@ -190,6 +208,7 @@ if '--write' in sys.argv:
             d = tree.query(xy)[0]
             return d <= 15 and (tg is None or d + 5 < tg.query(xy)[0])
         mine = {r: [sid for sid, xy in H[r] if tight(xy) and not kept(sid)] for r in froms}
+        if '--coded-only' in sys.argv: mine = {r: list(v) for r, v in NAMED.items()}   # (the fitted orange lines land 5-25 m off and took neighbouring streets: Wilson Rd, Ibis Way... - so by name only)
         mine[run] = [sid for sid, xy in H.get(run, []) if not kept(sid)]
         homes.update({sid: kept(sid) for sid, xy in H.get(run, []) if kept(sid)})
     mine = {r: v for r, v in mine.items() if v}
