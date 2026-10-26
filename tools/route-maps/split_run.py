@@ -30,6 +30,20 @@ with open(f'{S}/master.csv', newline='', encoding='utf8') as f:
             try: H.setdefault(r, []).append((row['Site Id'], to_m(float(row['Lat']), float(row['Lng']))))
             except Exception: pass
 for r in froms: H.setdefault(r, [])
+ADDR = {}
+with open(f'{S}/master.csv', newline='', encoding='utf8') as f:
+    for row in csv.DictReader(f): ADDR[row['Site Id']] = row['Address'].upper()
+# --keep 226:ERLANDSEN AVENUE,HOLYROOD AVENUE,... : streets the full run keeps although its page draws them in the split run's
+# colour (Fox: 226 does Terry, Erlandsen, Holyrood, Mendes, Kinneil - 227A doesn't)
+KEEP = {}
+if '--keep' in sys.argv:
+    kr, ks = sys.argv[sys.argv.index('--keep') + 1].split(':', 1)
+    for st in ks.split(','): KEEP[st.strip().upper()] = kr
+def kept(sid):
+    a = ADDR.get(sid, '')
+    for st, kr in KEEP.items():
+        if re.search(r'\b' + re.escape(st) + r',', a): return kr
+    return None
 
 pages = {}
 for p in range(1, page_count(pdf) + 1):
@@ -47,6 +61,14 @@ for r in froms:
     pts_h = np.array([h[1] for h in H[r]])
     allp = L['green'] + L['orange'] + L['purple'] + L.get(SEC, [])
     fm, prm = fit(densify(allp), pts_h)
+    # refit with the split run's own coded houses that lie on this page's lines too: the page draws the orange bits as well,
+    # and fitted by the full run's houses alone the orange could sit 15-25 m off (225A Monday's Wanda Cl / Yerlata Ct block)
+    if H.get(run):
+        t0 = cKDTree(densify(transform_routes({'a': allp}, prm)['a'], 3.0))
+        extra_h = [h[1] for h in H[run] if t0.query(h[1])[0] <= 40]
+        if extra_h:
+            fm2_, prm2_ = fit(densify(allp), np.array(list(pts_h) + extra_h), top_n=1, _cands=[(0, prm)])
+            print(f'  {r}: refit with {len(extra_h)} houses coded {run}: {fm:.1f} -> {fm2_:.1f} m'); fm, prm = fm2_, prm2_
     rm = transform_routes({SEC: L.get(SEC, []), 'green': L['green']}, prm)
     print(f'{r}: page {p}, fit {fm:.1f} m, {len(rm[SEC])} split lines')
     if fm <= 20: parts += rm[SEC]; greens += rm['green']
@@ -69,7 +91,8 @@ if '--homes' in sys.argv and H.get(run):
         trees[r] = cKDTree(densify(rm['all'], 3.0))
     for sid, xy in H[run]:
         d = {r: t.query(xy)[0] for r, t in trees.items()}
-        if d: homes[sid] = min(d, key=d.get)
+        if kept(sid): homes[sid] = kept(sid)
+        elif d: homes[sid] = min(d, key=d.get)
     from collections import Counter
     print('homes:', dict(Counter(homes.values())))
     for sid, xy in H[run]:
@@ -109,10 +132,20 @@ if '--write' in sys.argv:
     from shapely.strtree import STRtree
     ways = json.load(open(os.path.join(os.path.dirname(S), '..', '..', 'data', 'run-streets.json')))['ways']
     own = [LineString(pl) for pl in (out_lines['green'] + out_lines['orange'] + out_lines['purple'] + parts) if len(pl) > 1]
+    if '--coded' in sys.argv:
+        # and the streets the split run's coded houses are on (a street piece of that name within 40 m of them)
+        from shapely.geometry import MultiPoint
+        bystreet = {}
+        for sid, xy in H.get(run, []):
+            if kept(sid): continue
+            m_ = re.search(r'^[^,]*?\s([A-Z][A-Z ]+?),', ADDR.get(sid, ''))
+            if m_: bystreet.setdefault(m_.group(1).strip(), []).append(xy)
+        CODED = {k: MultiPoint(v).buffer(40) for k, v in bystreet.items()}
+    else: CODED = {}
     tr = STRtree(own)
     lines_out, streets, km = [], set(), 0.0
     for name, flat in ways:
-        if not name: continue
+        if not name or name.upper() in KEEP: continue
         pts = [to_m(flat[i], flat[i + 1]) for i in range(0, len(flat), 2)]
         if len(pts) < 2: continue
         sm = []
@@ -122,6 +155,7 @@ if '--write' in sys.argv:
         sm.append(pts[-1])
         from shapely.geometry import Point
         near_f = [min((g.distance(Point(p)) for g in [own[i] for i in tr.query(Point(p).buffer(18))]), default=99) <= 18 for p in sm]
+        if name.upper() in CODED: near_f = [ok or CODED[name.upper()].contains(Point(p)) for ok, p in zip(near_f, sm)]
         cur = []
         def flush():
             global km
@@ -146,7 +180,18 @@ if '--write' in sys.argv:
         d = tree.query(xy)[0]
         return d <= 20 and (tg is None or d < tg.query(xy)[0])
     # only the full runs' own houses: a run number with no week letter (222, 232, 234...) is a summer recycle run, not part of it
-    mine = {r: [sid for sid, xy in H[r] if takes(xy)] for r in froms}
+    mine = {r: [sid for sid, xy in H[r] if takes(xy) and not kept(sid)] for r in froms}
+    if '--coded' in sys.argv:
+        # --coded (227A Monday): the master list already codes the split run's houses under its own number - those ARE the
+        # orange bits, placed better than a fitted page can (225A's page sits 20-30 m off). They stay the split run's, except
+        # the --keep streets, which go to their full run; full-run houses count only when right on an orange line (15 m,
+        # 5 m nearer it than any green line).
+        def tight(xy):
+            d = tree.query(xy)[0]
+            return d <= 15 and (tg is None or d + 5 < tg.query(xy)[0])
+        mine = {r: [sid for sid, xy in H[r] if tight(xy) and not kept(sid)] for r in froms}
+        mine[run] = [sid for sid, xy in H.get(run, []) if not kept(sid)]
+        homes.update({sid: kept(sid) for sid, xy in H.get(run, []) if kept(sid)})
     mine = {r: v for r, v in mine.items() if v}
     sp_path = os.path.join(os.path.dirname(S), '..', '..', 'data', 'split-runs.json')
     sp = json.load(open(sp_path)) if os.path.exists(sp_path) else {'version': 1, 'runs': {}}
