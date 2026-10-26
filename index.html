@@ -26568,6 +26568,39 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     S.breaks.push({ s: Math.min(earliest(t), Date.now()), e: null });
     lastWarn = null; save(); return true;
   }
+  /* A break ends by itself (Fox, 26 Oct: a break started at 10:30 ran on to 11:43, through the drive to the tip, because
+     nobody pressed End break): after 30 minutes (it ends at the 30 minutes, not when this notices), or as soon as the truck
+     is more than 100 m from where the break began, or is going faster than 20 km/h for two fixes running (one odd GPS speed
+     doesn't end it). A break with a typed-in To time keeps that time (endPlanned). Where the break began is the first fix
+     seen while on it: a break put in after a long stop starts earlier than now, but the truck is still where it stopped. */
+  const AUTO_BREAK = 30 * MIN, AUTO_MOVE_M = 100, AUTO_KMH = 20;
+  let fastN = 0, lastFixSeen = null;
+  function hereNow() {
+    try { const l = userCurrentLocation; if (l && isFinite(l.lat) && isFinite(l.lng) && (l.lat || l.lng)) return l; } catch (e) {}
+    return null;
+  }
+  function autoEnd(now) {
+    if (!onBreak()) { fastN = 0; return false; }
+    const b = S.breaks[S.breaks.length - 1];
+    if (b.plan) return false;
+    let why = '';
+    if (now - b.s >= AUTO_BREAK) { b.e = b.s + AUTO_BREAK; why = '30 minutes up'; }
+    else {
+      const l = hereNow();
+      if (l && !b.at) { b.at = { lat: +l.lat, lng: +l.lng }; lastFixSeen = l; save(); }
+      if (l && l !== lastFixSeen) {           // (only a new fix counts: the same one is looked at every second)
+        lastFixSeen = l;
+        const kx = 111320 * Math.cos(b.at.lat * Math.PI / 180), d = Math.hypot((l.lng - b.at.lng) * kx, (l.lat - b.at.lat) * 110540);
+        fastN = (+l.speed || 0) > AUTO_KMH ? fastN + 1 : 0;
+        if (d > AUTO_MOVE_M) { b.e = now; why = 'driven off'; }
+        else if (fastN >= 2) { b.e = now; why = 'driving again'; }
+      }
+    }
+    if (!why) return false;
+    delete b.plan; fastN = 0; lastWarn = null; save();
+    try { if (window.uxToast) window.uxToast('Break ended at ' + clock(b.e) + ' (' + why + ')'); } catch (e) {}
+    return true;
+  }
   function endBreak() {
     const now = Date.now();
     if (!onBreak()) return;
@@ -26599,7 +26632,7 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
   // earlier"), and breaks from before it are dropped.
   function resetStart(t) {
     S.start = t; S.lastSeen = Date.now();
-    S.breaks = S.breaks.filter(b => b.e == null || b.e > t).map(b => ({ s: Math.max(b.s, t), e: b.e }));
+    S.breaks = S.breaks.filter(b => b.e == null || b.e > t).map(b => Object.assign({}, b, { s: Math.max(b.s, t) }));   // (keeps a break's To time and where it began)
     lastWarn = null; save();
   }
   function onGo() {
@@ -26866,6 +26899,7 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
       const now = Date.now();
       if (staleDay(now)) saveAt = 0;
       endPlanned(now);
+      autoEnd(now);
       if (S.start != null && now - saveAt > 30000) { S.lastSeen = now; save(); saveAt = now; }
       paint();
     } catch (e) { console.warn('Break clock:', e); }
