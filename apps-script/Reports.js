@@ -3,8 +3,9 @@
 //
 // The app posts a report in steps and CHECKS each one (it can't trust the
 // normal no-cors sync, which never sees a reply):
-//   POST {type:'msg',   rid, kind, urgent, to:[roles], subject, text, ts, data}
+//   POST {type:'msg',   rid, kind, urgent, to:[roles], subject, text, ts, data, quiet}
 //        -> stored on the "Reports" tab and emailed straight away
+//           (quiet: stored only - the 'final' below is then the one email)
 //   GET  ?status=<rid>   -> {status:'success', found, emailed, photos, finalEmailed, state, ackAt, ackBy}
 //   POST {type:'photo', rid, name, mime, b64}  -> saved to a Drive folder for that report
 //   POST {type:'final', rid, again, text}      -> one more email, photos attached
@@ -156,7 +157,7 @@ function handleMsg_(ss, d) {
     sh.appendRow([
       rid, clip_(d.kind), Date.now(), d.urgent ? "URGENT" : "", JSON.stringify(roles), clip_(subject),
       clip_(d.text), clip_(JSON.stringify(d.data || {})), 0, 0, "", 0, 0,
-      String(d.kind) === "dash" ? "waiting" : "sent", "", "", "", ""
+      String(d.kind) === "dash" ? "waiting" : (d.quiet ? "quiet" : "sent"), "", "", "", ""
     ]);
     row = sh.getLastRow();
   }
@@ -164,6 +165,11 @@ function handleMsg_(ss, d) {
   var emailed = 0, err = "";
   if (!to.length) {
     err = "no recipients configured";
+  } else if (d.quiet && String(d.kind) !== "dash") {
+    // quiet: the app sends the "final" next with the PDF attached, and that is the only email (the break / end of shift
+    // report used to arrive twice: once as text, then again as "Full report" with the PDF). Counted as emailed so the
+    // app's delivery check still passes.
+    emailed = to.length;
   } else {
     try { sendMail_(to, subject, body); emailed = to.length; }
     catch (mailErr) { err = "mail failed: " + mailErr.toString(); Logger.log(err); }
@@ -272,10 +278,11 @@ function handleFinal_(ss, d) {
     (folder ? "\n\n" + n + " photo/file(s)" + (attach ? " attached and" : " (too big to attach)") + " saved in Drive:\n" + folder.getUrl() : "");
   var emailed = 0;
   if (to.length) {
-    try { sendMail_(to, (d.again ? "More photos: " : "Full report: ") + rep.subject, body, attach ? blobs : []); emailed = to.length; }
+    var quiet = rep.state === "quiet" && !d.again;            // the first and only email of a quiet report: its own subject
+    try { sendMail_(to, (d.again ? "More photos: " : quiet ? "" : "Full report: ") + rep.subject, body, attach ? blobs : []); emailed = to.length; }
     catch (mailErr) { Logger.log("final mail failed: " + mailErr.toString()); writeReport_(sh, row, { error: "final mail failed: " + mailErr.toString() }); }
   }
-  if (emailed) writeReport_(sh, row, { finalEmailed: emailed, finalPhotos: n });
+  if (emailed) writeReport_(sh, row, rep.state === "quiet" ? { finalEmailed: emailed, finalPhotos: n, state: "sent" } : { finalEmailed: emailed, finalPhotos: n });
   return json_({ status: "success", emailed: emailed });
 }
 
