@@ -41569,6 +41569,52 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
           x.beginPath(); x.arc(q[0], q[1], 15, 0, 7); x.fillStyle = '#fff'; x.fill(); x.lineWidth = 4; x.strokeStyle = pc; x.stroke();
           x.fillStyle = pc; x.font = 'bold 18px system-ui, Arial, sans-serif'; x.textAlign = 'center'; x.textBaseline = 'middle'; x.fillText('C', q[0], q[1] + 1); x.textAlign = 'left';
         });
+        /* street names on top of the lines (Fox, 27 Oct: the red and green lines covered the names printed on the map
+           underneath). Placed like the Run maps screen's own names (labels()): along the middle of each street, never upside
+           down, longest streets first, none on top of another; a name the driver dragged somewhere stays there. */
+        (function(){
+          var Lp = E.labels || {}, LR = E.lrot || {}, boxes = [[0, 0, c.width, TOP + 4]], named = {};
+          var fs = Math.max(15, Math.min(24, Math.round(c.width / 70)));
+          var shortN = function(n){ return String(n).replace(/\bRoad$/, 'Rd').replace(/\bStreet$/, 'St').replace(/\bAvenue$/, 'Ave').replace(/\bCourt$/, 'Ct').replace(/\bDrive$/, 'Dr').replace(/\bCrescent$/, 'Cres').replace(/\bParade$/, 'Pde').replace(/\bPlace$/, 'Pl').replace(/\bGrove$/, 'Gr').replace(/\bClose$/, 'Cl').replace(/\bHighway$/, 'Hwy').replace(/\bBoulevard$/, 'Bvd').replace(/\bTerrace$/, 'Tce'); };
+          var pcs = R.lines.filter(function(l){ return l.n && !(ovOf(E, l) === 'x'); }).map(function(l){
+            var q = l.c.map(P), len = 0; for (var i = 1; i < q.length; i++) len += Math.hypot(q[i][0] - q[i - 1][0], q[i][1] - q[i - 1][1]);
+            return { n: l.n, q: q, len: len, id: pid(l) };
+          }).sort(function(a, b){ return b.len - a.len; });
+          x.font = '800 ' + fs + 'px system-ui, -apple-system, "Segoe UI", Arial, sans-serif'; x.textAlign = 'center'; x.textBaseline = 'middle'; x.lineJoin = 'round';
+          var put = function(p, text, cx, cy, ang){
+            var w = x.measureText(text).width + 8, rad = ang * Math.PI / 180;
+            var hw = Math.abs(Math.cos(rad)) * w / 2 + Math.abs(Math.sin(rad)) * fs / 2, hh = Math.abs(Math.sin(rad)) * w / 2 + Math.abs(Math.cos(rad)) * fs / 2;
+            var box = [cx - hw, cy - hh, cx + hw, cy + hh];
+            if (box[0] < 0 || box[2] > c.width || box[1] < TOP || box[3] > c.height) return false;
+            if (boxes.some(function(o){ return !(box[2] < o[0] || box[0] > o[2] || box[3] < o[1] || box[1] > o[3]); })) return false;
+            boxes.push(box); named[p.n] = 1;
+            x.save(); x.translate(cx, cy); x.rotate(rad);
+            x.strokeStyle = '#fff'; x.lineWidth = 5; x.strokeText(text, 0, 1); x.fillStyle = '#0f172a'; x.fillText(text, 0, 1);
+            x.restore(); return true;
+          };
+          var angOf = function(a, b, id){ var g2 = Math.atan2(b[1] - a[1], b[0] - a[0]) * 180 / Math.PI + (LR[id] || 0); g2 = ((g2 % 360) + 540) % 360 - 180; if (g2 > 90) g2 -= 180; if (g2 < -90) g2 += 180; return g2; };
+          // dragged ones first, where they were left
+          pcs.forEach(function(p){
+            var at = Lp[p.id]; if (!at || p.q.length < 2) return;
+            var v = P(at), bi = 1, bd = Infinity;
+            for (var i = 1; i < p.q.length; i++) { var d = Math.hypot((p.q[i - 1][0] + p.q[i][0]) / 2 - v[0], (p.q[i - 1][1] + p.q[i][1]) / 2 - v[1]); if (d < bd) { bd = d; bi = i; } }
+            if (put(p, shortN(p.n), v[0], v[1], angOf(p.q[bi - 1], p.q[bi], p.id))) p.done = true;
+          });
+          [[1, 0.55], [0, 0.35]].forEach(function(pass){
+            pcs.forEach(function(p){
+              if (p.done || p.q.length < 2) return;
+              if (!pass[0] && named[p.n]) return;
+              var text = shortN(p.n), w = x.measureText(text).width + 8;
+              if (named[p.n] && p.len < w * 3) return;
+              if (p.len < w * pass[1]) return;
+              var half = p.len / 2, acc = 0, a = p.q[0], b = p.q[1];
+              for (var i = 1; i < p.q.length; i++) { var d = Math.hypot(p.q[i][0] - p.q[i - 1][0], p.q[i][1] - p.q[i - 1][1]); if (acc + d >= half) { a = p.q[i - 1]; b = p.q[i]; break; } acc += d; }
+              var t = (half - acc) / (Math.hypot(b[0] - a[0], b[1] - a[1]) || 1);
+              if (put(p, text, a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, angOf(a, b, p.id))) p.done = true;
+            });
+          });
+          x.textAlign = 'left';
+        })();
         x.fillStyle = COL[o.stream] || '#16a34a'; x.fillRect(0, 0, c.width, 14);
         x.fillStyle = '#fff'; x.fillRect(0, 14, c.width, TOP - 14);
         x.fillStyle = '#111'; x.font = 'bold 44px system-ui, Arial, sans-serif'; x.textBaseline = 'middle';
