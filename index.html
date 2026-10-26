@@ -32001,12 +32001,13 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
         if (missed.has(id)) { pink++; st.pink++; hl = true; hLeft++; return; }
         left++; st.left++; hl = true; hLeft++; hOpen++;
       }); });
-      if (hBins && site.lat && +site.lat) st.pts.push([+site.lat, +site.lng, hOpen ? 1 : 0]);   // (where each house is and whether anything there is still to do: the run map PDF colours the two sides of a street apart)
+      var hpt = (hBins && site.lat && +site.lat) ? [+site.lat, +site.lng, hOpen ? 1 : 0, 0, hOpen] : null;   // [lat, lng, open?, on the To do?, open bins]
+      if (hpt) st.pts.push(hpt);   // (where each house is and whether anything there is still to do: the run map PDF colours the two sides of a street apart)
       if (hl) { st.hs++; houses++; }
       // still to do: bins neither lifted nor passed, at a house the truck has not gone past on its kerb side
       if (hOpen) {
         if (site.lat && +site.lat && passedBy(+site.lat, +site.lng)) passedB += hOpen;
-        else { st.tHs++; st.tBins += hOpen; todoH++; todoB += hOpen; }
+        else { st.tHs++; st.tBins += hOpen; todoH++; todoB += hOpen; if (hpt) hpt[3] = 1; }
       }
       if (!st.driven && site.lat && +site.lat && near(+site.lat, +site.lng)) st.driven = true;
     });
@@ -32020,6 +32021,17 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       notDriven: list.filter(function(x){ return !x.driven && x.bins; }), hasTrail: Object.keys(grid).length > 0, streetKeys: Object.keys(streets) };
   }
   window.lbRunCheck = runCheck;   // the run map asks it which streets of the shift's run are finished
+  /* (Fox, 27 Oct: the To do PDF for 220B TUE listed 17 streets and 212 houses while its own map had nearly all of it red.)
+     The To do now goes by the run map: a house whose side of the street the map shows done (window.lbRunMapRefine - the
+     truck drove that side, by the route lines rather than the GPS points) is not to do. Before, a house had to be within
+     40 m of a GPS point, and Rye's big blocks put the house points further back than that. Same answer as the map, always. */
+  function refineTc(tc, t0, key){
+    if (!tc || !window.lbRunMapRefine) return Promise.resolve(tc);
+    if (!key) try { key = window.lbRunMapKey ? window.lbRunMapKey() : null; } catch (e) {}
+    return window.lbRunMapRefine(tc, t0, key).then(function(){ return tc; }, function(){ return tc; });
+  }
+  function runCheckFull(){ var tc = runCheck(); return tc ? refineTc(tc, SH ? SH.start : 0) : Promise.resolve(null); }
+  window.lbRunCheckFull = runCheckFull;
   // What is left on the run, as text: the To do PDF, the To do send, and the break / end of shift email
   function todoText(tc, run, who, loc){
     var tl = tc.todo || [], head = 'TO DO ON RUN ' + String(run).toUpperCase() + ': ' + who;
@@ -32420,7 +32432,12 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       h = L0 ? summaryHtml(L0) + '<div class="drv-foot"><button type="button" class="drv-btn" data-a="share" data-id="' + L0.id + '">' + I.share + 'Share summary</button>' + (L0.trail ? '<button type="button" class="drv-btn" data-a="trail" data-id="' + L0.trail + '" data-lbl="' + esc(dateStr(L0.start)) + '">' + I.route + 'Trail</button><button type="button" class="drv-btn" data-a="kml" data-id="' + L0.trail + '" data-lbl="' + esc(L0.start) + '">' + I.share + 'Trail KML</button>' : '') + (window.lbRunSheet ? '<button type="button" class="drv-btn" data-a="rs:main" data-id="' + L0.id + '">Run sheet</button>' : '') + (window.lbPaperwork ? '<button type="button" class="drv-btn" data-a="paper" data-id="' + L0.id + '">Check the paperwork</button>' : '') + '<button type="button" class="drv-btn drv-go" data-a="close">Done</button></div>' : '';
     } else if (view === 'todo') {
       title = 'To do';
-      var tc = SH ? runCheck() : null;
+      // (the map's answer takes a moment: the last one is shown, and the page is drawn again when the new one is in)
+      var tc = SH ? ((todoRef.tc && Date.now() - todoRef.t < 60000) ? todoRef.tc : runCheck()) : null;
+      if (SH && !todoRef.busy && !(todoRef.tc && Date.now() - todoRef.t < 60000)) {
+        todoRef.busy = true;
+        runCheckFull().then(function(r){ todoRef = { t: Date.now(), tc: r, busy: false }; if (view === 'todo') paint(); }, function(){ todoRef.busy = false; });
+      }
       if (!tc) h = '<div class="drv-empty">This shift has no run picked, or the run’s houses aren’t loaded.</div>';
       else {
         var tl = (tc.todo || []).slice(), shown = todoAll ? tl : tl.slice(0, 3);
@@ -32877,17 +32894,18 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       return;
     }
     if (a === 'runcheck') { view = 'runcheck'; paint(); return; }
-    if (a === 'todo') { view = 'todo'; todoAll = false; paint(); return; }
+    if (a === 'todo') { view = 'todo'; todoAll = false; todoRef = { t: 0, tc: null, busy: false }; paint(); return; }
     if (a === 'todoall') { todoAll = !todoAll; paint(); return; }
     if (a === 'todopdf' || a === 'todosend') {
-      var tc2 = SH ? runCheck() : null; if (!tc2) { toast('No run to send'); return; }
+      var tc0 = SH ? runCheck() : null; if (!tc0) { toast('No run to send'); return; }
+      var sh0 = SH; toast(a === 'todopdf' ? 'Making the PDF…' : 'Sending to your leading hand…');
+      refineTc(tc0, SH.start).then(function(tc2){ var SH = sh0;
       var tl2 = tc2.todo || [], d2 = me(), loc2 = here();
       var subj2 = 'TO DO ON RUN ' + String(SH.run).toUpperCase() + ': ' + (d2.name || SH.driver || 'Driver');
       var txt2 = todoText(tc2, SH.run, d2.name || SH.driver || 'Driver', loc2);
       // page 1 of the PDF is the run map with the finished streets in red; the list of what is left follows it
       var mapImg = function(){ try { return window.lbRunMapImage ? window.lbRunMapImage(null, {}).catch(function(){ return null; }) : Promise.resolve(null); } catch (e) { return Promise.resolve(null); } };
       if (a === 'todopdf') {
-        toast('Making the PDF…');
         mapImg().then(function(img){
           var blob = window.lbMedia.pdfBlob(subj2, txt2, img), u = URL.createObjectURL(blob), an = document.createElement('a');
           an.href = u; an.download = 'Run ' + String(SH.run).toUpperCase() + ' to do ' + new Date().toISOString().slice(0, 10) + '.pdf'; document.body.appendChild(an); an.click();
@@ -32896,13 +32914,13 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
         });
         return;
       }
-      toast('Sending to your leading hand…');
       try { if (window.lbOutbox) {
         var rid2 = 't_' + uid(), go2 = function(ids){ window.lbOutbox.send({ rid: rid2, kind: 'driver-todo', urgent: false, to: ['lead'], subject: subj2, text: txt2, finalText: txt2, quiet: true, data: { run: SH.run, streets: tl2.length, houses: tc2.todoHouses, bins: tc2.todoBins, passed: tc2.passed, ts: Date.now() }, media: ids || [], delayMs: 0 }); };
         mapImg().then(function(img){
           if (window.lbMedia && window.lbMedia.putPdf) window.lbMedia.putPdf(subj2, txt2, img).then(function(id){ go2([id]); toast('Sent to your leading hand'); }, function(){ go2([]); toast('Sent to your leading hand'); }); else { go2([]); toast('Sent to your leading hand'); }
         });
       } } catch (e) {}
+      });
       return;
     }
     if (a === 'runmap') { closeSheet(); if (window.lbRunMapOpen) window.lbRunMapOpen(); return; }
@@ -32911,7 +32929,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     if (a === 'trail') { closeSheet(); showTrail(b.getAttribute('data-id'), 'Trail ' + (b.getAttribute('data-lbl') || '')); return; }
     if (a === 'role') { (isLead() ? Promise.resolve(toDriver()) : toLead()).then(function(){ paint(); }); return; }
   }
-  var pendingFaults = [], pre = null;
+  var pendingFaults = [], pre = null, todoRef = { t: 0, tc: null, busy: false };
   /* Sent without being asked: when a break starts and when the shift ends, ONE report to the leading hand - one email, with one
      PDF: the run sheet form, the run map (finished streets red) and what is left on the run. (Fox, 26 Oct: it used to be the run
      sheet and the To do as two reports, each a text email then a "Full report" email with its PDF, so 4 emails at the end of a
@@ -32928,12 +32946,15 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       lastAuto = { k: key, t: now };
       var sid = SH.id, run = SH.run, d2 = me(), loc2 = here(), who = d2.name || SH.driver || 'Driver';
       var tc2 = (run && !isStreet(SH.stream)) ? runCheck() : null;
-      var todo = tc2 ? todoText(tc2, run, who, loc2) : '';
       var mk = null; try { mk = window.lbRunMapKey ? window.lbRunMapKey() : null; } catch (e) {}
       var map = (tc2 && mk && window.lbRunMapImage) ? window.lbRunMapImage(mk, { rc: tc2, t0: SH.start }).catch(function(){ return null; }) : Promise.resolve(null);
+      var refined = tc2 ? refineTc(tc2, SH.start, mk) : Promise.resolve(null);   // (started now, while the shift and its run are still here)
       var extra = (opts && opts.photos) || [];
       var go = function(){
-        try { if (window.lbRunSheet && window.lbRunSheet.autoSend) window.lbRunSheet.autoSend(sid, tag, extra, { todo: todo, map: map, loc: loc2, todoData: tc2 ? { streets: (tc2.todo || []).length, houses: tc2.todoHouses, bins: tc2.todoBins, passed: tc2.passed } : null }); } catch (e) { console.warn('auto send', e); }
+        refined.then(function(t){
+          var todo = t ? todoText(t, run, who, loc2) : '';
+          try { if (window.lbRunSheet && window.lbRunSheet.autoSend) window.lbRunSheet.autoSend(sid, tag, extra, { todo: todo, map: map, loc: loc2, todoData: t ? { streets: (t.todo || []).length, houses: t.todoHouses, bins: t.todoBins, passed: t.passed } : null }); } catch (e) { console.warn('auto send', e); }
+        });
       };
       if (opts && opts.later) return go;
       go(); return null;
@@ -32956,9 +32977,9 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     if (loc) ['mapLiveStreet', 'hudStreetName', 'mapStreetOverlay'].some(function(id){ var e = document.getElementById(id); var t = e ? String(e.textContent || '').replace(/\s+/g, ' ').trim() : ''; if (t && t.length < 40 && RX.test(t)) { stn = t; return true; } return false; });
     return { k: 'drv', n: stn };
   }
-  function liveSnap(fin){
+  function liveSnap(fin, tc){
     if (!SH || !SH.run || isStreet(SH.stream)) return null;
-    var tc = runCheck(); if (!tc) return null;
+    tc = tc || runCheck(); if (!tc) return null;
     var d2 = me(), loc = here(), all = tc.all || [], hsAll = 0;
     all.forEach(function(x){ hsAll += x.pts ? x.pts.length : 0; });
     var stDone = all.filter(function(x){ return x.bins && !x.tHs; }).length, stAll = all.filter(function(x){ return x.bins; }).length;
@@ -32971,11 +32992,23 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   }
   function liveSend(fin){
     if (liveBusy || !window.lbOutbox || !window.lbOutbox.postPlace) return;
-    var p = liveSnap(fin); if (!p) return;
-    var tc = p._tc; delete p._tc; liveBusy = true; liveLast = Date.now();
+    if (!SH || !SH.run || isStreet(SH.stream)) return;
+    var tc0 = runCheck(); if (!tc0) return;
+    liveBusy = true; liveLast = Date.now();
     var mk = null; try { mk = window.lbRunMapKey ? window.lbRunMapKey() : null; } catch (e) {}
-    var ds = (mk && window.lbRunDoneState) ? window.lbRunDoneState(mk, tc, SH.start).catch(function(){ return null; }) : Promise.resolve(null);
-    ds.then(function(d){
+    var t0 = SH.start, p = null;
+    // (the snapshot of the shift is taken now - at the end of shift it is closed a moment later - and its numbers once the
+    // To do has the map's answer)
+    var base = liveSnap(fin, tc0);
+    var ds = (mk && window.lbRunDoneState) ? window.lbRunDoneState(mk, tc0, t0).catch(function(){ return null; }) : Promise.resolve(null);
+    refineTc(tc0, t0, mk).then(function(tc){
+      var all = tc.all || [];
+      p = base; delete p._tc;
+      p.passed = tc.passed; p.binsLeft = tc.todoBins; p.housesLeft = tc.todoHouses;
+      p.streetsDone = all.filter(function(x){ return x.bins && !x.tHs; }).length;
+      p.todo = (tc.todo || []).slice(0, 40).map(function(x){ return [x.name, x.tHs]; });
+      return ds;
+    }).then(function(d){
       if (d) { p.key = d.key; p.km = d.km; p.kmDone = d.kmDone; p.st = d.st; }
       return window.lbOutbox.postPlace(p);
     }).then(function(){ liveBusy = false; }, function(){ liveBusy = false; });
@@ -39697,6 +39730,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       }
       if (cur.length > 1 && acc > 0.5) mk(li, cur);
     });
+    var hAt = [];   // each house with its piece and side, so the To do can follow the map
     if (st) {
       var nOf = {}; pcs.forEach(function(pc){ nOf[pc.li] = (nOf[pc.li] || 0) + 1; });
       var at = {}; pcs.forEach(function(pc){ var s0 = String(st[pc.li] || ''), k = at[pc.li] = (at[pc.li] || 0); at[pc.li]++; var v = s0.length === nOf[pc.li] ? +s0.charAt(k) || 0 : 0; pc.fl = !!(v & 1); pc.fr = !!(v & 2); });
@@ -39709,6 +39743,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       if (!best) return;
       var sd = (best.u[0] * (H[1] - best.a[1]) - best.u[1] * (H[0] - best.a[0])) >= 0 ? 1 : -1;
       best.h[sd][0]++; if (h[2]) best.h[sd][1]++;
+      hAt.push([h, best, sd]);
     }); });
     // this shift's trail, as short steps with their direction
     var P = st ? [] : (g('gpsTrailPoints') || []), T = g('gpsTrailTimes') || [], B = g('gpsTrailBreaks') || [], t0 = t0in || 0, prevT = 0;
@@ -39755,7 +39790,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       if (last && last.l === l && last.r === r && last.end === pc.pts[0]) { last.c = last.c.concat(pc.pts.slice(1)); last.end = pc.pts[pc.pts.length - 1]; }
       else list.push({ c: pc.pts.slice(), l: l, r: r, end: pc.pts[pc.pts.length - 1] });
     });
-    return { lines: out, km: km / 1000, kmDone: kmDone / 1000, pink: rc.pink || 0, st: sts };
+    return { lines: out, km: km / 1000, kmDone: kmDone / 1000, pink: rc.pink || 0, st: sts, houseDone: hAt.map(function(a){ return [a[0], side(a[1], a[2])]; }) };
   }
   window.lbRunDoneParts = doneParts;   // (test hook)
   var doneNames = null, DONE_COL = '#dc2626', doneAvail = null, doneOn = null, doneKey = '', clkT = 0;
@@ -41427,6 +41462,25 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     return { R: R, E: E };
   }
   // Live runs: how much of the run is done, piece by piece (a short string per line) and in km, for the leading hand's screen
+  // The To do follows this map: a house on the To do whose side of the street is done here comes off it (counted as
+  // passed, bins not put out). tc is the shift's run check; changed in place.
+  window.lbRunMapRefine = function(tc, t0, key){
+    key = key || currentKey();
+    return load().then(function(){ return key && DATA[key] ? streetsFor(key) : null; }).then(function(){
+      var k = key; if (!k || !DATA[k] || !tc || tc.mapRefined) return tc;
+      var F = routeFor(k), lines = imgLines(F.R, F.E), dp = doneParts(k, lines.map(function(m){ return m.l.c; }), tc, t0);
+      if (!dp || !dp.houseDone) return tc;
+      var off = new Set(); dp.houseDone.forEach(function(x){ if (x[1] && x[0][3] === 1) off.add(x[0]); });
+      if (!off.size) return tc;
+      (tc.all || []).forEach(function(st){ (st.pts || []).forEach(function(h){
+        if (!off.has(h)) return;
+        h[3] = 0; st.tHs--; st.tBins -= h[4] || 0; tc.todoHouses--; tc.todoBins -= h[4] || 0; tc.passed += h[4] || 0;
+      }); });
+      tc.todo = (tc.all || []).filter(function(x){ return x.tHs > 0; }).sort(function(a, b){ return b.tHs - a.tHs; });
+      tc.mapRefined = true;
+      return tc;
+    });
+  };
   window.lbRunDoneState = function(key, rc, t0){
     return load().then(function(){ var k0 = key || currentKey(); return k0 && DATA[k0] ? streetsFor(k0) : null; }).then(function(){   // (the same street lines the picture waits for, or the pieces don't line up)
       var k = key || currentKey(); if (!k || !DATA[k] || !rc) return null;
