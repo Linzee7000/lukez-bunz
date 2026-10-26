@@ -38464,6 +38464,9 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   #lbRunMap .rm-sub { font-weight: 600; color: #475569; font-size: 13px; }
   #lbRunMap .rm-stats { display: flex; gap: 10px; margin: 6px 0; font-size: 12px; color: #334155; }
   #lbRunMap .rm-stats b { font-size: 15px; color: #111; margin-right: 2px; }
+  #lbRunMap .rm-extra { font-size: 11.5px; color: #334155; margin: -2px 0 6px; }
+  #lbRunMap .rm-extra b { color: #111; }
+  #lbRunMap .rm-hollow { display: inline-block; width: 6px; height: 6px; border: 1px solid #475569; border-radius: 50%; vertical-align: middle; margin-left: 3px; }
   #lbRunMap .rm-leg { display: grid; grid-template-columns: auto auto; gap: 2px 12px; font-size: 11.5px; }
   #lbRunMap .rm-leg i { display: inline-block; width: 18px; height: 0; vertical-align: middle; margin-right: 5px; border-top: 4px solid; }
   #lbRunMap .rm-leg i.dot { width: 7px; height: 7px; border: 0; border-radius: 50%; background: #475569; margin: 0 11px 0 6px; }
@@ -38621,7 +38624,17 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       if (A && A.runs) A.runs.forEach(function(rk){ var g2 = groupFor(parse(rk)); if (g2 && g2.sites) g2.sites.forEach(function(x){ if (!seen.has(x)) { seen.add(x); sites.push(x); } }); });
       return sites.length ? { sites: sites } : null;
     }
-    try { return (window.lbRunGroups(o.stream) || []).filter(function(x){ return String(x.run).toLowerCase() === String(o.run).toLowerCase() && String(x.day).toLowerCase() === o.day.toLowerCase() && (!o.week || !x.week || String(x.week).toUpperCase() === o.week); })[0] || null; } catch (e) { return null; }
+    var g = null;
+    try { g = (window.lbRunGroups(o.stream) || []).filter(function(x){ return String(x.run).toLowerCase() === String(o.run).toLowerCase() && String(x.day).toLowerCase() === o.day.toLowerCase() && (!o.week || !x.week || String(x.week).toUpperCase() === o.week); })[0] || null; } catch (e) { return null; }
+    if (!g || typeof window.lbSplitOf !== 'function') return g;
+    // A full run's houses that a split run takes (227A / 227B Monday) are counted with the split run - it is assumed to run -
+    // and kept aside as "extra": what the full run picks up when it doesn't (short a driver). So no house or bin is counted twice.
+    var own = [], extra = [], me = String(o.run).toLowerCase();
+    g.sites.forEach(function(s){
+      var sp = []; try { sp = window.lbSplitOf(o.stream, s) || []; } catch (e) {}
+      (sp.some(function(x){ return String(x.run).toLowerCase() !== me; }) ? extra : own).push(s);
+    });
+    return extra.length ? { key: g.key, stream: g.stream, run: g.run, day: g.day, week: g.week, sites: own, extra: extra, splitRuns: Object.keys(extra.reduce(function(m, s){ (window.lbSplitOf(o.stream, s) || []).forEach(function(x){ m[x.run] = 1; }); return m; }, {})) } : g;
   }
   function mPerDegLng(lat){ return 111320 * Math.cos(lat * Math.PI / 180); }
   // metres per CSS pixel at a web-map zoom level
@@ -39713,11 +39726,24 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     map.createPane('rmLabels').style.zIndex = 650; map.createPane('rmPins').style.zIndex = 660;
     var layers = L.layerGroup().addTo(map);
     if (R.days || daysLayerOn()) { try { drawDays(map, layers, o, R); } catch (e) {} }
-    var grp = R.days ? null : groupFor(o), houses = 0, bins = 0;
+    var grp = R.days ? null : groupFor(o), houses = 0, bins = 0, exHouses = 0, exBins = 0;
+    // (bins by serial, once each: a serial listed twice - at one house or two - is one bin)
+    var binSeen = new Set();
+    function binsAt(s){
+      var l = ((s.soloStreams || {})[o.stream] || []); if (!l.length) l = ((s.councilStreams || {})[o.stream] || []);
+      var n = 0; l.forEach(function(b, i){ var k = String((b && b.serial) || '').trim().toUpperCase() || ('#' + (s.siteId || s.propId) + '#' + i); if (!binSeen.has(k)) { binSeen.add(k); n++; } });
+      return n;
+    }
     if (grp) grp.sites.forEach(function(s){
       var la = +s.lat, ln = +s.lng; if (!la || !ln) return; houses++;
-      bins += ((s.soloStreams || {})[o.stream] || []).length || ((s.councilStreams || {})[o.stream] || []).length;
+      bins += binsAt(s);
       L.circleMarker([la, ln], { radius: 2, weight: 0, fillColor: '#475569', fillOpacity: .7, interactive: false }).addTo(layers);
+    });
+    // the split run's houses (done by it when it runs): a hollow dot, counted apart
+    if (grp && grp.extra) grp.extra.forEach(function(s){
+      var la = +s.lat, ln = +s.lng; if (!la || !ln) return; exHouses++;
+      exBins += binsAt(s);
+      L.circleMarker([la, ln], { radius: 2, weight: 1, color: '#475569', fill: false, opacity: .7, interactive: false }).addTo(layers);
     });
     try { var sc = JSON.parse(localStorage.getItem('lbSchools') || 'null'); (sc && sc.items || []).forEach(function(s){ L.polygon(s.r, { color: '#ca8a04', weight: 1, fillColor: '#fde68a', fillOpacity: .55, interactive: false }).addTo(layers); }); } catch (e) {}
     var all = []; R.lines.forEach(function(l){ all = all.concat(l.c); });
@@ -40039,7 +40065,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var sub = o.day === 'All' ? 'Monday to Friday' : o.day;   // the stream is the colour band and its logo; the week letter rides on the run number
     var card = document.createElement('div'); card.className = 'rm-card rm-key';
     card.innerHTML = northSvg(st.rot) + '<div class="rm-band" style="background:' + (COL[o.stream] || '#16a34a') + '"></div><div class="rm-title">' + (window.lbStreamIcon ? window.lbStreamIcon(o.stream) + ' ' : '') + (o.run === 'DAYS' ? 'Service days' + (o.week ? ' ' + esc(o.week) : '') : o.run === 'ALL' ? 'All runs' + (o.week ? ' ' + esc(o.week) : '') : String(o.run).indexOf('+') >= 0 ? 'Runs ' + esc(String(o.run).split('+').map(function(r){ return r + (o.week || ''); }).join(', ')) : 'Run ' + esc(o.run) + ((o.week && /^\d+$/.test(String(o.run))) ? esc(String(o.week).toUpperCase()) : '')) + '</div><div class="rm-sub">' + esc(sub) + (opts.pageLabel ? ' \u00b7 <b style="color:#111">' + esc(opts.pageLabel) + '</b>' : '') + '</div>' +
-      (R.days ? '<div class="rm-stats"><span><b>' + R.lines.filter(function(l){ return /\|0$/.test(l.pp); }).length + '</b>runs</span></div>' : '<div class="rm-stats"><span><b>' + houses.toLocaleString() + '</b>houses</span><span><b>' + bins.toLocaleString() + '</b>bins</span><span><b>' + esc(R.km) + '</b>km</span></div>') +
+      (R.days ? '<div class="rm-stats"><span><b>' + R.lines.filter(function(l){ return /\|0$/.test(l.pp); }).length + '</b>runs</span></div>' : '<div class="rm-stats"><span><b>' + houses.toLocaleString() + '</b>houses</span><span><b>' + bins.toLocaleString() + '</b>bins</span><span><b>' + esc(R.km) + '</b>km</span></div>' +
+        (exHouses ? '<div class="rm-extra">Full run (no ' + esc((grp.splitRuns || []).map(function(r){ return r + (o.week || ''); }).join(', ')) + '): <b>+' + exBins.toLocaleString() + '</b> bins · +' + exHouses.toLocaleString() + ' houses <span class="rm-hollow"></span></div>' : '')) +
       '<div class="rm-leg">' + legendSections(used, R.runNames ? Object.assign({}, E, { names: Object.assign({}, R.runNames, E.names) }) : E) + (R.days ? '</div>' : (E.points.length ? '<div><span class="rm-cp rm-cp-k">C</span>Collection point</div>' : '') + (E.arrows.length ? '<div><span class="rm-ar-k">&#10140;</span>Direction of travel</div>' : '') + '<div><i style="border-color:#7c3aed"></i>Reverse in</div><div><i style="border-color:#f59e0b"></i>Drive in, back out</div><div><i class="box"></i>School</div><div><i class="dot"></i>House</div><div><i class="num">1</i>Note</div></div>');   // (Service days: just its days or runs)
     st.page.appendChild(card);
     if (opts.noKey) card.style.display = 'none';   // (a page of several: the key is on the overview sheet, and each page says which it is in its corner)
