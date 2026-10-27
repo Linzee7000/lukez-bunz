@@ -68,7 +68,7 @@ function routeGet_(ss, e) {
   var p = (e && e.parameter) || {};
   try {
     if (p.status) return withLock_(function() { return handleStatus_(ss, String(p.status)); });
-    if (p.places) return json_({ status: "success", places: readPlaces_(ss) });
+    if (p.places) return json_({ status: "success", filtered: true, places: readPlaces_(ss, p) });
     if (p.config) return json_({ status: "success", company: CONFIG.COMPANY || "", opsPhone: CONFIG.OPS_PHONE || "" });
     if (p.ack)    return withLock_(function() { return handleAck_(ss, String(p.ack)); });
   } catch (err) {
@@ -305,11 +305,27 @@ function handlePlace_(ss, d) {
   return json_({ status: "success" });
 }
 
-function readPlaces_(ss) {
+// Filters (?places=1&kinds=a,b  &skip=a,b  &to=name  &since=ms) so a phone downloads only what it needs: the leading hand's
+// Live runs page only liveRun / issueThumb rows, a driver's phone every minute only the runs sent to it, and the normal
+// 10-minute pull everything but Live runs' rows. Without them it is every place, as before.
+function readPlaces_(ss, q) {
   var sh = ss.getSheetByName("Places"), out = {};
   if (!sh || sh.getLastRow() < 2) return out;
+  q = q || {};
+  var list = function(v) { return v ? String(v).split(",").map(function(x) { return x.trim(); }).filter(String) : null; };
+  var kinds = list(q.kinds), skip = list(q.skip), to = q.to ? String(q.to).trim().toLowerCase() : "", since = Number(q.since) || 0;
   sh.getRange(2, 1, sh.getLastRow() - 1, 2).getValues().forEach(function(r) {
-    try { out[String(r[0])] = JSON.parse(r[1]); } catch (e) {}
+    var key = String(r[0]), txt = String(r[1] || "");
+    // the kind is near the front of the JSON: skip a row without parsing it when the filter rules it out
+    var km = /"kind":"([^"]*)"/.exec(txt.substring(0, 400)), kind = km ? km[1] : "";
+    if (kinds && kinds.indexOf(kind) < 0) return;
+    if (skip && skip.indexOf(kind) >= 0) return;
+    try {
+      var pl = JSON.parse(txt);
+      if (to && String(pl.to || "").trim().toLowerCase() !== to) return;
+      if (since && (Number(pl.ts) || 0) < since) return;
+      out[key] = pl;
+    } catch (e) {}
   });
   return out;
 }

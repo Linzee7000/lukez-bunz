@@ -33092,6 +33092,14 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     }).then(function(){ liveBusy = false; }, function(){ liveBusy = false; });
   }
   setInterval(function(){ try { if (SH && Date.now() - liveLast >= 120000) { liveSend(false); liveThumbs(); } } catch (e) { liveBusy = false; } }, 15000);
+  /* (Fox, 27 Oct: "No signal 20 minutes" - can it not send in the background?) A phone with the screen off or the app in the
+     background stops the page's timers, so the 2-minute send above stopped too. In the phone app the background GPS keeps
+     calling the page with each fix even then, so the progress goes with the fixes as well. (In a browser tab nothing runs in
+     the background: that has to be the app.) */
+  (function bgSend(){
+    if (!window.lbNativeGps || !navigator.geolocation || !navigator.geolocation.watchPosition) { if (!window.__lbBgTry) { window.__lbBgTry = 1; setTimeout(bgSend, 5000); } return; }
+    try { navigator.geolocation.watchPosition(function(){ try { if (SH && Date.now() - liveLast >= 120000) { liveSend(false); liveThumbs(); } } catch (e) { liveBusy = false; } }, function(){}, { enableHighAccuracy: true }); } catch (e) {}
+  })();
   window.lbLiveSend = liveSend;   // (test hook; also sent at a break)
   window.lbLiveThumbs = liveThumbs;   // (test hook)
   function doFinish(){
@@ -33432,9 +33440,19 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   }
 
   /* ---- fleet places pulled from the script ---- */
+  // (the script leaves out what the filter says when it can - "filtered" in its answer; an older one sends everything)
+  var placesFiltered = lsGet('lbPlacesFiltered', false);
+  function getPlaces(qs){
+    if (!scriptUrl() || navigator.onLine === false) return Promise.resolve(null);
+    return getJ('places=1' + (qs ? '&' + qs : '')).then(function(r){
+      if (!r || r.status !== 'success' || !r.places) return null;
+      if (!!r.filtered !== placesFiltered) { placesFiltered = !!r.filtered; lsSet('lbPlacesFiltered', placesFiltered); }
+      return r;
+    }).catch(function(){ return null; });
+  }
   function pullPlaces(){
     if (!scriptUrl() || navigator.onLine === false) return Promise.resolve();
-    return getJ('places=1').then(function(r){
+    return getJ('places=1&skip=liveRun,issueThumb').then(function(r){
       if (!r || r.status !== 'success' || !r.places) return;
       var mine = lsGet('lbPlaces', []), have = {}; mine.forEach(function(p){ have[p.id] = 1; });
       var fleet = Object.keys(r.places).map(function(k){ var p = r.places[k]; if (p && p.lat != null) { p.id = p.id || k; p.fleet = true; return p; } return null; }).filter(Boolean);
@@ -33539,7 +33557,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     return null;
   }
 
-  window.lbOutbox = { send: send, sendPlace: sendPlace, postPlace: postPlace, cancel: cancel, flush: function(){ return flush(true); }, status: status, label: label, pending: function(){ return unsent().length; },
+  window.lbOutbox = { send: send, sendPlace: sendPlace, postPlace: postPlace, getPlaces: getPlaces, filtered: function(){ return placesFiltered; }, cancel: cancel, flush: function(){ return flush(true); }, status: status, label: label, pending: function(){ return unsent().length; },
     on: function(f){ listeners.push(f); }, config: config, refreshConfig: refreshConfig, pullPlaces: pullPlaces, report: report, list: function(){ return Q.slice(); }, hasUrl: function(){ return !!scriptUrl(); } };
 
   window.addEventListener('online', function(){ flush(true); refreshConfig(); });
@@ -54121,6 +54139,8 @@ body.lb-pc #lbLive{top:var(--pc-bar-h,92px);padding-top:0}
 #lbLive .lv-pin span{display:flex;align-items:center;justify-content:center;width:26px;height:26px;margin:2px;border-radius:50%;border:2.5px solid #000;color:#000;font:900 15px/1 system-ui,sans-serif;box-shadow:2px 2px 0 rgba(0,0,0,.6)}
 #lbLive .lv-pin em{position:absolute;right:-8px;top:-8px;width:18px;height:18px;display:flex;align-items:center;justify-content:center;border-radius:50%;background:#fff;border:1.5px solid #000}
 #lbLive .lv-pin em svg{width:12px;height:12px;stroke:#000;fill:none;stroke-width:2.4}
+#lbLive .lv-lbl{background:none;border:0}
+#lbLive .lv-lbl span{position:absolute;left:0;top:0;white-space:nowrap;font-weight:800;font-family:system-ui,-apple-system,"Segoe UI",sans-serif;color:#0f172a;text-shadow:-2px 0 #fff,2px 0 #fff,0 -2px #fff,0 2px #fff,-1.5px -1.5px #fff,1.5px 1.5px #fff,-1.5px 1.5px #fff,1.5px -1.5px #fff;transform-origin:50% 50%}
 #lbLive .lv-hs{background:none;border:0}
 #lbLive .lv-hs span{display:flex;align-items:center;justify-content:center;min-width:24px;height:24px;padding:0 3px;box-sizing:border-box;border-radius:12px;background:#ffd21f;border:2.5px solid #000;color:#000;font:900 10.5px/1 system-ui,sans-serif;box-shadow:2px 2px 0 rgba(0,0,0,.55);white-space:nowrap}
 #lbLive .lv-truck{background:none;border:0}
@@ -54185,19 +54205,40 @@ body.lb-pc #lbLive{top:var(--pc-bar-h,92px);padding-top:0}
 
   /* ---- what has come in ---- */
   var RUNS = {}, HO = [], THUMBS = {}, lastPull = 0;
-  document.addEventListener('lb-places', function(ev){
-    var P = (ev && ev.detail) || {}, cut = dayStart(), runs = {}, ho = [], th = {};
-    Object.keys(P).forEach(function(k){
+  // Live runs' rows and the photos: only when they came (an older script sends every place on the 10-minute pull, a newer one
+  // leaves them out of it and this page asks for just them, see pull)
+  function ingest(P, live){
+    var cut = dayStart(), runs = {}, ho = [], th = {}, anyLive = false;
+    Object.keys(P || {}).forEach(function(k){
       var p = P[k]; if (!p || typeof p !== 'object') return;
-      if (p.kind === 'issueThumb' && p.issue && p.img && (p.ts || 0) >= cut) (th[p.issue] = th[p.issue] || [])[p.i || 0] = p.img;
-      if (p.kind === 'liveRun' && (p.ts || 0) >= cut) runs[p.id || k] = p;
+      if (p.kind === 'issueThumb') { anyLive = true; if (p.issue && p.img && (p.ts || 0) >= cut) (th[p.issue] = th[p.issue] || [])[p.i || 0] = p.img; }
+      if (p.kind === 'liveRun') { anyLive = true; if ((p.ts || 0) >= cut) runs[p.id || k] = p; }
       if (p.kind === 'runHandover' && (p.ts || 0) >= Date.now() - 86400000) ho.push(p);
     });
-    RUNS = runs; HO = ho; THUMBS = th; lastPull = Date.now();
-    if (isOpen()) paint(true);
-    try { checkHandover(); } catch (e) {}
-  });
-  function pull(){ try { if (window.lbOutbox && window.lbOutbox.pullPlaces) return window.lbOutbox.pullPlaces(); } catch (e) {} return Promise.resolve(); }
+    if (live || anyLive) { RUNS = runs; THUMBS = th; lastPull = Date.now(); if (isOpen()) paint(true); }
+    if (!live) { HO = ho; try { checkHandover(); } catch (e) {} }
+  }
+  document.addEventListener('lb-places', function(ev){ ingest((ev && ev.detail) || {}, false); });
+  function pull(){
+    var O = window.lbOutbox; if (!O) return Promise.resolve();
+    if (!O.getPlaces) return O.pullPlaces ? O.pullPlaces() : Promise.resolve();
+    return O.getPlaces('kinds=liveRun,issueThumb&since=' + dayStart()).then(function(r){
+      if (!r) return;
+      if (r.filtered) ingest(r.places, true); else document.dispatchEvent(new CustomEvent('lb-places', { detail: r.places }));   // (an older script: all the places)
+    });
+  }
+  /* A run sent to this phone (Fox, 27 Oct: "When I sent to my phone, nothing happened"): with the newer script the phone asks
+     every minute for just the runs sent to its driver - a few hundred bytes - instead of waiting for the 10-minute pull. */
+  setInterval(function(){
+    try {
+      var O = window.lbOutbox, me = myName(); if (!O || !O.getPlaces || !O.filtered || !O.filtered() || !me || document.hidden && !window.lbNativeGps) return;
+      O.getPlaces('kinds=runHandover&to=' + encodeURIComponent(me) + '&since=' + (Date.now() - 86400000)).then(function(r){
+        if (!r || !r.filtered) return;
+        HO = Object.keys(r.places).map(function(k){ return r.places[k]; }).filter(function(p){ return p && p.kind === 'runHandover'; });
+        checkHandover();
+      });
+    } catch (e) {}
+  }, 60000);
 
   /* ---- the menu button (leading hands only) ---- */
   function addTile(){
@@ -54255,13 +54296,16 @@ body.lb-pc #lbLive{top:var(--pc-bar-h,92px);padding-top:0}
     setTimeout(function(){ if (M.map) M.map.invalidateSize(); }, 50);
     paint(); pull().then(function(){ paint(); });
     clearInterval(timer);
-    timer = setInterval(function(){ if (!isOpen()) { clearInterval(timer); return; } if (Date.now() - lastPull >= 120000) pull(); else paint(true); }, 30000);
+    timer = setInterval(function(){ if (!isOpen()) { clearInterval(timer); return; } var f = window.lbOutbox && window.lbOutbox.filtered && window.lbOutbox.filtered(); if (Date.now() - lastPull >= (f ? 60000 : 120000)) pull(); else paint(true); }, 30000);
   }
   function close(){ if (el) el.classList.remove('open'); clearInterval(timer); }
   window.lbLiveRuns = { open: open, close: close, _t: { runs: function(){ return RUNS; }, set: function(r){ RUNS = r; lastPull = Date.now(); if (isOpen()) paint(); }, ho: function(){ return HO; }, check: function(){ checkHandover(); } } };
 
   function list(){
-    return Object.keys(RUNS).map(function(k){ return RUNS[k]; }).filter(function(p){
+    // (one card for a driver's run: a row written before the rows were one per driver is left out when a newer one is here)
+    var best = {};
+    Object.keys(RUNS).forEach(function(k){ var p = RUNS[k], dk = String(p.driver || k).toLowerCase() + '|' + p.stream + '|' + p.run; if (!best[dk] || (p.ts || 0) > (best[dk].ts || 0)) best[dk] = p; });
+    return Object.keys(best).map(function(k){ return best[k]; }).filter(function(p){
       if (flt === 'all') return true;
       if (flt === 'open') return !p.fin;
       return (p.stream === 'SummerRecycling' ? 'Recycling' : p.stream) === flt;
@@ -54358,6 +54402,9 @@ body.lb-pc #lbLive{top:var(--pc-bar-h,92px);padding-top:0}
     M.map = L.map(host, { zoomControl: false, attributionControl: true, maxZoom: 22, zoomSnap: 0.25 });
     M.base = tiles(false).addTo(M.map);
     M.route = L.layerGroup().addTo(M.map); M.pins = L.layerGroup().addTo(M.map);
+    M.map.createPane('lvLbl'); M.map.getPane('lvLbl').style.zIndex = 450; M.map.getPane('lvLbl').style.pointerEvents = 'none';
+    M.lbl = L.layerGroup().addTo(M.map); M.named = [];
+    var lt = null; M.map.on('zoomend moveend resize', function(){ clearTimeout(lt); lt = setTimeout(labels, 60); });
     M.map.setView([-38.33, 144.95], 12);
     M.map.on('dragstart zoomstart', function(e){ if (e && e.hard !== false && !M.auto) M.fit = false; });
     return M.map;
@@ -54407,12 +54454,48 @@ body.lb-pc #lbLive{top:var(--pc-bar-h,92px);padding-top:0}
     hiTimer = setTimeout(function(){ if (hiLayer) { M.map.removeLayer(hiLayer); hiLayer = null; } }, 6000);
     return true;
   }
+  /* street names on top of the lines (Fox, 27 Oct: the lines hid the map's own names): along the middle of each street,
+     never upside down, longest first, none on top of another; placed again after every move and zoom */
+  function shortN(n){ return String(n).replace(/\bRoad$/, 'Rd').replace(/\bStreet$/, 'St').replace(/\bAvenue$/, 'Ave').replace(/\bCourt$/, 'Ct').replace(/\bDrive$/, 'Dr').replace(/\bCrescent$/, 'Cres').replace(/\bParade$/, 'Pde').replace(/\bPlace$/, 'Pl').replace(/\bGrove$/, 'Gr').replace(/\bClose$/, 'Cl').replace(/\bHighway$/, 'Hwy').replace(/\bBoulevard$/, 'Bvd').replace(/\bTerrace$/, 'Tce'); }
+  function labels(){
+    if (!M.map || !M.lbl) return;
+    M.lbl.clearLayers();
+    if (M.map.getZoom() < 14 || !M.named.length) return;
+    var sz = M.map.getSize(), boxes = [], named = {}, FS = M.map.getZoom() >= 17 ? 13 : 12;
+    // (the zoom buttons, Satellite and the key are not written under)
+    [[sz.x - 60, 0, sz.x, 150], [0, 0, 130, 50], [0, sz.y - 60, 420, sz.y]].forEach(function(b){ boxes.push(b); });
+    var pcs = M.named.map(function(o){
+      var q = o.c.map(function(c){ return M.map.latLngToContainerPoint(c); }), len = 0;
+      for (var i = 1; i < q.length; i++) len += q[i].distanceTo(q[i - 1]);
+      return { n: o.n, q: q, len: len };
+    }).filter(function(p){ return p.q.length > 1; }).sort(function(a, b){ return b.len - a.len; });
+    var placed = 0;
+    [[1, 0.9], [0, 0.6]].forEach(function(pass){
+      pcs.forEach(function(p){
+        if (placed > 160 || p.done || (!pass[0] && named[p.n])) return;
+        var text = shortN(p.n), w = text.length * FS * 0.6 + 10;
+        if (named[p.n] && p.len < w * 3) return;
+        if (p.len < w * pass[1]) return;
+        var half = p.len / 2, acc = 0, a = p.q[0], b = p.q[1];
+        for (var i = 1; i < p.q.length; i++) { var d = p.q[i].distanceTo(p.q[i - 1]); if (acc + d >= half) { a = p.q[i - 1]; b = p.q[i]; break; } acc += d; }
+        var t = (half - acc) / (a.distanceTo(b) || 1), cx = a.x + (b.x - a.x) * t, cy = a.y + (b.y - a.y) * t;
+        if (cx < 0 || cy < 0 || cx > sz.x || cy > sz.y) return;
+        var ang = Math.atan2(b.y - a.y, b.x - a.x) * 180 / Math.PI; if (ang > 90) ang -= 180; if (ang < -90) ang += 180;
+        var rad = ang * Math.PI / 180, hw = Math.abs(Math.cos(rad)) * w / 2 + Math.abs(Math.sin(rad)) * FS / 2, hh = Math.abs(Math.sin(rad)) * w / 2 + Math.abs(Math.cos(rad)) * FS / 2;
+        var box = [cx - hw, cy - hh, cx + hw, cy + hh];
+        if (boxes.some(function(o){ return !(box[2] < o[0] || box[0] > o[2] || box[3] < o[1] || box[1] > o[3]); })) return;
+        boxes.push(box); named[p.n] = 1; p.done = true; placed++;
+        L.marker(M.map.containerPointToLatLng([cx, cy]), { pane: 'lvLbl', interactive: false, keyboard: false,
+          icon: L.divIcon({ className: 'lv-lbl', html: '<span style="font-size:' + FS + 'px;transform:translate(-50%,-50%) rotate(' + ang.toFixed(1) + 'deg)">' + esc(text) + '</span>', iconSize: [0, 0] }) }).addTo(M.lbl);
+      });
+    });
+  }
   var drawSeq = 0;
   function drawRun(p, newRun){
     var m = ensureMap(); if (!m) { msg('The map could not load (no internet?)'); return; }
     var seq = ++drawSeq;
     if (hsLayer && (newRun || !p)) { m.removeLayer(hsLayer); hsLayer = null; }
-    if (!p) { M.route.clearLayers(); M.pins.clearLayers(); if (M.truck) { m.removeLayer(M.truck); M.truck = null; } msg('Pick a run to see its map.'); M.key = ''; return; }
+    if (!p) { M.route.clearLayers(); M.pins.clearLayers(); M.named = []; labels(); if (M.truck) { m.removeLayer(M.truck); M.truck = null; } msg('Pick a run to see its map.'); M.key = ''; return; }
     if (newRun) { M.fit = true; M.route.clearLayers(); }
     setTimeout(function(){ m.invalidateSize(); }, 0);
     // the truck
@@ -54432,7 +54515,8 @@ body.lb-pc #lbLive{top:var(--pc-bar-h,92px);padding-top:0}
     window.lbRunLiveGeom(p.key, p.st || []).then(function(G){
       if (seq !== drawSeq) return;
       msg(G ? '' : 'The run map could not be drawn');
-      M.route.clearLayers(); M.byName = {}; if (!G) return;
+      M.route.clearLayers(); M.byName = {}; M.named = []; if (!G) { labels(); return; }
+      G.lines.forEach(function(ln){ if (ln.n) M.named.push({ n: ln.n, c: [].concat.apply([], ln.parts.map(function(pt, i){ return i ? pt.c.slice(1) : pt.c; })) }); });
       var DC = G.done || '#dc2626';
       G.lines.forEach(function(ln){
         ln.parts.forEach(function(pt){
@@ -54445,6 +54529,7 @@ body.lb-pc #lbLive{top:var(--pc-bar-h,92px);padding-top:0}
         });
       });
       if (M.fit) fitRun();
+      labels();
     }).catch(function(){ if (seq === drawSeq) msg('The run map could not be drawn'); });
   }
   function mapImg(p){
@@ -54519,6 +54604,25 @@ body.lb-pc #lbLive{top:var(--pc-bar-h,92px);padding-top:0}
     try { var s = window.uxShiftState ? window.uxShiftState() : null; if (s && s.driver) n = n || s.driver; } catch (e) {}
     return String(n).trim().toLowerCase();
   }
+  // a phone notification too, so it is seen with the app in the background or the screen off (once per run sent)
+  function notify(h, n){
+    var told = lsGet('lbHandoverTold', []) || []; if (told.indexOf(h.id) >= 0) return;
+    told.push(h.id); lsSet('lbHandoverTold', told.slice(-100));
+    var title = (h.from || 'Your leading hand') + ' sent you run ' + String(h.run).toUpperCase() + (h.week || '') + ' ' + String(h.day || '').slice(0, 3).toUpperCase();
+    var body = h.whole ? 'The whole run' : n ? n + ' street' + (n === 1 ? '' : 's') + ', ' + (h.housesLeft || 0) + ' houses left' + (h.of ? ' (from ' + h.of + ')' : '') : 'Nothing left on it';
+    try { navigator.vibrate && navigator.vibrate([300, 150, 300, 150, 300]); } catch (e) {}
+    var cap = window.Capacitor;
+    if (cap && cap.isNativePlatform && cap.isNativePlatform() && cap.nativePromise) {
+      try { cap.nativePromise('LocalNotifications', 'schedule', { notifications: [{ id: Math.floor(Date.now() / 1000) % 2000000000, title: title, body: body }] }).catch(function(){}); } catch (e) {}
+      return;
+    }
+    try {
+      if (window.Notification) {
+        var show = function(){ try { new Notification(title, { body: body, icon: 'garbagetruck.png', tag: h.id }); } catch (e) {} };
+        if (Notification.permission === 'granted') show(); else if (Notification.permission === 'default') Notification.requestPermission().then(function(p){ if (p === 'granted') show(); });
+      }
+    } catch (e) {}
+  }
   function checkHandover(){
     var me = myName(); if (!me || $('lbHandover')) return;
     var seen = lsGet('lbHandoverSeen', []) || [];
@@ -54531,6 +54635,7 @@ body.lb-pc #lbLive{top:var(--pc-bar-h,92px);padding-top:0}
       '<button type="button" class="ho-x" data-ho="x" aria-label="Close">' + I.x + '</button></div>' +
       '<div class="ho-r" style="justify-content:flex-end"><button type="button" class="ho-b" data-ho="pdf">' + 'Map PDF</button><button type="button" class="ho-b go" data-ho="map">Show on my map</button></div>';
     document.body.appendChild(box);
+    notify(h, n);
     var done = function(){ seen.push(h.id); lsSet('lbHandoverSeen', seen.slice(-100)); box.remove(); };
     box.addEventListener('click', function(ev){
       var b = ev.target.closest ? ev.target.closest('[data-ho]') : null; if (!b) return;
