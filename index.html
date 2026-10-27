@@ -32993,7 +32993,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     try { if (loc && window.lbKnownPlaces) { var tp = window.lbKnownPlaces.tips(); for (var i = 0; i < tp.length; i++) if (tp[i].lat != null && Math.hypot((tp[i].lng - loc.lng) * 87000, (tp[i].lat - loc.lat) * 110540) < 400) return { k: 'tip', n: tp[i].name }; } } catch (e) {}
     // (only text that reads like a street: with no GPS those boxes hold hints such as "check filter")
     var stn = '', RX = /\b(RD|ROAD|ST|STREET|AVE?|AVENUE|CT|COURT|DR|DRIVE|CRES|CRESCENT|PDE|PARADE|GR|GROVE|PL|PLACE|WAY|LANE|LN|HWY|HIGHWAY|CL|CLOSE|BVD|BLVD|TCE|TERRACE|CIR|CIRCUIT|RISE|WALK|ESP|ESPLANADE)\b/i;
-    if (loc) ['mapLiveStreet', 'hudStreetName', 'mapStreetOverlay'].some(function(id){ var e = document.getElementById(id); var t = e ? String(e.textContent || '').replace(/\s+/g, ' ').trim() : ''; if (t && t.length < 40 && RX.test(t)) { stn = t; return true; } return false; });
+    if (loc) ['mapLiveStreet', 'hudStreetName', 'mapStreetOverlay'].some(function(id){ var e = document.getElementById(id); var t = e ? String(e.textContent || '').replace(/\s+/g, ' ').trim() : ''; if (t && t.length < 40 && RX.test(t) && !/scanning|searching|locating|waiting|no gps|\u2026|\.\.\./i.test(t)) { stn = t; return true; } return false; });
     return { k: 'drv', n: stn };
   }
   function liveSnap(fin, tc){
@@ -33002,12 +33002,49 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var d2 = me(), loc = here(), all = tc.all || [], hsAll = 0;
     all.forEach(function(x){ hsAll += x.pts ? x.pts.length : 0; });
     var stDone = all.filter(function(x){ return x.bins && !x.tHs; }).length, stAll = all.filter(function(x){ return x.bins; }).length;
-    return { id: 'lr_' + SH.id, kind: 'liveRun', ts: Date.now(), start: SH.start, fin: fin ? Date.now() : 0,
+    // (one row per driver, written over every day - the places are downloaded by every phone, so they must not pile up)
+    return { id: 'lr_' + slug(d2.name || SH.driver || SH.truck || SH.id), kind: 'liveRun', shift: SH.id, ts: Date.now(), start: SH.start, fin: fin ? Date.now() : 0,
       stream: SH.stream, run: String(SH.run), day: SH.day || '', week: SH.week || '', driver: d2.name || SH.driver || '', truck: SH.truck || '',
       bins: tc.total, lifted: Math.max(0, tc.total - tc.left - tc.pink), passed: tc.passed, binsLeft: tc.todoBins,
       houses: hsAll, housesLeft: tc.todoHouses, streets: stAll, streetsDone: stDone,
       todo: (tc.todo || []).slice(0, 40).map(function(x){ return [x.name, x.tHs]; }),
-      status: fin ? { k: 'fin' } : liveStatus(), loc: loc ? { lat: +loc.lat.toFixed(5), lng: +loc.lng.toFixed(5) } : null, _tc: tc };
+      status: fin ? { k: 'fin' } : liveStatus(), loc: loc ? { lat: +loc.lat.toFixed(5), lng: +loc.lng.toFixed(5) } : null,
+      issues: liveIssues(), _tc: tc };
+  }
+  function slug(v){ return String(v || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 30) || 'x'; }
+  // the bin / house / street issues logged this shift, for the pins on the leading hand's map (photos go separately, liveThumbs)
+  function liveIssues(){
+    var L0 = []; try { L0 = (window.uxIssueLog && window.uxIssueLog()) || []; } catch (e) {}
+    return L0.filter(function(i){ return i && i.ts >= SH.start && i.lat != null && /^(bin|house|street)$/.test(i.scope); }).slice(-60).map(function(i){
+      return { id: i.id, ts: i.ts, scope: i.scope, code: i.code, label: i.label, lat: i.lat, lng: i.lng, address: i.address || '', street: i.street || '', serial: i.serial || '', stream: i.stream || '',
+        note: String(i.note || '').slice(0, 140), ph: (i.media || []).filter(function(m){ return String(m).charAt(0) === 'p'; }).length };
+    });
+  }
+  /* Small copies of the issue photos (240 px), each sent once as its own place. Each driver has 30 slots that are written over
+     in turn (id it_<driver>_<n>), so the places stay a fixed size; the full photos are in the email to the leading hand. */
+  function liveThumbs(){
+    if (!SH || !window.lbOutbox || !window.lbOutbox.sendPlace || !window.lbMedia) return;
+    var L0 = []; try { L0 = (window.uxIssueLog && window.uxIssueLog()) || []; } catch (e) {}
+    var sent = lsGet('lbThumbSent', {}) || {}, who = slug(me().name || SH.driver || SH.truck), n = +lsGet('lbThumbSlot', 0) || 0, jobs = [];
+    L0.filter(function(i){ return i && i.ts >= SH.start && /^(bin|house|street)$/.test(i.scope); }).forEach(function(i){
+      (i.media || []).filter(function(m){ return String(m).charAt(0) === 'p'; }).slice(0, 3).forEach(function(m, k){ if (!sent[m]) jobs.push([i.id, m, k]); });
+    });
+    jobs.slice(0, 4).forEach(function(j){
+      window.lbMedia.get(j[1]).then(function(r){
+        if (!r || !r.blob || !window.createImageBitmap) return null;
+        return createImageBitmap(r.blob).then(function(bm){
+          var k = Math.min(1, 240 / Math.max(bm.width, bm.height)), c = document.createElement('canvas');
+          c.width = Math.round(bm.width * k); c.height = Math.round(bm.height * k); c.getContext('2d').drawImage(bm, 0, 0, c.width, c.height);
+          return c.toDataURL('image/jpeg', 0.6);
+        });
+      }).then(function(url){
+        if (!url) return;
+        var slot = n++ % 30; lsSet('lbThumbSlot', n);
+        window.lbOutbox.sendPlace({ id: 'it_' + who + '_' + slot, kind: 'issueThumb', issue: j[0], i: j[2], ts: Date.now(), img: url });
+        sent[j[1]] = Date.now(); var ks = Object.keys(sent); if (ks.length > 300) ks.sort(function(a, b){ return sent[a] - sent[b]; }).slice(0, ks.length - 300).forEach(function(k){ delete sent[k]; });
+        lsSet('lbThumbSent', sent);
+      }).catch(function(){});
+    });
   }
   function liveSend(fin){
     if (liveBusy || !window.lbOutbox || !window.lbOutbox.postPlace) return;
@@ -33032,8 +33069,9 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       return window.lbOutbox.postPlace(p);
     }).then(function(){ liveBusy = false; }, function(){ liveBusy = false; });
   }
-  setInterval(function(){ try { if (SH && Date.now() - liveLast >= 120000) liveSend(false); } catch (e) { liveBusy = false; } }, 15000);
+  setInterval(function(){ try { if (SH && Date.now() - liveLast >= 120000) { liveSend(false); liveThumbs(); } } catch (e) { liveBusy = false; } }, 15000);
   window.lbLiveSend = liveSend;   // (test hook; also sent at a break)
+  window.lbLiveThumbs = liveThumbs;   // (test hook)
   function doFinish(){
     var e = endDraft;
     // (what's left on the run is taken before the shift is closed - it needs it running; the email goes once it is closed)
@@ -41498,6 +41536,16 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       tc.todo = (tc.all || []).filter(function(x){ return x.tHs > 0; }).sort(function(a, b){ return b.tHs - a.tHs; });
       tc.mapRefined = true;
       return tc;
+    });
+  };
+  // Live runs' interactive map: the run's lines cut into pieces with each side done or not, from another phone's progress
+  // (st, as lbRunDoneState sends it), and each line's own route colour
+  window.lbRunLiveGeom = function(key, st){
+    return load().then(function(){ return key && DATA[key] ? streetsFor(key) : null; }).then(function(){
+      if (!key || !DATA[key]) return null;
+      var F = routeFor(key), lines = imgLines(F.R, F.E); if (!lines.length) return null;
+      var dp = doneParts(key, lines.map(function(m){ return m.l.c; }), null, 0, st || []);
+      return { lines: lines.map(function(m, i){ return { n: m.l.n || '', col: m.col, parts: dp ? dp.lines[i] : [{ c: m.l.c, l: false, r: false }] }; }), done: DONE_COL };
     });
   };
   window.lbRunDoneState = function(key, rc, t0){
@@ -53754,18 +53802,40 @@ body.lb-pc #lbLive{top:var(--pc-bar-h,92px);padding-top:0}
 #lbLive .lv-tile{display:flex;flex-direction:column;gap:3px;padding:6px 10px;background:var(--mn-tile);border:var(--mn-bd);border-radius:var(--mn-rad);box-shadow:var(--mn-sh)}
 #lbLive .lv-tile i{font-style:normal;font-size:9.5px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:var(--mn-text2)}
 #lbLive .lv-tile b{font-family:var(--mn-font);font-weight:var(--mn-fw);font-size:20px;line-height:1}
-#lbLive .lv-map{position:relative;flex:1;min-height:0;background:#e5e7eb;border:var(--mn-bd);border-radius:var(--mn-rad);box-shadow:var(--mn-sh);overflow:hidden;color:#374151;font-size:13px;font-weight:700;touch-action:none;cursor:grab}
-#lbLive .lv-map.drag{cursor:grabbing}
-#lbLive .lv-map .lv-msg{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;text-align:center;padding:12px}
-#lbLive .lv-map img{position:absolute;left:0;top:0;max-width:none;transform-origin:0 0;user-select:none;-webkit-user-drag:none;pointer-events:none}
-#lbLive .lv-zoom{position:absolute;right:8px;top:8px;display:flex;flex-direction:column;z-index:2}
+#lbLive .lv-map{position:relative;flex:1;min-height:0;background:#e5e7eb;border:var(--mn-bd);border-radius:var(--mn-rad);box-shadow:var(--mn-sh);overflow:hidden;color:#374151;font-size:13px;font-weight:700}
+#lbLive .lv-lmap{position:absolute;inset:0;z-index:0}
+#lbLive .lv-msg{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);z-index:3;padding:8px 12px;background:var(--mn-bg);color:var(--mn-text);border:var(--mn-bd);border-radius:var(--mn-rad);box-shadow:var(--mn-sh);text-align:center;pointer-events:none}
+#lbLive .lv-zoom{position:absolute;right:8px;top:8px;display:flex;flex-direction:column;z-index:3}
 #lbLive .lv-zoom button{width:42px;height:42px;display:flex;align-items:center;justify-content:center;padding:0;margin:0;background:var(--mn-tile);color:var(--mn-text);border:var(--mn-bd);box-shadow:var(--mn-sh);cursor:pointer;font:inherit}
 #lbLive .lv-zoom button + button{margin-top:-1px}
 #lbLive .lv-zoom button:first-child{border-radius:var(--mn-rad) var(--mn-rad) 0 0}
 #lbLive .lv-zoom button:last-child{border-radius:0 0 var(--mn-rad) var(--mn-rad)}
 #lbLive .lv-zoom svg{width:22px;height:22px;stroke:currentColor;fill:none;stroke-width:2.4;stroke-linecap:round;stroke-linejoin:round}
+#lbLive .lv-mtop{position:absolute;left:8px;top:8px;z-index:3}
+#lbLive .lv-leg{position:absolute;left:8px;bottom:22px;z-index:3;display:flex;flex-wrap:wrap;gap:4px 10px;max-width:calc(100% - 70px);padding:5px 8px;background:var(--mn-bg);color:var(--mn-text);border:var(--mn-bd);border-radius:var(--mn-rad);box-shadow:var(--mn-sh);font-size:11.5px;font-weight:700}
+#lbLive .lv-leg:empty{display:none}
+#lbLive .lv-leg span{display:inline-flex;align-items:center;gap:5px}
+#lbLive .lv-leg i{display:inline-block;width:18px;height:5px;border-radius:2px}
+#lbLive .lv-leg i.hf{background:repeating-linear-gradient(90deg,#dc2626 0 5px,#16a34a 5px 10px)}
+#lbLive .lv-pdot{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:#ff4b3e;color:#000;font-size:11px;border:1.5px solid #000}
+#lbLive .lv-pin{background:none;border:0}
+#lbLive .lv-pin span{display:flex;align-items:center;justify-content:center;width:26px;height:26px;margin:2px;border-radius:50%;border:2.5px solid #000;color:#000;font:900 15px/1 system-ui,sans-serif;box-shadow:2px 2px 0 rgba(0,0,0,.6)}
+#lbLive .lv-pin em{position:absolute;right:-8px;top:-8px;width:18px;height:18px;display:flex;align-items:center;justify-content:center;border-radius:50%;background:#fff;border:1.5px solid #000}
+#lbLive .lv-pin em svg{width:12px;height:12px;stroke:#000;fill:none;stroke-width:2.4}
+#lbLive .lv-truck{background:none;border:0}
+#lbLive .lv-truck img{width:34px;height:34px;object-fit:contain;filter:drop-shadow(0 2px 3px rgba(0,0,0,.6))}
+#lbLive .lv-pop{display:flex;flex-direction:column;gap:3px;font:600 13px/1.3 system-ui,sans-serif;color:inherit;min-width:180px}
+#lbLive .lv-pop b{font-size:14px;font-weight:800}
+#lbLive .lv-pop .lv-pt{opacity:.75;font-size:12px}
+#lbLive .lv-pop i{font-style:normal;opacity:.85}
+#lbLive .lv-th{display:flex;flex-wrap:wrap;gap:6px;margin-top:4px}
+#lbLive .lv-th img{width:76px;height:76px;object-fit:cover;border-radius:6px;border:2px solid #000;cursor:zoom-in}
+#lbBig,#lbLive #lvBig{position:absolute;inset:0;z-index:50;display:flex;align-items:center;justify-content:center;padding:16px;margin:0;background:rgba(0,0,0,.85);border:0;cursor:zoom-out}
+#lbLive #lvBig img{max-width:100%;max-height:100%;border-radius:8px;border:3px solid #000;image-rendering:auto}
 #lbLive .lv-k{font-size:10.5px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:var(--mn-text2);margin-top:2px}
-#lbLive .lv-row{display:flex;align-items:center;gap:8px;min-height:30px;padding:4px 10px;background:var(--mn-tile);border:var(--mn-bd);border-radius:var(--mn-rad);box-shadow:var(--mn-sh)}
+#lbLive .lv-row{display:flex;align-items:center;gap:8px;width:100%;min-height:34px;margin:0;padding:4px 10px;text-align:left;font:inherit;color:var(--mn-text);background:var(--mn-tile);border:var(--mn-bd);border-radius:var(--mn-rad);box-shadow:var(--mn-sh)}
+#lbLive button.lv-row{cursor:pointer}
+#lbLive .lv-row.on{background:var(--ui-accent,#ffd21f);color:#000}
 #lbLive .lv-row b{flex:1;min-width:0;font-size:13px}
 #lbLive .lv-row span{font-size:12px;font-weight:800;white-space:nowrap}
 #lbLive .lv-send{display:flex;flex-direction:column;gap:8px;padding:10px;background:var(--mn-bar);border:var(--mn-bd);border-radius:var(--mn-rad);box-shadow:var(--mn-sh)}
@@ -53813,15 +53883,16 @@ body.lb-pc #lbLive{top:var(--pc-bar-h,92px);padding-top:0}
   function dayStart(){ var d = new Date(), c = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 3, 30, 0, 0).getTime(); return Date.now() >= c ? c : c - 86400000; }
 
   /* ---- what has come in ---- */
-  var RUNS = {}, HO = [], lastPull = 0;
+  var RUNS = {}, HO = [], THUMBS = {}, lastPull = 0;
   document.addEventListener('lb-places', function(ev){
-    var P = (ev && ev.detail) || {}, cut = dayStart(), runs = {}, ho = [];
+    var P = (ev && ev.detail) || {}, cut = dayStart(), runs = {}, ho = [], th = {};
     Object.keys(P).forEach(function(k){
       var p = P[k]; if (!p || typeof p !== 'object') return;
+      if (p.kind === 'issueThumb' && p.issue && p.img && (p.ts || 0) >= cut) (th[p.issue] = th[p.issue] || [])[p.i || 0] = p.img;
       if (p.kind === 'liveRun' && (p.ts || 0) >= cut) runs[p.id || k] = p;
       if (p.kind === 'runHandover' && (p.ts || 0) >= Date.now() - 86400000) ho.push(p);
     });
-    RUNS = runs; HO = ho; lastPull = Date.now();
+    RUNS = runs; HO = ho; THUMBS = th; lastPull = Date.now();
     if (isOpen()) paint(true);
     try { checkHandover(); } catch (e) {}
   });
@@ -53860,6 +53931,12 @@ body.lb-pc #lbLive{top:var(--pc-bar-h,92px);padding-top:0}
     document.body.appendChild(el);
     el.addEventListener('click', onClick);
     viewer($('lvMap'));
+    // a photo in a pin's pop-up: shown bigger over the page, tap to close
+    el.addEventListener('click', function(ev){
+      var im = ev.target && ev.target.closest ? ev.target.closest('img[data-big]') : null; if (!im) return;
+      var ov = document.createElement('button'); ov.type = 'button'; ov.id = 'lvBig'; ov.setAttribute('data-lv', 'big'); ov.setAttribute('aria-label', 'Close the photo');
+      ov.innerHTML = '<img src="' + im.getAttribute('src') + '" alt="Photo">'; el.appendChild(ov);
+    });
     // (on a PC the four coloured buttons and the screens are in the top bar, not on this page: any of them puts this away first,
     // or the menu opened under it and nothing seemed to happen)
     var bar = $('lbPcBar');
@@ -53874,6 +53951,7 @@ body.lb-pc #lbLive{top:var(--pc-bar-h,92px);padding-top:0}
   window.lbLiveOpen = function(){ open(); };
   function open(){
     build(); el.classList.add('open'); el.classList.remove('det'); sendOpen = false;
+    setTimeout(function(){ if (M.map) M.map.invalidateSize(); }, 50);
     paint(); pull().then(function(){ paint(); });
     clearInterval(timer);
     timer = setInterval(function(){ if (!isOpen()) { clearInterval(timer); return; } if (Date.now() - lastPull >= 120000) pull(); else paint(true); }, 30000);
@@ -53930,7 +54008,7 @@ body.lb-pc #lbLive{top:var(--pc-bar-h,92px);padding-top:0}
   }
   function detail(){
     var d = $('lvSum'), td = $('lvTodo'), p = sel ? RUNS[sel] : null;
-    if (!p) { d.innerHTML = ''; td.innerHTML = ''; d.removeAttribute('data-ts'); showMap(null, 'Pick a run to see its map.'); return; }
+    if (!p) { d.innerHTML = ''; td.innerHTML = ''; d.removeAttribute('data-ts'); drawRun(null); return; }
     var newRun = d.getAttribute('data-id') !== p.id;
     d.setAttribute('data-ts', String(p.ts)); d.setAttribute('data-id', p.id);
     var others = Object.keys(RUNS).map(function(k){ return RUNS[k]; }).filter(function(x){ return x.id !== p.id && x.driver; }).map(function(x){ return x.driver; }).filter(function(n, i, a){ return a.indexOf(n) === i; });
@@ -53945,61 +54023,118 @@ body.lb-pc #lbLive{top:var(--pc-bar-h,92px);padding-top:0}
         '<button type="button" class="lv-go" data-lv="dosend">' + I.send + 'Send</button></div>' : '') +
       '<div class="lv-tiles"><div class="lv-tile"><i>Houses done</i><b>' + pct(p) + '%</b></div><div class="lv-tile"><i>Streets done</i><b>' + (+p.streetsDone || 0) + '/' + (+p.streets || 0) + '</b></div><div class="lv-tile"><i>Houses left</i><b>' + (+p.housesLeft || 0) + '</b></div></div>' +
       status(p);
-    td.innerHTML = (p.todo || []).length ? '<span class="lv-k">Streets to do · ' + p.todo.length + '</span>' + p.todo.map(function(x){ return '<div class="lv-row"><b>' + esc(x[0]) + '</b><span>' + x[1] + ' house' + (x[1] === 1 ? '' : 's') + '</span></div>'; }).join('') : '<span class="lv-k">Streets to do</span><div class="lv-row"><b>Nothing left</b></div>';
-    if (!p.key) { showMap(null, 'No run map for this run'); return; }
-    if (newRun) showMap(null, 'Drawing the map…');
-    mapImg(p).then(function(im){ if (sel !== p.id) return; showMap(im, im ? '' : 'The run map could not be drawn', !newRun); });
+    td.innerHTML = (p.todo || []).length ? '<span class="lv-k">Streets to do · ' + p.todo.length + '</span>' + p.todo.map(function(x){ return '<button type="button" class="lv-row" data-lv="st" data-n="' + esc(x[0]) + '"><b>' + esc(x[0]) + '</b><span>' + x[1] + ' house' + (x[1] === 1 ? '' : 's') + '</span></button>'; }).join('') : '<span class="lv-k">Streets to do</span><div class="lv-row"><b>Nothing left</b></div>';
+    drawRun(p, newRun);
   }
-  /* ---- the map: fills its box, drag to move, wheel / pinch / + - to zoom, the square button fits it again ---- */
-  var V = { el: null, img: null, w: 0, h: 0, s: 1, x: 0, y: 0, fit: true, url: '' };
+  /* ---- the map: the app's own map (the same tiles: Mapbox streets with a key, else OpenStreetMap; Satellite too), live -
+     the run's streets red where done, green to do, red dashes on green where one side is done; the truck; and a pin for each
+     bin / house / street issue logged this shift (a camera on it when there are photos; tap it for what, where, when and the
+     photos). Drag, pinch, wheel or + / - to zoom; the square fits the whole run again. ---- */
+  var M = { map: null, base: null, sat: false, route: null, pins: null, truck: null, key: '', fit: true };
+  var ISS = { contaminated: '#ff4b3e', overfull: '#ff8a1f', notout: '#8b9099', broken: '#ff8a1f', knocked: '#ff8a1f' };
+  function tiles(sat){
+    var tok = ''; try { tok = (localStorage.getItem('lbMapboxToken') || '').trim(); } catch (e) {}
+    if (sat) return tok ? L.tileLayer('https://api.mapbox.com/styles/v1/mapbox/satellite-v9/tiles/256/{z}/{x}/{y}@2x?access_token=' + encodeURIComponent(tok), { maxZoom: 22, maxNativeZoom: 22, attribution: '&copy; Mapbox &copy; OpenStreetMap' })
+      : L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { maxZoom: 22, maxNativeZoom: 19, attribution: 'Tiles &copy; Esri' });
+    return tok ? L.tileLayer('https://api.mapbox.com/styles/v1/mapbox/streets-v12/tiles/256/{z}/{x}/{y}@2x?access_token=' + encodeURIComponent(tok), { maxZoom: 22, maxNativeZoom: 22, attribution: '&copy; Mapbox &copy; OpenStreetMap' })
+      : L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 22, maxNativeZoom: 19, attribution: '&copy; OpenStreetMap contributors' });
+  }
   function viewer(box){
-    V.el = box;
-    var Z = '<div class="lv-zoom"><button type="button" data-z="in" aria-label="Zoom in">' + SV('<path d="M12 5v14M5 12h14"/>') + '</button><button type="button" data-z="out" aria-label="Zoom out">' + SV('<path d="M5 12h14"/>') + '</button><button type="button" data-z="fit" aria-label="Whole run">' + SV('<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>') + '</button></div>';
-    box.innerHTML = Z + '<div class="lv-msg">Pick a run to see its map.</div>';
+    var Z = '<div class="lv-zoom"><button type="button" data-z="in" aria-label="Zoom in">' + SV('<path d="M12 5v14M5 12h14"/>') + '</button><button type="button" data-z="out" aria-label="Zoom out">' + SV('<path d="M5 12h14"/>') + '</button><button type="button" data-z="fit" aria-label="Whole run">' + SV('<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>') + '</button></div>' +
+      '<div class="lv-mtop"><button type="button" class="lv-f" data-z="sat">Satellite</button></div><div class="lv-leg" id="lvLeg"></div><div class="lv-msg" id="lvMsg">Pick a run to see its map.</div><div class="lv-lmap" id="lvLmap"></div>';
+    box.innerHTML = Z;
     box.addEventListener('click', function(ev){
-      var b = ev.target.closest && ev.target.closest('[data-z]'); if (!b) return;
-      var k = b.getAttribute('data-z'), r = box.getBoundingClientRect();
-      if (k === 'fit') fitMap(); else zoomAt(k === 'in' ? 1.4 : 1 / 1.4, r.width / 2, r.height / 2);
+      var b = ev.target.closest && ev.target.closest('[data-z]'); if (!b || !M.map) return;
+      var k = b.getAttribute('data-z');
+      if (k === 'in') M.map.zoomIn(); else if (k === 'out') M.map.zoomOut(); else if (k === 'fit') fitRun();
+      else if (k === 'sat') { M.sat = !M.sat; b.classList.toggle('on', M.sat); b.textContent = M.sat ? 'Map' : 'Satellite'; if (M.base) M.map.removeLayer(M.base); M.base = tiles(M.sat).addTo(M.map); }
     });
-    box.addEventListener('wheel', function(ev){ if (!V.img) return; ev.preventDefault(); var r = box.getBoundingClientRect(); zoomAt(Math.pow(1.0015, -ev.deltaY), ev.clientX - r.left, ev.clientY - r.top); }, { passive: false });
-    var pts = {}, last = null;
-    var mid = function(){ var k = Object.keys(pts), a = pts[k[0]], b = pts[k[1]]; return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, d: Math.hypot(a.x - b.x, a.y - b.y) }; };
-    box.addEventListener('pointerdown', function(ev){
-      if (!V.img || (ev.target.closest && ev.target.closest('[data-z]'))) return;
-      try { box.setPointerCapture(ev.pointerId); } catch (e) {}
-      var r = box.getBoundingClientRect(); pts[ev.pointerId] = { x: ev.clientX - r.left, y: ev.clientY - r.top };
-      last = Object.keys(pts).length > 1 ? mid() : { x: pts[ev.pointerId].x, y: pts[ev.pointerId].y };
-      box.classList.add('drag');
-    });
-    box.addEventListener('pointermove', function(ev){
-      if (!pts[ev.pointerId]) return;
-      var r = box.getBoundingClientRect(); pts[ev.pointerId] = { x: ev.clientX - r.left, y: ev.clientY - r.top };
-      var n = Object.keys(pts).length, cur = n > 1 ? mid() : pts[ev.pointerId];
-      if (n > 1 && last.d) zoomAt(cur.d / last.d, cur.x, cur.y, true);
-      V.x += cur.x - last.x; V.y += cur.y - last.y; V.fit = false; last = cur; place();
-    });
-    var up = function(ev){ delete pts[ev.pointerId]; var k = Object.keys(pts); last = k.length ? (k.length > 1 ? mid() : { x: pts[k[0]].x, y: pts[k[0]].y }) : null; if (!k.length) box.classList.remove('drag'); };
-    box.addEventListener('pointerup', up); box.addEventListener('pointercancel', up);
-    if (window.ResizeObserver) new ResizeObserver(function(){ if (V.img && V.fit) fitMap(); }).observe(box);
+    if (window.ResizeObserver) new ResizeObserver(function(){ if (M.map) { M.map.invalidateSize(); if (M.fit) fitRun(); } }).observe(box);
   }
-  function place(){ if (V.img) V.img.style.transform = 'translate(' + V.x.toFixed(1) + 'px,' + V.y.toFixed(1) + 'px) scale(' + V.s.toFixed(4) + ')'; }
-  function fitMap(){
-    if (!V.img) return; var r = V.el.getBoundingClientRect(); if (!r.width || !r.height) return;
-    V.s = Math.min(r.width / V.w, r.height / V.h); V.x = (r.width - V.w * V.s) / 2; V.y = (r.height - V.h * V.s) / 2; V.fit = true; place();
+  function ensureMap(){
+    if (M.map || !window.L) return M.map;
+    var host = $('lvLmap'); if (!host) return null;
+    M.map = L.map(host, { zoomControl: false, attributionControl: true, maxZoom: 22, zoomSnap: 0.25 });
+    M.base = tiles(false).addTo(M.map);
+    M.route = L.layerGroup().addTo(M.map); M.pins = L.layerGroup().addTo(M.map);
+    M.map.setView([-38.33, 144.95], 12);
+    M.map.on('dragstart zoomstart', function(e){ if (e && e.hard !== false && !M.auto) M.fit = false; });
+    return M.map;
   }
-  function zoomAt(f, cx, cy, noPlace){
-    if (!V.img) return; var r = V.el.getBoundingClientRect(), min = Math.min(r.width / V.w, r.height / V.h) * 0.8, ns = Math.max(min, Math.min(6, V.s * f));
-    f = ns / V.s; V.x = cx - (cx - V.x) * f; V.y = cy - (cy - V.y) * f; V.s = ns; V.fit = false; if (!noPlace) place();
+  function msg(t){ var m = $('lvMsg'); if (m) { m.textContent = t || ''; m.style.display = t ? '' : 'none'; } }
+  function fitRun(){
+    if (!M.map) return; var b = null;
+    M.route.eachLayer(function(l){ if (l.getBounds) { var lb = l.getBounds(); if (lb.isValid()) b = b ? b.extend(lb) : L.latLngBounds(lb.getSouthWest(), lb.getNorthEast()); } });
+    if (!b && M.truck) b = L.latLngBounds([M.truck.getLatLng()]);
+    if (!b) return;
+    M.auto = true; M.map.fitBounds(b, { padding: [24, 24], maxZoom: 17 }); M.auto = false; M.fit = true;
   }
-  // keep: a newer picture of the same run keeps the zoom and position
-  function showMap(im, msg, keep){
-    var box = V.el; if (!box) return;
-    var old = box.querySelector('img, .lv-msg'); [].forEach.call(box.querySelectorAll('img, .lv-msg'), function(x){ x.remove(); });
-    if (!im) { V.img = null; var m = document.createElement('div'); m.className = 'lv-msg'; m.textContent = msg || ''; box.appendChild(m); return; }
-    var img = new Image(); img.alt = 'Run map: finished streets red, what is left green'; img.src = im.url; img.width = im.w; img.height = im.h;
-    box.appendChild(img); V.img = img;
-    var same = keep && V.w === im.w && V.h === im.h; V.w = im.w; V.h = im.h;
-    if (same && !V.fit) place(); else fitMap();
+  function popHtml(i){
+    var t = new Date(i.ts), th = THUMBS[i.id] || [];
+    return '<div class="lv-pop"><b>' + esc(i.label || i.code) + '</b>' +
+      '<span>' + esc(i.scope === 'street' ? (i.street || '') : (i.address || i.street || '')) + (i.serial ? ' · bin ' + esc(i.serial) : '') + '</span>' +
+      '<span class="lv-pt">' + clk(t.getTime()) + '</span>' + (i.note ? '<i>' + esc(i.note) + '</i>' : '') +
+      (th.length ? '<div class="lv-th">' + th.filter(Boolean).map(function(u){ return '<img src="' + esc(u) + '" alt="Photo" data-big="1">'; }).join('') + '</div>' : i.ph ? '<span class="lv-pt">' + i.ph + ' photo' + (i.ph === 1 ? '' : 's') + ' on the way (also in the email)</span>' : '') + '</div>';
+  }
+  function pinIcon(i){
+    var c = ISS[i.code] || (i.scope === 'street' ? '#4f8bff' : i.scope === 'house' ? '#b06cff' : '#ffd21f');
+    var cam = i.ph ? '<em><svg viewBox="0 0 24 24"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg></em>' : '';
+    return L.divIcon({ className: 'lv-pin', html: '<span style="background:' + c + '">!</span>' + cam, iconSize: [30, 30], iconAnchor: [15, 15], popupAnchor: [0, -14] });
+  }
+  // street names: the house list says FAIRHILLS DRIVE, the map's lines Fairhills Drive or Fairhills Dr
+  function stKey(n){ return String(n || '').toLowerCase().replace(/\b(street|st)\b/g, 'st').replace(/\b(road|rd)\b/g, 'rd').replace(/\b(avenue|ave|av)\b/g, 'ave').replace(/\b(court|ct)\b/g, 'ct').replace(/\b(drive|dr)\b/g, 'dr').replace(/\b(crescent|cres)\b/g, 'cres').replace(/\b(place|pl)\b/g, 'pl').replace(/\b(parade|pde)\b/g, 'pde').replace(/\b(grove|gr)\b/g, 'gr').replace(/\b(close|cl)\b/g, 'cl').replace(/\b(boulevard|bvd|blvd)\b/g, 'bvd').replace(/\b(highway|hwy)\b/g, 'hwy').replace(/\b(terrace|tce)\b/g, 'tce').replace(/[^a-z0-9]+/g, ''); }
+  /* a street tapped in "Streets to do": the map goes to it and it is outlined in the accent colour for a few seconds */
+  var hiLayer = null, hiTimer = null;
+  function showStreet(name){
+    if (!M.map) return false;
+    var ls = (M.byName || {})[stKey(name)] || [];
+    if (!ls.length) return false;
+    var b = null; ls.forEach(function(l){ var lb = l.getBounds(); b = b ? b.extend(lb) : L.latLngBounds(lb.getSouthWest(), lb.getNorthEast()); });
+    if (hiLayer) { M.map.removeLayer(hiLayer); hiLayer = null; } clearTimeout(hiTimer);
+    hiLayer = L.layerGroup(ls.map(function(l){ return L.polyline(l.getLatLngs(), { color: '#ffd21f', weight: 18, opacity: .85, lineCap: 'round', interactive: false }); })).addTo(M.map);
+    hiLayer.eachLayer(function(l){ l.bringToBack(); });
+    M.fit = false; M.map.flyToBounds(b, { padding: [60, 60], maxZoom: 18, duration: .6 });
+    hiTimer = setTimeout(function(){ if (hiLayer) { M.map.removeLayer(hiLayer); hiLayer = null; } }, 6000);
+    return true;
+  }
+  var drawSeq = 0;
+  function drawRun(p, newRun){
+    var m = ensureMap(); if (!m) { msg('The map could not load (no internet?)'); return; }
+    var seq = ++drawSeq;
+    if (!p) { M.route.clearLayers(); M.pins.clearLayers(); if (M.truck) { m.removeLayer(M.truck); M.truck = null; } msg('Pick a run to see its map.'); M.key = ''; return; }
+    if (newRun) { M.fit = true; M.route.clearLayers(); }
+    setTimeout(function(){ m.invalidateSize(); }, 0);
+    // the truck
+    if (p.loc && p.loc.lat) {
+      var src = { Garbage: 'truck-garbage.png', Recycling: 'truck-recycle.png', SummerRecycling: 'truck-recycle.png', FOGO: 'truck-fogo.png' }[p.stream] || 'garbagetruck.png';
+      var ic = L.divIcon({ className: 'lv-truck', html: '<img src="' + src + '" alt="Truck">', iconSize: [34, 34], iconAnchor: [17, 17] });
+      if (!M.truck) M.truck = L.marker([p.loc.lat, p.loc.lng], { icon: ic, zIndexOffset: 1000, keyboard: false }).addTo(m); else { M.truck.setLatLng([p.loc.lat, p.loc.lng]); M.truck.setIcon(ic); }
+      M.truck.bindTooltip(esc(p.driver || '') + ' · ' + clk(p.ts), { direction: 'top', offset: [0, -14] });
+    } else if (M.truck) { m.removeLayer(M.truck); M.truck = null; }
+    // issue pins
+    M.pins.clearLayers();
+    (p.issues || []).forEach(function(i){ L.marker([i.lat, i.lng], { icon: pinIcon(i), zIndexOffset: 500 }).bindPopup(popHtml(i), { maxWidth: 280 }).addTo(M.pins); });
+    var nIss = (p.issues || []).length;
+    $('lvLeg').innerHTML = '<span><i style="background:#dc2626"></i>Done</span><span><i style="background:#16a34a"></i>To do</span><span><i class="hf"></i>One side done</span>' + (nIss ? '<span><b class="lv-pdot">!</b>' + nIss + ' issue' + (nIss === 1 ? '' : 's') + '</span>' : '');
+    if (!p.key || !window.lbRunLiveGeom) { msg(p.key ? '' : 'No run map for this run'); M.route.clearLayers(); if (M.fit) fitRun(); return; }
+    if (newRun) msg('Drawing the run…');
+    window.lbRunLiveGeom(p.key, p.st || []).then(function(G){
+      if (seq !== drawSeq) return;
+      msg(G ? '' : 'The run map could not be drawn');
+      M.route.clearLayers(); M.byName = {}; if (!G) return;
+      var DC = G.done || '#dc2626';
+      G.lines.forEach(function(ln){
+        ln.parts.forEach(function(pt){
+          var both = pt.l && pt.r, none = !pt.l && !pt.r;
+          var base = L.polyline(pt.c, { color: both ? DC : ln.col, weight: 6, opacity: .95, lineCap: 'round', interactive: !!ln.n });
+          if (ln.n) base.bindTooltip(esc(ln.n) + (both ? ' · done' : none ? ' · to do' : ' · one side done'), { sticky: true });
+          base.addTo(M.route);
+          if (ln.n) (M.byName[stKey(ln.n)] = M.byName[stKey(ln.n)] || []).push(base);
+          if (!both && !none) L.polyline(pt.c, { color: DC, weight: 6, dashArray: '10 10', lineCap: 'butt', interactive: false }).addTo(M.route);
+        });
+      });
+      if (M.fit) fitRun();
+    }).catch(function(){ if (seq === drawSeq) msg('The run map could not be drawn'); });
   }
   function mapImg(p){
     var ck = p.id + '@' + p.ts; if (imgCache[ck]) return imgCache[ck];
@@ -54030,8 +54165,15 @@ body.lb-pc #lbLive{top:var(--pc-bar-h,92px);padding-top:0}
     }
     var a = b.getAttribute('data-lv');
     if (a === 'close') { close(); return; }
+    if (a === 'big') { var ov = $('lvBig'); if (ov) ov.remove(); return; }
+    if (a === 'st') {
+      [].forEach.call(el.querySelectorAll('.lv-row.on'), function(x){ x.classList.remove('on'); }); b.classList.add('on');
+      if (!showStreet(b.getAttribute('data-n'))) toast(b.getAttribute('data-n') + ' isn’t on the run map');
+      else if (!(window.matchMedia && window.matchMedia('(min-width:900px)').matches)) { var mb = el.querySelector('.lv-mapbox'); if (mb && mb.scrollIntoView) mb.scrollIntoView({ behavior: 'smooth', block: 'start' }); }   // (a phone: up to the map)
+      return;
+    }
     if (a === 'flt') { flt = b.getAttribute('data-f'); paint(); return; }
-    if (a === 'pick') { sel = b.getAttribute('data-id'); sendOpen = false; el.classList.add('det'); paint(); try { el.querySelector('.lv-wrap').scrollTop = 0; } catch (e) {} return; }
+    if (a === 'pick') { sel = b.getAttribute('data-id'); sendOpen = false; el.classList.add('det'); paint(); try { el.querySelector('.lv-wrap').scrollTop = 0; } catch (e) {} setTimeout(function(){ if (M.map) { M.map.invalidateSize(); if (M.fit) fitRun(); } }, 60); return; }
     var p = sel ? RUNS[sel] : null; if (!p) return;
     if (a === 'pdf' || a === 'share') {
       toast('Making the PDF…');
