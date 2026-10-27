@@ -38732,6 +38732,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   #lbRunMap .rm-rec { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 6px; }
   #lbRunMap .rm-rec input { font: inherit; padding: 4px 8px; border: 1px solid #cbd5e1; border-radius: 6px; min-width: 140px; }
   #lbRunMap .rm-card.rm-notes.rm-dragging { cursor: grabbing; box-shadow: 0 4px 18px rgba(0,0,0,.3); outline: 2px dashed #64748b; }
+  .rm-lbl.rm-lbl-ch { letter-spacing: 0; text-shadow: none; }
+  .rm-lbl.rm-lbl-ch.rm-lbl-halo { color: #fff; text-shadow: -2px 0 #fff, 2px 0 #fff, 0 -2px #fff, 0 2px #fff, -1.5px -1.5px #fff, 1.5px 1.5px #fff, -1.5px 1.5px #fff, 1.5px -1.5px #fff; }
   #lbRunMap .rm-lbl.rm-lbl-drag { pointer-events: auto; cursor: grab; touch-action: none; }
   #lbRunMap .rm-lbl.rm-lbl-drag.rm-dragging { cursor: grabbing; outline: 2px dashed #64748b; outline-offset: 2px; }
   #lbRunMap .rm-card.rm-key.rm-dragging { cursor: grabbing; box-shadow: 0 4px 18px rgba(0,0,0,.3); outline: 2px dashed #64748b; }
@@ -38900,6 +38902,19 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var sel = g('selectedRunsSet'), st = g('activeFilterStream'), day = g('activeFilterDay'), wk = g('activeFilterWeek');
     if (sel && sel.size === 1 && /^(Garbage|Recycling|FOGO)$/.test(st || '') && day) { day = String(day); return keyOf({ stream: st, day: day.charAt(0).toUpperCase() + day.slice(1).toLowerCase(), week: String(wk || '').toUpperCase(), run: Array.from(sel)[0] }); }
     return null;
+  }
+  /* Bins really lifted (data/run-lifts.json, from Solo's monthly reports - tools/reports/run_lifts.py): the key says how many bins
+     the run usually gets, as the app's bins are every bin on the run, out or not. All runs / picked runs: the runs added up. */
+  var LIFTS = null;
+  try { fetch('data/run-lifts.json', { cache: 'no-cache' }).then(function(r){ return r.ok ? r.json() : null; }).then(function(d){ LIFTS = (d && d.runs) || {}; }).catch(function(){ LIFTS = {}; }); } catch (e) { LIFTS = {}; }
+  function liftsLine(o){
+    if (!LIFTS || o.run === 'DAYS') return '';
+    var keys = [keyOf(o)];
+    if ((String(o.run).toUpperCase() === 'ALL' || String(o.run).indexOf('+') >= 0) && DATA) { var A = DATA[comboKey(keyOf(o))]; keys = A && A.runs ? A.runs : []; }
+    var n = 0, busy = 0, hol = 0, hk = 0, kg = 0, got = 0;
+    keys.forEach(function(k){ var x = LIFTS[k]; if (!x) return; got++; n += x.normal; busy += x.busy; kg += x.normal * (x.kg || 0); if (x.hol) { hol += x.hol; hk++; } });
+    if (!got || got < keys.length) return '';
+    return '<div class="rm-extra">Usually lifted: <b>' + n.toLocaleString() + '</b> bins' + (busy > n ? ' \u00b7 busy days ' + busy.toLocaleString() : '') + (hk === got && hol > n * 1.05 ? ' \u00b7 holidays ' + hol.toLocaleString() : '') + (kg ? ' \u00b7 about ' + (kg / 1000).toFixed(1) + ' t' : '') + '</div>';
   }
   function groupFor(o){
     if ((String(o.run).toUpperCase() === 'ALL' || String(o.run).indexOf('+') >= 0) && DATA) {   // (all runs / picked runs: every run's houses)
@@ -40068,7 +40083,15 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       exBins += binsAt(s);
       L.circleMarker([la, ln], { radius: 2, weight: 1, color: '#475569', fill: false, opacity: .7, interactive: false }).addTo(layers);
     });
-    try { var sc = JSON.parse(localStorage.getItem('lbSchools') || 'null'); (sc && sc.items || []).forEach(function(s){ L.polygon(s.r, { color: '#ca8a04', weight: 1, fillColor: '#fde68a', fillOpacity: .55, interactive: false }).addTo(layers); }); } catch (e) {}
+    var schoolsShown = 0;   // (the key only lists a school when one is on this map)
+    try {
+      var rbb = null; R.lines.forEach(function(l){ l.c.forEach(function(c){ if (!rbb) rbb = [c[0], c[1], c[0], c[1]]; rbb[0] = Math.min(rbb[0], c[0]); rbb[1] = Math.min(rbb[1], c[1]); rbb[2] = Math.max(rbb[2], c[0]); rbb[3] = Math.max(rbb[3], c[1]); }); });
+      var sc = JSON.parse(localStorage.getItem('lbSchools') || 'null');
+      (sc && sc.items || []).forEach(function(s){
+        L.polygon(s.r, { color: '#ca8a04', weight: 1, fillColor: '#fde68a', fillOpacity: .55, interactive: false }).addTo(layers);
+        if (rbb && (s.r || []).some(function(ring){ return (Array.isArray(ring[0]) ? ring : [ring]).some(function(c){ return c[0] > rbb[0] - 0.003 && c[0] < rbb[2] + 0.003 && c[1] > rbb[1] - 0.004 && c[1] < rbb[3] + 0.004; }); })) schoolsShown++;
+      });
+    } catch (e) {}
     var all = []; R.lines.forEach(function(l){ all = all.concat(l.c); });
     // the route, each street piece in its section's colour (from the map, or as edited); removed pieces only in edit mode
     var used = {};
@@ -40389,8 +40412,9 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var card = document.createElement('div'); card.className = 'rm-card rm-key';
     card.innerHTML = northSvg(st.rot) + '<div class="rm-band" style="background:' + (COL[o.stream] || '#16a34a') + '"></div><div class="rm-title">' + (window.lbStreamIcon ? window.lbStreamIcon(o.stream) + ' ' : '') + (o.run === 'DAYS' ? 'Service days' + (o.week ? ' ' + esc(o.week) : '') : o.run === 'ALL' ? 'All runs' + (o.week ? ' ' + esc(o.week) : '') : String(o.run).indexOf('+') >= 0 ? 'Runs ' + esc(String(o.run).split('+').map(function(r){ return r + (o.week || ''); }).join(', ')) : 'Run ' + esc(o.run) + ((o.week && /^\d+$/.test(String(o.run))) ? esc(String(o.week).toUpperCase()) : '')) + '</div><div class="rm-sub">' + esc(sub) + (opts.pageLabel ? ' \u00b7 <b style="color:#111">' + esc(opts.pageLabel) + '</b>' : '') + '</div>' +
       (R.days ? '<div class="rm-stats"><span><b>' + R.lines.filter(function(l){ return /\|0$/.test(l.pp); }).length + '</b>runs</span></div>' : '<div class="rm-stats"><span><b>' + houses.toLocaleString() + '</b>houses</span><span><b>' + bins.toLocaleString() + '</b>bins</span><span><b>' + esc(R.km) + '</b>km</span></div>' +
+        (liftsLine(o) || '') +
         (exHouses ? '<div class="rm-extra">Full run (no ' + esc((grp.splitRuns || []).map(function(r){ return r + (o.week || ''); }).join(', ')) + '): <b>+' + exBins.toLocaleString() + '</b> bins · +' + exHouses.toLocaleString() + ' houses <span class="rm-hollow"></span></div>' : '')) +
-      '<div class="rm-leg">' + legendSections(used, R.runNames ? Object.assign({}, E, { names: Object.assign({}, R.runNames, E.names) }) : E) + (R.days ? '</div>' : (E.points.length ? '<div><span class="rm-cp rm-cp-k">C</span>Collection point</div>' : '') + (E.arrows.length ? '<div><span class="rm-ar-k">&#10140;</span>Direction of travel</div>' : '') + '<div><i style="border-color:#7c3aed"></i>Reverse in</div><div><i style="border-color:#f59e0b"></i>Drive in, back out</div><div><i class="box"></i>School</div><div><i class="dot"></i>House</div><div><i class="num">1</i>Note</div></div>');   // (Service days: just its days or runs)
+      '<div class="rm-leg">' + legendSections(used, R.runNames ? Object.assign({}, E, { names: Object.assign({}, R.runNames, E.names) }) : E) + (R.days ? '</div>' : (E.points.length ? '<div><span class="rm-cp rm-cp-k">C</span>Collection point</div>' : '') + (E.arrows.length ? '<div><span class="rm-ar-k">&#10140;</span>Direction of travel</div>' : '') + (used['#7c3aed'] ? '<div><i style="border-color:#7c3aed"></i>Reverse in</div>' : '') + (used['#f59e0b'] ? '<div><i style="border-color:#f59e0b"></i>Drive in, back out</div>' : '') + (schoolsShown ? '<div><i class="box"></i>School</div>' : '') + (houses + exHouses ? '<div><i class="dot"></i>House</div>' : '') + (pinned.some(function(p){ return p.at; }) ? '<div><i class="num">1</i>Note</div>' : '') + '</div>');   // (Service days: just its days or runs; only what is on this map - Fox: "if an item in the key isn't in the app don't show it")
     st.page.appendChild(card);
     if (opts.noKey) card.style.display = 'none';   // (a page of several: the key is on the overview sheet, and each page says which it is in its corner)
     if (opts.noKey && opts.pageLabel) { var pl = document.createElement('div'); pl.className = 'rm-plabel'; pl.style.cssText = 'position:absolute;z-index:800;left:6px;top:6px;padding:4px 8px;font:800 13px system-ui,sans-serif;background:#fff;border:1px solid #cbd5e1;border-radius:6px;color:#111'; pl.textContent = opts.pageLabel; st.page.appendChild(pl); }
@@ -40576,6 +40600,60 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     s.addEventListener('pointerup', end); s.addEventListener('pointercancel', end);
     s.addEventListener('dblclick', function(e){ e.stopPropagation(); e.preventDefault(); st.onLabelMove && st.onLabelMove(id, null); });
   }
+  /* Where each letter of a name goes on a bending street: null = the street is straight there (a plain label), false = the name
+     doesn't fit along it. Letters sit on the middle of the line, centred on its half-way point, read left to right (never upside
+     down), each turned to the line's direction under it. */
+  var measureCtx = null;
+  function curvedLabel(st, p, text, fsz, half){
+    if (p.pts.length < 3) return null;
+    // the line smoothed first (resampled every 2 px, then averaged over about a letter's width): letters on a street drawn with
+    // sharp corners bunched up and overlapped at each corner
+    var raw = [p.pts[0]];
+    for (var r = 1; r < p.pts.length; r++) {
+      var a0p = p.pts[r - 1], b0p = p.pts[r], seg = a0p.distanceTo(b0p), nn = Math.max(1, Math.round(seg / 2));
+      for (var q2 = 1; q2 <= nn; q2++) raw.push(L.point(a0p.x + (b0p.x - a0p.x) * q2 / nn, a0p.y + (b0p.y - a0p.y) * q2 / nn));
+    }
+    var hw2 = Math.max(2, Math.round(fsz * 0.45)), pts = raw.map(function(pt, i){
+      var x = 0, y = 0, c = 0;
+      for (var j = Math.max(0, i - hw2); j <= Math.min(raw.length - 1, i + hw2); j++) { x += raw[j].x; y += raw[j].y; c++; }
+      return L.point(x / c, y / c);
+    });
+    if (!measureCtx) { try { measureCtx = document.createElement('canvas').getContext('2d'); } catch (e) { return null; } }
+    measureCtx.font = '800 ' + fsz + "px system-ui, -apple-system, 'Segoe UI', sans-serif";
+    var ws = text.split('').map(function(ch){ return measureCtx.measureText(ch).width + 0.1; });
+    var tot = ws.reduce(function(a, b){ return a + b; }, 0);
+    var cum = [0]; for (var i = 1; i < pts.length; i++) cum.push(cum[i - 1] + pts[i].distanceTo(pts[i - 1]));
+    var len = cum[cum.length - 1];
+    var at = function(d){
+      d = Math.max(0, Math.min(len, d));
+      for (var j = 1; j < pts.length; j++) if (cum[j] >= d) { var t = (d - cum[j - 1]) / ((cum[j] - cum[j - 1]) || 1); return L.point(pts[j - 1].x + (pts[j].x - pts[j - 1].x) * t, pts[j - 1].y + (pts[j].y - pts[j - 1].y) * t); }
+      return pts[pts.length - 1];
+    };
+    var s0 = half - tot / 2, s1 = half + tot / 2;
+    if (s0 < 0 || s1 > len) return null;
+    // straight enough? (the line's direction under the name turns less than 7 degrees)
+    var dir = function(d){ var a = at(d - fsz * 0.6), b = at(d + fsz * 0.6); return Math.atan2(b.y - a.y, b.x - a.x); };
+    var a0 = dir(s0 + fsz * 0.3), turn = 0;
+    for (var k = 1; k <= 6; k++) { var dd = dir(s0 + (s1 - s0) * k / 6) - a0; dd = Math.atan2(Math.sin(dd), Math.cos(dd)); turn = Math.max(turn, Math.abs(dd)); }
+    if (turn < 7 * Math.PI / 180) return null;
+    if (turn > 100 * Math.PI / 180) return false;   // (round a hairpin: no room for it)
+    // which way reads left to right on the page
+    var A = at(s0), B = at(s1), pa = Math.atan2(B.y - A.y, B.x - A.x) * 180 / Math.PI + (st.rot || 0);
+    pa = ((pa % 360) + 540) % 360 - 180;
+    var flip = pa > 90 || pa < -90;
+    var chars = [], box = [Infinity, Infinity, -Infinity, -Infinity], pos = 0, prevAng = null, tooSharp = false;
+    text.split('').forEach(function(ch, i){
+      var w = ws[i], d = flip ? s1 - pos - w / 2 : s0 + pos + w / 2; pos += w;
+      var q = at(d), ang = dir(d) * 180 / Math.PI + (flip ? 180 : 0);
+      if (prevAng != null) { var dA = ((ang - prevAng) % 360 + 540) % 360 - 180; if (Math.abs(dA) > 30) tooSharp = true; }
+      prevAng = ang;
+      chars.push({ ch: ch, x: q.x, y: q.y, ang: ang });
+      var v = toView(st, q.x, q.y), r = fsz * 0.55;
+      box[0] = Math.min(box[0], v.x - r); box[1] = Math.min(box[1], v.y - r); box[2] = Math.max(box[2], v.x + r); box[3] = Math.max(box[3], v.y + r);
+    });
+    if (tooSharp) return false;   // (a corner too tight to bend a name round)
+    return { chars: chars, box: box };
+  }
   function labels(st){
     var map = st.map, R = st.R, pane = map.getPane('rmLabels'); if (!pane) return; pane.innerHTML = '';   // (a map already replaced by a redraw)
     var m = st.page.getBoundingClientRect(), boxes = [];
@@ -40601,6 +40679,18 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       if (st.onLabelMove) lblDrag(st, s, p.id);
       pane.appendChild(s);
       lblAt(s, lp.x, lp.y);
+    };
+    // a curved name: each letter on its own, white outline first (so one letter's halo never covers the next letter), then the letters
+    var mkCurved = function(cv, fsz){
+      [true, false].forEach(function(halo){
+        cv.chars.forEach(function(c){
+          if (c.ch === ' ') return;
+          var s = document.createElement('div'); s.className = 'rm-lbl rm-lbl-ch' + (halo ? ' rm-lbl-halo' : ''); s.textContent = c.ch; s.style.fontSize = fsz + 'px';
+          s.style.transform = 'rotate(' + c.ang.toFixed(1) + 'deg)'; s.style.transformOrigin = '50% 50%';
+          pane.appendChild(s);
+          var lp = map.containerPointToLayerPoint([c.x, c.y]); lblAt(s, lp.x, lp.y);
+        });
+      });
     };
     var short = function(n){ return n.replace(/\bRoad$/, 'Rd').replace(/\bStreet$/, 'St').replace(/\bAvenue$/, 'Ave').replace(/\bCourt$/, 'Ct').replace(/\bDrive$/, 'Dr').replace(/\bCrescent$/, 'Cres').replace(/\bParade$/, 'Pde').replace(/\bPlace$/, 'Pl'); };
     // names the driver dragged somewhere (they stay there, at the angle of their own street, and nothing else lands on them)
@@ -40630,6 +40720,17 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
         // the angle as seen on the page (map angle + the turn), kept readable, i.e. never upside down
         var ang = Math.atan2(b.y - a.y, b.x - a.x) * 180 / Math.PI + (st.rot || 0);
         ang = ((ang % 360) + 540) % 360 - 180; if (ang > 90) ang -= 180; if (ang < -90) ang += 180;
+        // on a bending street the name follows the curve, letter by letter (Fox: "street names to follow the curve of the road");
+        // not while editing, where a name is one piece you can drag
+        var cv = !st.onLabelMove && !(st.lrot && st.lrot[p.id]) ? curvedLabel(st, p, text, fsz, half) : null;
+        if (cv === false) return;
+        if (cv) {
+          if (cv.box[0] < 0 || cv.box[1] < 0 || cv.box[2] > W || cv.box[3] > H) return;
+          if (boxes.some(function(o){ return !(cv.box[2] < o[0] || cv.box[0] > o[2] || cv.box[3] < o[1] || cv.box[1] > o[3]); })) return;
+          boxes.push(cv.box); named[p.n] = 1;
+          mkCurved(cv, fsz);
+          return;
+        }
         var rad = ang * Math.PI / 180, hw = Math.abs(Math.cos(rad)) * w / 2 + Math.abs(Math.sin(rad)) * fsz / 2, hh = Math.abs(Math.sin(rad)) * w / 2 + Math.abs(Math.cos(rad)) * fsz / 2;
         var box = [mx - hw, my - hh, mx + hw, my + hh];
         if (boxes.some(function(o){ return !(box[2] < o[0] || box[0] > o[2] || box[3] < o[1] || box[1] > o[3]); })) return;
