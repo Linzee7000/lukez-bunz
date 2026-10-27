@@ -40847,7 +40847,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
         cv.chars.forEach(function(c){
           if (c.ch === ' ') return;
           var s = document.createElement('div'); s.className = 'rm-lbl rm-lbl-ch' + (halo ? ' rm-lbl-halo' : '') + (col ? ' rm-lbl-on' : ''); s.textContent = c.ch; s.style.fontSize = fsz + 'px';
-          if (col && !halo) s.style.color = col;
+          if (col && !halo) s.style.color = c.col || '#16a34a';
           s.style.transform = 'rotate(' + c.ang.toFixed(1) + 'deg)'; s.style.transformOrigin = '50% 50%';
           // (its own measured width, placed to the fraction of a pixel: placing by the element's whole-pixel width put each letter up to
           // half a pixel off and the gaps between letters came out uneven)
@@ -40872,18 +40872,39 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       mkLbl(p, short(p.n), fs, q.x, q.y, ang);
     });
     chains.forEach(function(c){ if (c.ids.some(function(id){ return named[c.n + '#' + id]; })) c.moved = true; });
-    /* Names go BESIDE their street, never on it (Fox: "some street names hide the colour of the road"), letter by letter along the
-       line so they follow every bend, as big as the zoom allows and smaller on a short street so it still gets its name ("adjust the
-       size of the font to suit the length"; short courts had none). Each tries the middle of the street, then further along, on
-       either side; a spot where the letters would sit on another road or another name is passed over. */
+    /* Names are written ON their street, letter by letter along it so they follow every bend, each letter in the colour of the
+       street under it (green, or orange / purple on a drive-in / reverse-in stretch) with a black outline, so the colour still shows
+       through the name (Fox: "some street names hide the colour of the road" ... "try the text on the street way"). As big as the
+       zoom allows, smaller on a short street so it still gets its name, or straight on past a dead end. Where it can't go on the
+       street without sitting on another road or name, it goes beside the street in plain black on white. */
     var SC = 32, roads = {}, cellsOf = function(x0, y0, x1, y1, f){ for (var gx = Math.floor(x0 / SC); gx <= Math.floor(x1 / SC); gx++) for (var gy = Math.floor(y0 / SC); gy <= Math.floor(y1 / SC); gy++) f(gx + ':' + gy); };
     R.lines.forEach(function(l){
+      var col = (st.lineCol && st.lineCol[pid(l)]) || l.s || '#16a34a', pr = l.mode ? 2 : 1, nm = l.n || l.mn || '';
+      if (st.lineCol && !st.lineCol[pid(l)] && !l.mode) return;   // (a piece taken off the map)
       var pts = l.c.map(function(c){ return map.latLngToContainerPoint(c); });
-      for (var i = 1; i < pts.length; i++) { var A = pts[i - 1], B = pts[i]; if (Math.abs(A.x - B.x) + Math.abs(A.y - B.y) > 4000) continue; cellsOf(Math.min(A.x, B.x), Math.min(A.y, B.y), Math.max(A.x, B.x), Math.max(A.y, B.y), function(k){ (roads[k] = roads[k] || []).push([A, B]); }); }
+      for (var i = 1; i < pts.length; i++) { var A = pts[i - 1], B = pts[i]; if (Math.abs(A.x - B.x) + Math.abs(A.y - B.y) > 4000) continue; var sg = [A, B, col, pr, nm]; cellsOf(Math.min(A.x, B.x), Math.min(A.y, B.y), Math.max(A.x, B.x), Math.max(A.y, B.y), function(k){ (roads[k] = roads[k] || []).push(sg); }); }
     });
-    var roadNear = function(q, lim){
-      var hit = false; cellsOf(q.x - lim, q.y - lim, q.x + lim, q.y + lim, function(k){ if (hit) return; (roads[k] || []).some(function(sg){ if (L.LineUtil.pointToSegmentDistance(q, sg[0], sg[1]) < lim) return (hit = true); return false; }); });
+    // is there a road within lim px (any road, or only roads other than street `not`)?
+    // (with `not`, a letter written on its own street: only a road crossing it counts - an unnamed piece, or one under another
+    // name, lying along the very same street is the street itself)
+    var roadNear = function(q, lim, not){
+      var hit = false; cellsOf(q.x - lim, q.y - lim, q.x + lim, q.y + lim, function(k){ if (hit) return; (roads[k] || []).some(function(sg){
+        if (not != null) {
+          if (sg[4] === not || !sg[4]) return false;
+          if (q.ang != null) { var a = Math.atan2(sg[1].y - sg[0].y, sg[1].x - sg[0].x) * 180 / Math.PI - q.ang; a = Math.abs(((a % 180) + 270) % 180 - 90); if (a < 30) return false; }
+        }
+        if (L.LineUtil.pointToSegmentDistance(q, sg[0], sg[1]) < lim) return (hit = true); return false; }); });
       return hit;
+    };
+    // the colour of street `nm` under (or nearest) a letter: a drive-in / reverse-in line is drawn on top, so it wins where it is
+    var colourAt = function(q, nm){
+      var on = null, onP = -1, nearC = null, nd = 1e9;
+      cellsOf(q.x - 96, q.y - 96, q.x + 96, q.y + 96, function(k){ (roads[k] || []).forEach(function(sg){
+        if (sg[4] !== nm) return; var d = L.LineUtil.pointToSegmentDistance(q, sg[0], sg[1]);
+        if (d < 4 && sg[3] > onP) { on = sg[2]; onP = sg[3]; }
+        if (d < nd) { nd = d; nearC = sg[2]; }
+      }); });
+      return on || nearC || '#16a34a';
     };
     var LC = 24, lgrid = {}, lcells = function(x, y, r, f){ for (var gx = Math.floor((x - r) / LC); gx <= Math.floor((x + r) / LC); gx++) for (var gy = Math.floor((y - r) / LC); gy <= Math.floor((y + r) / LC); gy++) f(gx + ':' + gy); };
     var fits = function(cv, fsz){
@@ -40896,48 +40917,59 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       });
       return ok;
     };
-    var onRoads = function(cv, fsz){ var n = 0; cv.chars.forEach(function(c){ if (c.ch !== ' ' && roadNear(c, fsz * 0.45 + 4)) n++; }); return n; };
+    // (on its own street a letter only clashes with a road running right through it; the mouth of a side street meeting the street
+    // is fine - a long street can't be named between its corners otherwise)
+    var onRoads = function(cv, fsz, not){ var lim = not != null ? fsz * 0.3 + 2.5 : fsz * 0.45 + 4, n = 0; cv.chars.forEach(function(c){ if (c.ch !== ' ' && roadNear(c, lim, not)) n++; }); return n; };
     var keep = function(cv, fsz){ var r = fsz * 0.5; cv.chars.forEach(function(c){ if (c.ch === ' ') return; var e = [c.vx, c.vy, r]; lcells(c.vx, c.vy, r, function(k){ (lgrid[k] = lgrid[k] || []).push(e); }); }); };
     var fmin = Math.max(small ? 6.5 : 7, fs * 0.6), sizes = []; for (var z = fs; z >= fmin - 0.01; z -= Math.max(0.5, fs * 0.1)) sizes.push(Math.round(z * 2) / 2);
     var abbr = function(n){ return n.replace(/\bRoad$/, 'Rd').replace(/\bStreet$/, 'St').replace(/\bAvenue$/, 'Ave').replace(/\bCourt$/, 'Ct').replace(/\bDrive$/, 'Dr').replace(/\bCrescent$/, 'Cres').replace(/\bParade$/, 'Pde').replace(/\bPlace$/, 'Pl').replace(/\bGrove$/, 'Gr').replace(/\bClose$/, 'Cl').replace(/\bHighway$/, 'Hwy').replace(/\bLane$/, 'La').replace(/\bTerrace$/, 'Tce').replace(/\bBoulevard$/, 'Bvd'); };
+    var FR = [0.5, 0.36, 0.64, 0.24, 0.76, 0.14, 0.86];
+    var onStreet = function(cv, fsz, p){ cv.chars.forEach(function(c){ c.col = colourAt(c, p.n); }); keep(cv, fsz); named[p.n] = 1; mkCurved(cv, fsz, p, true); };
     chains.forEach(function(p){
       if (p.moved || p.len < 12) return;
       var text = abbr(p.n), again = !!named[p.n];
-      var sm = lblSmooth(p, fs), best = null;
+      var sm = lblSmooth(p, fs), bestOn = null, bestBy = null, P0 = lblOffset(sm, 0);
+      var dead = function(P, e){ return !roadNear(lblAtD(P, e ? P.start + P.olen + 9 : P.start - 9), 6); };
       for (var si = 0; si < sizes.length; si++) {
         var fsz = sizes[si], ws = lblMeasure(text, fsz); if (!ws) return;
         var tot = ws.reduce(function(a, b){ return a + b; }, 0);
         if (again && p.len < tot * 4) return;                 // (a second name on the same street only where it is long)
         if (tot > p.len * 1.1 + 24) continue;                 // (it may run a little past the end of the street)
-        var off = 6.5 + fsz * 0.5, found = null;
-        // (right beside it first, then a little further out, then straight on past either end - the end of a short court)
-        [1, -1, 1.8, -1.8, 0].some(function(side){
-          var P = lblOffset(sm, side * off), past = (tot / 2 + 7) / (P.olen || 1);
-          // (straight on past an end only where the street stops - a dead end - not past a junction onto the next block)
-          var dead = function(e){ return !roadNear(lblAtD(P, e ? P.start + P.olen + 9 : P.start - 9), 6); };
-          return (side ? [0.5, 0.36, 0.64, 0.24, 0.76, 0.14, 0.86] : [dead(1) ? 1 + past : null, dead(0) ? -past : null].filter(function(v){ return v != null; })).some(function(fr){
-            var cv = curvedLabel(st, P, text, fsz, P.start + P.olen * fr); if (!cv || !fits(cv, fsz)) return false;
-            var n = onRoads(cv, fsz);
-            if (!n) { found = cv; return true; }
-            if (!best || n < best.n) best = { cv: cv, fsz: fsz, n: n };
+        var past = (tot / 2 + 7) / (P0.olen || 1), found = null;
+        // 1. on the street (or straight on past a dead end - not past a junction onto the next block)
+        FR.concat([dead(P0, 1) ? 1 + past : null, dead(P0, 0) ? -past : null].filter(function(v){ return v != null; })).some(function(fr){
+          var cv = curvedLabel(st, P0, text, fsz, P0.start + P0.olen * fr); if (!cv || !fits(cv, fsz)) return false;
+          var n = onRoads(cv, fsz, p.n);
+          if (!n) { found = cv; return true; }
+          if (!bestOn || n < bestOn.n) bestOn = { cv: cv, fsz: fsz, n: n };
+          return false;
+        });
+        if (found) { onStreet(found, fsz, p); return; }
+      }
+      if (bestOn && bestOn.n <= 1 && !again) { onStreet(bestOn.cv, bestOn.fsz, p); return; }
+      // 2. beside it, black on white, on either side, right beside it and then a little further out
+      for (var sj = 0; sj < sizes.length; sj++) {
+        var fz = sizes[sj], wz = lblMeasure(text, fz); if (!wz) return;
+        var tz = wz.reduce(function(a, b){ return a + b; }, 0);
+        if (tz > p.len * 1.1 + 24) continue;
+        var off = 6.5 + fz * 0.5, got = null;
+        [1, -1, 1.8, -1.8].some(function(side){
+          var P = lblOffset(sm, side * off);
+          return FR.some(function(fr){
+            var cv = curvedLabel(st, P, text, fz, P.start + P.olen * fr); if (!cv || !fits(cv, fz)) return false;
+            var n = onRoads(cv, fz);
+            if (!n) { got = cv; return true; }
+            if (!bestBy || n < bestBy.n) bestBy = { cv: cv, fsz: fz, n: n };
             return false;
           });
         });
-        if (found) { keep(found, fsz); named[p.n] = 1; mkCurved(found, fsz, p); return; }
+        if (got) { keep(got, fz); named[p.n] = 1; mkCurved(got, fz, p); return; }
       }
-      // No room beside it at any size: written ON the street, in the street's own colour with a black outline, so the colour still
-      // shows through the name (Fox's idea) - a short court squeezed between other roads otherwise had no name
       if (again) return;
-      // (a letter or two just touching another road's edge is still fine beside the street)
-      if (best && best.n <= 2) { keep(best.cv, best.fsz); named[p.n] = 1; mkCurved(best.cv, best.fsz, p); return; }
-      var col = (st.lineCol && (p.ids || [p.id]).map(function(id){ return st.lineCol[id]; }).filter(Boolean)[0]) || '#16a34a';
-      for (var sj = 0; sj < sizes.length; sj++) {
-        var fz = sizes[sj], P0 = lblOffset(sm, 0), wz = lblMeasure(text, fz); if (!wz) return;
-        var tz = wz.reduce(function(a, b){ return a + b; }, 0), pz = (tz / 2 + 7) / (P0.olen || 1), hit = null;
-        [0.5, 0.36, 0.64, 1 + pz, -pz].some(function(fr){ var cv = curvedLabel(st, P0, text, fz, P0.start + P0.olen * fr); if (cv && fits(cv, fz)) { hit = cv; return true; } return false; });
-        if (hit) { keep(hit, fz); named[p.n] = 1; mkCurved(hit, fz, p, col); return; }
-      }
-      if (window.lbLblDebug) window.lbLblDebug.push([text, Math.round(p.len), best ? best.n : -1, again]);
+      // 3. the least bad spot (a letter or two over a crossing road beats a street with no name)
+      if (bestOn && bestOn.n <= 2) { onStreet(bestOn.cv, bestOn.fsz, p); return; }
+      if (bestBy && bestBy.n <= 2) { keep(bestBy.cv, bestBy.fsz); named[p.n] = 1; mkCurved(bestBy.cv, bestBy.fsz, p); return; }
+      if (window.lbLblDebug) window.lbLblDebug.push([text, Math.round(p.len), bestOn ? bestOn.n : -1, bestBy ? bestBy.n : -1]);
     });
   }
   function placeCards(st){
