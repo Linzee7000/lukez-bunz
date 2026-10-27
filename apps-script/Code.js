@@ -188,6 +188,8 @@ function logSyncAttempt_(ss, rawData, errorText, duplicatesSkipped) {
 
 // 2. STREAM MASTER DATASET OR READ SYNC DATA (GET)
 function doGet(e) {
+  // ?history=1 (Run forecast driver details, leading hand PIN) is answered by History.js
+  if (e && e.parameter && e.parameter.history) return historyGet_(e);
   if (e && e.parameter && e.parameter.download === "csv") {
     try {
       var file = DriveApp.getFileById(CONFIG.MASTER_FILE_ID);
