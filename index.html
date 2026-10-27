@@ -38748,7 +38748,10 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   #lbRunMap .rm-rec input { font: inherit; padding: 4px 8px; border: 1px solid #cbd5e1; border-radius: 6px; min-width: 140px; }
   #lbRunMap .rm-card.rm-notes.rm-dragging { cursor: grabbing; box-shadow: 0 4px 18px rgba(0,0,0,.3); outline: 2px dashed #64748b; }
   .rm-lbl.rm-lbl-ch { letter-spacing: 0; text-shadow: none; }
-  .rm-lbl.rm-lbl-ch.rm-lbl-halo { color: #fff; text-shadow: -2px 0 #fff, 2px 0 #fff, 0 -2px #fff, 0 2px #fff, -1.5px -1.5px #fff, 1.5px 1.5px #fff, -1.5px 1.5px #fff, 1.5px -1.5px #fff; }
+  .rm-lbl.rm-lbl-grp { width: 0; height: 0; text-shadow: none; }
+  #lbRunMap .rm-lbl-grp.rm-lbl-drag .rm-lbl-ch { pointer-events: auto; cursor: grab; touch-action: none; }
+  /* (a stroke as well as the shadows: the eight shadows alone left holes the green route showed through, as green specks in the letters) */
+  .rm-lbl.rm-lbl-ch.rm-lbl-halo { color: #fff; -webkit-text-stroke: 3.5px #fff; paint-order: stroke fill; text-shadow: -2px 0 #fff, 2px 0 #fff, 0 -2px #fff, 0 2px #fff, -1.5px -1.5px #fff, 1.5px 1.5px #fff, -1.5px 1.5px #fff, 1.5px -1.5px #fff; }
   #lbRunMap .rm-lbl.rm-lbl-drag { pointer-events: auto; cursor: grab; touch-action: none; }
   #lbRunMap .rm-lbl.rm-lbl-drag.rm-dragging { cursor: grabbing; outline: 2px dashed #64748b; outline-offset: 2px; }
   #lbRunMap .rm-card.rm-key.rm-dragging { cursor: grabbing; box-shadow: 0 4px 18px rgba(0,0,0,.3); outline: 2px dashed #64748b; }
@@ -38834,7 +38837,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
 
   .rm-dlbl span { position: absolute; transform: translate(-50%, -50%); white-space: nowrap; font: 800 12px/1 system-ui, sans-serif; color: #0b0f14; text-shadow: -2px 0 #fff, 2px 0 #fff, 0 -2px #fff, 0 2px #fff; pointer-events: none; }
   .rm-note-pin { width: 22px; height: 22px; border-radius: 50%; background: #111; color: #fff; font: 700 12px/22px system-ui; text-align: center; border: 2px solid #fff; box-shadow: 0 1px 4px rgba(0,0,0,.5); }
-  .rm-lbl { position: absolute; white-space: nowrap; font: 800 12px/1 system-ui, -apple-system, 'Segoe UI', sans-serif; color: #0f172a; letter-spacing: .1px; pointer-events: none;
+  /* street names: a plain map font, not bold (Fox: "don't use that font on the streets, no bold") - the heavy system-ui 800 read as a headline */
+  .rm-lbl { position: absolute; white-space: nowrap; font: 400 12px/1 Roboto, Arial, 'Helvetica Neue', sans-serif; color: #111; letter-spacing: .2px; pointer-events: none;
     text-shadow: -2px 0 #fff, 2px 0 #fff, 0 -2px #fff, 0 2px #fff, -1.5px -1.5px #fff, 1.5px 1.5px #fff, -1.5px 1.5px #fff, 1.5px -1.5px #fff; transform-origin: 0 0; }
   /* Print page size. The run sheet's print styles (lb-runsheet) set a global "@page { size: A4 landscape }"
      further down the file, and a later @page rule wins - so every run map printed landscape, and a portrait
@@ -39959,19 +39963,43 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   }
   /* The reverse-in / drive-in streets (data/street-modes.json) near this run, as lines of the route: they used to be drawn on top
      with no way to tap them, so one in the wrong place could not be removed or recoloured. Each has its own id. */
-  function modeLines(R){
-    var all = []; R.lines.forEach(function(l){ all = all.concat(l.c); });
-    var grid = {}; all.forEach(function(p){ grid[Math.round(p[0] / 0.0003) + ':' + Math.round(p[1] / 0.0004)] = 1; });
-    var near = function(p){ var a = Math.round(p[0] / 0.0003), b = Math.round(p[1] / 0.0004); for (var i = -1; i <= 1; i++) for (var j = -1; j <= 1; j++) if (grid[(a + i) + ':' + (b + j)]) return true; return false; };
+  /* Only a street mode from a route map of the run's own day, and only where it lies on (within ~20 m of) the run's own line:
+     "anywhere within a grid square or two" put Monday 224B's drive-in on Dundas St's west service road onto Tuesday 220B (Fox). */
+  function modeLines(R, k){
+    var segs = [], C = 0.0003;
+    R.lines.forEach(function(l){ for (var i = 1; i < l.c.length; i++) segs.push([l.c[i - 1], l.c[i]]); });
+    var grid = {};
+    segs.forEach(function(sg){
+      var a0 = Math.floor(Math.min(sg[0][0], sg[1][0]) / C), a1 = Math.floor(Math.max(sg[0][0], sg[1][0]) / C), b0 = Math.floor(Math.min(sg[0][1], sg[1][1]) / C), b1 = Math.floor(Math.max(sg[0][1], sg[1][1]) / C);
+      if ((a1 - a0 + 1) * (b1 - b0 + 1) > 400) return;
+      for (var a = a0; a <= a1; a++) for (var b = b0; b <= b1; b++) (grid[a + ':' + b] = grid[a + ':' + b] || []).push(sg);
+    });
+    var near = function(p){
+      var a = Math.floor(p[0] / C), b = Math.floor(p[1] / C), MX = 111320 * Math.cos(p[0] * Math.PI / 180), MY = 110540;
+      for (var i = -1; i <= 1; i++) for (var j = -1; j <= 1; j++) {
+        var l = grid[(a + i) + ':' + (b + j)]; if (!l) continue;
+        for (var q = 0; q < l.length; q++) {
+          var A = l[q][0], B = l[q][1], ax = (A[1] - p[1]) * MX, ay = (A[0] - p[0]) * MY, ex = (B[1] - A[1]) * MX, ey = (B[0] - A[0]) * MY, L2 = ex * ex + ey * ey || 1e-9;
+          var t = Math.max(0, Math.min(1, -(ax * ex + ay * ey) / L2));
+          if (Math.hypot(ax + t * ex, ay + t * ey) < 20) return true;
+        }
+      }
+      return false;
+    };
+    var DAYS = /monday|tuesday|wednesday|thursday|friday|saturday|sunday/gi, kd = String(k || '').match(DAYS);
+    kd = kd && kd.length === 1 ? kd[0].toLowerCase() : null;
     var out = [];
     (g('sharedStreetModes') || []).forEach(function(m){
-      if (!m.points || m.points.length < 2 || !m.points.every(near)) return;
+      if (!m.points || m.points.length < 2) return;
+      var sd = String(m.src || '').match(DAYS);
+      if (kd && sd && sd[0].toLowerCase() !== kd) return;
+      if (!m.points.every(near)) return;
       var p0 = m.points[0];
       out.push({ c: m.points, s: m.type === 'drive-reverse-out' ? '#f59e0b' : '#7c3aed', mode: m.type, pp: 'mode|' + m.type + '|' + (+p0[0]).toFixed(5) + ',' + (+p0[1]).toFixed(5) });
     });
     return out;
   }
-  function withModes(R){ var ml = modeLines(R); return ml.length ? Object.assign({}, R, { lines: R.lines.concat(ml) }) : R; }
+  function withModes(R, k){ var ml = modeLines(R, k); return ml.length ? Object.assign({}, R, { lines: R.lines.concat(ml) }) : R; }
   /* Drawn lines as they are shown: rubbed out where the Rub out tool went over them too, and left out wherever they run along a
      street (or that side of it) of the very same colour - a red line drawn along a red street showed as one thick doubled line;
      now the two read as the one line. pieces: [{ c, col, S }] the route as drawn (S = that piece's side colours). */
@@ -40095,7 +40123,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   function draw(container, key, R, page, opts){
     opts = opts || {};
     var E = edits(key), mode = opts.edit ? opts.mode : '';
-    if (!R.days) R = withModes(R);
+    if (!R.days) R = withModes(R, key);
     if (E.erase.length) R = Object.assign({}, R, { lines: rubOut(R.lines, E) });
     if (E.areas.length) R = Object.assign({}, R, { lines: areaPaint(R.lines, E, function(l){ return E.pt[pid(l)] || (l.pid0 && E.pt[l.pid0]) || 0; }) });
     // the map can be turned (rot, degrees clockwise) inside the page; the page and its cards stay upright
@@ -40657,14 +40685,16 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       var a0p = p.pts[r - 1], b0p = p.pts[r], seg = a0p.distanceTo(b0p), nn = Math.max(1, Math.round(seg / 2));
       for (var q2 = 1; q2 <= nn; q2++) raw.push(L.point(a0p.x + (b0p.x - a0p.x) * q2 / nn, a0p.y + (b0p.y - a0p.y) * q2 / nn));
     }
-    var hw2 = Math.max(2, Math.round(fsz * 0.45)), pts = raw.map(function(pt, i){
+    // (averaged twice over about a letter and a half: a 1-2 px zigzag where pieces join made the line longer than it looks, and
+    // the letters there spread apart - "Sussex R d")
+    var hw2 = Math.max(3, Math.round(fsz * 0.75)), avg = function(src){ return src.map(function(pt, i){
       var x = 0, y = 0, c = 0;
-      for (var j = Math.max(0, i - hw2); j <= Math.min(raw.length - 1, i + hw2); j++) { x += raw[j].x; y += raw[j].y; c++; }
+      for (var j = Math.max(0, i - hw2); j <= Math.min(src.length - 1, i + hw2); j++) { x += src[j].x; y += src[j].y; c++; }
       return L.point(x / c, y / c);
-    });
+    }); }, pts = avg(avg(raw));
     if (!measureCtx) { try { measureCtx = document.createElement('canvas').getContext('2d'); } catch (e) { return null; } }
-    measureCtx.font = '800 ' + fsz + "px system-ui, -apple-system, 'Segoe UI', sans-serif";
-    var ws = text.split('').map(function(ch){ return measureCtx.measureText(ch).width + 0.1; });
+    measureCtx.font = '400 ' + fsz + "px Roboto, Arial, 'Helvetica Neue', sans-serif";
+    var ws = text.split('').map(function(ch){ return measureCtx.measureText(ch).width + 0.2; });
     var tot = ws.reduce(function(a, b){ return a + b; }, 0);
     var cum = [0]; for (var i = 1; i < pts.length; i++) cum.push(cum[i - 1] + pts[i].distanceTo(pts[i - 1]));
     var len = cum[cum.length - 1];
@@ -40679,7 +40709,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var dir = function(d){ var a = at(d - fsz * 0.6), b = at(d + fsz * 0.6); return Math.atan2(b.y - a.y, b.x - a.x); };
     var a0 = dir(s0 + fsz * 0.3), turn = 0;
     for (var k = 1; k <= 6; k++) { var dd = dir(s0 + (s1 - s0) * k / 6) - a0; dd = Math.atan2(Math.sin(dd), Math.cos(dd)); turn = Math.max(turn, Math.abs(dd)); }
-    if (turn < 7 * Math.PI / 180) return null;
+    if (turn < 3 * Math.PI / 180) return null;
     if (turn > 100 * Math.PI / 180) return false;   // (round a hairpin: no room for it)
     // which way reads left to right on the page
     var A = at(s0), B = at(s1), pa = Math.atan2(B.y - A.y, B.x - A.x) * 180 / Math.PI + (st.rot || 0);
@@ -40691,7 +40721,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       var q = at(d), ang = dir(d) * 180 / Math.PI + (flip ? 180 : 0);
       if (prevAng != null) { var dA = ((ang - prevAng) % 360 + 540) % 360 - 180; if (Math.abs(dA) > 30) tooSharp = true; }
       prevAng = ang;
-      chars.push({ ch: ch, x: q.x, y: q.y, ang: ang });
+      chars.push({ ch: ch, x: q.x, y: q.y, ang: ang, w: w });
       var v = toView(st, q.x, q.y), r = fsz * 0.55;
       box[0] = Math.min(box[0], v.x - r); box[1] = Math.min(box[1], v.y - r); box[2] = Math.max(box[2], v.x + r); box[3] = Math.max(box[3], v.y + r);
     });
@@ -40712,6 +40742,42 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       for (var i = 1; i < pts.length; i++) len += pts[i].distanceTo(pts[i - 1]);
       return { n: l.n, pts: pts, len: len, id: pid(l) };
     }).sort(function(a, b){ return b.len - a.len; });
+    // the route is stored in short pieces split at every corner and junction (and often twice, once each way), so a name only ever saw
+    // a short, nearly straight bit of its street and never followed the bend. For the names the pieces of one street are joined end to
+    // end into whole stretches first (the straightest way on at a junction; a piece lying on top of one already used is left out).
+    var chains = (function(){
+      var by = {}, out = [], near = function(a, b){ return Math.abs(a.x - b.x) + Math.abs(a.y - b.y) < 3; };
+      pieces.forEach(function(p){ if (p.len > 0) (by[p.n] = by[p.n] || []).push(p); });
+      Object.keys(by).forEach(function(n){
+        var list = [], used = [];
+        by[n].forEach(function(p){   // (longest first) drop pieces that lie along one already kept
+          var on = list.some(function(o){ return p.pts.every(function(q){ for (var i = 1; i < o.pts.length; i++) if (L.LineUtil.pointToSegmentDistance(q, o.pts[i - 1], o.pts[i]) < 3) return true; return false; }); });
+          if (!on) list.push(p);
+        });
+        var ang = function(a, b){ return Math.atan2(b.y - a.y, b.x - a.x); };
+        list.forEach(function(seed, si){
+          if (used[si]) return; used[si] = 1;
+          var pts = seed.pts.slice(), ids = [seed.id];
+          [0, 1].forEach(function(end){
+            for (var guard = 0; guard < 60; guard++) {
+              var tip = end ? pts[pts.length - 1] : pts[0], prev = end ? pts[pts.length - 2] : pts[1], a0 = ang(prev, tip), best = -1, bd = 1e9, bpts = null;
+              list.forEach(function(o, oi){
+                if (used[oi]) return;
+                var q = near(o.pts[0], tip) ? o.pts : near(o.pts[o.pts.length - 1], tip) ? o.pts.slice().reverse() : null; if (!q || q.length < 2) return;
+                var d = ang(q[0], q[1]) - a0; d = Math.abs(Math.atan2(Math.sin(d), Math.cos(d)));
+                if (d < bd) { bd = d; best = oi; bpts = q; }
+              });
+              if (best < 0 || bd > Math.PI / 3) break;   // (a turn sharper than 60 degrees: another arm of the street)
+              used[best] = 1; ids.push(list[best].id);
+              if (end) pts = pts.concat(bpts.slice(1)); else pts = bpts.slice(1).reverse().concat(pts);
+            }
+          });
+          var len = 0; for (var i = 1; i < pts.length; i++) len += pts[i].distanceTo(pts[i - 1]);
+          out.push({ n: n, pts: pts, len: len, id: seed.id, ids: ids });
+        });
+      });
+      return out.sort(function(a, b){ return b.len - a.len; });
+    })();
     var named = {}, LP = st.lblPos || {}, mkLbl = function(p, text, fsz, cx, cy, ang){
       var s = document.createElement('div'); s.className = 'rm-lbl'; s.textContent = text; s.style.fontSize = fsz + 'px';
       var lp = map.containerPointToLayerPoint([cx, cy]);
@@ -40725,16 +40791,26 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       lblAt(s, lp.x, lp.y);
     };
     // a curved name: each letter on its own, white outline first (so one letter's halo never covers the next letter), then the letters
-    var mkCurved = function(cv, fsz){
+    // The letters sit in one empty box at the name's middle, so a leading hand can still drag the whole name (it was a plain straight
+    // name whenever names could be dragged, i.e. always for a leading hand - so Fox never saw a name bend)
+    var mkCurved = function(cv, fsz, p){
+      var mid = cv.chars[Math.floor(cv.chars.length / 2)], o = map.containerPointToLayerPoint([mid.x, mid.y]);
+      var g = document.createElement('div'); g.className = 'rm-lbl rm-lbl-grp'; g.style.fontSize = fsz + 'px';
+      pane.appendChild(g); lblAt(g, o.x, o.y);
       [true, false].forEach(function(halo){
         cv.chars.forEach(function(c){
           if (c.ch === ' ') return;
           var s = document.createElement('div'); s.className = 'rm-lbl rm-lbl-ch' + (halo ? ' rm-lbl-halo' : ''); s.textContent = c.ch; s.style.fontSize = fsz + 'px';
           s.style.transform = 'rotate(' + c.ang.toFixed(1) + 'deg)'; s.style.transformOrigin = '50% 50%';
-          pane.appendChild(s);
-          var lp = map.containerPointToLayerPoint([c.x, c.y]); lblAt(s, lp.x, lp.y);
+          // (its own measured width, placed to the fraction of a pixel: placing by the element's whole-pixel width put each letter up to
+          // half a pixel off and the gaps between letters came out uneven)
+          s.style.width = c.w + 'px'; s.style.height = fsz + 'px'; s.style.textAlign = 'center';
+          g.appendChild(s);
+          var lp = map.containerPointToLayerPoint([c.x, c.y]); s.style.left = (lp.x - o.x - c.w / 2) + 'px'; s.style.top = (lp.y - o.y - fsz / 2) + 'px';
         });
       });
+      if (st.selLabel && st.selLabel === p.id) g.classList.add('rm-lbl-sel');
+      if (st.onLabelMove) lblDrag(st, g, p.id);
     };
     var short = function(n){ return n.replace(/\bRoad$/, 'Rd').replace(/\bStreet$/, 'St').replace(/\bAvenue$/, 'Ave').replace(/\bCourt$/, 'Ct').replace(/\bDrive$/, 'Dr').replace(/\bCrescent$/, 'Cres').replace(/\bParade$/, 'Pde').replace(/\bPlace$/, 'Pl'); };
     // names the driver dragged somewhere (they stay there, at the angle of their own street, and nothing else lands on them)
@@ -40748,12 +40824,13 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       boxes.push([v.x - w / 2, v.y - fs / 2, v.x + w / 2, v.y + fs / 2]); named[p.n] = 1; named[p.n + '#' + p.id] = 1; p.moved = true;
       mkLbl(p, short(p.n), fs, q.x, q.y, ang);
     });
+    chains.forEach(function(c){ if (c.ids.some(function(id){ return named[c.n + '#' + id]; })) c.moved = true; });
     (small ? [[fs, 0.75]] : [[fs, 0.55], [Math.max(7, fs * 0.85), 0.35]]).forEach(function(pass){ var fsz = pass[0], need = pass[1];
-      pieces.forEach(function(p){
+      chains.forEach(function(p){
         if (p.moved) return;
         if (need < 0.5 && named[p.n]) return;
         var text = p.n.replace(/\bRoad$/, 'Rd').replace(/\bStreet$/, 'St').replace(/\bAvenue$/, 'Ave').replace(/\bCourt$/, 'Ct').replace(/\bDrive$/, 'Dr').replace(/\bCrescent$/, 'Cres').replace(/\bParade$/, 'Pde').replace(/\bPlace$/, 'Pl').replace(/\bGrove$/, 'Gr').replace(/\bClose$/, 'Cl').replace(/\bHighway$/, 'Hwy').replace(/\bLane$/, 'La').replace(/\bTerrace$/, 'Tce').replace(/\bBoulevard$/, 'Bvd');
-        var w = text.length * fsz * 0.6 + 6;
+        var w = text.length * fsz * 0.55 + 6;
         if (named[p.n] && p.len < w * 3) return;
         if (p.len < w * need) return;
         var half = p.len / 2, acc = 0, a = p.pts[0], b = p.pts[1] || p.pts[0];
@@ -40766,13 +40843,13 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
         ang = ((ang % 360) + 540) % 360 - 180; if (ang > 90) ang -= 180; if (ang < -90) ang += 180;
         // on a bending street the name follows the curve, letter by letter (Fox: "street names to follow the curve of the road");
         // not while editing, where a name is one piece you can drag
-        var cv = !st.onLabelMove && !(st.lrot && st.lrot[p.id]) ? curvedLabel(st, p, text, fsz, half) : null;
+        var cv = !(st.lrot && st.lrot[p.id]) ? curvedLabel(st, p, text, fsz, half) : null;
         if (cv === false) return;
         if (cv) {
           if (cv.box[0] < 0 || cv.box[1] < 0 || cv.box[2] > W || cv.box[3] > H) return;
           if (boxes.some(function(o){ return !(cv.box[2] < o[0] || cv.box[0] > o[2] || cv.box[3] < o[1] || cv.box[1] > o[3]); })) return;
           boxes.push(cv.box); named[p.n] = 1;
-          mkCurved(cv, fsz);
+          mkCurved(cv, fsz, p);
           return;
         }
         var rad = ang * Math.PI / 180, hw = Math.abs(Math.cos(rad)) * w / 2 + Math.abs(Math.sin(rad)) * fsz / 2, hh = Math.abs(Math.sin(rad)) * w / 2 + Math.abs(Math.cos(rad)) * fsz / 2;
@@ -41691,7 +41768,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     return R.lines.map(function(l){ if (l.ar) return { l: l, gone: l.ar.a === 'x', col: l.ar.a === 'col' && l.ar.col ? l.ar.col : (l.s || '#16a34a') }; var ov = ovOf(E, l); return { l: l, gone: ov === 'x', col: ov && ov !== 'x' ? ov : (l.s || '#16a34a') }; }).filter(function(x){ return !x.gone; });
   }
   function routeFor(k){
-    var R = withModes(route(k)), E = edits(k);
+    var R = withModes(route(k), k), E = edits(k);
     if (E.erase.length) R = Object.assign({}, R, { lines: rubOut(R.lines, E) });
     if (E.areas.length) R = Object.assign({}, R, { lines: areaPaint(R.lines, E, function(l){ return E.pt[pid(l)] || (l.pid0 && E.pt[l.pid0]) || 0; }) });
     return { R: R, E: E };
