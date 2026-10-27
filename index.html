@@ -33087,7 +33087,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       p.todo = todoList(tc);
       return ds;
     }).then(function(d){
-      if (d) { p.key = d.key; p.km = d.km; p.kmDone = d.kmDone; p.st = d.st; }
+      if (d) { p.key = d.key; p.km = d.km; p.kmDone = d.kmDone; p.st = d.sg; }   // (by place, not line number: see doneParts)
       return window.lbOutbox.postPlace(p);
     }).then(function(){ liveBusy = false; }, function(){ liveBusy = false; });
   }
@@ -39825,7 +39825,30 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       if (cur.length > 1 && acc > 0.5) mk(li, cur);
     });
     var hAt = [];   // each house with its piece and side, so the To do can follow the map
-    if (st) {
+    /* (Fox, 27 Oct: Live runs showed 220B nearly all green at 98% done.) Sent by line and piece number, the done pieces only
+       lined up while both phones had the very same route: the route was redrawn at 12:09 and every line after it shifted.
+       Now (st a 'g1|' string) each done piece goes as WHERE it is - its middle, its direction and which sides - and each piece
+       here takes the one sent within 20 m running the same way (or the opposite way, sides swapped). Any route, any phone. */
+    if (typeof st === 'string' && st.indexOf('g1|') === 0) {
+      var sent = [], sgrid = {}, zz = function(v){ v = parseInt(v, 36) || 0; return v & 1 ? -(v + 1) / 2 : v / 2; }, la = 0, lo = 0;
+      st.slice(3).split(';').forEach(function(tk){
+        var f = tk.split(','); if (f.length < 4) return;
+        la += zz(f[0]); lo += zz(f[1]);
+        var ang = (parseInt(f[2], 36) || 0) / 36 * 2 * Math.PI - Math.PI, P0 = xy([la / 1e5, lo / 1e5]);
+        var o = { m: P0, u: [Math.cos(ang), Math.sin(ang)], v: +f[3] || 0 }; sent.push(o);
+        var c0 = cellOf(P0); (sgrid[c0] = sgrid[c0] || []).push(o);
+      });
+      pcs.forEach(function(pc){
+        var cx = Math.floor(pc.m[0] / CELL), cy = Math.floor(pc.m[1] / CELL), best = null, bd = 20, bdot = 0;
+        for (var x = cx - 1; x <= cx + 1; x++) for (var y = cy - 1; y <= cy + 1; y++) (sgrid[x + ':' + y] || []).forEach(function(o){
+          var dot = o.u[0] * pc.u[0] + o.u[1] * pc.u[1]; if (Math.abs(dot) < 0.77) return;   // (within 40 degrees, either way)
+          var d = Math.hypot(o.m[0] - pc.m[0], o.m[1] - pc.m[1]); if (d < bd) { bd = d; best = o; bdot = dot; }
+        });
+        var v = best ? best.v : 0, L1 = !!(v & 1), R1 = !!(v & 2);
+        pc.fl = bdot >= 0 ? L1 : R1; pc.fr = bdot >= 0 ? R1 : L1;
+      });
+      rc = { all: [], pink: 0 };
+    } else if (st) {
       var nOf = {}; pcs.forEach(function(pc){ nOf[pc.li] = (nOf[pc.li] || 0) + 1; });
       var at = {}; pcs.forEach(function(pc){ var s0 = String(st[pc.li] || ''), k = at[pc.li] = (at[pc.li] || 0); at[pc.li]++; var v = s0.length === nOf[pc.li] ? +s0.charAt(k) || 0 : 0; pc.fl = !!(v & 1); pc.fr = !!(v & 2); });
       rc = { all: [], pink: 0 };
@@ -39902,15 +39925,21 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       if (o[0]) return pc.dr[-s] || !o[1];
       return pc.dr[1] || pc.dr[-1];
     };
-    var out = lines.map(function(){ return []; }), sts = lines.map(function(){ return ''; }), km = 0, kmDone = 0;
+    var out = lines.map(function(){ return []; }), sts = lines.map(function(){ return ''; }), km = 0, kmDone = 0, sg = [], pla = 0, plo = 0;
+    var zc = function(v){ v = Math.round(v); return (v < 0 ? -2 * v - 1 : 2 * v).toString(36); };
     pcs.forEach(function(pc){
       var l = st ? pc.fl : side(pc, 1), r = st ? pc.fr : side(pc, -1), list = out[pc.li], last = list[list.length - 1];
       sts[pc.li] += String((l ? 1 : 0) + (r ? 2 : 0));
+      if (l || r) {   // the done pieces by where they are (see the 'g1|' reading above)
+        var mla = Math.round((lat0 + pc.m[1] / MY) * 1e5), mlo = Math.round((lng0 + pc.m[0] / MX) * 1e5);
+        var ai = Math.round((Math.atan2(pc.u[1], pc.u[0]) + Math.PI) / (2 * Math.PI) * 36) % 36;
+        sg.push(zc(mla - pla) + ',' + zc(mlo - plo) + ',' + ai.toString(36) + ',' + ((l ? 1 : 0) + (r ? 2 : 0))); pla = mla; plo = mlo;
+      }
       km += pc.len; kmDone += pc.len * ((l ? 1 : 0) + (r ? 1 : 0)) / 2;
       if (last && last.l === l && last.r === r && last.end === pc.pts[0]) { last.c = last.c.concat(pc.pts.slice(1)); last.end = pc.pts[pc.pts.length - 1]; }
       else list.push({ c: pc.pts.slice(), l: l, r: r, end: pc.pts[pc.pts.length - 1] });
     });
-    return { lines: out, km: km / 1000, kmDone: kmDone / 1000, pink: rc.pink || 0, st: sts, houseDone: hAt.map(function(a){ return [a[0], side(a[1], a[2])]; }) };
+    return { lines: out, km: km / 1000, kmDone: kmDone / 1000, pink: rc.pink || 0, st: sts, sg: 'g1|' + sg.join(';'), houseDone: hAt.map(function(a){ return [a[0], side(a[1], a[2])]; }) };
   }
   window.lbRunDoneParts = doneParts;   // (test hook)
   var doneNames = null, DONE_COL = '#dc2626', doneAvail = null, doneOn = null, doneKey = '', clkT = 0;
@@ -41701,7 +41730,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     return load().then(function(){ var k0 = key || currentKey(); return k0 && DATA[k0] ? streetsFor(k0) : null; }).then(function(){   // (the same street lines the picture waits for, or the pieces don't line up)
       var k = key || currentKey(); if (!k || !DATA[k] || !rc) return null;
       var F = routeFor(k), lines = imgLines(F.R, F.E), dp = doneParts(k, lines.map(function(m){ return m.l.c; }), rc, t0);
-      return dp ? { key: k, km: +dp.km.toFixed(2), kmDone: +dp.kmDone.toFixed(2), st: dp.st } : null;
+      return dp ? { key: k, km: +dp.km.toFixed(2), kmDone: +dp.kmDone.toFixed(2), st: dp.st, sg: dp.sg } : null;
     });
   };
   window.lbRunMapImage = function(key, o2){
