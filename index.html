@@ -39754,6 +39754,9 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     return R;
   }
   function daysLayerOn(){ return lsGet('lbRunMapDaysLayer', false) === true; }
+  // Reset names shows while this run has a street name moved or turned by hand
+  function lblResetBtn(){ var rb = document.getElementById('rmLblReset'); if (!rb || !curKey) return; var Ez = edits(curKey); rb.hidden = !(isLeadNow() && (Object.keys(Ez.labels || {}).length || Object.keys(Ez.lrot || {}).length)); }
+  function namesMode(){ var v = lsGet('lbRunMapNames', 'col'); return v === 'on' || v === 'beside' ? v : 'col'; }
   function drawDays(map, layer, o, R){
     var L0 = window.uxDaysLib; if (!L0) return;
     var kNow = curKey; if (L0.extend) L0.extend(o.stream, function(ch){ if (ch && curKey === kNow && el && el.style.display !== 'none') { DAYSR = {}; renderView(true); } }, DAYS.indexOf(o.day) >= 0 ? o.day : null);
@@ -40777,6 +40780,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   }
   function labels(st){
     var map = st.map, R = st.R, pane = map.getPane('rmLabels'); if (!pane) return; pane.innerHTML = '';   // (a map already replaced by a redraw)
+    var T0 = Date.now();
     var m = st.page.getBoundingClientRect(), boxes = [];
     Array.prototype.forEach.call(st.page.querySelectorAll('.rm-card'), function(c){ var r = c.getBoundingClientRect(); boxes.push([r.left - m.left, r.top - m.top, r.right - m.left, r.bottom - m.top]); });
     // names grow and shrink with the zoom (they were 12-14 px at any zoom, so zoomed in they were lost beside the streets and zoomed
@@ -40841,10 +40845,14 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     // a curved name: each letter on its own, white outline first (so one letter's halo never covers the next letter), then the letters
     // The letters sit in one empty box at the name's middle, so a leading hand can still drag the whole name (it was a plain straight
     // name whenever names could be dragged, i.e. always for a leading hand - so Fox never saw a name bend)
-    var mkCurved = function(cv, fsz, p, col){
+    var mkCurved = function(cv, fsz, p, col, solo){
       var mid = cv.chars[Math.floor(cv.chars.length / 2)], o = map.containerPointToLayerPoint([mid.x, mid.y]);
       var g = document.createElement('div'); g.className = 'rm-lbl rm-lbl-grp'; g.style.fontSize = fsz + 'px';
-      pane.appendChild(g); lblAt(g, o.x, o.y);
+      // (an empty box: placed by its corner straight away - lblAt reads the element's size, which made the browser lay out the
+      // whole page again for every name: over a second per map, and slow printing with several pages)
+      g.style.left = o.x + 'px'; g.style.top = o.y + 'px'; pane.appendChild(g);
+      // (a white outline layer under the letters in every mode: one element per letter with its own outline let each letter's
+      // outline cut into the one before - "Vicirr Ave")
       [true, false].forEach(function(halo){
         cv.chars.forEach(function(c){
           if (c.ch === ' ') return;
@@ -40926,13 +40934,20 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var fmin = Math.max(small ? 6.5 : 7, fs * 0.6), sizes = []; for (var z = fs; z >= fmin - 0.01; z -= Math.max(0.5, fs * 0.1)) sizes.push(Math.round(z * 2) / 2);
     var abbr = function(n){ return n.replace(/\bRoad$/, 'Rd').replace(/\bStreet$/, 'St').replace(/\bAvenue$/, 'Ave').replace(/\bCourt$/, 'Ct').replace(/\bDrive$/, 'Dr').replace(/\bCrescent$/, 'Cres').replace(/\bParade$/, 'Pde').replace(/\bPlace$/, 'Pl').replace(/\bGrove$/, 'Gr').replace(/\bClose$/, 'Cl').replace(/\bHighway$/, 'Hwy').replace(/\bLane$/, 'La').replace(/\bTerrace$/, 'Tce').replace(/\bBoulevard$/, 'Bvd'); };
     var FR = [0.5, 0.36, 0.64, 0.24, 0.76, 0.14, 0.86];
-    var onStreet = function(cv, fsz, p){ cv.chars.forEach(function(c){ c.col = colourAt(c, p.n); }); keep(cv, fsz); named[p.n] = 1; mkCurved(cv, fsz, p, true); };
+    // (Names setting: 'col' coloured letters on the line; 'on' plain black letters on the street; 'beside' plain letters above /
+    // beside it. Plain letters skip the colour look-up)
+    var NM = namesMode();
+    var onStreet = function(cv, fsz, p){
+      keep(cv, fsz); named[p.n] = 1;
+      if (NM === 'col') { cv.chars.forEach(function(c){ c.col = colourAt(c, p.n); }); mkCurved(cv, fsz, p, true); }
+      else mkCurved(cv, fsz, p, false, true);
+    };
     chains.forEach(function(p){
       if (p.moved || p.len < 12) return;
       var text = abbr(p.n), again = !!named[p.n];
       var sm = lblSmooth(p, fs), bestOn = null, bestBy = null, P0 = lblOffset(sm, 0);
       var dead = function(P, e){ return !roadNear(lblAtD(P, e ? P.start + P.olen + 9 : P.start - 9), 6); };
-      for (var si = 0; si < sizes.length; si++) {
+      for (var si = 0; si < sizes.length && NM !== 'beside'; si++) {
         var fsz = sizes[si], ws = lblMeasure(text, fsz); if (!ws) return;
         var tot = ws.reduce(function(a, b){ return a + b; }, 0);
         if (again && p.len < tot * 4) return;                 // (a second name on the same street only where it is long)
@@ -40965,14 +40980,15 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
             return false;
           });
         });
-        if (got) { keep(got, fz); named[p.n] = 1; mkCurved(got, fz, p); return; }
+        if (got) { keep(got, fz); named[p.n] = 1; mkCurved(got, fz, p, false, NM !== 'col'); return; }
       }
       if (again) return;
       // 3. the least bad spot (a letter or two over a crossing road beats a street with no name)
       if (bestOn && bestOn.n <= 2) { onStreet(bestOn.cv, bestOn.fsz, p); return; }
-      if (bestBy && bestBy.n <= 2) { keep(bestBy.cv, bestBy.fsz); named[p.n] = 1; mkCurved(bestBy.cv, bestBy.fsz, p); return; }
+      if (bestBy && bestBy.n <= 2) { keep(bestBy.cv, bestBy.fsz); named[p.n] = 1; mkCurved(bestBy.cv, bestBy.fsz, p, false, NM !== 'col'); return; }
       if (window.lbLblDebug) window.lbLblDebug.push([text, Math.round(p.len), bestOn ? bestOn.n : -1, bestBy ? bestBy.n : -1]);
     });
+    window.lbRmLabelsMs = Date.now() - T0;   // (test hook: how long the names took)
   }
   function placeCards(st){
     var map = st.map, R = st.R, c = st.page, W = c.clientWidth, H = c.clientHeight, count = { tl: 0, tr: 0, bl: 0, br: 0 };
@@ -41396,12 +41412,14 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       '<button type="button" data-rm="rot0" title="North up">N</button>' +
       '<button type="button" class="rm-fine" data-rm="rotR" data-step="1" title="Turn the map 1\u00b0 right" aria-label="Turn the map 1 degree right">1\u00b0</button><button type="button" data-rm="rotR" data-step="5" title="Turn the map 5\u00b0 right" aria-label="Turn the map 5 degrees right">5\u00b0 \u21bb</button></span>' +
       '<select id="rmKey" title="Where the key goes (or drag the key on the map)"><option value="auto">Key: auto</option><option value="tl">Key: top left</option><option value="tr">Key: top right</option><option value="bl">Key: bottom left</option><option value="br">Key: bottom right</option><option value="drag" hidden>Key: where dragged</option></select>' +
+      '<select id="rmNames" title="How street names are written on the map and the PDF"><option value="col">Names: coloured on line</option><option value="on">Names: on the street</option><option value="beside">Names: above the street</option></select>' +
+      '<button type="button" data-rm="lblreset" id="rmLblReset" hidden title="Put every street name you moved or turned back where it goes by itself">Reset names</button>' +
       '<button type="button" data-rm="done" id="rmDone" hidden title="Draw the streets you have finished in red">Done streets</button><button type="button" data-rm="fit" title="Show the whole run">Whole run</button><button type="button" data-rm="turn" title="Portrait / landscape">Turn page</button><button type="button" data-rm="edit">Edit</button><button type="button" data-rm="pages" title="Split the run over several printed pages">Pages</button><select id="rmPaper" title="Paper size for Print / Download"><option>A4</option><option>A3</option><option>A2</option><option>A1</option></select><button type="button" data-rm="dlayer" title="Show the Service days areas under the run">Service days</button><button type="button" data-rm="printview" title="Prints exactly what is on screen">Print</button><button type="button" data-rm="pdf" title="Download what is on screen as a PDF">PDF</button><button type="button" data-rm="close">Close</button></div>' +
       '<div id="rmTools" class="rm-tools"></div></div><div id="rmView"></div><div id="rmPrint"></div>';
     document.body.appendChild(el);
     // On a phone the bar above the map took half the screen: turning, where the key goes, Turn page and Pages (not needed often)
     // fold away behind More.
-    ['.rm-rot', '#rmKey', '[data-rm="turn"]', '[data-rm="pages"]', '[data-rm="dlayer"]'].forEach(function(q){ var x = el.querySelector('.rm-head ' + q); if (x) x.classList.add('rm-more'); });
+    ['.rm-rot', '#rmKey', '#rmNames', '[data-rm="lblreset"]', '[data-rm="turn"]', '[data-rm="pages"]', '[data-rm="dlayer"]'].forEach(function(q){ var x = el.querySelector('.rm-head ' + q); if (x) x.classList.add('rm-more'); });
     (function(){ var eb = el.querySelector('.rm-head [data-rm="edit"]'); if (!eb) return; var mb = document.createElement('button'); mb.type = 'button'; mb.setAttribute('data-rm', 'more'); mb.className = 'rm-morebtn'; mb.textContent = 'More \u25be'; eb.parentNode.insertBefore(mb, eb); })();
     // the title bar's clock (hours in the accent colour, no colon) on this page too
     function clk(){ var c = document.getElementById('rmClk'); if (!c || el.style.display === 'none' || typeof window.lbClk !== 'function') return; var d = new Date(); c.innerHTML = window.lbClk(d.getHours(), d.getMinutes(), d.getSeconds()); }
@@ -41422,6 +41440,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       if (a === 'printview') { if (phonePrint()) { mobilePrint(b); } else printView(false); }
       if (a === 'pdf') mobilePrint(b);   // (a computer: the same PDF a phone downloads)
       if (a === 'dlayer') { lsSet('lbRunMapDaysLayer', !daysLayerOn()); renderView(true); }
+      // every moved / turned street name of this run back where it goes by itself (Fox: "you can move them by accident")
+      if (a === 'lblreset' && curKey && isLeadNow()) { var Ez = edits(curKey); Ez.labels = {}; Ez.lrot = {}; saveEdits(curKey, Ez); renderView(true); }
       if (a === 'pages') { pagesMode = !pagesMode; if (pagesMode) editing = false; selPage = 0; renderView(true, true); }
       if (a === 'pauto' && view) { var PA = autoPages(view); if (PA.length) { selPage = 0; pagesChanged(PA); } else note('Nothing to cover'); }
       if (a === 'padd' && view) {
@@ -41489,6 +41509,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     });
     ['rmStream', 'rmDay', 'rmRun'].forEach(function(id){ document.getElementById(id).addEventListener('change', function(){ pickerChanged(id); }); });
     (function(){ var ps = document.getElementById('rmPaper'); ps.value = paperName(); ps.addEventListener('change', function(){ lsSet('lbRunMapPaper', ps.value); if (view && pagesMode) drawFrames(view, sheetsFor(curKey), true); }); })();
+    // street names: coloured letters on the line (slowest to print), plain letters on the street, or plain letters beside it
+    (function(){ var ns = document.getElementById('rmNames'); ns.value = namesMode(); ns.addEventListener('change', function(){ lsSet('lbRunMapNames', this.value); renderView(true); }); })();
     document.getElementById('rmKey').addEventListener('change', function(){ var v = this.value; if (v === 'drag') return; setKey(v === 'auto' ? null : { q: v }); });
     // the turn buttons act on press, and keep turning while held
     var holdT = 0, repT = 0;
@@ -41676,11 +41698,12 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       if (ll) E.labels[id] = ll; else delete E.labels[id];
       saveEdits(curKey, E);
       if (view) { view.lblPos = E.labels; labels(view); }
+      lblResetBtn();
     };
     if (kept) opts.view = kept;
     if (editing && keptOrder) opts.order = keptOrder;
     view = draw(d.map, curKey, R, pg, opts);
-    rotLabel(); keyPicker();
+    rotLabel(); keyPicker(); lblResetBtn();
     Array.prototype.forEach.call(el.querySelectorAll('[data-rm="pages"]'), function(b){ var n = sheetsFor(curKey).length; b.classList.toggle('on', pagesMode); b.textContent = pagesMode ? 'Done with pages' : 'Pages' + (n ? ' (' + n + ')' : ''); });
     if (pagesMode) {
       var vw = view, redraw = function(){ drawFrames(vw, sheetsFor(curKey), true); };
@@ -42016,7 +42039,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
             var q = l.c.map(P), len = 0; for (var i = 1; i < q.length; i++) len += Math.hypot(q[i][0] - q[i - 1][0], q[i][1] - q[i - 1][1]);
             return { n: l.n, q: q, len: len, id: pid(l) };
           }).sort(function(a, b){ return b.len - a.len; });
-          x.font = '800 ' + fs + 'px system-ui, -apple-system, "Segoe UI", Arial, sans-serif'; x.textAlign = 'center'; x.textBaseline = 'middle'; x.lineJoin = 'round';
+          x.font = '400 ' + fs + 'px Roboto, Arial, "Helvetica Neue", sans-serif'; x.textAlign = 'center'; x.textBaseline = 'middle'; x.lineJoin = 'round';
           var put = function(p, text, cx, cy, ang){
             var w = x.measureText(text).width + 8, rad = ang * Math.PI / 180;
             var hw = Math.abs(Math.cos(rad)) * w / 2 + Math.abs(Math.sin(rad)) * fs / 2, hh = Math.abs(Math.sin(rad)) * w / 2 + Math.abs(Math.cos(rad)) * fs / 2;
