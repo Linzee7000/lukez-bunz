@@ -38767,6 +38767,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   #lbRunMap .rm-card.rm-notes.rm-dragging { cursor: grabbing; box-shadow: 0 4px 18px rgba(0,0,0,.3); outline: 2px dashed #64748b; }
   .rm-lbl.rm-lbl-ch { letter-spacing: 0; text-shadow: none; }
   .rm-lbl.rm-lbl-grp { width: 0; height: 0; text-shadow: none; }
+  .rm-lbl.rm-lbl-ch.rm-lbl-on.rm-lbl-halo { color: #000; -webkit-text-stroke: 2px #000; text-shadow: -1px 0 #000, 1px 0 #000, 0 -1px #000, 0 1px #000; }
   #lbRunMap .rm-lbl-grp.rm-lbl-drag .rm-lbl-ch { pointer-events: auto; cursor: grab; touch-action: none; }
   /* (a stroke as well as the shadows: the eight shadows alone left holes the green route showed through, as green specks in the letters) */
   .rm-lbl.rm-lbl-ch.rm-lbl-halo { color: #fff; -webkit-text-stroke: 3.5px #fff; paint-order: stroke fill; text-shadow: -2px 0 #fff, 2px 0 #fff, 0 -2px #fff, 0 2px #fff, -1.5px -1.5px #fff, 1.5px 1.5px #fff, -1.5px 1.5px #fff, 1.5px -1.5px #fff; }
@@ -40013,7 +40014,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       if (kd && sd && sd[0].toLowerCase() !== kd) return;
       if (!m.points.every(near)) return;
       var p0 = m.points[0];
-      out.push({ c: m.points, s: m.type === 'drive-reverse-out' ? '#f59e0b' : '#7c3aed', mode: m.type, pp: 'mode|' + m.type + '|' + (+p0[0]).toFixed(5) + ',' + (+p0[1]).toFixed(5) });
+      out.push({ c: m.points, s: m.type === 'drive-reverse-out' ? '#f59e0b' : '#7c3aed', mode: m.type, mn: m.street || '', pp: 'mode|' + m.type + '|' + (+p0[0]).toFixed(5) + ',' + (+p0[1]).toFixed(5) });
     });
     return out;
   }
@@ -40189,6 +40190,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       if (l.ar) return { l: l, col: l.ar.a === 'col' && l.ar.col ? l.ar.col : (l.s || '#16a34a'), gone: l.ar.a === 'x', inArea: true };
       var ov = ovOf(E, l); return { l: l, col: ov && ov !== 'x' ? ov : (l.s || '#16a34a'), gone: ov === 'x' };
     });
+    st.lineCol = {}; shown.forEach(function(x){ if (!x.gone) st.lineCol[pid(x.l)] = x.col; });   // (a name written on its street takes the street's colour)
     shown.forEach(function(x){ if (!x.gone && !x.l.off) L.polyline(x.l.c, { color: '#fff', weight: 9, opacity: 1, interactive: false }).addTo(layers); });
     var offList = shown.filter(function(x){ return !x.gone && x.l.off; });   // (two runs, a side each: drawn beside the street in paintExtras)
     var DRV = visibleDrawn(E, shown.filter(function(x){ return !x.gone; }).map(function(x){ return { c: x.l.c, col: x.col, S: (!x.inArea && E.sides[pid(x.l)]) || null }; }));
@@ -40694,57 +40696,82 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
      doesn't fit along it. Letters sit on the middle of the line, centred on its half-way point, read left to right (never upside
      down), each turned to the line's direction under it. */
   var measureCtx = null;
-  function curvedLabel(st, p, text, fsz, half){
-    if (p.pts.length < 3) return null;
-    // the line smoothed first (resampled every 2 px, then averaged over about a letter's width): letters on a street drawn with
-    // sharp corners bunched up and overlapped at each corner
+  /* A street's line for its name: resampled every 2 px and averaged twice over about a letter and a half (sharp corners bunched the
+     letters up, and a 1-2 px zigzag where pieces join spread them apart - "Sussex R d"). Kept on the stretch, worked out once. */
+  function lblSmooth(p, fs){
+    if (p._sm) return p._sm;
     var raw = [p.pts[0]];
     for (var r = 1; r < p.pts.length; r++) {
-      var a0p = p.pts[r - 1], b0p = p.pts[r], seg = a0p.distanceTo(b0p), nn = Math.max(1, Math.round(seg / 2));
-      for (var q2 = 1; q2 <= nn; q2++) raw.push(L.point(a0p.x + (b0p.x - a0p.x) * q2 / nn, a0p.y + (b0p.y - a0p.y) * q2 / nn));
+      var A = p.pts[r - 1], B = p.pts[r], nn = Math.max(1, Math.round(A.distanceTo(B) / 2));
+      for (var q = 1; q <= nn; q++) raw.push(L.point(A.x + (B.x - A.x) * q / nn, A.y + (B.y - A.y) * q / nn));
     }
-    // (averaged twice over about a letter and a half: a 1-2 px zigzag where pieces join made the line longer than it looks, and
-    // the letters there spread apart - "Sussex R d")
-    var hw2 = Math.max(3, Math.round(fsz * 0.75)), avg = function(src){ return src.map(function(pt, i){
+    var hw = Math.max(3, Math.round(fs * 0.75)), avg = function(src){ return src.map(function(pt, i){
       var x = 0, y = 0, c = 0;
-      for (var j = Math.max(0, i - hw2); j <= Math.min(src.length - 1, i + hw2); j++) { x += src[j].x; y += src[j].y; c++; }
+      for (var j = Math.max(0, i - hw); j <= Math.min(src.length - 1, i + hw); j++) { x += src[j].x; y += src[j].y; c++; }
       return L.point(x / c, y / c);
-    }); }, pts = avg(avg(raw));
+    }); };
+    // (carried on straight past both ends while it is averaged, then cut back: averaging pulled the ends in, and a short court
+    // came out too short to take its name)
+    var pad = 2 * hw, n0 = raw.length;
+    if (n0 > 1) {
+      var a0 = raw[0], a1 = raw[Math.min(3, n0 - 1)], b0 = raw[n0 - 1], b1 = raw[Math.max(0, n0 - 4)];
+      var ua = a0.subtract(a1), la = Math.hypot(ua.x, ua.y) || 1, ub = b0.subtract(b1), lb = Math.hypot(ub.x, ub.y) || 1, pre = [], post = [];
+      for (var e = pad; e >= 1; e--) pre.push(L.point(a0.x + ua.x / la * 2 * e, a0.y + ua.y / la * 2 * e));
+      for (var f = 1; f <= pad; f++) post.push(L.point(b0.x + ub.x / lb * 2 * f, b0.y + ub.y / lb * 2 * f));
+      raw = pre.concat(raw, post);
+    }
+    return (p._sm = avg(avg(raw)).slice(pad, pad + n0));
+  }
+  // the same line moved off to one side by `off` px (+ = left of the way it was drawn), with its running length
+  function lblOffset(sm0, off){
+    // (with 40 px of straight line added at each end, so a name can run a little past the end of a short street)
+    var E = 40, m0 = sm0.length;
+    var hd = sm0[0].subtract(sm0[Math.min(3, m0 - 1)]), hl = Math.hypot(hd.x, hd.y) || 1, td = sm0[m0 - 1].subtract(sm0[Math.max(0, m0 - 4)]), tl = Math.hypot(td.x, td.y) || 1;
+    var sm = [], st0;
+    for (var e = 20; e >= 1; e--) sm.push(L.point(sm0[0].x + hd.x / hl * e * 2, sm0[0].y + hd.y / hl * e * 2));
+    st0 = sm.length; sm = sm.concat(sm0);
+    for (var f = 1; f <= 20; f++) sm.push(L.point(sm0[m0 - 1].x + td.x / tl * f * 2, sm0[m0 - 1].y + td.y / tl * f * 2));
+    var n = sm.length, pts = new Array(n);
+    for (var i = 0; i < n; i++) {
+      var a = sm[Math.max(0, i - 2)], b = sm[Math.min(n - 1, i + 2)], tx = b.x - a.x, ty = b.y - a.y, l = Math.hypot(tx, ty) || 1;
+      pts[i] = L.point(sm[i].x + ty / l * off, sm[i].y - tx / l * off);
+    }
+    var cum = [0]; for (var k = 1; k < n; k++) cum.push(cum[k - 1] + pts[k].distanceTo(pts[k - 1]));
+    return { pts: pts, cum: cum, len: cum[n - 1], start: cum[st0], olen: cum[st0 + m0 - 1] - cum[st0] };
+  }
+  function lblAtD(P, d){
+    var pts = P.pts, cum = P.cum; d = Math.max(0, Math.min(P.len, d));
+    var lo = 1, hi = pts.length - 1;
+    while (lo < hi) { var mid = (lo + hi) >> 1; if (cum[mid] < d) lo = mid + 1; else hi = mid; }
+    var t = (d - cum[lo - 1]) / ((cum[lo] - cum[lo - 1]) || 1);
+    return L.point(pts[lo - 1].x + (pts[lo].x - pts[lo - 1].x) * t, pts[lo - 1].y + (pts[lo].y - pts[lo - 1].y) * t);
+  }
+  function lblMeasure(text, fsz){
     if (!measureCtx) { try { measureCtx = document.createElement('canvas').getContext('2d'); } catch (e) { return null; } }
     measureCtx.font = '400 ' + fsz + "px Roboto, Arial, 'Helvetica Neue', sans-serif";
-    var ws = text.split('').map(function(ch){ return measureCtx.measureText(ch).width + 0.2; });
-    var tot = ws.reduce(function(a, b){ return a + b; }, 0);
-    var cum = [0]; for (var i = 1; i < pts.length; i++) cum.push(cum[i - 1] + pts[i].distanceTo(pts[i - 1]));
-    var len = cum[cum.length - 1];
-    var at = function(d){
-      d = Math.max(0, Math.min(len, d));
-      for (var j = 1; j < pts.length; j++) if (cum[j] >= d) { var t = (d - cum[j - 1]) / ((cum[j] - cum[j - 1]) || 1); return L.point(pts[j - 1].x + (pts[j].x - pts[j - 1].x) * t, pts[j - 1].y + (pts[j].y - pts[j - 1].y) * t); }
-      return pts[pts.length - 1];
-    };
-    var s0 = half - tot / 2, s1 = half + tot / 2;
-    if (s0 < 0 || s1 > len) return null;
-    // straight enough? (the line's direction under the name turns less than 7 degrees)
-    var dir = function(d){ var a = at(d - fsz * 0.6), b = at(d + fsz * 0.6); return Math.atan2(b.y - a.y, b.x - a.x); };
-    var a0 = dir(s0 + fsz * 0.3), turn = 0;
-    for (var k = 1; k <= 6; k++) { var dd = dir(s0 + (s1 - s0) * k / 6) - a0; dd = Math.atan2(Math.sin(dd), Math.cos(dd)); turn = Math.max(turn, Math.abs(dd)); }
-    if (turn < 3 * Math.PI / 180) return null;
-    if (turn > 100 * Math.PI / 180) return false;   // (round a hairpin: no room for it)
-    // which way reads left to right on the page
-    var A = at(s0), B = at(s1), pa = Math.atan2(B.y - A.y, B.x - A.x) * 180 / Math.PI + (st.rot || 0);
+    return text.split('').map(function(ch){ return measureCtx.measureText(ch).width + 0.2; });
+  }
+  /* Where each letter of a name goes along path P (a street's line, moved beside it), centred `mid` px along it: read left to right
+     (never upside down), each letter turned to the line under it. false = it doesn't fit there (off the end, or round a corner too
+     tight to bend a name round). */
+  function curvedLabel(st, P, text, fsz, mid){
+    var ws = lblMeasure(text, fsz); if (!ws) return false;
+    var tot = ws.reduce(function(a, b){ return a + b; }, 0), s0 = mid - tot / 2, s1 = mid + tot / 2;
+    if (s0 < 1 || s1 > P.len - 1) return false;
+    var dir = function(d){ var a = lblAtD(P, d - fsz * 0.6), b = lblAtD(P, d + fsz * 0.6); return Math.atan2(b.y - a.y, b.x - a.x); };
+    var A = lblAtD(P, s0), B = lblAtD(P, s1), pa = Math.atan2(B.y - A.y, B.x - A.x) * 180 / Math.PI + (st.rot || 0);
     pa = ((pa % 360) + 540) % 360 - 180;
-    var flip = pa > 90 || pa < -90;
-    var chars = [], box = [Infinity, Infinity, -Infinity, -Infinity], pos = 0, prevAng = null, tooSharp = false;
+    var flip = pa > 90 || pa < -90, chars = [], pos = 0, prev = null, first = null, bad = false;
     text.split('').forEach(function(ch, i){
       var w = ws[i], d = flip ? s1 - pos - w / 2 : s0 + pos + w / 2; pos += w;
-      var q = at(d), ang = dir(d) * 180 / Math.PI + (flip ? 180 : 0);
-      if (prevAng != null) { var dA = ((ang - prevAng) % 360 + 540) % 360 - 180; if (Math.abs(dA) > 30) tooSharp = true; }
-      prevAng = ang;
-      chars.push({ ch: ch, x: q.x, y: q.y, ang: ang, w: w });
-      var v = toView(st, q.x, q.y), r = fsz * 0.55;
-      box[0] = Math.min(box[0], v.x - r); box[1] = Math.min(box[1], v.y - r); box[2] = Math.max(box[2], v.x + r); box[3] = Math.max(box[3], v.y + r);
+      var q = lblAtD(P, d), ang = dir(d) * 180 / Math.PI + (flip ? 180 : 0);
+      if (prev != null) { var dA = ((ang - prev) % 360 + 540) % 360 - 180; if (Math.abs(dA) > 25) bad = true; }
+      if (first == null) first = ang; else { var dT = ((ang - first) % 360 + 540) % 360 - 180; if (Math.abs(dT) > 50) bad = true; /* (not wrapped round a corner or the end of a court) */ }
+      prev = ang;
+      var v = toView(st, q.x, q.y);
+      chars.push({ ch: ch, x: q.x, y: q.y, ang: ang, w: w, vx: v.x, vy: v.y });
     });
-    if (tooSharp) return false;   // (a corner too tight to bend a name round)
-    return { chars: chars, box: box };
+    return bad ? false : { chars: chars };
   }
   function labels(st){
     var map = st.map, R = st.R, pane = map.getPane('rmLabels'); if (!pane) return; pane.innerHTML = '';   // (a map already replaced by a redraw)
@@ -40755,10 +40782,11 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var zoom = map.getZoom(), W = st.page.clientWidth, H = st.page.clientHeight, small = W < 640;
     var fs = Math.max(8, Math.min(small ? 18 : 24, (small ? 10 : 12.5) * Math.pow(2, (zoom - 16) * 0.5)));
     fs = Math.round(fs * 2) / 2;   // (a phone: smaller names, and only where a street has room - below)
-    var pieces = R.lines.filter(function(l){ return l.n; }).map(function(l){
+    // (a drive-in / reverse-in line has its street's name as mn: they had no name, so a court done that way showed none)
+    var pieces = R.lines.filter(function(l){ return l.n || l.mn; }).map(function(l){
       var pts = l.c.map(function(c){ return map.latLngToContainerPoint(c); }), len = 0;
       for (var i = 1; i < pts.length; i++) len += pts[i].distanceTo(pts[i - 1]);
-      return { n: l.n, pts: pts, len: len, id: pid(l) };
+      return { n: l.n || l.mn, pts: pts, len: len, id: pid(l) };
     }).sort(function(a, b){ return b.len - a.len; });
     // the route is stored in short pieces split at every corner and junction (and often twice, once each way), so a name only ever saw
     // a short, nearly straight bit of its street and never followed the bend. For the names the pieces of one street are joined end to
@@ -40811,14 +40839,15 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     // a curved name: each letter on its own, white outline first (so one letter's halo never covers the next letter), then the letters
     // The letters sit in one empty box at the name's middle, so a leading hand can still drag the whole name (it was a plain straight
     // name whenever names could be dragged, i.e. always for a leading hand - so Fox never saw a name bend)
-    var mkCurved = function(cv, fsz, p){
+    var mkCurved = function(cv, fsz, p, col){
       var mid = cv.chars[Math.floor(cv.chars.length / 2)], o = map.containerPointToLayerPoint([mid.x, mid.y]);
       var g = document.createElement('div'); g.className = 'rm-lbl rm-lbl-grp'; g.style.fontSize = fsz + 'px';
       pane.appendChild(g); lblAt(g, o.x, o.y);
       [true, false].forEach(function(halo){
         cv.chars.forEach(function(c){
           if (c.ch === ' ') return;
-          var s = document.createElement('div'); s.className = 'rm-lbl rm-lbl-ch' + (halo ? ' rm-lbl-halo' : ''); s.textContent = c.ch; s.style.fontSize = fsz + 'px';
+          var s = document.createElement('div'); s.className = 'rm-lbl rm-lbl-ch' + (halo ? ' rm-lbl-halo' : '') + (col ? ' rm-lbl-on' : ''); s.textContent = c.ch; s.style.fontSize = fsz + 'px';
+          if (col && !halo) s.style.color = col;
           s.style.transform = 'rotate(' + c.ang.toFixed(1) + 'deg)'; s.style.transformOrigin = '50% 50%';
           // (its own measured width, placed to the fraction of a pixel: placing by the element's whole-pixel width put each letter up to
           // half a pixel off and the gaps between letters came out uneven)
@@ -40843,39 +40872,72 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       mkLbl(p, short(p.n), fs, q.x, q.y, ang);
     });
     chains.forEach(function(c){ if (c.ids.some(function(id){ return named[c.n + '#' + id]; })) c.moved = true; });
-    (small ? [[fs, 0.75]] : [[fs, 0.55], [Math.max(7, fs * 0.85), 0.35]]).forEach(function(pass){ var fsz = pass[0], need = pass[1];
-      chains.forEach(function(p){
-        if (p.moved) return;
-        if (need < 0.5 && named[p.n]) return;
-        var text = p.n.replace(/\bRoad$/, 'Rd').replace(/\bStreet$/, 'St').replace(/\bAvenue$/, 'Ave').replace(/\bCourt$/, 'Ct').replace(/\bDrive$/, 'Dr').replace(/\bCrescent$/, 'Cres').replace(/\bParade$/, 'Pde').replace(/\bPlace$/, 'Pl').replace(/\bGrove$/, 'Gr').replace(/\bClose$/, 'Cl').replace(/\bHighway$/, 'Hwy').replace(/\bLane$/, 'La').replace(/\bTerrace$/, 'Tce').replace(/\bBoulevard$/, 'Bvd');
-        var w = text.length * fsz * 0.55 + 6;
-        if (named[p.n] && p.len < w * 3) return;
-        if (p.len < w * need) return;
-        var half = p.len / 2, acc = 0, a = p.pts[0], b = p.pts[1] || p.pts[0];
-        for (var i = 1; i < p.pts.length; i++) { var d = p.pts[i].distanceTo(p.pts[i - 1]); if (acc + d >= half) { a = p.pts[i - 1]; b = p.pts[i]; break; } acc += d; }
-        var t = (half - acc) / (a.distanceTo(b) || 1), cx = a.x + (b.x - a.x) * t, cy = a.y + (b.y - a.y) * t;
-        var v = toView(st, cx, cy), mx = v.x, my = v.y;   // where it lands on the page
-        if (mx < 0 || my < 0 || mx > W || my > H) return;
-        // the angle as seen on the page (map angle + the turn), kept readable, i.e. never upside down
-        var ang = Math.atan2(b.y - a.y, b.x - a.x) * 180 / Math.PI + (st.rot || 0);
-        ang = ((ang % 360) + 540) % 360 - 180; if (ang > 90) ang -= 180; if (ang < -90) ang += 180;
-        // on a bending street the name follows the curve, letter by letter (Fox: "street names to follow the curve of the road");
-        // not while editing, where a name is one piece you can drag
-        var cv = !(st.lrot && st.lrot[p.id]) ? curvedLabel(st, p, text, fsz, half) : null;
-        if (cv === false) return;
-        if (cv) {
-          if (cv.box[0] < 0 || cv.box[1] < 0 || cv.box[2] > W || cv.box[3] > H) return;
-          if (boxes.some(function(o){ return !(cv.box[2] < o[0] || cv.box[0] > o[2] || cv.box[3] < o[1] || cv.box[1] > o[3]); })) return;
-          boxes.push(cv.box); named[p.n] = 1;
-          mkCurved(cv, fsz, p);
-          return;
-        }
-        var rad = ang * Math.PI / 180, hw = Math.abs(Math.cos(rad)) * w / 2 + Math.abs(Math.sin(rad)) * fsz / 2, hh = Math.abs(Math.sin(rad)) * w / 2 + Math.abs(Math.cos(rad)) * fsz / 2;
-        var box = [mx - hw, my - hh, mx + hw, my + hh];
-        if (boxes.some(function(o){ return !(box[2] < o[0] || box[0] > o[2] || box[3] < o[1] || box[1] > o[3]); })) return;
-        boxes.push(box); named[p.n] = 1;
-        mkLbl(p, text, fsz, cx, cy, ang);
+    /* Names go BESIDE their street, never on it (Fox: "some street names hide the colour of the road"), letter by letter along the
+       line so they follow every bend, as big as the zoom allows and smaller on a short street so it still gets its name ("adjust the
+       size of the font to suit the length"; short courts had none). Each tries the middle of the street, then further along, on
+       either side; a spot where the letters would sit on another road or another name is passed over. */
+    var SC = 32, roads = {}, cellsOf = function(x0, y0, x1, y1, f){ for (var gx = Math.floor(x0 / SC); gx <= Math.floor(x1 / SC); gx++) for (var gy = Math.floor(y0 / SC); gy <= Math.floor(y1 / SC); gy++) f(gx + ':' + gy); };
+    R.lines.forEach(function(l){
+      var pts = l.c.map(function(c){ return map.latLngToContainerPoint(c); });
+      for (var i = 1; i < pts.length; i++) { var A = pts[i - 1], B = pts[i]; if (Math.abs(A.x - B.x) + Math.abs(A.y - B.y) > 4000) continue; cellsOf(Math.min(A.x, B.x), Math.min(A.y, B.y), Math.max(A.x, B.x), Math.max(A.y, B.y), function(k){ (roads[k] = roads[k] || []).push([A, B]); }); }
+    });
+    var roadNear = function(q, lim){
+      var hit = false; cellsOf(q.x - lim, q.y - lim, q.x + lim, q.y + lim, function(k){ if (hit) return; (roads[k] || []).some(function(sg){ if (L.LineUtil.pointToSegmentDistance(q, sg[0], sg[1]) < lim) return (hit = true); return false; }); });
+      return hit;
+    };
+    var LC = 24, lgrid = {}, lcells = function(x, y, r, f){ for (var gx = Math.floor((x - r) / LC); gx <= Math.floor((x + r) / LC); gx++) for (var gy = Math.floor((y - r) / LC); gy <= Math.floor((y + r) / LC); gy++) f(gx + ':' + gy); };
+    var fits = function(cv, fsz){
+      var r = fsz * 0.5, ok = true;
+      cv.chars.forEach(function(c){
+        if (!ok || c.ch === ' ') return;
+        if (c.vx - r < 0 || c.vy - r < 0 || c.vx + r > W || c.vy + r > H) { ok = false; return; }
+        if (boxes.some(function(o){ return !(c.vx + r < o[0] || c.vx - r > o[2] || c.vy + r < o[1] || c.vy - r > o[3]); })) { ok = false; return; }
+        lcells(c.vx, c.vy, r, function(k){ if (ok) (lgrid[k] || []).forEach(function(o){ if (Math.abs(o[0] - c.vx) < (o[2] + r) * 0.95 && Math.abs(o[1] - c.vy) < (o[2] + r) * 0.95) ok = false; }); });
       });
+      return ok;
+    };
+    var onRoads = function(cv, fsz){ var n = 0; cv.chars.forEach(function(c){ if (c.ch !== ' ' && roadNear(c, fsz * 0.45 + 4)) n++; }); return n; };
+    var keep = function(cv, fsz){ var r = fsz * 0.5; cv.chars.forEach(function(c){ if (c.ch === ' ') return; var e = [c.vx, c.vy, r]; lcells(c.vx, c.vy, r, function(k){ (lgrid[k] = lgrid[k] || []).push(e); }); }); };
+    var fmin = Math.max(small ? 6.5 : 7, fs * 0.6), sizes = []; for (var z = fs; z >= fmin - 0.01; z -= Math.max(0.5, fs * 0.1)) sizes.push(Math.round(z * 2) / 2);
+    var abbr = function(n){ return n.replace(/\bRoad$/, 'Rd').replace(/\bStreet$/, 'St').replace(/\bAvenue$/, 'Ave').replace(/\bCourt$/, 'Ct').replace(/\bDrive$/, 'Dr').replace(/\bCrescent$/, 'Cres').replace(/\bParade$/, 'Pde').replace(/\bPlace$/, 'Pl').replace(/\bGrove$/, 'Gr').replace(/\bClose$/, 'Cl').replace(/\bHighway$/, 'Hwy').replace(/\bLane$/, 'La').replace(/\bTerrace$/, 'Tce').replace(/\bBoulevard$/, 'Bvd'); };
+    chains.forEach(function(p){
+      if (p.moved || p.len < 12) return;
+      var text = abbr(p.n), again = !!named[p.n];
+      var sm = lblSmooth(p, fs), best = null;
+      for (var si = 0; si < sizes.length; si++) {
+        var fsz = sizes[si], ws = lblMeasure(text, fsz); if (!ws) return;
+        var tot = ws.reduce(function(a, b){ return a + b; }, 0);
+        if (again && p.len < tot * 4) return;                 // (a second name on the same street only where it is long)
+        if (tot > p.len * 1.1 + 24) continue;                 // (it may run a little past the end of the street)
+        var off = 6.5 + fsz * 0.5, found = null;
+        // (right beside it first, then a little further out, then straight on past either end - the end of a short court)
+        [1, -1, 1.8, -1.8, 0].some(function(side){
+          var P = lblOffset(sm, side * off), past = (tot / 2 + 7) / (P.olen || 1);
+          // (straight on past an end only where the street stops - a dead end - not past a junction onto the next block)
+          var dead = function(e){ return !roadNear(lblAtD(P, e ? P.start + P.olen + 9 : P.start - 9), 6); };
+          return (side ? [0.5, 0.36, 0.64, 0.24, 0.76, 0.14, 0.86] : [dead(1) ? 1 + past : null, dead(0) ? -past : null].filter(function(v){ return v != null; })).some(function(fr){
+            var cv = curvedLabel(st, P, text, fsz, P.start + P.olen * fr); if (!cv || !fits(cv, fsz)) return false;
+            var n = onRoads(cv, fsz);
+            if (!n) { found = cv; return true; }
+            if (!best || n < best.n) best = { cv: cv, fsz: fsz, n: n };
+            return false;
+          });
+        });
+        if (found) { keep(found, fsz); named[p.n] = 1; mkCurved(found, fsz, p); return; }
+      }
+      // No room beside it at any size: written ON the street, in the street's own colour with a black outline, so the colour still
+      // shows through the name (Fox's idea) - a short court squeezed between other roads otherwise had no name
+      if (again) return;
+      // (a letter or two just touching another road's edge is still fine beside the street)
+      if (best && best.n <= 2) { keep(best.cv, best.fsz); named[p.n] = 1; mkCurved(best.cv, best.fsz, p); return; }
+      var col = (st.lineCol && (p.ids || [p.id]).map(function(id){ return st.lineCol[id]; }).filter(Boolean)[0]) || '#16a34a';
+      for (var sj = 0; sj < sizes.length; sj++) {
+        var fz = sizes[sj], P0 = lblOffset(sm, 0), wz = lblMeasure(text, fz); if (!wz) return;
+        var tz = wz.reduce(function(a, b){ return a + b; }, 0), pz = (tz / 2 + 7) / (P0.olen || 1), hit = null;
+        [0.5, 0.36, 0.64, 1 + pz, -pz].some(function(fr){ var cv = curvedLabel(st, P0, text, fz, P0.start + P0.olen * fr); if (cv && fits(cv, fz)) { hit = cv; return true; } return false; });
+        if (hit) { keep(hit, fz); named[p.n] = 1; mkCurved(hit, fz, p, col); return; }
+      }
+      if (window.lbLblDebug) window.lbLblDebug.push([text, Math.round(p.len), best ? best.n : -1, again]);
     });
   }
   function placeCards(st){
