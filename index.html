@@ -33003,7 +33003,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
      the run, driver, truck, houses lifted / passed (not put out) / still to do, streets done, what the truck is doing, and
      the run map's pieces done (window.lbRunDoneState) so the leading hand's phone draws the same red / green map. One row
      per shift (id lr_<shift>), written over each time; no queue (see postPlace). Street litter runs have no house list. */
-  var liveBusy = false, liveLast = 0;
+  var liveBusy = false, liveLast = 0, liveDone = null;
   function liveStatus(){
     try { var v = window.lbBreakClock && window.lbBreakClock.view ? window.lbBreakClock.view() : null; if (v && v.mode === 'break') return { k: 'brk', t: v.elapsed != null ? Date.now() - v.elapsed : null }; } catch (e) {}
     var loc = here();
@@ -33071,7 +33071,10 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     });
   }
   function liveSend(fin){
-    if (liveBusy || !window.lbOutbox || !window.lbOutbox.postPlace) return;
+    // (a send that never finished - a download that hung with the app in the background - used to leave liveBusy on for
+    // good, and then nothing was sent again until the app was restarted: Fox, 28 Oct, "offline xxx minutes")
+    if (liveBusy && Date.now() - liveLast < 90000) return;
+    if (!window.lbOutbox || !window.lbOutbox.postPlace) return;
     if (!SH || !SH.run || isStreet(SH.stream)) return;
     var tc0 = runCheck(); if (!tc0) return;
     liveBusy = true; liveLast = Date.now();
@@ -33081,7 +33084,11 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     // To do has the map's answer)
     var base = liveSnap(fin, tc0);
     var ds = (mk && window.lbRunDoneState) ? window.lbRunDoneState(mk, tc0, t0).catch(function(){ return null; }) : Promise.resolve(null);
-    refineTc(tc0, t0, mk).then(function(tc){
+    // the map's finer answer is waited for at most 25 s; without it the progress still goes, with the plain run check's
+    // numbers and the last pieces done that were worked out
+    var cap = function(pr, dflt){ return Promise.race([pr, new Promise(function(res){ setTimeout(function(){ res(dflt); }, 25000); })]); };
+    ds = cap(ds, null).then(function(d){ if (d) liveDone = d; return d || (liveDone && liveDone.key === mk ? liveDone : null); });
+    cap(refineTc(tc0, t0, mk), tc0).then(function(tc){
       var all = tc.all || [];
       p = base; delete p._tc;
       p.passed = tc.passed; p.binsLeft = tc.todoBins; p.housesLeft = tc.todoHouses;
@@ -33102,6 +33109,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     if (!window.lbNativeGps || !navigator.geolocation || !navigator.geolocation.watchPosition) { if (!window.__lbBgTry) { window.__lbBgTry = 1; setTimeout(bgSend, 5000); } return; }
     try { navigator.geolocation.watchPosition(function(){ try { if (SH && Date.now() - liveLast >= 120000) { liveSend(false); liveThumbs(); } } catch (e) { liveBusy = false; } }, function(){}, { enableHighAccuracy: true }); } catch (e) {}
   })();
+  // back in front after a while away: send straight away rather than at the next 15 s tick
+  document.addEventListener('visibilitychange', function(){ try { if (!document.hidden && SH && Date.now() - liveLast >= 120000) { liveSend(false); liveThumbs(); } } catch (e) {} });
   window.lbLiveSend = liveSend;   // (test hook; also sent at a break)
   window.lbLiveThumbs = liveThumbs;   // (test hook)
   function doFinish(){
