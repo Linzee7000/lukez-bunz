@@ -17706,6 +17706,20 @@ window.addEventListener('DOMContentLoaded', async () => {
   // runs that collect it (the same box as off-run, orange, serials hidden until a tab is tapped). Light: the nearest house
   // within 60 m by a latitude band, not the run index, and at most twice a second.
   let lbIdleAt = 0;
+  // (Fox, 31 Oct: parked on a break between Lochiel Ave and Langrigg Ave the box flicked between the two every second - the GPS
+  // wanders and the heading swings while standing still - and the flag on 10A Mirang Ave popped up over and over.)
+  // On a break, standing or walking about (under 8 km/h), the house already shown stays while it is still within 40 m. (Only on
+  // a break: while collecting, the truck stands at a house and the box must move on to the next bin as soon as one is done.)
+  function lbHoldStill(site) {
+    const prev = lastTelemetrySite, loc = userCurrentLocation;
+    if (!prev || !site || site === prev || !loc || !((+loc.speed || 0) < 8)) return site;
+    let brk = false; try { brk = !!(window.lbBreakClock && window.lbBreakClock.onBreak && window.lbBreakClock.onBreak()); } catch (e) {}
+    if (!brk) return site;
+    const la = Number(prev.lat), ln = Number(prev.lng);
+    if (!la || !ln) return site;
+    return getDistanceMeters(loc.lat, loc.lng, la, ln) <= 40 ? prev : site;
+  }
+  window.lbHoldStill = lbHoldStill;   // (test hook)
   function lbIdleTelemetry() {
     const now = Date.now(); if (now - lbIdleAt < 500) return; lbIdleAt = now;
     const loc = userCurrentLocation; if (!loc || !Number.isFinite(loc.lat)) return;
@@ -17717,6 +17731,7 @@ window.addEventListener('DOMContentLoaded', async () => {
       if (d < bd) { bd = d; best = s; }
     }
     const el = q('mapLiveStreet');
+    best = lbHoldStill(best);
     if (el) el.innerText = best ? toSentenceCaseLabel((best.baseStreetLine || best.addressText?.split(',')[0] || '').trim()) : 'No bins in range';
     renderCurrentAddressTelemetry(best);
   }
@@ -17870,8 +17885,9 @@ window.addEventListener('DOMContentLoaded', async () => {
     // The house being passed is always the one shown: an off-run house right beside the truck (within 12 m, not on the run's
     // bins) wins over a run bin that is still well ahead, so the box says what collects the house you are at.
     const passing = (nearestSiteOverall && nearestDistOverall <= 12 && !binDistBySite.has(String(nearestSiteOverall.propId || nearestSiteOverall.siteId || '')) && onWantedSide(nearestSiteOverall)) ? nearestSiteOverall : null;
-    const currentSite = (passing && (!currentSite0 || currentSite0 === passing || getDistanceMeters(userCurrentLocation.lat, userCurrentLocation.lng, Number(currentSite0.lat), Number(currentSite0.lng)) > 25)) ? passing : (nearestBinSite && nearestBinDist <= 8 && currentSite0 !== nearestBinSite &&
+    let currentSite = (passing && (!currentSite0 || currentSite0 === passing || getDistanceMeters(userCurrentLocation.lat, userCurrentLocation.lng, Number(currentSite0.lat), Number(currentSite0.lng)) > 25)) ? passing : (nearestBinSite && nearestBinDist <= 8 && currentSite0 !== nearestBinSite &&
       (!currentSite0 || (binDistBySite.get(String(currentSite0.propId || currentSite0.siteId || '')) ?? 1e9) > nearestBinDist + 3)) ? nearestBinSite : currentSite0;
+    currentSite = lbHoldStill(currentSite);
     if (currentSite) lastSideOfTravel = isBothSidesSite(currentSite) ? null : (sideOfSite(currentSite) || lastSideOfTravel);
     const mapLiveStreet = q('mapLiveStreet');
     if (mapLiveStreet) {
@@ -26647,10 +26663,12 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
   /* A break ends by itself (Fox, 26 Oct: a break started at 10:30 ran on to 11:43, through the drive to the tip, because
      nobody pressed End break): after 30 minutes (it ends at the 30 minutes, not when this notices), or as soon as the truck
      is more than 100 m from where the break began, or is going faster than 20 km/h for two fixes running (one odd GPS speed
-     doesn't end it). A break with a typed-in To time keeps that time (endPlanned). Where the break began is the first fix
+     doesn't end it). A break with a typed-in To time keeps that time (endPlanned).
+     (Fox, 31 Oct: walking to the supermarket on a break ended it.) The 100 m only counts when it was driven: the last two fixes
+     faster than 12 km/h. Someone on foot (about 5 km/h) can walk as far as they like. Where the break began is the first fix
      seen while on it: a break put in after a long stop starts earlier than now, but the truck is still where it stopped. */
-  const AUTO_BREAK = 30 * MIN, AUTO_MOVE_M = 100, AUTO_KMH = 20;
-  let fastN = 0, lastFixSeen = null;
+  const AUTO_BREAK = 30 * MIN, AUTO_MOVE_M = 100, AUTO_KMH = 20, AUTO_MOVE_KMH = 12;
+  let fastN = 0, movN = 0, lastFixSeen = null;
   function hereNow() {
     try { const l = userCurrentLocation; if (l && isFinite(l.lat) && isFinite(l.lng) && (l.lat || l.lng)) return l; } catch (e) {}
     return null;
@@ -26668,12 +26686,13 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
         lastFixSeen = l;
         const kx = 111320 * Math.cos(b.at.lat * Math.PI / 180), d = Math.hypot((l.lng - b.at.lng) * kx, (l.lat - b.at.lat) * 110540);
         fastN = (+l.speed || 0) > AUTO_KMH ? fastN + 1 : 0;
-        if (d > AUTO_MOVE_M) { b.e = now; why = 'driven off'; }
+        movN = (+l.speed || 0) > AUTO_MOVE_KMH ? movN + 1 : 0;
+        if (d > AUTO_MOVE_M && movN >= 2) { b.e = now; why = 'driven off'; }
         else if (fastN >= 2) { b.e = now; why = 'driving again'; }
       }
     }
     if (!why) return false;
-    delete b.plan; fastN = 0; lastWarn = null; save();
+    delete b.plan; fastN = 0; movN = 0; lastWarn = null; save();
     try { if (window.uxToast) window.uxToast('Break ended at ' + clock(b.e) + ' (' + why + ')'); } catch (e) {}
     return true;
   }
@@ -26982,6 +27001,7 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
   }, 1000);
 
   window.lbBreakClock = {
+    onBreak() { return !!onBreak(); },
     endShift() { S = { start: null, lastSeen: 0, breaks: [] }; lastWarn = null; save(); paint(); },
     sectionHtml, paint,
     startBreak, endBreak, newShift, onGo,
@@ -39061,7 +39081,46 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var mine = (lsGet('lbRunMapEdits', {}) || {})[key], fleet = (lsGet('lbRunMapEditsFleet', {}) || {})[key];
     var e = (fleet && (!mine || !isLeadNow() || (fleet.ts || 0) > (mine.ts || 0))) ? fleet : mine;
     e = e || {};
-    return { pieces: e.pieces || {}, drawn: e.drawn || [], erase: e.erase || [], sides: e.sides || {}, arrows: e.arrows || [], points: e.points || [], notes: e.notes || [], hide: e.hide || [], names: e.names || {}, labels: e.labels || {}, lrot: e.lrot || {}, areas: e.areas || [], pt: e.pt || {}, ts: e.ts || 0 };
+    return guardHouses(key, { pieces: e.pieces || {}, drawn: e.drawn || [], erase: e.erase || [], sides: e.sides || {}, arrows: e.arrows || [], points: e.points || [], notes: e.notes || [], hide: e.hide || [], names: e.names || {}, labels: e.labels || {}, lrot: e.lrot || {}, areas: e.areas || [], pt: e.pt || {}, ts: e.ts || 0 });
+  }
+  /* (Fox, 31 Oct: Bay Rd, Latrobe Dr, Hilton Ct, Village Cl and the Esplanade were gone from 219B Thursday's run map although its
+     houses were on the map.) A rub out or a "take off" area made on one run is copied to every other run of that day that drives
+     there (shareGeo) - meant for a dead end or a bit of road nobody drives. But a removal made while working on one run also took
+     streets off its neighbours that collect bins there. Now a rub out or removal area that came from another run (or from before
+     runs were marked, 31 Oct) is left out of this run wherever this run has houses within 20 m of it: a street a run collects
+     from can only be taken off on that run's own map. */
+  var GUARD = {};
+  function guardHouses(key, E){
+    var xs = E.areas.filter(function(a){ return a && a.a === 'x' && a.from !== key; }), es = E.erase.filter(function(x){ return x && x.from !== key; });
+    if (!xs.length && !es.length) return E;
+    var ck = (E.ts || 0) + '|' + E.erase.length + '|' + E.areas.length;
+    var G = GUARD[key];
+    var grp = null; try { grp = groupFor(parse(key)); } catch (e) {}
+    if (!grp || !grp.sites || !grp.sites.length) return E;   // (houses not in yet: nothing to protect, and nothing kept)
+    if (G && G.ck === ck && G.n === grp.sites.length) return Object.assign({}, E, { erase: G.erase, areas: G.areas });
+    var hs = []; grp.sites.forEach(function(x){ var la = +x.lat, ln = +x.lng; if (la && ln) hs.push([la, ln]); });
+    if (!hs.length) return E;
+    var lat0 = hs[0][0], lng0 = hs[0][1], MY = 110540, MX = 111320 * Math.cos(lat0 * Math.PI / 180), C = 60, grid = {};
+    var xy = function(p){ return [(p[1] - lng0) * MX, (p[0] - lat0) * MY]; };
+    hs.forEach(function(h){ var P = xy(h), k = Math.floor(P[0] / C) + ':' + Math.floor(P[1] / C); (grid[k] = grid[k] || []).push(P); });
+    var near = function(P, r, test){ var cx = Math.floor(P[0] / C), cy = Math.floor(P[1] / C), n = Math.ceil(r / C); for (var x = cx - n; x <= cx + n; x++) for (var y = cy - n; y <= cy + n; y++) { var a = grid[x + ':' + y]; if (a) for (var i = 0; i < a.length; i++) if (test(a[i])) return true; } return false; };
+    var segD = function(P, A, B){ var ex = B[0] - A[0], ey = B[1] - A[1], L2 = ex * ex + ey * ey || 1e-9, t = Math.max(0, Math.min(1, ((P[0] - A[0]) * ex + (P[1] - A[1]) * ey) / L2)); return Math.hypot(P[0] - A[0] - t * ex, P[1] - A[1] - t * ey); };
+    var strokeHits = function(st){
+      var c = (st.c || []).map(xy), r = (st.r || 8) + 20; if (!c.length) return false;
+      for (var i = 0; i < c.length; i++) { var A = c[i], B = c[Math.min(i + 1, c.length - 1)];
+        if (near(A, r + Math.hypot(B[0] - A[0], B[1] - A[1]), function(H){ return segD(H, A, B) <= r; })) return true; }
+      return false;
+    };
+    var areaHits = function(a){
+      var p = (a.p || []).map(xy); if (p.length < 3) return false;
+      var b = [Infinity, Infinity, -Infinity, -Infinity]; p.forEach(function(P){ b[0] = Math.min(b[0], P[0]); b[1] = Math.min(b[1], P[1]); b[2] = Math.max(b[2], P[0]); b[3] = Math.max(b[3], P[1]); });
+      return hs.some(function(h){ var H = xy(h); if (H[0] < b[0] - 20 || H[0] > b[2] + 20 || H[1] < b[1] - 20 || H[1] > b[3] + 20) return false;
+        if (inPoly(H, p)) return true; for (var i = 0; i < p.length; i++) if (segD(H, p[i], p[(i + 1) % p.length]) <= 20) return true; return false; });
+    };
+    var erase = E.erase.filter(function(x){ return !x || x.from === key || !strokeHits(x); });
+    var areas = E.areas.filter(function(a){ return !a || a.a !== 'x' || a.from === key || !areaHits(a); });
+    GUARD[key] = { ck: ck, n: grp.sites.length, erase: erase, areas: areas };
+    return Object.assign({}, E, { erase: erase, areas: areas });
   }
   /* ---- Undo: every change, in order, with what it was ----
      Undo used to take back only the last thing drawn / rubbed out / placed, so after removing a street by mistake it undid
@@ -39101,6 +39160,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   }
   function saveEdits(key, E){
     var before = edits(key);
+    // a rub out or removal area says which run it was made on (see guardHouses)
+    ['erase', 'areas'].forEach(function(f){ var had = {}; (before[f] || []).forEach(function(it){ if (it && it.ts) had[it.ts] = 1; }); (E[f] || []).forEach(function(it){ if (it && !it.from && !(it.ts && had[it.ts])) it.from = key; }); });
     var h = UNDO[key] || (UNDO[key] = []);
     h.push({ label: describeChange(before, E), before: JSON.stringify(before) });
     if (h.length > 60) h.shift();
@@ -46577,8 +46638,10 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
       else if (t && (el.classList.contains('meta-has-flag-note') || el.querySelector('[data-i="flag"]') || /^\u{1F6A9}/u.test(t))) { hit = t.replace(/^\u{1F6A9}\s*/u, ''); kind = 'flag'; }
     });
     if (!hit) { lastFlag = ''; return; }
-    if (hit !== lastFlag) { lastFlag = hit; flagShow(kind, hit); }
+    // (the same flag again within 15 minutes - the box going back and forth between two houses - doesn't pop up again)
+    if (hit !== lastFlag) { lastFlag = hit; var nw = Date.now(); if (!(flagSeen[hit] && nw - flagSeen[hit] < 15 * 60000)) { flagSeen[hit] = nw; flagShow(kind, hit); } }
   }, 600);
+  var flagSeen = {};
 
   // ---- found something on the map: a sticker, like the hidden package ------------------------------
   new MutationObserver(function(ms){
