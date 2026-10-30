@@ -6954,7 +6954,7 @@ const STREET_LITTER_SERVICE_LEVELS = {"seasons":[{"key":"tourist1","label":"Tour
     saveToDB('gpsTrailTimes', gpsTrailTimes).catch(() => {});
   }
 
-  function recordSnailTrailPoint(lat, lng) {
+  function recordSnailTrailPoint(lat, lng, fixAt) {
     if (snailTrailPaused) return;
     // The trail is the shift's: nothing is recorded before Start shift (or GO) or after End shift.
     if (typeof window.lbShiftOn === 'function' && !window.lbShiftOn() && !(window.lbBreakClock && window.lbBreakClock.state && window.lbBreakClock.state.start != null)) return;
@@ -6990,7 +6990,11 @@ const STREET_LITTER_SERVICE_LEVELS = {"seasons":[{"key":"tourist1","label":"Tour
     // screen was hidden since the last fix (see visibilitychange below),
     // the trail was just restored after the app was fully closed, or GPS
     // fixes silently stopped for a while even without a visibility event.
-    const now = Date.now();
+    // The time the fix was TAKEN, not when the page got round to it: in the phone app's background the fixes of several minutes
+    // arrive together, and stamped with "now" they all had the same time - the gaps and the done streets that go by the
+    // times went wrong (31 Oct). A fix time that looks wrong (the phone's clock, over 10 minutes off) falls back to now.
+    const wall = Date.now();
+    const now = (Number.isFinite(fixAt) && fixAt <= wall + 60000 && wall - fixAt < 600000 && !(gpsTrailLastFixAt && fixAt < gpsTrailLastFixAt)) ? fixAt : wall;
     const gapTooLong = gpsTrailLastFixAt > 0 && (now - gpsTrailLastFixAt) > GPS_TRAIL_BREAK_GAP_MS;
     const isBreak = gpsTrailPoints.length === 0 || gpsTrailPendingBreak || gapTooLong;
     const previousFixAt = gpsTrailLastFixAt; // when `previous` was recorded, before we overwrite it below
@@ -18273,6 +18277,22 @@ window.addEventListener('DOMContentLoaded', async () => {
 };
   
   /* GPS Position Watcher */
+  let lbGpsBehind = false;
+  // back in front after fixes were handled in the background: the screen catches up once, with where the truck is now
+  function lbGpsCatchUp() {
+    if (document.hidden || !lbGpsBehind || !userCurrentLocation) return;
+    lbGpsBehind = false;
+    try {
+      updateSpeedMetaLine(); updateAreaRunsBar();
+      if (isTruckFollowEnabled && leafletMap && !mapManualOverrideActive) leafletMap.panTo([userCurrentLocation.lat, userCurrentLocation.lng], { animate: false });
+      applyMapHeadingRotation(); updateMapTruckPosition();
+      updateLiveStreetFromGps(userCurrentLocation.lat, userCurrentLocation.lng);
+      updateFlippedBinCount(); updateBinPropertyHighlight();
+      lastGpsCoords = { ...userCurrentLocation };
+      updateDriverHud({ gpsOnly: true });
+    } catch (e) { console.warn('GPS catch-up', e); }
+  }
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) setTimeout(lbGpsCatchUp, 50); });
   window.onGpsPositionSuccess = function(pos) {
     // A fix taken BEFORE the last one we used, arriving late - the one-off getCurrentPosition every GPS
     // restart makes (maximumAge 30 s) can hand back a cached position from half a minute ago - would snap
@@ -18297,7 +18317,15 @@ window.addEventListener('DOMContentLoaded', async () => {
     // Record every GPS fix onto the snail trail here (not inside the map
     // drawing code) so the trail keeps recording in the background -
     // whichever tab you're on, and even before Map has ever been opened.
-    recordSnailTrailPoint(userCurrentLocation.lat, userCurrentLocation.lng);
+    recordSnailTrailPoint(userCurrentLocation.lat, userCurrentLocation.lng, fixT);
+
+    // (Fox, 31 Oct: back from the background the map showed but no button worked.) With the screen off the fixes pile up and
+    // are all handed to the page at once when it wakes - minutes of them - and each one used to move the map, turn it, redraw
+    // the truck, look up the street name online and rebuild the bin box: the page was busy for ages and every tap waited.
+    // In the background only what counts is done (the trail, the heading, ticking bins off); the screen is brought up to
+    // date once, when the app comes back (lbGpsCatchUp).
+    const lbBg = document.hidden;
+    if (lbBg) lbGpsBehind = true;
 
     // --- LOCKED HEADING ENGINE (Prevents 180° flips & snaps) ---
     // lastValidHeading is the way the TRUCK FACES, not the way it's moving.
@@ -18441,8 +18469,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     // Travel direction changes with every fix even when the distance to
     // the next bin hasn't (e.g. sitting at an address) - keep the
     // top-right distance/direction readout current too.
-    updateSpeedMetaLine();
-    updateAreaRunsBar();
+    if (!lbBg) { updateSpeedMetaLine(); updateAreaRunsBar(); }
 
     // While the driver has manually spun/panned the map away (see
     // armMapManualOverride), live GPS re-centring is paused rather than
@@ -18456,7 +18483,7 @@ window.addEventListener('DOMContentLoaded', async () => {
       mapManualOverrideMoveStartTs = null;
     }
 
-    if (isTruckFollowEnabled && leafletMap && !mapManualOverrideActive) {
+    if (!lbBg && isTruckFollowEnabled && leafletMap && !mapManualOverrideActive) {
       if (!hasAutoCenteredTruck) {
         leafletMap.setView([userCurrentLocation.lat, userCurrentLocation.lng], leafletMap.getZoom() || 18, { animate: false });
         hasAutoCenteredTruck = true;
@@ -18465,14 +18492,16 @@ window.addEventListener('DOMContentLoaded', async () => {
       }
     }
 
-    applyMapHeadingRotation();
-    updateMapTruckPosition();
+    if (!lbBg) {
+      applyMapHeadingRotation();
+      updateMapTruckPosition();
 
-    // Live street name overlay on the map is driven by the truck's actual
-    // GPS position via OpenStreetMap reverse geocoding (see
-    // updateLiveStreetFromGps) - independent of, and more reliable than,
-    // whichever bin/property happens to be nearest.
-    updateLiveStreetFromGps(userCurrentLocation.lat, userCurrentLocation.lng);
+      // Live street name overlay on the map is driven by the truck's actual
+      // GPS position via OpenStreetMap reverse geocoding (see
+      // updateLiveStreetFromGps) - independent of, and more reliable than,
+      // whichever bin/property happens to be nearest.
+      updateLiveStreetFromGps(userCurrentLocation.lat, userCurrentLocation.lng);
+    }
 
     // Which side of the road a bin is on, relative to the direction of
     // travel (not a fixed compass side - "left" always means the driver's
@@ -18503,23 +18532,28 @@ window.addEventListener('DOMContentLoaded', async () => {
     // (not from a fix that leapt further than the truck could have driven - the truck was never there)
     // A bin is only flipped when the truck has STOPPED (Fox, Oct 2026): rolling slowly from bin to bin is under 6 km/h
     // too, so "slow" flipped every bin crawled past. Stopped = 2 km/h or less (GPS never reads a clean 0) held for 1.5 s.
-    if (speedKmh <= 2) { if (!lbStopSince) lbStopSince = Date.now(); } else lbStopSince = 0;
+    // (Fox, 31 Oct: "it's not counting bins in the background".) These used the clock at the moment the page handled the fix.
+    // With the phone app in the background the page is only woken now and then, and the fixes saved up meanwhile are handed
+    // over all in one go - within a few milliseconds of each other - so no stop ever lasted 1.5 s and no bin flipped. The
+    // time each fix was TAKEN (fixT) is used instead, which is right however late the fix is handled.
+    if (speedKmh <= 2) { if (!lbStopSince) lbStopSince = fixT; } else lbStopSince = 0;
     // ...or by where it is: the phone app reads the GPS chip itself, and on a parked truck its speed wobbles around
     // 1-4 km/h while the position barely moves. Stopped too when the fixes of the last 2 s or so all sit within 2 m.
     {
-      const nowT = Date.now(); lbStillFixes.push({ t: nowT, lat: userCurrentLocation.lat, lng: userCurrentLocation.lng });
+      const nowT = fixT; lbStillFixes.push({ t: nowT, lat: userCurrentLocation.lat, lng: userCurrentLocation.lng });
       while (lbStillFixes.length && nowT - lbStillFixes[0].t > 4000) lbStillFixes.shift();
     }
     const lbStillByPlace = (() => {
-      const nowT = Date.now(), win = lbStillFixes.filter(f => nowT - f.t <= 2600);   // (2.6 s: with one fix a second the oldest of three is just over 2 s old)
+      const nowT = fixT, win = lbStillFixes.filter(f => nowT - f.t <= 2600 && f.t <= nowT);   // (2.6 s: with one fix a second the oldest of three is just over 2 s old)
       if (win.length < 2 || nowT - win[0].t < 1500 || speedKmh > 6) return false;
       return win.every(f => getDistanceMeters(f.lat, f.lng, userCurrentLocation.lat, userCurrentLocation.lng) <= 2);
     })();
-    const lbStopped = (!!lbStopSince && Date.now() - lbStopSince >= 1500) || lbStillByPlace;
+    const lbStopped = (!!lbStopSince && fixT - lbStopSince >= 1500) || lbStillByPlace;
     window.lbFlipState = { stopped: lbStopped, byPlace: lbStillByPlace, kmh: speedKmh, heading: lastValidHeading };   // (test hook)
     if (!lbLastFixJumped) activeMapCircleMarkers.forEach((markerObj, markerKey) => {
       const binId = markerObj.serial || markerKey;
       if (servicedBinSerials.has(binId)) return;
+      if (Math.abs(markerObj.lat - userCurrentLocation.lat) > 0.0004) return;   // (over 40 m north or south: quick no, for a whole day's markers on every fix)
 
       const d = getDistanceMeters(userCurrentLocation.lat, userCurrentLocation.lng, markerObj.lat, markerObj.lng);
       // A provisional dot sits at the property's own point, not a confirmed kerbside spot - that
@@ -18563,6 +18597,8 @@ window.addEventListener('DOMContentLoaded', async () => {
         saveRunProgress();
       }
     });
+
+    if (lbBg) return;   // (the rest is the screen: done once on coming back - lbGpsCatchUp)
 
     // Red outline on the property whose bin the truck is passing / pulled up to.
     updateBinPropertyHighlight();
