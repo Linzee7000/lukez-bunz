@@ -5390,6 +5390,7 @@ const STREET_LITTER_SERVICE_LEVELS = {"seasons":[{"key":"tourist1","label":"Tour
   let lbSpeedLast = { v: 0, t: 0 };
   let lbLastFixJumped = false;
   let lbStopSince = 0;   // when the truck last came to a stop (see the bin flip below)
+  let lbStopVisit = null;   // this stop: where, since when, and how many bins it has ticked off (see the bin flip below)
   const lbStillFixes = [];   // the last few seconds of positions, for 'stopped' by place
   try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (e) {}   // keep the saved data: don't let the phone clear it when space is short   // this fix leapt further than the truck could have driven (ignored for heading)
   window.lbGpsJumpAt = 0;
@@ -18549,7 +18550,17 @@ window.addEventListener('DOMContentLoaded', async () => {
       return win.every(f => getDistanceMeters(f.lat, f.lng, userCurrentLocation.lat, userCurrentLocation.lng) <= 2);
     })();
     const lbStopped = (!!lbStopSince && fixT - lbStopSince >= 1500) || lbStillByPlace;
-    window.lbFlipState = { stopped: lbStopped, byPlace: lbStillByPlace, kmh: speedKmh, heading: lastValidHeading };   // (test hook)
+    /* One bin at a time (Fox, 31 Oct: "if a truck stops at a location with multiple bins they are all counted as flipped, but
+       it takes 5 seconds minimum to flip a bin, 12 seconds to do two"). A stop is a visit: it starts when the truck stops and
+       lasts while it stays within 10 m and under 6 km/h (a wobble in the GPS speed doesn't start a new one). A visit ticks
+       off its first bin after 5 s stopped and one more every 6 s after that, nearest bin first - 5 s: one, 11 s: two,
+       17 s: three. Times are the fixes' own (fixT). */
+    if (lbStopVisit && (speedKmh > 6 || getDistanceMeters(lbStopVisit.lat, lbStopVisit.lng, userCurrentLocation.lat, userCurrentLocation.lng) > 10)) lbStopVisit = null;
+    if (lbStopped && !lbStopVisit) lbStopVisit = { lat: userCurrentLocation.lat, lng: userCurrentLocation.lng, t0: lbStopSince || (fixT - 1500), n: 0 };
+    const lbVisitMs = lbStopVisit ? fixT - lbStopVisit.t0 : 0;
+    const lbMayFlip = (lbStopped && lbStopVisit && lbVisitMs >= 5000) ? 1 + Math.floor((lbVisitMs - 5000) / 6000) - lbStopVisit.n : 0;
+    const lbFlipNow = [];
+    window.lbFlipState = { stopped: lbStopped, byPlace: lbStillByPlace, kmh: speedKmh, heading: lastValidHeading, visitMs: lbVisitMs, visitBins: lbStopVisit ? lbStopVisit.n : 0 };   // (test hook)
     if (!lbLastFixJumped) activeMapCircleMarkers.forEach((markerObj, markerKey) => {
       const binId = markerObj.serial || markerKey;
       if (servicedBinSerials.has(binId)) return;
@@ -18578,14 +18589,7 @@ window.addEventListener('DOMContentLoaded', async () => {
       if (travelMode === 'all' && !(isLeft || isRight)) return;
 
       if (lbStopped) {
-        servicedBinSerials.add(binId);
-        if (markerObj.provisional) confirmProvisionalBinLocation(markerObj, userCurrentLocation);
-        if (mapMarkersLayer && markerObj.layer) mapMarkersLayer.removeLayer(markerObj.layer);
-        // With data source "All" a bin is drawn twice - from Solo's list and from the council's (a rough dot at the
-        // house). Only the dot that was reached used to go, so its twin stayed on the map yellow after the bin was done.
-        if (mapMarkersLayer) activeMapCircleMarkers.forEach(o => { if (o !== markerObj && o.layer && (o.serial || '') === binId) mapMarkersLayer.removeLayer(o.layer); });
-        updateFlippedBinCount();
-        saveRunProgress();
+        if (lbMayFlip > 0) lbFlipNow.push({ m: markerObj, id: binId, d });
       } else if (speedKmh > 6 && !markerObj.provisional && d <= 9 && !missedBinSerials.has(binId)) {
         // Not for a provisional dot - its position is only an approximation, so driving past it
         // too fast to tell isn't good evidence of a genuinely missed bin.
@@ -18597,6 +18601,19 @@ window.addEventListener('DOMContentLoaded', async () => {
         saveRunProgress();
       }
     });
+    if (lbFlipNow.length && lbMayFlip > 0) {
+      const seen = new Set();
+      lbFlipNow.sort((a, b) => a.d - b.d).filter(x => !seen.has(x.id) && seen.add(x.id)).slice(0, lbMayFlip).forEach(({ m: markerObj, id: binId }) => {
+        servicedBinSerials.add(binId); lbStopVisit.n++;
+        if (markerObj.provisional) confirmProvisionalBinLocation(markerObj, userCurrentLocation);
+        if (mapMarkersLayer && markerObj.layer) mapMarkersLayer.removeLayer(markerObj.layer);
+        // With data source "All" a bin is drawn twice - from Solo's list and from the council's (a rough dot at the
+        // house). Only the dot that was reached used to go, so its twin stayed on the map yellow after the bin was done.
+        if (mapMarkersLayer) activeMapCircleMarkers.forEach(o => { if (o !== markerObj && o.layer && (o.serial || '') === binId) mapMarkersLayer.removeLayer(o.layer); });
+      });
+      updateFlippedBinCount();
+      saveRunProgress();
+    }
 
     if (lbBg) return;   // (the rest is the screen: done once on coming back - lbGpsCatchUp)
 
