@@ -49,14 +49,16 @@
         return;
       }
       if (!loc) return;
+      lastFixWall = Date.now(); restartN = 0;
       last = toPos(loc);
       Object.keys(subs).forEach(function (k) { try { subs[k].ok(last); } catch (x) {} });
       waiters.splice(0).forEach(function (w) { clearTimeout(w.t); try { w.ok(last); } catch (x) {} });
     }
     function startNative() {
       clearTimeout(idleTimer); idleTimer = null;
+      if (starting && Date.now() - startedAt > 15000) starting = false;   // (a start that never finished - see the watchdog)
       if (nativeId !== null || starting) return;
-      starting = true;
+      starting = true; startedAt = Date.now();
       // Android 13+ hides the "tracking" notification without this; ask first so the two prompts don't collide.
       var ask = Promise.resolve();
       try { ask = cap.nativePromise('LocalNotifications', 'requestPermissions', {}).catch(function () {}); } catch (x) {}
@@ -84,6 +86,25 @@
       clearTimeout(idleTimer);
       idleTimer = setTimeout(function () { if (!Object.keys(subs).length) stopNative(); }, 120000);
     }
+    /* Watchdog (Fox, 30 Oct video: back from the background the truck sat still on the Peninsula Link showing 99 km/h for
+       20 minutes). The background GPS had stopped handing fixes to the page - the watch was gone on the phone's side - but the
+       page still thought it had one, so asking again did nothing. Now, with the app on screen and something watching, no fix
+       for 25 s (or 10 s just after coming back to the app) drops the watch and starts it again; if that brings nothing it waits
+       longer each time (25 s, 50 s, 100 s, 200 s). Only on screen: Android won't let an app start its background GPS from the
+       background. */
+    var lastFixWall = 0, startedAt = 0, restartN = 0, restartAt = 0;
+    function logNote(t) { try { if (typeof window.lbGpsLogAdd === 'function') window.lbGpsLogAdd({ k: 'note', note: t }); } catch (x) {} }
+    function restartIfDead(quiet) {
+      if (document.hidden || !Object.keys(subs).length || starting) return;
+      var now = Date.now(), since = now - Math.max(lastFixWall, startedAt);
+      if (since < quiet || now - restartAt < 25000 * Math.pow(2, Math.min(restartN, 3))) return;
+      restartAt = now; restartN++;
+      logNote('No GPS for ' + Math.round(since / 1000) + ' s: background GPS restarted');
+      stopNative(); startNative();
+    }
+    setInterval(function () { restartIfDead(25000); }, 5000);
+    document.addEventListener('visibilitychange', function () { if (!document.hidden) { restartAt = 0; setTimeout(function () { restartIfDead(10000); }, 1500); } });
+    window.lbNativeGpsState = function () { return { nativeId: nativeId, starting: starting, lastFixAgo: lastFixWall ? Date.now() - lastFixWall : null, restarts: restartN }; };   // (test hook)
     var geo = navigator.geolocation || {};
     var shim = {
       watchPosition: function (ok, err) {
@@ -5369,6 +5390,7 @@ const STREET_LITTER_SERVICE_LEVELS = {"seasons":[{"key":"tourist1","label":"Tour
     while (lbGpsLog.length > 1200 || (lbGpsLog.length && e.at - lbGpsLog[0].at > 15 * 60000)) lbGpsLog.shift();
     if (e.k === 'fix') window.lbGpsDiag = { at: e.at, ps: e.ps, acc: e.acc, age: Math.round((e.at - e.t) / 1000) };
   }
+  window.lbGpsLogAdd = lbGpsLogAdd;   // (the background GPS watchdog and the long-stop pop-up add notes)
   setInterval(() => { try { localStorage.setItem('lbGpsLog', JSON.stringify(lbGpsLog)); } catch (e) {} }, 30000);
   // While the position is frozen (lbFrozenN), ask the phone for a brand-new reading every 5 s, and restart the
   // GPS watch every 30 s - an experiment to wake Android's GPS during a slow reverse; the GPS log records each
