@@ -5387,6 +5387,38 @@ const STREET_LITTER_SERVICE_LEVELS = {"seasons":[{"key":"tourist1","label":"Tour
     // two of them while reversing, and the very next fixes were the same frozen spot every time. In the phone app a restart
     // also stops and starts the background GPS service, which is a gap of its own.)
   }
+  /* ---- Motion sensors: is the truck moving while the GPS is frozen? ----
+     (Fox, 31 Oct: in a T-turn the GPS freezes - it stops facing one way and reverses off at an angle, and the phone's GPS
+     holds the last spot until the truck is 30-40 m away; reversing straight back works.) The phone's gyroscope still feels
+     the truck turn. Its turning about the up-and-down line (the rotation, whatever way the phone sits in its mount, measured
+     around gravity) is added up while the GPS position is frozen; once it has turned 15 degrees the truck is moving, not
+     parked: lbGpsFrozeMoving is set (no bins are ticked off at the frozen spot, the stop timer and the hold-up pop-up treat it
+     as driving) until the GPS moves again. A parked truck - engine running, bins being lifted - doesn't turn; slower than
+     2 degrees a second is left out so the gyro's own slow drift doesn't add up over a long stop. Only while the app is on the
+     screen (the page gets no sensor readings in the background). */
+  const lbSens = { g: null, rate: 0, at: 0, turnAt: 0, sum: 0, ok: false };
+  window.lbSens = lbSens;   // (test hook)
+  function lbOnMotion(e) {
+    const a = e.accelerationIncludingGravity, r = e.rotationRate;
+    if (!a || !r || a.x == null || r.alpha == null) return;
+    const now = Date.now(), dt = lbSens.at ? Math.min(0.25, (now - lbSens.at) / 1000) : 0;
+    lbSens.at = now; lbSens.ok = true;
+    const k = 0.05, g = lbSens.g = lbSens.g ? [lbSens.g[0] + k * (a.x - lbSens.g[0]), lbSens.g[1] + k * (a.y - lbSens.g[1]), lbSens.g[2] + k * (a.z - lbSens.g[2])] : [a.x, a.y, a.z];
+    const n = Math.hypot(g[0], g[1], g[2]); if (!n) return;
+    // rotationRate (degrees a second): alpha about the phone's z axis, beta about x, gamma about y
+    const yaw = ((r.beta || 0) * g[0] + (r.gamma || 0) * g[1] + (r.alpha || 0) * g[2]) / n;
+    lbSens.rate = lbSens.rate * 0.8 + yaw * 0.2;
+    if (Math.abs(lbSens.rate) > 4) lbSens.turnAt = now;
+    if (lbFrozenN >= 3) { if (Math.abs(lbSens.rate) > 2) lbSens.sum += yaw * dt; } else lbSens.sum = 0;
+    if (lbFrozenN >= 3 && Math.abs(lbSens.sum) >= 15 && !window.lbGpsFrozeMoving) {
+      window.lbGpsFrozeMoving = Date.now(); lbStopVisit = null;
+      lbGpsLogAdd({ k: 'note', note: 'Sensors: truck turned ' + Math.round(Math.abs(lbSens.sum)) + ' degrees while the GPS was frozen' });
+    }
+  }
+  try { window.addEventListener('devicemotion', lbOnMotion, { passive: true }); } catch (e) {}
+  window.lbOnMotion = lbOnMotion;   // (test hook)
+  // turning right now (the last 2.5 s), whatever the GPS says
+  function lbSensorTurning() { return lbSens.ok && Date.now() - lbSens.turnAt < 2500; }
   const lbSpeedFixes = [];
   let lbSpeedLast = { v: 0, t: 0 };
   let lbLastFixJumped = false;
@@ -18453,7 +18485,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     // If stopped or < 4 km/h, lastValidHeading remains locked to your last driving direction
     lbGpsLogAdd({ k: 'fix', t: fixT, lat: +pos.coords.latitude.toFixed(6), lng: +pos.coords.longitude.toFixed(6), acc: accuracy,
       ps: pos.coords.speed == null ? null : Math.round(pos.coords.speed * 36) / 10, ph: pos.coords.heading == null ? null : Math.round(pos.coords.heading),
-      v: speedKmh, j: lbLastFixJumped ? 1 : 0, f: lastValidHeading, r: lbReverseState.on ? 1 : 0 });
+      v: speedKmh, j: lbLastFixJumped ? 1 : 0, f: lastValidHeading, r: lbReverseState.on ? 1 : 0, y: lbSens.ok ? Math.round(lbSens.rate) : null, fm: window.lbGpsFrozeMoving ? 1 : 0 });
     if (lbFrozenN >= 5) lbPokeFrozenGps(); else lbPokeRestartAt = 0;
 
     updateGpsBadgeUI(true, `🟢 ±${accuracy}m`);
@@ -18550,7 +18582,8 @@ window.addEventListener('DOMContentLoaded', async () => {
       if (win.length < 2 || nowT - win[0].t < 1500 || speedKmh > 6) return false;
       return win.every(f => getDistanceMeters(f.lat, f.lng, userCurrentLocation.lat, userCurrentLocation.lng) <= 2);
     })();
-    const lbStopped = (!!lbStopSince && fixT - lbStopSince >= 1500) || lbStillByPlace;
+    // (not while the gyro feels the truck turning, or once it has turned with the GPS frozen - see lbOnMotion)
+    const lbStopped = ((!!lbStopSince && fixT - lbStopSince >= 1500) || lbStillByPlace) && !window.lbGpsFrozeMoving && !lbSensorTurning();
     /* One bin at a time (Fox, 31 Oct: "if a truck stops at a location with multiple bins they are all counted as flipped, but
        it takes 5 seconds minimum to flip a bin, 12 seconds to do two"). A stop is a visit: it starts when the truck stops and
        lasts while it stays within 10 m and under 6 km/h (a wobble in the GPS speed doesn't start a new one). A visit ticks
@@ -37330,10 +37363,11 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
 (function(){
   function hms(ms){ var d = new Date(ms); return d.toTimeString().slice(0, 8) + '.' + String(Math.floor(d.getMilliseconds() / 100)); }
   function csv(){
-    var rows = ['arrived,kind,fix_time,lat,lng,acc_m,phone_kmh,phone_heading,app_kmh,jump,facing,reversing,note'];
+    var rows = ['arrived,kind,fix_time,lat,lng,acc_m,phone_kmh,phone_heading,app_kmh,jump,facing,reversing,turn_dps,frozen_moving,note'];
     (window.lbGpsLog || []).forEach(function(e){
       rows.push([hms(e.at), e.k, e.t ? hms(e.t) : '', e.lat == null ? '' : e.lat, e.lng == null ? '' : e.lng, e.acc == null ? '' : e.acc,
         e.ps == null ? '' : e.ps, e.ph == null ? '' : e.ph, e.v == null ? '' : e.v, e.j || '', e.f == null ? '' : e.f, e.r || '',
+        e.y == null ? '' : e.y, e.fm || '',
         e.k === 'err' ? ('code ' + e.code + ' ' + (e.msg || '')).replace(/,/g, ' ')
           : e.k === 'note' ? String(e.note || '').replace(/,/g, ' ')
           : ''].join(','));
