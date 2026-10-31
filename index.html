@@ -45645,9 +45645,12 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
       var led = ''; for (var i = 0; i < 20; i++) led += '<i></i>';
       top.innerHTML =
         '<div class="rd-hero">' +
-          '<i class="rd-lim" id="rdLim" aria-hidden="true"></i>' +
+          // (Fox, 31 Oct 2026: on truck and bins to go on the left, the limit between the speed and the compass)
+          '<div class="rd-left"><button type="button" class="rd-lt" id="rdLTruck" aria-label="On truck">' + rdMask('garbagetruck.png') + '<span class="rd-v"></span></button>' +
+            '<div class="rd-lt" id="rdLTogo" aria-label="Bins to go">' + rdMask('bin.png') + '<span class="rd-v"></span></div></div>' +
           '<b class="rd-spd" id="rdSpd" aria-live="off"></b>' +
-          '<div class="rd-cmp" id="rdCmp"><span class="rd-deg" id="rdDeg"></span><em>&deg;</em><span id="rdCard">N</span></div>' +
+          '<i class="rd-lim" id="rdLim" aria-hidden="true"></i>' +
+          '<div class="rd-cmp" id="rdCmp"><span id="rdCard">N</span><span class="rd-cmpd"><span class="rd-deg" id="rdDeg"></span><em>&deg;</em></span></div>' +
         '</div>' +
         '<div class="rd-led" id="rdLed" aria-hidden="true">' + led + '</div>' +
         '<div class="rd-st" id="rdSt"><i class="rd-n rd-nl"></i><b></b><i class="rd-n rd-nr"></i></div>' +
@@ -45655,6 +45658,7 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
         '<div id="rdBins"></div>';
       var bn = top.querySelector('#rdBins');
       bn.addEventListener('click', rdBinsClick);
+      top.querySelector('#rdLTruck').addEventListener('click', function(ev){ ev.stopPropagation(); if (typeof window.uxShiftOpen === 'function') window.uxShiftOpen(); });
       document.addEventListener('click', function(ev){ if (rdPick && !(ev.target.closest && ev.target.closest('#rdBins'))) { rdClearPick(); paintBins(true); } });
     }
     if (top.parentNode !== stack || stack.firstElementChild !== top) stack.insertBefore(top, stack.firstChild);
@@ -45772,6 +45776,14 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
   function rdPid(s){ return String((s && (s.propId || s.siteId)) || ''); }
   function rdNorm(s){ return String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, ''); }
   function rdShortAddr(s){ return String((s && (s.baseStreetLine || String(s.addressText || '').split(',')[0])) || '').trim(); }
+  // a reminder that is due now: on one of these bins (propId_serial, set with the clock) or on the address (propId)
+  function rdRemOf(site, bins){
+    var rems = g('siteReminders') || {}, id = rdPid(site), today = new Date().toISOString().slice(0, 10);
+    var due = function(r){ return r && r.message && (!r.triggerDate || r.triggerDate <= today); };
+    for (var i = 0; i < bins.length; i++) { var k = id + '_' + (bins[i].serial || i); if (due(rems[k])) return { k: k, serial: bins[i].serial || '', text: String(rems[k].message) }; }
+    if (due(rems[id])) return { k: id, serial: '', text: String(rems[id].message) };
+    return null;
+  }
   function rdIssueOf(site, bins){
     if (!window.lbIssues || !site) return null;
     for (var i = 0; i < bins.length; i++) { var x = window.lbIssues.forBin(rdPid(site), bins[i].serial); if (x) return x; }
@@ -45861,9 +45873,10 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
     var turns = [];
     if (act) rdGrp.forEach(function(m){
       var mb = rdSrc(m)[act.key] || []; if (!mb.length) return;
-      var iss = rdIssueOf(m, mb);
-      turns.push({ s: m, iss: iss, msg: false });
-      if (iss) turns.push({ s: m, iss: iss, msg: true });
+      var iss = rdIssueOf(m, mb), rem = rdRemOf(m, mb);
+      turns.push({ s: m, iss: iss, rem: rem, msg: false });
+      if (iss) turns.push({ s: m, iss: iss, rem: rem, msg: true });
+      if (rem) turns.push({ s: m, iss: iss, rem: rem, msg: 'rem' });
     });
     if (rdPin) { var pinned = turns.filter(function(x){ return rdPid(x.s) === rdPin && !x.msg; }); if (pinned.length) turns = pinned; else rdPin = ''; }
     if (rdIssOpen) { var op = turns.filter(function(x){ return x.iss && x.iss.id === rdIssOpen && !x.msg; }); if (op.length) turns = op; }
@@ -45871,7 +45884,7 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
     var shownSite = turn ? turn.s : site, ssrc = rdSrc(shownSite);
     var side = rdSide(shownSite, nl, nr);
     var bins = act ? (ssrc[act.key] || []) : [];
-    var purple = !!(turn && turn.iss);
+    var purple = !!(turn && (turn.iss || turn.rem));
     var bandBg = purple ? RD_PURPLE : (act ? act.bg : tint.bg), bandFg = purple ? '#fff' : (act ? act.fg : tint.fg);
     var spd = +g('currentMapSpeedKmh') || 0, stopped = spd < 3;
     var many = bins.length > 3, big = !many && (bins.length <= 1 || stopped);                  // two bins or more: only the big digits when stopped
@@ -45915,7 +45928,11 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
       var oi = window.lbIssues.get(rdIssOpen);
       if (oi) pre = '<div class="rd-icard">' + window.lbIssues.card(oi) + '</div>'; else rdIssOpen = '';
     }
-    if (act && turn && turn.msg) {
+    if (act && turn && turn.msg === 'rem') {
+      // a reminder (the clock, or the check a report leaves at the address): its words, tap to change or finish it
+      h = '<div class="rd-band rd-msg ' + (side === 'R' ? 'r ' : '') + 'big" style="--bc:' + bandBg + ';--bt:' + bandFg + '"><div class="rd-area">' +
+        '<button type="button" class="rd-mtx rd-rtx" data-a="rem" data-k="' + escH(turn.rem.k) + '" data-sr="' + escH(turn.rem.serial) + '" data-ad="' + escH(turn.s.addressText || '') + '" aria-label="Reminder: ' + escH(turn.rem.text) + '">' + RD_SVG_CLOCK + '<span>' + escH(turn.rem.text) + '</span></button></div></div>';
+    } else if (act && turn && turn.msg) {
       var d = new Date(turn.iss.ts), dd = ('0' + d.getDate()).slice(-2) + '/' + ('0' + (d.getMonth() + 1)).slice(-2);
       h = '<div class="rd-band rd-msg ' + (side === 'R' ? 'r ' : '') + 'big" style="--bc:' + bandBg + ';--bt:' + bandFg + '"><div class="rd-area">' +
         '<button type="button" class="rd-mtx" data-a="msg" data-iss="' + escH(turn.iss.id) + '" aria-label="' + escH(turn.iss.label || 'Issue') + ' ' + dd + ', tap for the photo and note">' + escH(turn.iss.label || 'Issue') + '<em>' + dd + '</em></button></div></div>';
@@ -45927,7 +45944,7 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
       var maxN = Math.max.apply(null, items.map(function(x){ return String(x.text).length; }));   // (one size for every row of the band)
       var mkSer = function(list){ return list.map(function(x){
         return '<button type="button" class="rd-sn' + (x.rem ? ' rem-' + x.rem : '') + '" data-a="sn" data-k="' + escH(x.k) + '" data-p="' + escH(propId) + '" data-s="' + act.key + '" data-i="' + x.i + '"' +
-          (purple ? ' data-iss="' + escH(turn.iss.id) + '"' : '') + ' aria-label="Bin ' + escH(x.text) + (purple ? ', has an issue, tap to see it' : ', tap for the bin and the property') + '">' + rdSerialHtml(x.text, maxN) + rdSizeTag(x.b, act) + '</button>';
+          (turn && turn.iss ? ' data-iss="' + escH(turn.iss.id) + '"' : '') + ' aria-label="Bin ' + escH(x.text) + (turn && turn.iss ? ', has an issue, tap to see it' : ', tap for the bin and the property') + '">' + rdSerialHtml(x.text, maxN) + rdSizeTag(x.b, act) + '</button>';
       }).join(''); };
       var ser = mkSer(items);
       // lots of bins at one spot: the count (and what is still to do), the list only when asked for, in a box that scrolls
@@ -45958,9 +45975,9 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
       var d = String(Math.min(sp, 999)); d = '   '.slice(d.length) + d;
       segSet($('rdSpd'), d);
       attr(top, 'data-warn', warn);
-      var leds = $('rdLed') && $('rdLed').children, lit = Math.min(20, Math.round(sp / 4)), lb = lim ? Math.min(20, Math.round(lim / 4)) - 1 : -1;
+      var leds = $('rdLed') && $('rdLed').children, lit = Math.min(20, Math.round(sp / 6.25)), lb = lim ? Math.min(20, Math.round(lim / 6.25)) - 1 : -1;
       if (leds && leds.length >= 20) for (var i = 0; i < 20; i++) {
-        var v = (i + 1) * 4, z = (lim && v > lim + 9) ? 'r' : (lim && v > lim + 2) ? 'o' : 'g', cls = z + (i < lit ? ' on' : '') + (i === lb ? ' lim' : '');
+        var v = (i + 1) * 6.25, z = (lim && v > lim + 9) ? 'r' : (lim && v > lim + 2) ? 'o' : 'g', cls = z + (i < lit ? ' on' : '') + (i === lb ? ' lim' : '');
         if (leds[i].className !== cls) leds[i].className = cls;
       }
     } else {
@@ -45982,9 +45999,9 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
     attr($('rdSpd'), 'aria-label', 'Speed ' + sp + ' kilometres an hour' + (lim ? ', limit ' + lim : ''));
     var lm = $('rdLim'); txt(lm, lim || ''); lm.style.visibility = lim ? '' : 'hidden';
     // the LED bar: 20 blocks of 4 km/h, lit up to the speed. A block's colour follows the same steps as the wanted level.
-    var leds = $('rdLed').children, lit = Math.min(20, Math.round(sp / 4)), lb = lim ? Math.min(20, Math.round(lim / 4)) - 1 : -1;
+    var leds = $('rdLed').children, lit = Math.min(20, Math.round(sp / 6.25)), lb = lim ? Math.min(20, Math.round(lim / 6.25)) - 1 : -1;
     for (var i = 0; i < 20; i++) {
-      var v = (i + 1) * 4, z = (lim && v > lim + 9) ? 'r' : (lim && v > lim + 2) ? 'o' : 'g';
+      var v = (i + 1) * 6.25, z = (lim && v > lim + 9) ? 'r' : (lim && v > lim + 2) ? 'o' : 'g';
       var cls = z + (i < lit ? ' on' : '') + (i === lb ? ' lim' : '');
       if (leds[i].className !== cls) leds[i].className = cls;
     }
@@ -46028,6 +46045,16 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
     var otherTruck = function(){ try { return typeof window.lbOtherTrucksOnRun === 'function' && !!window.lbOtherTrucksOnRun(); } catch (e) { return false; } };
     var dn = doneCount(), tot = hasRun ? (HT.bins || 0) : 0;
     segSet($('rdTogo').querySelector('.rd-v'), hasRun ? String(Math.max(0, tot - dn)) : '-');
+    // the left of the speedo: on the truck, and bins to go - from the bins this run collected on the same day last year
+    // (data/run-history.json, window.lbLastYearBins), less the bins emptied today; the run's listed bins when there's no history
+    if ($('rdLTruck')) {
+      segSet($('rdLTruck').querySelector('.rd-v'), String(T ? T.n : dn));
+      attr($('rdLTruck'), 'aria-label', (T ? 'On truck ' + T.n : 'Collected ' + dn));
+      var ly = null; try { ly = window.lbLastYearBins ? window.lbLastYearBins() : null; } catch (e) {}
+      var tg = ly != null ? Math.max(0, ly - dn) : (hasRun ? Math.max(0, tot - dn) : null);
+      segSet($('rdLTogo').querySelector('.rd-v'), tg != null ? String(tg) : '-');
+      attr($('rdLTogo'), 'aria-label', 'Bins to go ' + (tg != null ? tg : '') + (ly != null ? ' (same day last year ' + ly + ')' : ''));
+    }
     var dv = $('rdDone').querySelectorAll('.rd-v'); segSet(dv[0], String(dn)); segSet(dv[1], String(tot));
     // a cell with nothing to count (no shift, no run yet) is left out, so the row is never a string of dashes
     [['rdKm', !!(r && r.perKm != null)], ['rdRate', ph != null], ['rdStreets', sg != null], ['rdTogo', hasRun], ['rdDone', hasRun && tot > 0 && otherTruck()]].forEach(function(c){ var e = $(c[0]); if (e) e.style.display = c[1] ? '' : 'none'; });
@@ -55581,6 +55608,29 @@ html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x
 html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-fres .rd-fnone{padding:10px 2px;color:#9a9ca4;font:400 13px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
 html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-icard{padding:12px;background:#1e1f23;border-top:3px solid #000}
 html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-band[style*="--bt:#fff"] .rd-logo img{filter:invert(1)}
+
+/* the speedo (Fox, 31 Oct 2026): see-through, the yellow line moved down above the street, digits closer, the limit between the
+   speed and the compass, the compass letters big on top and the bearing small under, on truck / bins to go on the left */
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash{background:transparent}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-hero{grid-template-columns:minmax(0,1fr) auto auto minmax(0,1fr);column-gap:10px;background:transparent;border-top:0;padding:6px 10px 0}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-led{background:transparent}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-st{border-top:5px solid var(--rb-a)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-spd{gap:2px}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-lim{justify-self:center;width:40px;height:40px;border-width:5px;font-size:15px}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-cmp{justify-self:end;display:flex;flex-direction:column;align-items:center;gap:3px}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash #rdCard{grid-column:auto;justify-self:auto;padding:0;font:800 26px/1 var(--rd-f);letter-spacing:.02em}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-cmpd{display:flex;align-items:flex-start;gap:1px}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-cmpd em{font:800 9px/1 var(--rd-f);font-style:normal}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-deg{--dw:8px;gap:2px}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-left{justify-self:start;display:flex;flex-direction:column;gap:6px;min-width:0}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-lt{display:flex;align-items:center;gap:6px;padding:0;margin:0;background:none;border:0;box-shadow:none;color:var(--rb-a);cursor:pointer;width:auto;height:auto;min-height:0}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-lt .rd-ic{display:block;flex:none;width:22px;height:22px;opacity:1;background:currentColor;-webkit-mask:var(--m) center/contain no-repeat;mask:var(--m) center/contain no-repeat}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-lt .rd-v{display:flex;gap:2px;align-items:flex-end;--dw:11px}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-band .rd-sn.rem-set,html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-band .rd-sn.rem-due{outline:0 !important;animation:none !important}   /* (the reminder takes its own turn now; no box round the number) */
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats #rdTruck,html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbStats #rdTogo{display:none !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-band .rd-rtx{align-items:center;gap:10px;text-transform:none;font-size:20px;letter-spacing:0}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-band .rd-rtx svg{flex:none;width:30px;height:30px}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-band .rd-rtx span{min-width:0;overflow:hidden;text-overflow:ellipsis}
 </style>
 <script id="lb-propbins-script">
 (function(){
@@ -55622,6 +55672,32 @@ html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x
     var la1 = +a.lat, ln1 = +a.lng, la2 = +b.lat, ln2 = +b.lng; if (!isFinite(la1) || !isFinite(la2) || !la1 || !la2) return Infinity;
     var kx = 111320 * Math.cos(la1 * Math.PI / 180); return Math.hypot((ln2 - ln1) * kx, (la2 - la1) * 110540);
   }
+
+
+  /* ---------------- bins to go: the bins this run collected on the same day last year ---------------- */
+  // data/run-history.json (Solo's monthly reports): runs keyed Stream#Day#Week#Run (Garbage / Summer: no week), d: {date: [bins, kg, flag]}.
+  // "Same day last year" is 364 days back (the same weekday, and a whole number of fortnights, so the same A / B week); the nearest
+  // collection within 10 days of it counts, else the run's normal estimate.
+  var RH = null;
+  try { fetch('data/run-history.json', { cache: 'no-cache' }).then(function(r){ return r.ok ? r.json() : null; }).then(function(d){ RH = d; }).catch(function(){}); } catch (e) {}
+  var DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  window.lbLastYearBins = function(){
+    if (!RH || !RH.runs) return null;
+    var st = clean(g('activeFilterStream')), day = clean(g('activeFilterDay')) || DAYS[new Date().getDay()], wk = clean(g('activeFilterWeek')).toUpperCase(), sel = g('selectedRunsSet');
+    if (!st || !sel || !sel.size) return null;
+    day = day.charAt(0).toUpperCase() + day.slice(1).toLowerCase();
+    var target = Date.now() - 364 * 864e5, total = 0, found = false;
+    sel.forEach(function(run){
+      run = String(run).toUpperCase().replace(/\s+/g, '');
+      var key = (st === 'Recycling' || st === 'FOGO') ? [st, day, wk, run].join('#') : [st, day, run].join('#');
+      var h = RH.runs[key]; if (!h || !h.d) return;
+      var best = null, bd = 1e9;
+      Object.keys(h.d).forEach(function(ds){ var dd = Math.abs(new Date(ds + 'T12:00:00').getTime() - target) / 864e5; if (dd < bd) { bd = dd; best = ds; } });
+      if (best && bd <= 10 && h.d[best][0] > 0) { total += h.d[best][0]; found = true; }
+      else if (h.n) { total += h.n; found = true; }
+    });
+    return found ? total : null;
+  };
 
   /* ---------------- put out at another house ---------------- */
   function cps(){ try { return window.lbCollectionPointsObj ? window.lbCollectionPointsObj() : null; } catch (e) { return null; } }
@@ -55977,6 +56053,8 @@ html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x
     }
     if (t.hasAttribute('data-pb-report')) {
       var ok = String(window.__uPropOpenBinKey || '').split('_'), b = site && site.soloStreams && site.soloStreams[ok[0]] && site.soloStreams[ok[0]][+ok[1]];
+      // (Fox: "when you push report nothing happens till you close the property box" - the report sheet opened behind it)
+      try { var pm = document.getElementById('propInspectModal'); if (pm && pm.classList.contains('open') && typeof window.closeModal === 'function') window.closeModal('propInspectModal'); } catch (e) {}
       if (typeof window.uxOpenIssue === 'function') window.uxOpenIssue('bin', { site: id, serial: b ? b.serial : '', stream: ok[0] || '' });
       return;
     }
