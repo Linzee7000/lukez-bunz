@@ -30640,6 +30640,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   function dayKey(ts){ var d = new Date(ts); return d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate(); }
   function todaysIssues(){ var k = dayKey(Date.now()); return log.filter(function(i){ return dayKey(i.ts) === k; }); }
   window.uxIssueLog = function(){ return log.slice(); };
+  // ALL GOOD · CLEAR on a reported issue (lb-propbins-script): it stays in the log, marked cleared, so the purple warning goes
+  window.uxIssueClear = function(id){ var ch = false; log.forEach(function(i){ if (i.id === id && !i.cleared) { i.cleared = Date.now(); ch = true; } }); if (ch) { saveLog(log); try { cache.__hk = null; } catch (e) {} } };
 
   // ---- live state (all read from the app) ---------------------------------------------
   var S = { site: null, street: '', run: '', done: 0, total: 0 };
@@ -45752,24 +45754,98 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
       if (typeof window.renderCurrentAddressTelemetry === 'function') window.renderCurrentAddressTelemetry(site);
     } catch (e) {}
   }
+  // ---- Fox, 31 Oct 2026: one row, nothing wasted --------------------------------------------------------------------
+  //   18      Graydon Ct       6
+  //   ♻️ R055170          ⏰ 🔎        a house on the left: logo and serial on the left, the clock and the search on the right
+  //   🔎 ⏰          R055176 ♻️        a house on the right: mirrored. Purple instead of the stream colour when the bin had
+  //   CONTAMINATED 27/10                an issue reported (lbIssues.forBin), and the issue takes a turn with the serial.
+  // Bins of two houses put out at one spot (window.lbPutOut.group: 6 puts its bins out at 18, opposite) take turns, 2.5 s
+  // each; the number of the house the bins shown belong to is the one in colour. TAPPING THE SERIAL opens the property page
+  // on that bin (lb-propbins-script); a purple serial or the issue opens the issue (photo, note, ALL GOOD · CLEAR). The
+  // clock sets a reminder; the search turns the serial into a search box (type or scan), the bins at this stop listed above.
+  var RD_PURPLE = '#7e22ce', RD_TURN = 2500;
+  var RD_SVG_FIND = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><circle cx="10" cy="10" r="6.5"/><path d="m15 15 6 6"/></svg>';
+  var RD_SVG_SCAN = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3"/><path d="M8 8v8M11 8v8M14 8v8M17 8v8"/></svg>';
+  var RD_SVG_X = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>';
+  var rdFind = false, rdFindQ = '', rdPin = '', rdPinFor = '', rdIssOpen = '', rdGrp = [];
+  function rdSrc(s){ return s ? ((g('activeFilterDataSource') === 'council') ? (s.councilStreams || {}) : (s.soloStreams || {})) : {}; }
+  function rdPid(s){ return String((s && (s.propId || s.siteId)) || ''); }
+  function rdNorm(s){ return String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, ''); }
+  function rdShortAddr(s){ return String((s && (s.baseStreetLine || String(s.addressText || '').split(',')[0])) || '').trim(); }
+  function rdIssueOf(site, bins){
+    if (!window.lbIssues || !site) return null;
+    for (var i = 0; i < bins.length; i++) { var x = window.lbIssues.forBin(rdPid(site), bins[i].serial); if (x) return x; }
+    return null;
+  }
+  // the bins at this stop (every house in the group, every stream), then any bin anywhere with that number
+  function rdFindRows(q){
+    q = rdNorm(q); var out = [], seen = {};
+    var add = function(s, d, b, i){ var k = rdPid(s) + d.key + i; if (seen[k]) return; seen[k] = 1; out.push({ s: s, d: d, b: b, i: i }); };
+    rdGrp.forEach(function(s){ RD_STREAMS.forEach(function(d){ (rdSrc(s)[d.key] || []).forEach(function(b, i){ if (!q || rdNorm(b.serial).indexOf(q) >= 0) add(s, d, b, i); }); }); });
+    if (q.length >= 3 && out.length < 8) {
+      var all = g('siteRecords') || [];
+      for (var n = 0; n < all.length && out.length < 8; n++) {
+        var s = all[n], st = s.soloStreams || {};
+        RD_STREAMS.forEach(function(d){ (st[d.key] || []).forEach(function(b, i){ if (out.length < 8 && rdNorm(b.serial).indexOf(q) >= 0) add(s, d, b, i); }); });
+      }
+    }
+    return out;
+  }
+  function rdFindList(){
+    var rows = rdFindRows(rdFindQ);
+    return rows.length ? rows.map(function(r){
+      return '<button type="button" data-a="fres" data-p="' + escH(rdPid(r.s)) + '" data-s="' + r.d.key + '" data-i="' + r.i + '"><img src="' + r.d.icon + '" alt=""><span>' + escH(String(r.b.serial || '—').replace(/__\d+$/, '')) + '</span><small>' + escH(rdShortAddr(r.s)) + '</small></button>';
+    }).join('') : '<div class="rd-fnone">No bin with that number</div>';
+  }
+  window.lbRdRepaint = function(){ try { paintBins(true); } catch (e) {} };
+  window.lbRdCloseIssue = function(){ if (rdIssOpen) { rdIssOpen = ''; try { paintBins(true); } catch (e) {} } };
   function rdBinsClick(ev){
     var t = ev.target.closest ? ev.target.closest('[data-a]') : null; if (!t) return;
     ev.stopPropagation();
     var a = t.getAttribute('data-a'), site = rdSite();
     if (a === 'more') { rdMany = !rdMany; paintBins(true); return; }
-    if (a === 'sn') { var k = t.getAttribute('data-k'); if (rdPick === k) rdClearPick(); else { rdPick = k; rdIssue = false; clearTimeout(rdPickT); rdPickT = setTimeout(function(){ rdClearPick(); paintBins(true); }, 9000); } paintBins(true); return; }
+    if (a === 'sn' || a === 'msg') {
+      var iss = t.getAttribute('data-iss');
+      if (iss) { rdIssOpen = rdIssOpen === iss ? '' : iss; paintBins(true); return; }
+      var pid = t.getAttribute('data-p'), sk = t.getAttribute('data-s'), ix = parseInt(t.getAttribute('data-i'), 10);
+      if (pid && sk && typeof window.promptEditBin === 'function') window.promptEditBin(pid, sk, isFinite(ix) ? ix : 0);
+      return;
+    }
     if (a === 'logo' || a === 'ob') { rdSwitch(t.getAttribute('data-s')); return; }
-    if (a === 'rem') { var k2 = t.getAttribute('data-k'), sr = t.getAttribute('data-sr') || ''; rdClearPick(); paintBins(true); if (typeof window.openBinReminderModal === 'function') window.openBinReminderModal(k2, escape(site ? (site.addressText || '') : ''), sr); return; }
-    if (a === 'rep') { rdIssue = !rdIssue; paintBins(true); return; }
-    if (a === 'iss') { var mid = t.getAttribute('data-m'), is = t.getAttribute('data-i'); rdClearPick(); paintBins(true); if (typeof window.setBinIssue === 'function') window.setBinIssue(ev, mid, is); return; }
+    if (a === 'rem') {
+      var k2 = t.getAttribute('data-k'), sr = t.getAttribute('data-sr') || '', ad = t.getAttribute('data-ad') || '';
+      if (typeof window.openBinReminderModal === 'function') window.openBinReminderModal(k2, escape(ad || (site ? (site.addressText || '') : '')), sr);
+      return;
+    }
+    if (a === 'find') { rdFind = true; rdFindQ = ''; rdIssOpen = ''; paintBins(true); setTimeout(function(){ var i = $('rdFindQ'); if (i) i.focus(); }, 30); return; }
+    if (a === 'fx') { rdFind = false; rdFindQ = ''; rdPin = ''; paintBins(true); return; }
+    if (a === 'fscan') {
+      if (typeof window.uxScanBin !== 'function') return;
+      window.uxScanBin().then(function(s){ if (!s) return; rdFindQ = String(s).toUpperCase(); var i = $('rdFindQ'); if (i) i.value = rdFindQ; var l = $('rdFres'); if (l) l.innerHTML = rdFindList(); });
+      return;
+    }
+    if (a === 'fres') {
+      var p2 = t.getAttribute('data-p'), s2 = t.getAttribute('data-s'), i2 = parseInt(t.getAttribute('data-i'), 10);
+      if (rdGrp.some(function(s){ return rdPid(s) === p2; })) { rdPin = p2; rdFind = false; rdFindQ = ''; paintBins(true); return; }
+      rdFind = false; rdFindQ = ''; paintBins(true);
+      if (typeof window.promptEditBin === 'function') window.promptEditBin(p2, s2, isFinite(i2) ? i2 : 0);
+      return;
+    }
+    if (a === 'addprop') return;
   }
+  document.addEventListener('input', function(ev){
+    if (!ev.target || ev.target.id !== 'rdFindQ') return;
+    rdFindQ = String(ev.target.value || '').toUpperCase();
+    var l = $('rdFres'); if (l) l.innerHTML = rdFindList();
+  }, true);
   var rdSig = '';
   function paintBins(force){
     var bn = $('rdBins'), tab = $('rdSt'), sd = $('rdSd'); if (!bn) return;
+    if (rdFind && !force && $('rdFindQ')) return;          // typing: leave the box alone
     var site = rdSite(), nm = ((tab.querySelector('b') || {}).textContent || '');
-    var src = site ? ((g('activeFilterDataSource') === 'council') ? (site.councilStreams || {}) : (site.soloStreams || {})) : {};
+    var src = rdSrc(site);
     var eligible = site ? RD_STREAMS.filter(function(d){ return (src[d.key] || []).length > 0; }) : [];
-    if (!site || !eligible.length || !nm) { bn.style.display = 'none'; if (sd) sd.style.display = 'none'; tab.removeAttribute('data-side'); rdSig = ''; return; }
+    if (!site || !eligible.length || !nm) { bn.style.display = 'none'; if (sd) sd.style.display = 'none'; tab.removeAttribute('data-side'); rdSig = ''; rdFind = false; rdIssOpen = ''; return; }
     bn.style.display = ''; sd.style.display = '';
     var shownFn = g('isStreamShownAtAddress');
     var shown = eligible.filter(function(d){ try { return typeof shownFn === 'function' ? !!shownFn(d.key, site) : true; } catch (e) { return true; } });
@@ -45777,52 +45853,81 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
     var act = null;
     if (shown.length) act = shown.filter(function(d){ return d.key.toLowerCase() === f; })[0] || shown[0];
     var tint = act || eligible.filter(function(d){ return d.key.toLowerCase() === f; })[0] || eligible[0];
-    var others = eligible.filter(function(d){ return d !== act; });
     var nl = (tab.querySelector('.rd-nl') || {}).textContent || '', nr = (tab.querySelector('.rd-nr') || {}).textContent || '';
-    var side = rdSide(site, nl, nr);
-    var bins = act ? src[act.key] : [];
+    // the houses whose bins are at this stop, and whose turn it is
+    var home = rdPid(site);
+    if (rdPinFor !== home) { rdPinFor = home; rdPin = ''; rdFind = false; rdIssOpen = ''; }
+    rdGrp = (window.lbPutOut && window.lbPutOut.group) ? (window.lbPutOut.group(site) || [site]) : [site];
+    var turns = [];
+    if (act) rdGrp.forEach(function(m){
+      var mb = rdSrc(m)[act.key] || []; if (!mb.length) return;
+      var iss = rdIssueOf(m, mb);
+      turns.push({ s: m, iss: iss, msg: false });
+      if (iss) turns.push({ s: m, iss: iss, msg: true });
+    });
+    if (rdPin) { var pinned = turns.filter(function(x){ return rdPid(x.s) === rdPin && !x.msg; }); if (pinned.length) turns = pinned; else rdPin = ''; }
+    if (rdIssOpen) { var op = turns.filter(function(x){ return x.iss && x.iss.id === rdIssOpen && !x.msg; }); if (op.length) turns = op; }
+    var turn = turns.length ? turns[Math.floor(Date.now() / RD_TURN) % turns.length] : null;
+    var shownSite = turn ? turn.s : site, ssrc = rdSrc(shownSite);
+    var side = rdSide(shownSite, nl, nr);
+    var bins = act ? (ssrc[act.key] || []) : [];
+    var purple = !!(turn && turn.iss);
+    var bandBg = purple ? RD_PURPLE : (act ? act.bg : tint.bg), bandFg = purple ? '#fff' : (act ? act.fg : tint.fg);
     var spd = +g('currentMapSpeedKmh') || 0, stopped = spd < 3;
     var many = bins.length > 3, big = !many && (bins.length <= 1 || stopped);                  // two bins or more: only the big digits when stopped
-    var propId = String(site.propId || site.siteId || ''), rems = g('siteReminders') || {};
+    var propId = rdPid(shownSite), rems = g('siteReminders') || {};
     var off = !!g('lbOffRunNow');
     var items = bins.map(function(b, i){
       var bk = propId + '_' + (b.serial || i), rem = rems[bk], today = new Date().toISOString().slice(0, 10);
       return { b: b, i: i, k: bk, text: rdSerialText(bins, i), rem: rem ? (!rem.triggerDate || rem.triggerDate <= today ? 'due' : 'set') : '' };
     });
-    if (rdPick && !items.some(function(x){ return x.k === rdPick; })) rdClearPick();
     var addBtn = document.querySelector('#mapBinsAtAddress .lb-offrun-add'), addTxt = addBtn ? (addBtn.textContent || '').replace(/^\s*\+\s*/, '').trim() : '';
     if (rdManyFor !== propId) { rdManyFor = propId; rdMany = false; }
-    var sig = [many ? (rdMany ? 'M1' : 'M0') : '', addTxt, propId, act ? act.key : '-', eligible.map(function(d){ return d.key + rdRunLabel(site, d); }).join(','), side, big ? 1 : 0, off ? 1 : 0, rdPick || '', rdIssue ? 1 : 0, items.map(function(x){ return x.text + x.rem + (x.b.size || ''); }).join('|'), nl, nr].join('~');
+    var sig = [many ? (rdMany ? 'M1' : 'M0') : '', addTxt, propId, act ? act.key : '-', eligible.map(function(d){ return d.key + rdRunLabel(site, d); }).join(','), side, big ? 1 : 0, off ? 1 : 0,
+      purple ? 'P' : '', turn && turn.msg ? 'MSG' : '', rdFind ? 'F' : '', rdIssOpen, rdGrp.length, items.map(function(x){ return x.text + x.rem + (x.b.size || ''); }).join('|'), nl, nr].join('~');
     // the tab of the side the bins are on says the number of THAT house (the street row's own numbers are for the next bin on each side,
-    // which is not always this house), smaller when it is long
-    var hn = rdHouseNo(site), hel = tab.querySelector(side === 'R' ? '.rd-nr' : '.rd-nl');
+    // which is not always this house), smaller when it is long; with two houses at the stop, the other side says the other house
+    var hn = rdHouseNo(shownSite), hel = tab.querySelector(side === 'R' ? '.rd-nr' : '.rd-nl'), oel = tab.querySelector(side === 'R' ? '.rd-nl' : '.rd-nr');
     if (hn) { txt(hel, hn); hel.style.fontSize = hn.length > 5 ? '13px' : hn.length > 3 ? '17px' : ''; }
-    tab.querySelectorAll('.rd-n').forEach(function(e){ if (e !== hel) e.style.fontSize = ''; });
+    oel.style.fontSize = '';
+    if (rdGrp.length > 1) rdGrp.forEach(function(m){
+      if (m === shownSite) return;
+      var ms = rdSide(m, nl, nr), mn = rdHouseNo(m);
+      if (ms !== side && mn) { txt(oel, mn); oel.style.fontSize = mn.length > 5 ? '13px' : mn.length > 3 ? '17px' : ''; }
+    });
     tab.setAttribute('data-side', side); sd.setAttribute('data-side', side);
-    tab.style.setProperty('--bc', tint.bg); tab.style.setProperty('--bt', tint.fg); sd.style.setProperty('--bc', tint.bg);
+    tab.style.setProperty('--bc', bandBg); tab.style.setProperty('--bt', bandFg); sd.style.setProperty('--bc', bandBg);
     attr(sd, 'data-off', off ? '1' : '0');
     if (!force && sig === rdSig) return;
     rdSig = sig;
-    var h = '';
-    var boxes = function(list, cls){
-      return '<div class="rd-oth ' + cls + '">' + list.map(function(d){
-        return '<button type="button" class="rd-ob" data-a="ob" data-s="' + d.key + '" style="--c:' + d.bg + ';--t:' + d.fg + '" aria-label="' + d.key + ' ' + escH(rdRunLabel(site, d)) + '"><img src="' + d.icon + '" alt="">' + '<b>' + escH(rdRunLabel(site, d)) + '</b></button>';
-      }).join('') + '</div>';
-    };
-    var pickItem = rdPick ? items.filter(function(x){ return x.k === rdPick; })[0] : null;
-    var menuId = pickItem ? ('binMenu_' + propId + '_' + act.key + '_' + pickItem.i).replace(/[^a-zA-Z0-9_]/g, '_') : '';
-    var right = '', issH = '';
-    if (pickItem) {
-      right = '<div class="rd-oth ' + ((big && items.length > 1) ? 'rd-col' : 'rd-row') + ' rd-acts">' +
-        '<button type="button" class="rd-ac rd-ac-rem" data-a="rem" data-k="' + escH(pickItem.k) + '" data-sr="' + escH(pickItem.b.serial || '') + '" aria-label="Set a reminder for this bin">' + RD_SVG_CLOCK + '<b>REMIND</b></button>' +
-        '<button type="button" class="rd-ac rd-ac-rep" data-a="rep" aria-label="Report a problem with this bin">' + RD_SVG_WARN + '<b>REPORT</b></button>' +
-        '</div>';
-      issH = rdIssue ? '<div class="rd-iss rd-iss-w' + (side === 'R' ? ' r' : '') + '">' + RD_ISSUES.map(function(is){ return '<button type="button" data-a="iss" data-m="' + menuId + '" data-i="' + is + '">' + is + '</button>'; }).join('') + '</div>' : '';
-    } else if (others.length) right = boxes(others, (big && items.length > 1 && others.length > 1) ? 'rd-col' : 'rd-row');
-    if (act) {
+    var h = '', pre = '';
+    if (act && rdFind) {
+      // the search: typed (or scanned) into the band itself, the bins it matches above it
+      pre = '<div class="rd-fres" id="rdFres">' + rdFindList() + '</div>';
+      h = '<div class="rd-band rd-find big" style="--bc:' + act.bg + ';--bt:' + act.fg + '">' + RD_SVG_FIND +
+        '<input id="rdFindQ" type="text" inputmode="text" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="SERIAL" aria-label="Search a serial number" value="' + escH(rdFindQ) + '">' +
+        '<button type="button" class="rd-fb" data-a="fscan" aria-label="Scan the bin">' + RD_SVG_SCAN + '</button>' +
+        '<button type="button" class="rd-fx" data-a="fx" aria-label="Close the search">' + RD_SVG_X + '</button></div>';
+      bn.innerHTML = pre + h;
+      return;
+    }
+    if (rdIssOpen && window.lbIssues) {
+      var oi = window.lbIssues.get(rdIssOpen);
+      if (oi) pre = '<div class="rd-icard">' + window.lbIssues.card(oi) + '</div>'; else rdIssOpen = '';
+    }
+    if (act && turn && turn.msg) {
+      var d = new Date(turn.iss.ts), dd = ('0' + d.getDate()).slice(-2) + '/' + ('0' + (d.getMonth() + 1)).slice(-2);
+      h = '<div class="rd-band rd-msg ' + (side === 'R' ? 'r ' : '') + 'big" style="--bc:' + bandBg + ';--bt:' + bandFg + '"><div class="rd-area">' +
+        '<button type="button" class="rd-mtx" data-a="msg" data-iss="' + escH(turn.iss.id) + '" aria-label="' + escH(turn.iss.label || 'Issue') + ' ' + dd + ', tap for the photo and note">' + escH(turn.iss.label || 'Issue') + '<em>' + dd + '</em></button></div></div>';
+    } else if (act) {
+      var first = items[0], ad = shownSite.addressText || '';
+      var clock = '<button type="button" data-a="rem" data-k="' + escH(first ? first.k : '') + '" data-sr="' + escH(first ? (first.b.serial || '') : '') + '" data-ad="' + escH(ad) + '" aria-label="Set a reminder for this bin">' + RD_SVG_CLOCK + '</button>';
+      var find = '<button type="button" data-a="find" aria-label="Search a serial number">' + RD_SVG_FIND + '</button>';
+      var right = '<div class="rd-oth rd-ico">' + (side === 'R' ? find + clock : clock + find) + '</div>';
       var maxN = Math.max.apply(null, items.map(function(x){ return String(x.text).length; }));   // (one size for every row of the band)
       var mkSer = function(list){ return list.map(function(x){
-        return '<button type="button" class="rd-sn' + (x.k === rdPick ? ' pick' : '') + (x.rem ? ' rem-' + x.rem : '') + '" data-a="sn" data-k="' + escH(x.k) + '" aria-label="Bin ' + escH(x.text) + ', tap to set a reminder or report">' + rdSerialHtml(x.text, maxN) + rdSizeTag(x.b, act) + '</button>';
+        return '<button type="button" class="rd-sn' + (x.rem ? ' rem-' + x.rem : '') + '" data-a="sn" data-k="' + escH(x.k) + '" data-p="' + escH(propId) + '" data-s="' + act.key + '" data-i="' + x.i + '"' +
+          (purple ? ' data-iss="' + escH(turn.iss.id) + '"' : '') + ' aria-label="Bin ' + escH(x.text) + (purple ? ', has an issue, tap to see it' : ', tap for the bin and the property') + '">' + rdSerialHtml(x.text, maxN) + rdSizeTag(x.b, act) + '</button>';
       }).join(''); };
       var ser = mkSer(items);
       // lots of bins at one spot: the count (and what is still to do), the list only when asked for, in a box that scrolls
@@ -45831,9 +45936,9 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
       if (many) inner = rdMany
         ? '<div class="rd-ser rd-sc">' + ser + '</div><button type="button" class="rd-more" data-a="more" aria-label="Show fewer bins">▴</button>'
         : '<button type="button" class="rd-tap" data-a="more" aria-label="Show all ' + items.length + ' bins">Tap for ' + items.length + ' serial N°<i>▾</i></button>';
-      h = '<div class="rd-band ' + (side === 'R' ? 'r ' : '') + (big ? 'big' : 'small') + (many ? ' many' : '') + '" style="--bc:' + act.bg + ';--bt:' + act.fg + '">' +
+      h = '<div class="rd-band ' + (side === 'R' ? 'r ' : '') + (big ? 'big' : 'small') + (many ? ' many' : '') + '" style="--bc:' + bandBg + ';--bt:' + bandFg + '">' +
         '<div class="rd-area"><button type="button" class="rd-logo" data-a="logo" data-s="' + act.key + '" aria-label="' + act.key + ' serials, tap to hide"><img src="' + act.icon + '" alt=""></button>' + inner + '</div>' +
-        (right ? '<i class="rd-bar3"></i>' + right : '') + '</div>';
+        right + '</div>';
     } else {
       // nothing showing (off the run, or the driver closed it): just the streams' boxes, side by side and joined
       h = '<div class="rd-band rd-closed ' + (side === 'R' ? 'r ' : '') + 'small">' + eligible.map(function(d){
@@ -45841,9 +45946,9 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
         return '<button type="button" class="rd-ob' + (isF ? ' front' : '') + '" data-a="ob" data-s="' + d.key + '" style="--c:' + d.bg + ';--t:' + d.fg + '" aria-label="' + d.key + ' ' + escH(rdRunLabel(site, d)) + '"><img src="' + d.icon + '" alt=""><b>' + escH(rdRunLabel(site, d)) + '</b>' + rdDayEl(site) + '</button>';
       }).join('') + (addTxt ? '<button type="button" class="rd-ob rd-add" data-a="addprop" aria-label="' + escH(addTxt) + '" title="' + escH(addTxt) + '">+ Add</button>' : '') + '</div>';
     }
-    bn.innerHTML = h + issH;
+    bn.innerHTML = pre + h;
+    if (pre && window.lbMedia) { try { window.lbMedia.hydrate(bn); } catch (e) {} }
   }
-
   // The speedo's own quick painter (the 1-second tick is far too slow for it, Fox: "7 seconds lag stopping and starting").
   // lb-speedo-fast-script below runs it every screen refresh with a number that runs up or down to the real speed.
   window.lbSpeedPaint = function(sp){
@@ -55336,6 +55441,589 @@ body.dark-mode #lbFc .fc-sb img{filter:brightness(0) invert(1)}
     var f = b.getAttribute('data-fc-f'); if (f) { flt = f; paint(); return; }
     var k = b.getAttribute('data-fc-k'); if (k) { sel = sel === k ? null : k; paint(); if (sel && !DRV) loadDrivers().then(function(){ if (isOpen()) paint(); }); }
   }
+})();
+</script>
+<!-- =====================================================================
+     PROPERTY & BINS ON ONE SCREEN, PICK-UP, BIN ISSUES (Fox, 31 Oct 2026: "trying to change a bin number, way too hard,
+     too many different options and screens. Property and bins need to be one screen.")
+     - The property page (#propInspectModal, and the same panel inline in Search) no longer has a tab per stream and a
+       separate settings tab: every bin is a row (the stream's box with its logo and run, the serial, the size); tapping a
+       row opens that bin's editor right there, the property settings follow underneath. The page opens on the bin that
+       was tapped: a serial or a stream box in a map pop-up, a serial in the next-bin box, a result in Search.
+       It is drawn by replacing buildUPropTabContentHtml / buildUPropTabsRow(Inline) (top-level functions in the main
+       script, so the main script's own calls land here). The editor is the main script's own renderUPropBinEditor with
+       the same field ids, so saveUPropBin / deleteUPropBin and their wrappers (photo on save etc.) are unchanged; the
+       size and stream selects stay in the page (hidden) and the chips set them.
+     - Pick-up: at the house, drive in / reverse out, reverse in / drive out, or a collection point. "Put out at" is a
+       collection point that names the house it is outside (`at`, `atLabel`), so the bins' dots move there (sourceCoords)
+       and it is shared between phones by lb-house-access-script with the rest of the collection point.
+     - window.lbPutOut.group(site): the houses whose bins are put out at the same spot (the next-bin box takes turns).
+     - window.lbIssues: bin / house issues reported in the last 21 days that nobody has cleared (from the issue log,
+       'lbIssueLog', on this phone). A purple triangle on the map at the property; the next-bin box goes purple and shows
+       the issue in turn with the serial; tapping either shows the photo and note, with ALL GOOD · CLEAR.
+     ================================================================== -->
+<style id="lb-propbins-style">
+.lbpb{--pb-tile:var(--mn-tile,#2b2c31);--pb-bar:var(--mn-bar,#141416);--pb-bd:var(--mn-bd,3px solid #000);--pb-rad:var(--mn-rad,6px);--pb-sh:var(--mn-sh,3px 3px 0 #000);--pb-text:var(--mn-text,var(--uprop-text,#fff));--pb-dim:var(--uprop-text-dim,#9a9ca4);--pb-acc:var(--ui-accent,#ffd21f);display:flex;flex-direction:column;gap:10px}
+.lbpb .uprop-set-btn{display:none !important}
+.lbpb-h{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:6px 0 0}
+.lbpb-h>b{font:400 15px/1 var(--mn-font,inherit);font-weight:800;letter-spacing:.06em;text-transform:uppercase;color:var(--pb-acc)}
+.lbpb-lab{display:flex;justify-content:space-between;gap:8px;font-size:11px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--pb-dim);margin:2px 0 -2px}
+.lbpb-lab span{letter-spacing:0;text-transform:none;font-weight:400}
+html body.ux2 .lbpb button.lbpb-t:not(#lbpb-a):not(#lbpb-b),.lbpb .lbpb-t{display:inline-flex;align-items:stretch;flex:none !important;width:auto !important;min-width:0 !important;height:auto !important;min-height:40px !important;margin:0;padding:0 !important;justify-content:flex-start;background:var(--pb-tile);color:var(--pb-text);border:var(--pb-bd);border-radius:var(--pb-rad);box-shadow:var(--pb-sh);font:inherit;font-size:12.5px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;overflow:hidden;cursor:pointer;text-align:left}
+.lbpb .lbpb-t>i{display:flex;align-items:center;justify-content:center;width:40px;flex:none;background:var(--pb-bar);border-right:var(--pb-bd);color:var(--pb-acc)}
+.lbpb .lbpb-t>i svg{width:22px;height:22px}
+.lbpb .lbpb-t>span{display:flex;align-items:center;padding:0 10px;line-height:1.15}
+.lbpb .lbpb-grid2 .lbpb-t>span{padding:4px 8px;font-size:11.5px;letter-spacing:.02em}
+html body.ux2 .lbpb .lbpb-t.on:not(#lbpb-a):not(#lbpb-b),.lbpb .lbpb-t.on{box-shadow:inset 3px 3px 0 rgba(0,0,0,.55)}
+.lbpb .lbpb-t.on>i{background:var(--pb-acc);color:#000}
+.lbpb .lbpb-t.ico>i{border-right:0}
+.lbpb .lbpb-grid2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+html body.ux2 .lbpb .lbpb-grid2 button.lbpb-t:not(#lbpb-a):not(#lbpb-b):not(#lbpb-c),.lbpb .lbpb-grid2 .lbpb-t{width:100% !important}
+.lbpb-card{background:var(--pb-tile);border:var(--pb-bd);border-radius:calc(var(--pb-rad) + 2px);box-shadow:var(--pb-sh);padding:12px;display:flex;flex-direction:column;gap:10px}
+/* a bin */
+.lbpb-bin{background:var(--pb-tile);border:var(--pb-bd);border-radius:calc(var(--pb-rad) + 2px);box-shadow:var(--pb-sh);overflow:hidden}
+.lbpb-bin.open{border-color:var(--sc)}
+html body.ux2 .lbpb button.lbpb-row:not(#lbpb-a):not(#lbpb-b),.lbpb-row{display:flex;align-items:center;justify-content:flex-start;gap:10px;width:100% !important;max-width:none !important;min-height:0 !important;padding:7px 10px 7px 7px !important;background:none;border:0;color:var(--pb-text);cursor:pointer;text-align:left;font:inherit}
+.lbpb-sbox{display:inline-flex;align-items:center;gap:6px;flex:none;height:38px;padding:0 9px 0 7px;background:var(--sc);color:var(--sf);border:3px solid #000;border-radius:6px}
+.lbpb-sbox img{width:22px;height:22px;display:block}
+.lbpb-sbox[data-dark] img{filter:invert(1)}
+.lbpb-sbox b{font-size:17px;font-weight:800}
+.lbpb-sbox em{font-style:normal;font-size:11px;font-weight:700;letter-spacing:.05em}
+.lbpb-mid{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px}
+.lbpb-ser{display:flex;align-items:baseline;gap:8px;min-width:0}
+.lbpb-ser b{font-size:18px;font-weight:800;letter-spacing:.03em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lbpb-ser small{font-size:12.5px;color:var(--pb-dim);white-space:nowrap}
+.lbpb-sub{display:flex;flex-wrap:wrap;white-space:nowrap;align-items:center;gap:6px;min-height:0;font-size:12px}
+.lbpb-sub:empty{display:none}
+.lbpb-x{display:inline-flex;align-items:center;gap:4px;height:18px;padding:0 5px;background:var(--xc);color:#000;border:2px solid #000;border-radius:4px;font-size:11px;font-weight:700}
+.lbpb-x img{width:12px;height:12px}
+.lbpb-iss{display:inline-flex;align-items:center;gap:4px;padding:1px 6px;background:#7e22ce;color:#fff;border:2px solid #000;border-radius:4px;font-size:11px;font-weight:700;letter-spacing:.04em}
+.lbpb-chev{flex:none;width:18px;height:18px;color:var(--pb-dim);transition:transform .15s}
+.lbpb-bin.open .lbpb-chev{transform:rotate(180deg)}
+.lbpb-ed{border-top:var(--pb-bd);padding:10px 10px 12px}
+.lbpb-ed .uprop-bin-edit{margin:0}
+.lbpb-ed #modalBinSizeSelect,.lbpb-ed #modalBinStreamSelect{display:none !important}
+.lbpb-ed .uprop-bin-two-col:has(#modalBinStreamSelect){display:flex !important;flex-direction:column;gap:10px}
+.lbpb-chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:2px}
+html body.ux2 .lbpb button.lbpb-chip:not(#lbpb-a):not(#lbpb-b),.lbpb .lbpb-chip{display:inline-flex;align-items:center;justify-content:center;gap:6px;flex:none !important;width:auto !important;min-width:44px !important;height:38px !important;min-height:38px !important;margin:0;padding:0 9px !important;background:var(--pb-tile);color:var(--pb-text);border:var(--pb-bd);border-radius:var(--pb-rad);box-shadow:2px 2px 0 #000;font:inherit;font-size:13px;font-weight:700;cursor:pointer}
+.lbpb .lbpb-chip img{width:24px;height:24px;filter:invert(1)}
+html body.ux2 .lbpb button.lbpb-chip.on:not(#lbpb-a):not(#lbpb-b),.lbpb .lbpb-chip.on{background:var(--cc,var(--pb-acc));color:var(--cf,#000);box-shadow:inset 2px 2px 0 rgba(0,0,0,.4)}
+html body.ux2 .lbpb button.lbpb-chip.on:not(#lbpb-a):not(#lbpb-b) img,.lbpb .lbpb-chip.on img{filter:var(--ci,none)}
+.lbpb-serrow{display:flex;gap:8px;align-items:stretch}
+.lbpb-serrow input{flex:1;min-width:0}
+.lbpb-was{font-size:12px;color:var(--pb-dim);margin-top:4px}
+.lbpb-was s{opacity:.8}
+.lbpb-rep{display:flex;flex-direction:column;gap:8px;margin:4px 0 10px}
+/* pick-up */
+.lbpb-at{display:flex;align-items:center;gap:10px;padding:8px 8px 8px 10px;background:var(--pb-bar);border:var(--pb-bd);border-radius:var(--pb-rad)}
+.lbpb-at.away{border-color:var(--pb-acc)}
+.lbpb-at>svg{flex:none;width:22px;height:22px;color:var(--pb-dim)}
+.lbpb-at.away>svg{color:var(--pb-acc)}
+.lbpb-at>div{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px}
+.lbpb-at b{font-size:15px;font-weight:800;text-transform:uppercase}
+.lbpb-at small{font-size:12px;color:var(--pb-dim)}
+.lbpb-here{display:flex;flex-direction:column}
+html body.ux2 .lbpb .lbpb-here button:not(#lbpb-a):not(#lbpb-b),.lbpb-here button{display:flex;align-items:center;justify-content:flex-start;gap:10px;width:100% !important;max-width:none !important;padding:9px 2px !important;background:none;border:0;border-bottom:2px solid var(--uprop-border,#34353b);color:var(--pb-text);font:inherit;font-size:14px;text-align:left;cursor:pointer}
+.lbpb-here button small{margin-left:auto;color:var(--pb-dim);font-size:12px}
+.lbpb-none{font-size:13px;color:var(--pb-dim)}
+.lbpb-picker{display:flex;flex-direction:column;gap:6px}
+.lbpb-picker input{width:100%;box-sizing:border-box}
+/* issue card (map pop-up and next-bin box) */
+.lbi-card{display:flex;flex-direction:column;gap:10px;color:#fff;font-family:inherit;min-width:250px}
+.lbi-top{display:flex;align-items:center;gap:10px}
+.lbi-top b{flex:1;font-size:16px;font-weight:800;letter-spacing:.04em;text-transform:uppercase}
+.lbi-top time{font-size:15px;color:#b4b6bd;white-space:nowrap}
+.lbi-x{width:42px;height:42px;flex:none;display:flex;align-items:center;justify-content:center;padding:0;border:3px solid #000;border-radius:6px;box-shadow:3px 3px 0 #000;background:#eea23f;color:#000;cursor:pointer}
+.lbi-x svg{width:22px;height:22px}
+.lbi-mid{display:flex;gap:10px}
+.lbi-ph{display:flex;gap:6px;flex:none}
+.lbi-ph .drv-th{display:block;width:96px;height:96px;border:3px solid #000;border-radius:6px;background:#141416 center/cover no-repeat;cursor:pointer}
+.lbi-noph{width:96px;height:96px;flex:none;display:flex;align-items:center;justify-content:center;text-align:center;font-size:11px;color:#6c6e76;background:#141416;border:3px solid #000;border-radius:6px}
+.lbi-txt{flex:1;min-width:0;display:flex;flex-direction:column;gap:5px;font-size:13px}
+.lbi-txt strong{font-size:14px}
+.lbi-txt span{color:#b4b6bd;line-height:1.35}
+.lbi-txt small{color:#8a8c94}
+.lbi-acts{display:flex;flex-wrap:wrap;gap:10px}
+.lbi-t{display:inline-flex;align-items:stretch;padding:0;background:#2b2c31;color:#fff;border:3px solid #000;border-radius:6px;box-shadow:3px 3px 0 #000;font:inherit;font-size:12.5px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;cursor:pointer;overflow:hidden}
+.lbi-t>i{display:flex;align-items:center;justify-content:center;width:40px;min-height:38px;background:#141416;border-right:3px solid #000;color:#fff}
+.lbi-t>i svg{width:20px;height:20px}
+.lbi-t>span{display:flex;align-items:center;padding:0 11px}
+.lbi-t.ok>i{background:#16a34a;color:#000}
+.leaflet-popup.lbi-pop .leaflet-popup-content-wrapper{background:#1e1f23;color:#fff;border:3px solid #000;border-radius:10px;box-shadow:4px 4px 0 #000}
+.leaflet-popup.lbi-pop .leaflet-popup-tip{background:#1e1f23}
+.leaflet-popup.lbi-pop .leaflet-popup-close-button{display:none}
+.leaflet-popup .rb-pbin,.leaflet-popup .ux-lot-bin,.leaflet-popup .ux-lot-row>img{cursor:pointer}
+.lbi-mk{background:none !important;border:0 !important}
+.lbi-mk svg{display:block;filter:none;cursor:pointer}
+/* the next-bin box (Hard Rubbish): the clock and the search the size of the logo, the search typed into the band,
+   a bin with an issue in purple, the issue card above the band */
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-band .rd-ico{display:flex;align-items:center;gap:2px;flex:none;padding:0 6px;background:none;border:0}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-band .rd-ico button{width:44px;height:44px;flex:none;display:flex;align-items:center;justify-content:center;padding:0;margin:0;background:none;border:0;box-shadow:none;color:var(--bt);cursor:pointer}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-band .rd-ico svg{width:36px;height:36px;display:block}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-band.small .rd-ico svg{width:28px;height:28px}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-band.rd-msg .rd-area{justify-content:flex-start}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-band .rd-mtx{display:flex;align-items:baseline;gap:12px;flex:1;min-width:0;padding:0 8px;background:none;border:0;color:var(--bt);font:700 22px/1.1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;letter-spacing:.04em;text-transform:uppercase;cursor:pointer;white-space:nowrap;overflow:hidden}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-band.r .rd-mtx{justify-content:flex-end}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-band .rd-mtx em{font-style:normal;font-weight:400;font-variant-numeric:tabular-nums}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-band.rd-find{align-items:center;gap:6px;padding:0 8px;min-height:64px}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-band.rd-find>svg{flex:none;width:36px;height:36px;color:var(--bt)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-band.rd-find input{flex:1;min-width:0;height:48px;margin:0;padding:0 4px;background:none;border:0;outline:none;box-shadow:none;color:var(--bt);font:400 34px/1 var(--rb-font,ui-monospace,monospace);letter-spacing:.04em;text-transform:uppercase}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-band.rd-find input::placeholder{color:var(--bt);opacity:.45}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-band.rd-find .rd-fb{width:44px;height:44px;flex:none;display:flex;align-items:center;justify-content:center;padding:0;margin:0;background:none;border:0;box-shadow:none;color:var(--bt);cursor:pointer}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-band.rd-find .rd-fb svg{width:36px;height:36px}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-band.rd-find .rd-fx{width:42px;height:42px;flex:none;display:flex;align-items:center;justify-content:center;padding:0;margin:0 0 0 2px;background:#eea23f;color:#000;border:3px solid #000;border-radius:6px;box-shadow:3px 3px 0 #000;cursor:pointer}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-band.rd-find .rd-fx svg{width:22px;height:22px}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-fres{display:flex;flex-direction:column;max-height:30vh;overflow:auto;padding:0 12px;background:#1e1f23;border-top:3px solid #000}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-fres button{display:flex;align-items:center;gap:10px;width:100%;min-height:42px;padding:8px 2px;margin:0;background:none;border:0;border-bottom:2px solid #34353b;box-shadow:none;color:#fff;font:500 15px/1.2 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;letter-spacing:.03em;text-align:left;cursor:pointer}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-fres button img{width:18px;height:18px;flex:none;filter:invert(1)}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-fres button span{flex:1;min-width:0}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-fres button small{font:400 13px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;color:#b4b6bd;white-space:nowrap}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-fres .rd-fnone{padding:10px 2px;color:#9a9ca4;font:400 13px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-icard{padding:12px;background:#1e1f23;border-top:3px solid #000}
+html[data-ux-skin="rubbish"] body.ux2:not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x):not(#rb-x) #rbDash .rd-band[style*="--bt:#fff"] .rd-logo img{filter:invert(1)}
+</style>
+<script id="lb-propbins-script">
+(function(){
+  'use strict';
+  var GF = {};
+  function g(n){ try { return (GF[n] || (GF[n] = new Function('return typeof ' + n + ' === "undefined" ? undefined : ' + n)))(); } catch (e) { return undefined; } }
+  function esc(v){ return String(v == null ? '' : v).replace(/[&<>"']/g, function(c){ return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+  function clean(v){ return v == null ? '' : String(v).trim(); }
+  function norm(s){ return String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, ''); }
+  function recs(){ var r = g('siteRecords'); return Array.isArray(r) ? r : []; }
+  function idOf(site){ return String((site && (site.propId || site.siteId)) || ''); }
+  function siteById(id){ id = String(id); return recs().find(function(s){ return idOf(s) === id; }) || null; }
+  function addr(site){ return site ? String(site.baseStreetLine || String(site.addressText || '').split(',')[0]).trim() : ''; }
+  function lsSet(k, v){ try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
+  var SVG = function(p, sw){ return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="' + (sw || 2.2) + '" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + p + '</svg>'; };
+  var P = {
+    chev: '<path d="m6 9 6 6 6-6"/>', plus: '<path d="M12 5v14M5 12h14"/>', check: '<path d="m4 12 5 5L20 6"/>', x: '<path d="M6 6l12 12M18 6 6 18"/>',
+    scan: '<path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3"/><path d="M8 8v8M11 8v8M14 8v8M17 8v8"/>',
+    house: '<path d="M3 11 12 4l9 7"/><path d="M5 10v10h14V10"/>', up: '<path d="M12 20V4M6 10l6-6 6 6"/>', down: '<path d="M12 4v16M6 14l6 6 6-6"/>',
+    pin: '<path d="M12 21s7-6.2 7-12a7 7 0 0 0-14 0c0 5.8 7 12 7 12Z"/><circle cx="12" cy="9" r="2.5"/>',
+    warn: '<path d="M12 3.5 2.5 20.5h19L12 3.5Z"/><path d="M12 10v5M12 17.8v.2"/>', list: '<path d="M4 7h16M4 12h16M4 17h10"/>',
+    street: '<path d="M2 12 7 8l5 4M3.5 11v7h7v-7"/><path d="M12 12l5-4 5 4M13.5 11v7h7v-7"/>'
+  };
+  var STREAMS = [
+    { k: 'Garbage', run: 'garRun', icon: 'garbage.png', bg: '#dc2626', fg: '#fff', week: false },
+    { k: 'Recycling', run: 'recRun', icon: 'recycle.png', bg: '#ffd21f', fg: '#000', week: true },
+    { k: 'FOGO', run: 'fogRun', icon: 'fogo.png', bg: '#16a34a', fg: '#fff', week: true }
+  ];
+  function stDef(k){ return STREAMS.filter(function(s){ return s.k === k; })[0] || STREAMS[0]; }
+  function runText(site, st){
+    var sch = (site && site.soloSchedule) || {}, r = clean(sch[st.run]);
+    if (r && st.week && sch.weekLetter) r += String(sch.weekLetter).trim().toUpperCase();
+    return r;
+  }
+  function day3(site){ return clean(((site && site.soloSchedule) || {}).day).slice(0, 3).toUpperCase(); }
+  function ddmm(ts){ var d = new Date(ts); return ('0' + d.getDate()).slice(-2) + '/' + ('0' + (d.getMonth() + 1)).slice(-2); }
+  function dayKey(ts){ var d = new Date(ts); return d.getFullYear() + '-' + d.getMonth() + '-' + d.getDate(); }
+  function metres(a, b){
+    var la1 = +a.lat, ln1 = +a.lng, la2 = +b.lat, ln2 = +b.lng; if (!isFinite(la1) || !isFinite(la2) || !la1 || !la2) return Infinity;
+    var kx = 111320 * Math.cos(la1 * Math.PI / 180); return Math.hypot((ln2 - ln1) * kx, (la2 - la1) * 110540);
+  }
+
+  /* ---------------- put out at another house ---------------- */
+  function cps(){ try { return window.lbCollectionPointsObj ? window.lbCollectionPointsObj() : null; } catch (e) { return null; } }
+  function hsm(){ try { return window.lbHouseStreetModesObj ? window.lbHouseStreetModesObj() : null; } catch (e) { return null; } }
+  function putAt(id){ var c = cps(), cp = c && c[String(id)]; return cp && cp.at ? String(cp.at) : ''; }
+  window.lbPutOut = {
+    at: putAt,
+    // every house whose bins sit at the same spot as this one's: the house itself, the house it puts them out at,
+    // and every other house putting them out at either
+    group: function(site){
+      var id = idOf(site), c = cps(); if (!id || !c) return site ? [site] : [];
+      var t = putAt(id), ids = [id];
+      if (t && ids.indexOf(t) < 0) ids.push(t);
+      Object.keys(c).forEach(function(k){ var a = c[k] && c[k].at ? String(c[k].at) : ''; if (a && (a === id || (t && a === t)) && ids.indexOf(k) < 0) ids.push(k); });
+      if (ids.length === 1) return [site];
+      return ids.map(function(k){ return k === id ? site : siteById(k); }).filter(Boolean);
+    }
+  };
+
+  /* ---------------- issues ---------------- */
+  var ISSUE_DAYS = 21;
+  function issueLog(){ try { return (window.uxIssueLog && window.uxIssueLog()) || []; } catch (e) { return []; } }
+  function openIssue(i){ return i && !i.cleared && i.propId && (i.scope === 'bin' || i.scope === 'house') && (Date.now() - (+i.ts || 0)) < ISSUE_DAYS * 864e5; }
+  function issuesFor(propId, serial, beforeToday){
+    var id = String(propId), sn = norm(serial), today = dayKey(Date.now());
+    return issueLog().filter(function(i){
+      if (!openIssue(i) || String(i.propId) !== id) return false;
+      if (beforeToday && dayKey(i.ts) === today) return false;
+      return i.scope === 'house' || !sn || !i.serial || norm(i.serial) === sn;
+    }).sort(function(a, b){ return b.ts - a.ts; });
+  }
+  function issueCard(i){
+    var site = siteById(i.propId), media = (i.media || []).filter(function(m){ return String(m).charAt(0) === 'p'; });
+    var ph = media.length && window.lbMedia
+      ? '<div class="lbi-ph">' + media.slice(0, 2).map(function(m){ return window.lbMedia.thumb(m, false).replace('class="drv-th"', 'class="drv-th" data-lbi-view="' + esc(media.join(',')) + '" role="button" aria-label="Show the photo"'); }).join('') + '</div>'
+      : '<div class="lbi-noph">No photo</div>';
+    return '<div class="lbi-card" data-lbi="' + esc(i.id) + '">' +
+      '<div class="lbi-top">' + SVG(P.warn) .replace('<svg', '<svg style="width:22px;height:22px;color:#c084fc"') + '<b>' + esc(i.label || 'Issue') + '</b><time>' + esc(day3ts(i.ts)) + ' ' + ddmm(i.ts) + '</time>' +
+        '<button type="button" class="lbi-x" data-lbi-a="close" aria-label="Close">' + SVG(P.x, 2.6) + '</button></div>' +
+      '<div class="lbi-mid">' + ph + '<div class="lbi-txt">' +
+        '<strong>' + esc([i.serial, addr(site) || i.address].filter(Boolean).join(' · ')) + '</strong>' +
+        (i.note ? '<span>' + esc(i.note) + '</span>' : '<span>No note</span>') +
+        '<small>' + esc(['Reported' + (i.driver ? ' by ' + i.driver : ''), i.run ? 'on ' + i.run : ''].filter(Boolean).join(' ')) + '</small>' +
+      '</div></div>' +
+      '<div class="lbi-acts">' +
+        '<button type="button" class="lbi-t ok" data-lbi-a="clear"><i>' + SVG(P.check, 3) + '</i><span>All good · clear</span></button>' +
+        (site ? '<button type="button" class="lbi-t" data-lbi-a="info"><i>' + SVG(P.list) + '</i><span>Bin info</span></button>' : '') +
+      '</div></div>';
+  }
+  function day3ts(ts){ return ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'][new Date(ts).getDay()]; }
+  function findIssue(id){ return issueLog().filter(function(i){ return i.id === id; })[0] || null; }
+  function binIndex(site, serial){
+    var out = null, sn = norm(serial);
+    STREAMS.forEach(function(st){ ((site && site.soloStreams && site.soloStreams[st.k]) || []).forEach(function(b, i){ if (!out && sn && norm(b.serial) === sn) out = { k: st.k, i: i }; }); });
+    return out;
+  }
+  // opens the property page on a bin (or on the property when the bin can't be found)
+  function openBin(propId, stream, idx){
+    try { if (g('leafletMap') && g('leafletMap').closePopup) g('leafletMap').closePopup(); } catch (e) {}
+    if (stream && idx != null && idx >= 0 && typeof window.promptEditBin === 'function') { window.promptEditBin(String(propId), stream, idx); return; }
+    if (typeof window.openPropertyInspectModal === 'function') window.openPropertyInspectModal(String(propId), 'Settings');
+  }
+  window.lbOpenBinInfo = function(propId, serial){
+    var site = siteById(propId), bi = site ? binIndex(site, serial) : null;
+    openBin(propId, bi ? bi.k : null, bi ? bi.i : null);
+  };
+  window.lbIssues = {
+    forBin: function(propId, serial){ return issuesFor(propId, serial, true)[0] || null; },     // the next-bin box: before today
+    forSite: function(propId){ return issuesFor(propId, '', false)[0] || null; },               // the map and the property page
+    card: function(i){ return i ? issueCard(i) : ''; },
+    get: findIssue,
+    clear: function(id){
+      var i = findIssue(id); if (!i) return;
+      try { if (window.uxIssueClear) window.uxIssueClear(id); } catch (e) {}
+      // and the "check the bin" reminder the report left at the address
+      try {
+        var all = JSON.parse(localStorage.getItem('siteReminders') || '{}') || {}, r = all[i.propId];
+        if (r && r.message && /^Check the /.test(r.message) && r.message.indexOf(i.label) >= 0) {
+          var rest = r.message.split(' | ').filter(function(p){ return !(/^Check the /.test(p) && p.indexOf(i.label) >= 0); });
+          if (rest.length) r.message = rest.join(' | '); else delete all[i.propId];
+          localStorage.setItem('siteReminders', JSON.stringify(all));
+          try { (new Function('v', 'if (typeof siteReminders !== "undefined") siteReminders = v'))(all); } catch (e) {}
+        }
+      } catch (e) {}
+      paintMarks(true);
+      if (typeof window.lbRdRepaint === 'function') window.lbRdRepaint();
+      refreshProp();
+    }
+  };
+  document.addEventListener('click', function(ev){
+    var t = ev.target.closest ? ev.target.closest('[data-lbi-a],[data-lbi-view]') : null; if (!t) return;
+    var card = t.closest('[data-lbi]'), id = card ? card.getAttribute('data-lbi') : '';
+    ev.preventDefault(); ev.stopPropagation();
+    var v = t.getAttribute('data-lbi-view'); if (v) { if (window.lbMedia) window.lbMedia.view(v.split(',')); return; }
+    var a = t.getAttribute('data-lbi-a'), i = findIssue(id);
+    if (a === 'close') { closeIssueViews(); return; }
+    if (a === 'clear') { closeIssueViews(); window.lbIssues.clear(id); return; }
+    if (a === 'info' && i) { closeIssueViews(); window.lbOpenBinInfo(i.propId, i.serial); return; }
+  }, true);
+  function closeIssueViews(){
+    try { var m = g('leafletMap'); if (m && m.closePopup) m.closePopup(); } catch (e) {}
+    if (typeof window.lbRdCloseIssue === 'function') window.lbRdCloseIssue();
+  }
+
+  /* ---------------- the purple triangles on the map ---------------- */
+  var markLayer = null, markSig = '', markMap = null;
+  var TRI = '<svg width="33" height="30" viewBox="0 0 66 60" aria-hidden="true"><path d="M36 6 65 58H7Z" fill="#000" stroke="#000" stroke-width="3" stroke-linejoin="round"/><path d="M33 3 62 55H4Z" fill="#7e22ce" stroke="#000" stroke-width="3" stroke-linejoin="round"/><path d="M33 21v16" stroke="#fff" stroke-width="6" stroke-linecap="round"/><circle cx="33" cy="46" r="3.6" fill="#fff"/></svg>';
+  function paintMarks(force){
+    var map = g('leafletMap'); if (!map || typeof L === 'undefined') return;
+    var by = {};
+    issueLog().forEach(function(i){ if (openIssue(i)) { var k = String(i.propId); if (!by[k] || by[k].ts < i.ts) by[k] = i; } });
+    var sig = Object.keys(by).sort().map(function(k){ return k + ':' + by[k].id; }).join('|');
+    if (!force && sig === markSig && markMap === map) return;
+    markSig = sig;
+    if (!markLayer || markMap !== map) {
+      if (!map.getPane('lb-issue-pane')) { var pn = map.createPane('lb-issue-pane'); pn.style.zIndex = 670; }
+      if (markLayer) try { markLayer.remove(); } catch (e) {}
+      markLayer = L.layerGroup().addTo(map); markMap = map;
+    }
+    markLayer.clearLayers();
+    Object.keys(by).forEach(function(k){
+      var i = by[k], site = siteById(k);
+      var la = site ? +site.lat : +i.lat, ln = site ? +site.lng : +i.lng; if (!isFinite(la) || !isFinite(ln) || !la) return;
+      var m = L.marker([la, ln], { pane: 'lb-issue-pane', keyboard: false, title: (i.label || 'Issue') + ' · ' + (addr(site) || i.address || ''),
+        icon: L.divIcon({ className: 'lbi-mk', html: TRI, iconSize: [33, 30], iconAnchor: [16, 27] }) });
+      m.on('click', function(){
+        var cur = findIssue(i.id); if (!cur) return;
+        L.popup({ className: 'lbi-pop', maxWidth: 340, minWidth: 260, autoPanPaddingTopLeft: [16, 190], autoPanPaddingBottomRight: [16, 20], offset: [0, -20] })
+          .setLatLng([la, ln]).setContent(issueCard(cur)).openOn(map);
+        setTimeout(function(){ try { var el = document.querySelector('.lbi-pop'); if (el && window.lbMedia) window.lbMedia.hydrate(el); } catch (e) {} }, 30);
+      });
+      m.addTo(markLayer);
+    });
+  }
+  setInterval(function(){ try { paintMarks(false); } catch (e) {} }, 4000);
+  setTimeout(function(){ try { paintMarks(true); } catch (e) {} }, 2500);
+
+  /* ---------------- the property page ---------------- */
+  function refreshProp(){ try { if (typeof window.refreshUPropViews === 'function' && window.__uPropId) window.refreshUPropViews(); } catch (e) {} }
+  function isDark(fg){ return fg === '#fff'; }
+  function sbox(site, st, label){
+    var d = day3(site);
+    return '<span class="lbpb-sbox" style="--sc:' + st.bg + ';--sf:' + st.fg + '"' + (isDark(st.fg) ? ' data-dark' : '') + '><img src="' + st.icon + '" alt=""><b>' + esc(label || '-') + '</b>' + (d ? '<em>' + d + '</em>' : '') + '</span>';
+  }
+  function chipSel(id, val, label, style, extra){ return '<button type="button" class="lbpb-chip" data-pb-sel="' + id + '" data-v="' + esc(val) + '"' + (style ? ' style="' + style + '"' : '') + (extra || '') + '>' + label + '</button>'; }
+  function enhanceEditor(html, site, st, idx, b){
+    var orig = clean(b && b.serial);
+    // the serial: a scan button beside it, and what it was when it's being changed
+    html = html.replace(/(<input type="text" id="modalBinSerial"[^>]*>)/, '<div class="lbpb-serrow">$1<button type="button" class="lbpb-t ico" data-pb-scan="1" aria-label="Scan the bin"><i>' + SVG(P.scan, 2) + '</i></button></div><div class="lbpb-was" id="lbpbWas" data-orig="' + esc(orig) + '"></div>');
+    html = html.replace('id="modalBinSerial"', 'id="modalBinSerial" autocomplete="off" autocapitalize="characters"');
+    // the serial is what a driver comes here to change, so it goes first
+    var mv = /<div class="form-group">\s*<label>Bin Serial Number \*<\/label>[\s\S]*?id="lbpbWas"[^>]*><\/div>\s*<\/div>/.exec(html);
+    var two = html.indexOf('<div class="form-group uprop-bin-two-col">');
+    if (mv && two > 0 && two < mv.index) html = html.slice(0, two) + mv[0] + html.slice(two, mv.index) + html.slice(mv.index + mv[0].length);
+    // size: chips (the select stays, hidden, and is what Save reads)
+    var size = clean(b && b.size) || (st.k === 'Garbage' ? '120L' : '240L');
+    html = html.replace(/(<select id="modalBinSizeSelect"[\s\S]*?<\/select>)/, '$1<div class="lbpb-chips">' + ['80L', '120L', '240L'].map(function(z){
+      return chipSel('modalBinSizeSelect', z, z, '--cc:' + st.bg + ';--cf:' + st.fg, '');
+    }).join('') + '</div>');
+    // stream: the logos only
+    html = html.replace(/(<select id="modalBinStreamSelect"[\s\S]*?<\/select>)/, '$1<div class="lbpb-chips">' + STREAMS.map(function(s){
+      return chipSel('modalBinStreamSelect', s.k, '<img src="' + s.icon + '" alt="">', '--cc:' + s.bg + ';--cf:' + s.fg + ';--ci:' + (isDark(s.fg) ? 'invert(1)' : 'none'), ' aria-label="' + s.k + '"');
+    }).join('') + '</div>');
+    // report: last collection's issue, and the report sheet for this bin
+    var iss = (orig && site) ? issuesFor(idOf(site), orig, false)[0] : null;
+    var rep = '<div class="lbpb-rep"><div class="lbpb-lab">Report</div>' +
+      (iss ? '<button type="button" class="lbpb-iss" data-pb-iss="' + esc(iss.id) + '" style="align-self:flex-start;font-size:12px;padding:6px 10px">' + SVG(P.warn).replace('<svg', '<svg style="width:15px;height:15px"') + ' ' + esc(day3ts(iss.ts) + ' ' + ddmm(iss.ts) + ' · ' + (iss.label || '')) + '</button>' : '') +
+      '<div class="lbpb-chips"><button type="button" class="lbpb-t" data-pb-report="1"><i>' + SVG(P.warn) + '</i><span>Report</span></button></div></div>';
+    var at = html.lastIndexOf('<div class="modal-actions">');
+    if (at > 0) html = html.slice(0, at) + rep + html.slice(at);
+    return html;
+  }
+  function binsHtml(site){
+    var id = idOf(site), openKey = window.__uPropOpenBinKey || '', sch = site.soloSchedule || {};
+    var council = g('activeFilterDataSource') === 'council';
+    var rows = [], n = 0;
+    // a new bin being added goes at the top
+    STREAMS.forEach(function(st){
+      if (openKey === st.k + '_new' && typeof window.renderUPropBinEditor === 'function') {
+        rows.push('<div class="lbpb-bin open" style="--sc:' + st.bg + '"><div class="lbpb-row">' + sbox(site, st, runText(site, st)) + '<div class="lbpb-mid"><div class="lbpb-ser"><b>New bin</b></div></div></div>' +
+          '<div class="lbpb-ed">' + enhanceEditor(window.renderUPropBinEditor(site, st.k, -1, window.__uPropPendingCouncilBin || {}), site, st, -1, window.__uPropPendingCouncilBin || {}) + '</div></div>');
+      }
+    });
+    STREAMS.forEach(function(st){
+      var bins = (site.soloStreams && site.soloStreams[st.k]) || [];
+      bins.forEach(function(b, i){
+        n++;
+        var key = st.k + '_' + i, open = openKey === key, sn = clean(b.serial);
+        var sub = '';
+        if (st.k === 'Recycling' && clean(sch.recSummerRun)) sub += '<span class="lbpb-x" style="--xc:#f59e0b"><img src="summer.png" alt="">' + esc(clean(sch.recSummerRun)) + '</span>';
+        var iss = sn ? issuesFor(id, sn, false)[0] : null;
+        if (iss) sub += '<span class="lbpb-iss">' + esc(day3ts(iss.ts) + ' ' + ddmm(iss.ts) + ' · ' + (iss.label || '')) + '</span>';
+        var ed = '';
+        if (open && typeof window.renderUPropBinEditor === 'function') ed = '<div class="lbpb-ed">' + enhanceEditor(window.renderUPropBinEditor(site, st.k, i, b), site, st, i, b) + '</div>';
+        rows.push('<div class="lbpb-bin' + (open ? ' open' : '') + '" style="--sc:' + st.bg + '">' +
+          '<button type="button" class="lbpb-row" data-pb-bin="' + st.k + '" data-i="' + i + '" aria-expanded="' + open + '">' + sbox(site, st, runText(site, st)) +
+            '<span class="lbpb-mid"><span class="lbpb-ser"><b>' + esc(sn || 'No number') + '</b><small>' + esc(b.size || '') + '</small></span><span class="lbpb-sub">' + sub + '</span></span>' +
+            SVG(P.chev, 2.5).replace('<svg', '<svg class="lbpb-chev"') + '</button>' + ed + '</div>');
+      });
+    });
+    if (!n && !rows.length) rows.push('<div class="lbpb-none">No bins listed' + (council ? ' (council data)' : '') + '</div>');
+    return '<div class="lbpb-h"><b>Bins · ' + n + '</b><button type="button" class="lbpb-t lb-addbin-btn" data-prop="cur"><i>' + SVG(P.plus, 2.6) + '</i><span>Add bin</span></button></div>' + rows.join('');
+  }
+
+  // ---- pick-up ----
+  var MODES = [
+    { m: 'house', t: 'At house', ic: P.house },
+    { m: 'drivein', t: 'Drive in<br>reverse out', ic: P.up },
+    { m: 'revin', t: 'Reverse in<br>drive out', ic: P.down },
+    { m: 'point', t: 'Collection<br>point', ic: P.pin }
+  ];
+  function modeOf(id){
+    var h = hsm() || {}, c = cps() || {}, mode = h[id] || (window.lbSharedHouseModesNow ? (window.lbSharedHouseModesNow() || {})[id] : null);
+    if (mode && mode.type === 'drive-reverse-out') return 'drivein';
+    if (mode && mode.type === 'reverse-in-drive-out') return 'revin';
+    if (c[id]) return 'point';
+    return 'house';
+  }
+  var pickerFor = '', pickerQ = '';
+  function streetOf(site){ return String(addr(site)).replace(/^(unit|u|flat|apt|shop|lot)\s*/i, '').replace(/^[\d\s\/-]+[A-Za-z]?\s+(?=\D)/, '').trim(); }
+  function pickupHtml(site){
+    var id = idOf(site), mode = modeOf(id), c = cps() || {}, cp = c[id], h = hsm() || {}, own = h[id], street = streetOf(site);
+    var tgt = cp && cp.at ? siteById(cp.at) : null, tl = tgt ? addr(tgt) : (cp && cp.atLabel) || '';
+    var where = 'This house', why = 'Bins picked up outside ' + (addr(site) || 'the house'), away = false, change = false;
+    if (mode === 'drivein') { change = true; if (tl) { where = tl; why = 'Truck drives in and reverses out'; away = true; } else why = 'Drive in, reverse out · pick the house the bins go to'; }
+    if (mode === 'revin') why = 'Reverse in, drive out · bins stay here';
+    if (mode === 'point') { change = true; away = true; if (tl) { where = tl; why = 'Collection point · outside this house'; } else { where = 'Collection point'; why = 'Set on the map'; } }
+    var shared = !own && mode !== 'house' && mode !== 'point';
+    var h1 = '<div class="lbpb-card lbpb-pu"><div class="lbpb-lab">Pick-up' + (shared ? '<span>From the route maps</span>' : '') + '</div><div class="lbpb-grid2">' +
+      MODES.map(function(o){ return '<button type="button" class="lbpb-t' + (o.m === mode ? ' on' : '') + '" data-pb-pu="' + o.m + '" aria-pressed="' + (o.m === mode) + '"><i>' + SVG(o.ic, 2.4) + '</i><span>' + o.t + '</span></button>'; }).join('') + '</div>';
+    if ((mode === 'drivein' || mode === 'revin') && street) h1 += '<div><button type="button" class="lbpb-t" data-pb-all="' + mode + '"><i>' + SVG(P.street, 2) + '</i><span>Same for all of ' + esc(street) + '</span></button></div>';
+    h1 += '<div class="lbpb-lab">Bins put out at</div><div class="lbpb-at' + (away ? ' away' : '') + '">' + SVG(P.pin) + '<div><b>' + esc(where) + '</b><small>' + esc(why) + '</small></div>' +
+      (change ? '<button type="button" class="lbpb-t" data-pb-change="1"><span>Change</span></button>' : '') + '</div>';
+    if (pickerFor === id) h1 += pickerHtml(site);
+    var here = Object.keys(c).filter(function(k){ return c[k] && String(c[k].at || '') === id; }).map(siteById).filter(Boolean);
+    h1 += '<div class="lbpb-lab">Also put out here</div>' + (here.length
+      ? '<div class="lbpb-here">' + here.map(function(s){ return '<button type="button" data-pb-open="' + esc(idOf(s)) + '">' + SVG(P.house).replace('<svg', '<svg style="width:18px;height:18px;flex:none"') + '<span>' + esc(addr(s)) + '</span><small>' + esc(STREAMS.map(function(st){ return ((s.soloStreams || {})[st.k] || []).map(function(b){ return b.serial; }).join(' '); }).filter(Boolean).join(' · ')) + '</small></button>'; }).join('') + '</div>'
+      : '<div class="lbpb-none">None. A house that puts its bins out here shows here.</div>');
+    return h1 + '</div>';
+  }
+  function pickerHtml(site){
+    var q = clean(pickerQ).toLowerCase(), list;
+    if (q.length >= 2) list = recs().filter(function(s){ return idOf(s) !== idOf(site) && addr(s).toLowerCase().indexOf(q) >= 0; }).slice(0, 300);
+    else list = recs().filter(function(s){ return idOf(s) !== idOf(site) && Math.abs(+s.lat - +site.lat) < 0.003 && Math.abs(+s.lng - +site.lng) < 0.004; });
+    list = list.map(function(s){ return { s: s, d: metres(site, s) }; }).sort(function(a, b){ return a.d - b.d; }).slice(0, 12);
+    return '<div class="lbpb-picker"><input type="text" id="lbpbPickQ" placeholder="Type an address" value="' + esc(pickerQ) + '" autocomplete="off">' +
+      '<div class="lbpb-here">' + '<button type="button" data-pb-at="">' + SVG(P.house).replace('<svg', '<svg style="width:18px;height:18px;flex:none"') + '<span>This house</span></button>' +
+      list.map(function(r){ return '<button type="button" data-pb-at="' + esc(idOf(r.s)) + '"><span>' + esc(addr(r.s)) + '</span><small>' + (isFinite(r.d) ? Math.round(r.d) + ' m' : '') + '</small></button>'; }).join('') + '</div></div>';
+  }
+  function saveAccess(moved){
+    var c = cps(), h = hsm();
+    try { if (c) localStorage.setItem('lukezBunzCollectionPoints', JSON.stringify(c)); if (h) localStorage.setItem('lukezBunzHouseStreetModes', JSON.stringify(h)); } catch (e) {}
+    try { if (window.lbHouseAccess) window.lbHouseAccess.push(); } catch (e) {}
+    refreshProp();
+    // the bins' dots move with a collection point, so the map is redrawn (once, after the page has updated)
+    if (moved) setTimeout(function(){ try { var r = g('renderMapData'); if (typeof r === 'function' && g('leafletMap')) r(); } catch (e) {} }, 60);
+  }
+  var LABELS = { 'drive-reverse-out': 'Drive in · reverse out', 'reverse-in-drive-out': 'Reverse in · drive out' };
+  function setMode(id, mode){
+    var c = cps(), h = hsm(); if (!c || !h) return;
+    var hadCp = !!c[id];
+    if (mode === 'house') { delete h[id]; delete c[id]; }
+    if (mode === 'drivein') { h[id] = { type: 'drive-reverse-out', label: LABELS['drive-reverse-out'], runs: ['ALL'] }; }
+    if (mode === 'revin') { h[id] = { type: 'reverse-in-drive-out', label: LABELS['reverse-in-drive-out'], runs: ['ALL'] }; delete c[id]; }
+    if (mode === 'point') { delete h[id]; }
+    pickerFor = ((mode === 'drivein' || mode === 'point') && !(c[id] && c[id].at)) ? id : ''; pickerQ = '';
+    saveAccess(hadCp !== !!c[id]);
+  }
+  function setAt(id, targetId){
+    var c = cps(); if (!c) return;
+    if (!targetId) { delete c[id]; if (modeOf(id) === 'point') { /* nothing left to point at */ } }
+    else {
+      var t = siteById(targetId); if (!t) return;
+      var prev = c[id] || {};
+      c[id] = { id: prev.id && /^pu_/.test(prev.id) ? prev.id : 'pu_' + id, lat: +t.lat, lng: +t.lng, runs: prev.runs && prev.runs.length ? prev.runs : ['ALL'], at: String(targetId), atLabel: addr(t) };
+    }
+    pickerFor = ''; pickerQ = '';
+    saveAccess(true);
+  }
+  function setAll(id, mode){
+    var site = siteById(id), h = hsm(); if (!site || !h) return;
+    var st = streetOf(site).toLowerCase(), sub = clean(site.suburbLine).toLowerCase(), type = mode === 'drivein' ? 'drive-reverse-out' : 'reverse-in-drive-out', n = 0;
+    recs().forEach(function(s){
+      if (streetOf(s).toLowerCase() !== st || clean(s.suburbLine).toLowerCase() !== sub) return;
+      h[idOf(s)] = { type: type, label: LABELS[type], runs: ['ALL'] }; n++;
+    });
+    saveAccess(false);
+    try { if (typeof window.customAlert === 'function') window.customAlert(LABELS[type] + ' · ' + n + ' houses in ' + streetOf(site)); } catch (e) {}
+  }
+
+  // ---- the page itself ----
+  window.buildUPropTabsRow = function(){ return ''; };
+  window.buildUPropTabsRowInline = function(){ return ''; };
+  window.buildUPropTabContentHtml = function(site){
+    var top = '', set = '';
+    try { top = typeof window.renderUPropPropertyTab === 'function' ? window.renderUPropPropertyTab(site) : ''; } catch (e) {}
+    try { set = typeof window.renderUPropSettingsTab === 'function' ? window.renderUPropSettingsTab(site) : ''; } catch (e) {}
+    // (the settings start with the same distance / PID / alerts block that is already at the top)
+    if (top && set.indexOf(top) >= 0) set = set.replace(top, '');
+    else set = set.replace(/^\s*<div class="uprop-row">[\s\S]*?<div class="uprop-info-block">[\s\S]*?<\/div>\s*<\/div>/, '');
+    var bins = '', pu = '';
+    try { bins = binsHtml(site); } catch (e) { bins = ''; }
+    try { pu = pickupHtml(site); } catch (e) { pu = ''; }
+    return '<div class="lbpb">' + top + bins + '<div class="lbpb-h"><b>Property</b></div>' + pu + set + '</div>';
+  };
+
+  // what changed in the editor
+  function syncChips(root){
+    (root || document).querySelectorAll('.lbpb [data-pb-sel]').forEach(function(b){
+      var sel = document.getElementById(b.getAttribute('data-pb-sel'));
+      b.classList.toggle('on', !!sel && sel.value === b.getAttribute('data-v'));
+    });
+    var w = document.getElementById('lbpbWas'), inp = document.getElementById('modalBinSerial');
+    if (w && inp) {
+      var o = w.getAttribute('data-orig') || '', v = clean(inp.value).toUpperCase();
+      w.innerHTML = (o && v !== o.toUpperCase()) ? 'Was <s>' + esc(o) + '</s> · ' + (v ? 'save to change it' : 'type the new number') : '';
+    }
+  }
+  var syncT = 0;
+  new MutationObserver(function(){ if (syncT) return; syncT = requestAnimationFrame(function(){ syncT = 0; if (document.querySelector('.lbpb')) syncChips(); }); })
+    .observe(document.body, { childList: true, subtree: true });
+  document.addEventListener('input', function(ev){
+    var t = ev.target; if (!t) return;
+    if (t.id === 'modalBinSerial' && t.closest && t.closest('.lbpb')) syncChips();
+    if (t.id === 'lbpbPickQ') {
+      pickerQ = t.value; var pos = t.selectionStart;
+      refreshProp();
+      var n = document.getElementById('lbpbPickQ'); if (n) { n.focus(); try { n.setSelectionRange(pos, pos); } catch (e) {} }
+    }
+  }, true);
+  document.addEventListener('click', function(ev){
+    var t = ev.target.closest ? ev.target.closest('[data-pb-bin],[data-pb-sel],[data-pb-scan],[data-pb-report],[data-pb-iss],[data-pb-pu],[data-pb-change],[data-pb-at],[data-pb-all],[data-pb-open]') : null;
+    if (!t || !t.closest('.lbpb')) return;
+    ev.preventDefault(); ev.stopPropagation();
+    var id = String(window.__uPropId || ''), site = siteById(id);
+    if (t.hasAttribute('data-pb-bin')) {
+      var k = t.getAttribute('data-pb-bin'), i = +t.getAttribute('data-i'), key = k + '_' + i, wasOpen = window.__uPropOpenBinKey === key;
+      window.__uPropTab = wasOpen ? 'Settings' : k;
+      if (typeof window.toggleUPropBinEditor === 'function') window.toggleUPropBinEditor(k, i);
+      if (!wasOpen) setTimeout(function(){ var el = document.querySelector('.lbpb-bin.open'); if (el && el.scrollIntoView) el.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); }, 30);
+      return;
+    }
+    if (t.hasAttribute('data-pb-sel')) {
+      var sel = document.getElementById(t.getAttribute('data-pb-sel')); if (!sel) return;
+      sel.value = t.getAttribute('data-v');
+      if (sel.id === 'modalBinStreamSelect' && typeof window.uPropBinStreamChanged === 'function') window.uPropBinStreamChanged(sel);
+      syncChips(); return;
+    }
+    if (t.hasAttribute('data-pb-scan')) {
+      if (typeof window.uxScanBin !== 'function') return;
+      window.uxScanBin().then(function(s){ var inp = document.getElementById('modalBinSerial'); if (s && inp) { inp.value = String(s).toUpperCase(); syncChips(); } });
+      return;
+    }
+    if (t.hasAttribute('data-pb-report')) {
+      var ok = String(window.__uPropOpenBinKey || '').split('_'), b = site && site.soloStreams && site.soloStreams[ok[0]] && site.soloStreams[ok[0]][+ok[1]];
+      if (typeof window.uxOpenIssue === 'function') window.uxOpenIssue('bin', { site: id, serial: b ? b.serial : '', stream: ok[0] || '' });
+      return;
+    }
+    if (t.hasAttribute('data-pb-iss')) {
+      var iss = findIssue(t.getAttribute('data-pb-iss')); if (!iss) return;
+      var holder = t.parentNode, old = holder.querySelector('.lbi-card');
+      if (old) { old.remove(); return; }
+      var d = document.createElement('div'); d.innerHTML = issueCard(iss); d.firstChild.style.cssText = 'background:#1e1f23;border:3px solid #000;border-radius:8px;padding:10px';
+      holder.insertBefore(d.firstChild, t.nextSibling);
+      try { if (window.lbMedia) window.lbMedia.hydrate(holder); } catch (e) {}
+      return;
+    }
+    if (t.hasAttribute('data-pb-pu')) { setMode(id, t.getAttribute('data-pb-pu')); return; }
+    if (t.hasAttribute('data-pb-change')) { pickerFor = pickerFor === id ? '' : id; pickerQ = ''; refreshProp(); setTimeout(function(){ var n = document.getElementById('lbpbPickQ'); if (n) n.focus(); }, 30); return; }
+    if (t.hasAttribute('data-pb-at')) { setAt(id, t.getAttribute('data-pb-at')); return; }
+    if (t.hasAttribute('data-pb-all')) { setAll(id, t.getAttribute('data-pb-all')); return; }
+    if (t.hasAttribute('data-pb-open')) { if (typeof window.openPropertyInspectModal === 'function') window.openPropertyInspectModal(t.getAttribute('data-pb-open'), 'Settings'); return; }
+  }, true);
+  // closing an issue card shown inside the page
+  document.addEventListener('click', function(ev){
+    var x = ev.target.closest ? ev.target.closest('.lbpb .lbi-card [data-lbi-a="close"]') : null; if (!x) return;
+    var c = x.closest('.lbi-card'); if (c) c.remove();
+  }, true);
+
+  /* ---------------- the map's pop-ups: a serial or a stream box opens the property page on that bin ---------------- */
+  var SKEY = { gar: 'Garbage', rec: 'Recycling', fog: 'FOGO', sum: 'Recycling' };
+  document.addEventListener('click', function(ev){
+    var t = ev.target.closest ? ev.target.closest('.leaflet-popup .rb-pbin, .leaflet-popup .ux-lot-bin, .leaflet-popup .ux-lot-row > img') : null;
+    if (!t) return;
+    var pop = t.closest('.leaflet-popup'), scope = t.closest('.ux-lot-site') || pop;
+    var pb = scope.querySelector('[onclick*="openPropertyInspectModal"]'), m = pb ? /openPropertyInspectModal\('([^']+)'/.exec(pb.getAttribute('onclick') || '') : null;
+    if (!m) return;
+    var site = siteById(m[1]); if (!site) return;
+    ev.preventDefault(); ev.stopPropagation();
+    var serial = '';
+    if (t.classList.contains('rb-pbin')) serial = clean((t.querySelector('.rb-pbs') || {}).textContent);
+    else if (t.classList.contains('ux-lot-bin')) serial = clean((t.querySelector('b') || {}).textContent);
+    var bi = serial ? binIndex(site, serial) : null;
+    if (!bi) {
+      // a stream box: the first bin of that stream
+      var row = t.closest('.ux-lot-row'), sk = t.getAttribute('data-s') || '';
+      var k = SKEY[sk] || '';
+      if (!k && row) { var src = (row.querySelector('img') || {}).getAttribute ? row.querySelector('img').getAttribute('src') : ''; k = /garbage/.test(src) ? 'Garbage' : /fogo/.test(src) ? 'FOGO' : /recycle|summer/.test(src) ? 'Recycling' : ''; }
+      if (k && ((site.soloStreams || {})[k] || []).length) bi = { k: k, i: 0 };
+    }
+    openBin(m[1], bi ? bi.k : null, bi ? bi.i : null);
+  }, true);
 })();
 </script>
 </body>
