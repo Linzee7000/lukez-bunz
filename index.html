@@ -57254,6 +57254,11 @@ html body.ux2:not(#rp-a):not(#rp-b):not(#rp-c) #lbFuel .lbpb button.lbpb-t.lbfu-
   function keep(){ if (!P) return; var g = function(id){ var e = document.getElementById(id); return e ? e.value : ''; }; P.d = g('lbfpD'); P.a = g('lbfpA'); P.o = g('lbfpO'); }
   function open(mode, extra){
     var t = truckNow(); if (!t) return false;
+    // The depot / start-of-shift pop-up is the SAME page as Fuel on the shift screen (Fox, 1 Nov: the shift one is ok, this was the old style).
+    var shx = shift();
+    if (shx && window.lbRunSheet && window.lbRunSheet.open) {
+      try { window.lbRunSheet.open('fuel', shx.id); if (mode === 'warn') toast('No fuel entered after the last shift' + ((extra && extra.prevDriver) ? ' (' + extra.prevDriver + ')' : '')); return true; } catch (e) {}
+    }
     if (!page) {
       page = document.createElement('div'); page.id = 'lbFuel'; page.setAttribute('role', 'dialog'); page.setAttribute('aria-label', 'Fuel');
       page.innerHTML = '<div class="lbfu-page lbpb"><button type="button" class="mn-x" data-fp="close" aria-label="Close" style="display:none"></button><div class="lbfu-body"></div></div>';
@@ -57314,35 +57319,32 @@ html body.ux2:not(#rp-a):not(#rp-b):not(#rp-c) #lbFuel .lbpb button.lbpb-t.lbfu-
   /* the fuel button: it appears when the truck has come back to the depot with no fuel entered since it left, and goes
      when fuel is entered, the shift ends or a new one starts. Tapping it opens the fuel page. */
   var fb = null;
+  var atDepotNow = false;
   function fab(){
+    // Only at the depot (within 250 m; once there it stays until 400 m away, so GPS wobble can't make it blink).
+    // The old "fuel due after the shift's return" trigger showed it anywhere: the CSS also forced it visible. Now it needs the depot.
     var due = lsGet(KEY_DUE, null), sh = shift(), show = false;
-    if (due && sh && sh.id === due.id) {
-      var rs = null; try { rs = window.lbRunSheet && window.lbRunSheet._t ? window.lbRunSheet._t.get(sh.id) : null; } catch (e) {}
-      var L = last(String(sh.truck || '').trim());
-      show = !(fuelSince(rs, due.depart || 0) || (L && L.tank && L.tank.t >= (due.depart || 0)));
-    }
-    if (due && !show && !(sh && sh.id === due.id)) lsSet(KEY_DUE, null);
-    // at the depot (within 250 m), with or without a shift: the fuel button is there to use
-    if (!show) {
-      try {
-        var dp = lsGet('lbDepot', null); if (!(dp && isFinite(dp.lat))) dp = (window.lbKnownPlaces && window.lbKnownPlaces.depot && window.lbKnownPlaces.depot()) || null;
-        var ul = (new Function('return typeof userCurrentLocation !== "undefined" ? userCurrentLocation : null'))();
-        if (dp && ul && isFinite(ul.lat)) {
-          var R = Math.PI / 180, a = Math.sin((ul.lat - dp.lat) * R / 2) * Math.sin((ul.lat - dp.lat) * R / 2) + Math.cos(dp.lat * R) * Math.cos(ul.lat * R) * Math.sin((ul.lng - dp.lng) * R / 2) * Math.sin((ul.lng - dp.lng) * R / 2);
-          if (12742000 * Math.asin(Math.sqrt(a)) <= 250) show = true;
-        }
-      } catch (e) {}
-    }
+    if (due && !(sh && sh.id === due.id)) lsSet(KEY_DUE, null);
+    try {
+      var dp = lsGet('lbDepot', null); if (!(dp && isFinite(dp.lat))) dp = (window.lbKnownPlaces && window.lbKnownPlaces.depot && window.lbKnownPlaces.depot()) || null;
+      var ul = (new Function('return typeof userCurrentLocation !== "undefined" ? userCurrentLocation : null'))();
+      if (dp && ul && isFinite(ul.lat)) {
+        var R = Math.PI / 180, sa = Math.sin((ul.lat - dp.lat) * R / 2), so = Math.sin((ul.lng - dp.lng) * R / 2),
+            m = 12742000 * Math.asin(Math.sqrt(sa * sa + Math.cos(dp.lat * R) * Math.cos(ul.lat * R) * so * so));
+        atDepotNow = atDepotNow ? m <= 400 : m <= 250;
+      } else atDepotNow = false;
+    } catch (e) { atDepotNow = false; }
+    show = atDepotNow;
     if (show && !fb) {
-      fb = document.createElement('button'); fb.type = 'button'; fb.id = 'lbFuelFab'; fb.className = 'mn-tb y'; fb.setAttribute('aria-label', 'Fuel'); fb.innerHTML = IC.fuel;
+      fb = document.createElement('button'); fb.type = 'button'; fb.id = 'lbFuelFab'; fb.className = 'mn-tb';   /* no colour class: the logo intro flips every .mn-tb.y to the recycle logo and back - that was the flicker */ fb.setAttribute('aria-label', 'Fuel'); fb.innerHTML = IC.fuel;
       fb.addEventListener('click', function(){ open('depot'); });
       document.body.appendChild(fb);
     }
-    // it sits in the left column of map buttons (under Zoom to map and Follow), so it never covers Start shift / Load run
     if (fb) {
       var Lc = document.getElementById('mapFixedLeftControls');
       if (Lc && fb.parentNode !== Lc) Lc.appendChild(fb);
-      fb.style.display = show ? '' : 'none';
+      fb.classList.toggle('on', !!show);
+      fb.style.display = '';
     }
   }
   setInterval(function(){ try { check(); fab(); } catch (e) {} }, 6000);
@@ -57457,54 +57459,7 @@ html body.ux2:not(#dt-a):not(#dt-b):not(#dt-c):not(#dt-d):not(#dt-e):not(#dt-f):
 #lbLoadFab .mn-fi svg{width:30px;height:30px}
 #lbLoadFab .mn-fl{display:flex;align-items:center;padding:0 18px;height:56px}
 </style>
-<script id="lb-loadrun-script">
-/* "Load run" under Start shift (Fox, 1 Nov): load the run's KMZ (the WasteTrack export) onto the run, then start the shift.
-   The run is the one on the map; with none, the number in the file's name (e.g. "220 Tue.kmz") if it is a run of today;
-   failing both, it asks to pick the run first. After the file is in, the Start shift sheet opens. */
-(function(){
-  'use strict';
-  function g(n){ try { return (new Function('return typeof ' + n + ' !== "undefined" ? ' + n + ' : undefined'))(); } catch (e) { return undefined; } }
-  var ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M4 17v3h16v-3"/></svg>';
-  var b = document.createElement('button'); b.type = 'button'; b.id = 'lbLoadFab';
-  b.innerHTML = '<span class="mn-fi">' + ICON + '</span><span class="mn-fl">Load run</span>';
-  document.body.appendChild(b);
-  var inp = document.createElement('input'); inp.type = 'file'; inp.multiple = true; inp.style.display = 'none';
-  inp.accept = '.kmz,.kml,application/vnd.google-earth.kmz,application/vnd.google-earth.kml+xml,application/zip,text/xml';
-  document.body.appendChild(inp);
-  function runNow(){ try { var f = g('selectedSingleMapRun'); return typeof f === 'function' ? f() : null; } catch (e) { return null; } }
-  function toast(m){ try { window.customAlert(m); } catch (e) {} }
-  b.addEventListener('click', function(){ inp.value = ''; inp.click(); });
-  inp.addEventListener('change', function(){
-    var files = inp.files; if (!files || !files.length) return;
-    var run = runNow();
-    if (!run) {
-      var m = /(?:^|\D)(\d{3})(?:\D|$)/.exec(files[0].name || '');
-      if (m && typeof window.openRunDirectlyOnMap === 'function') {
-        var days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'], day = days[new Date().getDay()], wk = '';
-        var hit = (g('siteRecords') || []).filter(function(s){ var sc = s.soloSchedule || {}; return sc.day === day && [sc.garRun, sc.recRun, sc.fogRun].some(function(r){ return String(r || '').trim() === m[1]; }); })[0];
-        if (hit) {
-          var sc = hit.soloSchedule, st = String(sc.garRun).trim() === m[1] ? 'Garbage' : String(sc.recRun).trim() === m[1] ? 'Recycling' : 'FOGO';
-          window.openRunDirectlyOnMap(m[1], st, day, st === 'Garbage' ? '' : String(sc.weekLetter || '').toUpperCase(), false);
-          run = runNow();
-        }
-      }
-    }
-    if (!run) { toast('Pick the run first (Add run in Layers, or the run picker), then Load run'); try { if (typeof window.openFilterDrawerModal === 'function') window.openFilterDrawerModal(); } catch (e) {} return; }
-    Promise.resolve(window.handleKmzFiles(files, run)).then(function(){
-      setTimeout(function(){ if (typeof window.uxShiftOpen === 'function' && !(window.uxShiftState && window.uxShiftState())) window.uxShiftOpen(); }, 600);
-    }, function(err){ toast('Could not load the file: ' + (err && err.message || err)); });
-  });
-  // shows with Start shift, just under it
-  setInterval(function(){
-    var s = document.getElementById('lbStartFab'), on = s && getComputedStyle(s).display !== 'none' && s.getBoundingClientRect().width > 4;
-    b.classList.toggle('on', !!on);
-    if (on) { var r = s.getBoundingClientRect(); b.style.left = Math.round(r.left) + 'px'; b.style.top = Math.round(r.bottom + 10) + 'px'; b.style.minWidth = Math.round(r.width) + 'px'; }
-    // the bins on the truck follow the speed's size
-    var sp = document.querySelector('#rbDash .rd-spd'), dash = document.getElementById('rbDash');
-    if (sp && dash) { var dw = getComputedStyle(sp).getPropertyValue('--dw').trim(); if (dw && dash._dw !== dw) { dash._dw = dw; dash.style.setProperty('--lb-spd-dw', dw); } }
-  }, 300);
-})();
-</script>
+<!-- Load run (lb-loadrun-script) removed 1 Nov at Fox's request: "we will revisit it later it's not quite right". git log has the code. -->
 <style id="lb-report2-style">
 /* ==== One look for the Report sheet and the property page (Fox, 1 Nov): the head in one row, the street in the same plain font as the
    pop-up sheet, the stream box filling the whole row, no yellow outline, report tiles with the picture faded behind the words ==== */
@@ -57550,7 +57505,7 @@ html body.ux2:not(#rq-a):not(#rq-b):not(#rq-c):not(#rq-d):not(#rq-e):not(#rq-f):
 /* the fuel button that comes up at the depot: a square like the ones at the top */
 html body.ux2:not(#rq-a):not(#rq-b):not(#rq-c):not(#rq-d):not(#rq-e):not(#rq-f):not(#rq-g):not(#rq-h) #lbFuelFab{position:fixed;left:calc(50% - 24px);transform:none !important;top:calc(118px + var(--ux-safe-t,0px));z-index:2600;width:48px !important;height:48px !important;padding:0;display:none;align-items:center;justify-content:center;border:3px solid #000;border-radius:6px;box-shadow:3px 3px 0 #000;background:#ffd21f;color:#000}
 html body.ux2 #lbFuelFab svg{width:26px !important;height:26px !important;stroke-width:1.9 !important}
-html body.ux2:not(#rq-a):not(#rq-b):not(#rq-c):not(#rq-d):not(#rq-e):not(#rq-f):not(#rq-g):not(#rq-h)[data-ux-screen="map"] #lbFuelFab{display:flex}
+html body.ux2:not(#rq-a):not(#rq-b):not(#rq-c):not(#rq-d):not(#rq-e):not(#rq-f):not(#rq-g):not(#rq-h)[data-ux-screen="map"] #lbFuelFab.on{display:flex}
 </style>
 <style id="lb-sheet-style">
 /* ==== Pop-ups the Android way (Fox, 1 Nov: designs 1 and 2 of "Pop-ups · the four Android kinds") ==== */
@@ -57937,6 +57892,7 @@ html body.ux2:not(#rv-a):not(#rv-b):not(#rv-c):not(#rv-d):not(#rv-e):not(#rv-f):
 #lbNavFill{position:fixed;left:0;right:0;bottom:0;height:0;background:#26282d;z-index:90;pointer-events:none;display:none}
 body.lb-map-screen #lbNavFill.on{display:block}
 html body.ux2:not(#fz-a):not(#fz-b):not(#fz-c):not(#fz-d):not(#fz-e):not(#fz-f) #mapFixedLeftControls #lbFuelFab{color:#ffd21f !important;position:relative !important;left:auto !important;top:auto !important;z-index:auto !important;margin:0 !important;flex:none}
+html body.ux2:not(#fz-a):not(#fz-b):not(#fz-c):not(#fz-d):not(#fz-e):not(#fz-f):not(#fz-g) #mapFixedLeftControls #lbFuelFab svg,html body.ux2:not(#fz-a):not(#fz-b):not(#fz-c):not(#fz-d):not(#fz-e):not(#fz-f):not(#fz-g) #mapFixedLeftControls #lbFuelFab svg *{stroke:#ffd21f !important;color:#ffd21f !important;opacity:1 !important}
 /* Fuel page: the same top as every other page (title, four buttons, search), then a compact head and compact coloured tiles */
 html body.ux2:not(#fu-a):not(#fu-b):not(#fu-c):not(#fu-d):not(#fu-e):not(#fu-f):not(#fu-g) #lbFuel .lbfu-hero{display:flex !important;align-items:stretch;gap:0;padding:0 !important;margin:10px 10px 0;background:var(--pb-bar) !important;border:var(--pb-bd) !important;border-radius:var(--pb-rad) !important;overflow:hidden}
 html body.ux2:not(#fu-a):not(#fu-b):not(#fu-c):not(#fu-d):not(#fu-e):not(#fu-f):not(#fu-g) #lbFuel .lbfu-hi{flex:none;width:58px;display:flex;align-items:center;justify-content:center;background:#ffd21f;color:#000}
