@@ -119,3 +119,5 @@ The Apps Script project behind `SCRIPT_URL` (standalone, `executeAs` the owner, 
 - Long comments explain *why* (past bugs, GPS edge cases, data-loss incidents). Keep them, and add one when fixing something subtle.
 - Icons are `<img class="icon-img" src="name.png">`. Stream colours are Garbage red, Recycling yellow, FOGO green.
 - New UI goes in the `ux2` layer as another IIFE that wraps existing globals. Don't restructure the earlier blocks.
+
+**Report tiles (`lb-zoomfont-style`, `#tl-a..l` prefix):** every tile (Photo / Voice / Scan / GPS log and the what-is-wrong ones) is the same 58px rectangle, 3 across (4 across on the Bin tab, smaller), big icon on the left, label in Barlow Condensed 600 (bundled in `fonts/`, so it works offline). Fox rejected the faded icon behind the text; keep the icon beside it. Tabs are icon-only.
