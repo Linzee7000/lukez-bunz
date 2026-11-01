@@ -57120,7 +57120,7 @@ html body.ux2:not(#rp-a):not(#rp-b):not(#rp-c) #lbFuel .lbpb button.lbpb-t.lbfu-
    - A shift starting when the truck's last shift had no fuel entered after it: the warning, with the tank estimate. */
 (function(){
   'use strict';
-  var CAP = 280, RATE0 = 55, KEY_ASK = 'lbFuelAsked', KEY_SEEN = 'lbFuelSeenShift';
+  var CAP = 280, RATE0 = 55, KEY_ASK = 'lbFuelAsked', KEY_SEEN = 'lbFuelSeenShift', KEY_DUE = 'lbFuelDue';
   function lsGet(k, d){ try { var v = JSON.parse(localStorage.getItem(k)); return v == null ? d : v; } catch (e) { return d; } }
   function lsSet(k, v){ try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
   function esc(s){ return String(s == null ? '' : s).replace(/[&<>"']/g, function(c){ return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
@@ -57199,14 +57199,7 @@ html body.ux2:not(#rp-a):not(#rp-b):not(#rp-c) #lbFuel .lbpb button.lbpb-t.lbfu-
     var o = odoNow(t), h = hrsNow(t);
     return '<div class="lbpa-lab rp-lab">Readings</div>' +
       '<div class="lbfu-two"><label class="lbfu-f"><span>Odometer km</span><input class="lbfu-in" id="lbfuOdo" inputmode="numeric" autocomplete="off" placeholder="' + (o != null ? esc(o) : 'km') + '"></label>' +
-      '<label class="lbfu-f"><span>Engine hours</span><input class="lbfu-in" id="lbfuHrs" inputmode="decimal" autocomplete="off" placeholder="' + (h != null ? esc(h) : 'hours') + '"></label></div>' +
-      '<div class="lbpa-lab rp-lab">Fuel and AdBlue</div>' +
-      '<div class="lbpb-card">' + tankHtml(t) +
-        '<div class="lbfu-add"><label class="lbfu-f"><span>Diesel added (L)</span><input class="lbfu-in" id="lbfuD" inputmode="decimal" autocomplete="off" placeholder="0"></label>' +
-          '<button type="button" class="lbpb-t lbfu-go" data-fu="fuel"><i>' + IC.fuel + '</i><span>Add fuel</span></button></div>' +
-        '<div class="lbfu-add"><label class="lbfu-f"><span>AdBlue added (L)</span><input class="lbfu-in" id="lbfuA" inputmode="decimal" autocomplete="off" placeholder="0"></label>' +
-          '<button type="button" class="lbpb-t lbfu-go" data-fu="adblue"><i class="blue">' + IC.drop + '</i><span>Add AdBlue</span></button></div>' +
-      '</div>';
+      '<label class="lbfu-f"><span>Engine hours</span><input class="lbfu-in" id="lbfuHrs" inputmode="decimal" autocomplete="off" placeholder="' + (h != null ? esc(h) : 'hours') + '"></label></div>';
   }
   function repaintTruck(){ var el = document.getElementById('uxiTruck'); if (el && el.innerHTML) el.innerHTML = truckHtml(); }
   function readingsFrom(){ var o = document.getElementById('lbfuOdo'), h = document.getElementById('lbfuHrs'); return { km: o ? num(o.value) : null, hrs: h ? num(h.value) : null }; }
@@ -57310,11 +57303,29 @@ html body.ux2:not(#rp-a):not(#rp-b):not(#rp-c) #lbFuel .lbpb button.lbpb-t.lbfu-
     lsSet(KEY_ASK, { id: sh.id, ret: rs2.ret });
     var L2 = last(String(sh.truck || '').trim());
     if (fuelSince(rs2, rs2.depart) || (L2 && L2.tank && L2.tank.t >= rs2.depart)) return;
-    if (Date.now() - rs2.ret < 30 * 60000 && !P) open('depot');
+    if (Date.now() - rs2.ret < 30 * 60000) { lsSet(KEY_DUE, { id: sh.id, ret: rs2.ret, depart: rs2.depart }); fab(); }
   }
-  setInterval(function(){ try { check(); } catch (e) {} }, 6000);
+  /* the fuel button: it appears when the truck has come back to the depot with no fuel entered since it left, and goes
+     when fuel is entered, the shift ends or a new one starts. Tapping it opens the fuel page. */
+  var fb = null;
+  function fab(){
+    var due = lsGet(KEY_DUE, null), sh = shift(), show = false;
+    if (due && sh && sh.id === due.id) {
+      var rs = null; try { rs = window.lbRunSheet && window.lbRunSheet._t ? window.lbRunSheet._t.get(sh.id) : null; } catch (e) {}
+      var L = last(String(sh.truck || '').trim());
+      show = !(fuelSince(rs, due.depart || 0) || (L && L.tank && L.tank.t >= (due.depart || 0)));
+    }
+    if (due && !show && !(sh && sh.id === due.id)) lsSet(KEY_DUE, null);
+    if (show && !fb) {
+      fb = document.createElement('button'); fb.type = 'button'; fb.id = 'lbFuelFab'; fb.className = 'mn-tb y'; fb.setAttribute('aria-label', 'Fuel'); fb.innerHTML = IC.fuel;
+      fb.addEventListener('click', function(){ open('depot'); });
+      document.body.appendChild(fb);
+    }
+    if (fb) fb.style.display = show ? '' : 'none';
+  }
+  setInterval(function(){ try { check(); fab(); } catch (e) {} }, 6000);
 
-  window.lbFuel = { CAP: CAP, tank: tank, rate: rate, add: add, odoNow: odoNow, truckHtml: truckHtml, open: open, close: close, _t: { check: check, state: function(){ return P; } } };
+  window.lbFuel = { fab: fab, CAP: CAP, tank: tank, rate: rate, add: add, odoNow: odoNow, truckHtml: truckHtml, open: open, close: close, _t: { check: check, state: function(){ return P; } } };
 })();
 </script>
 <script id="lb-popup-hold-script">
@@ -57472,6 +57483,37 @@ html body.ux2:not(#dt-a):not(#dt-b):not(#dt-c):not(#dt-d):not(#dt-e):not(#dt-f):
   }, 300);
 })();
 </script>
+<style id="lb-report2-style">
+/* ==== One look for the Report sheet and the property page (Fox, 1 Nov): the head in one row, the street in the same plain font as the
+   pop-up sheet, the stream box filling the whole row, no yellow outline, report tiles with the picture faded behind the words ==== */
+html body.ux2:not(#rq-a):not(#rq-b):not(#rq-c):not(#rq-d):not(#rq-e):not(#rq-f):not(#rq-g):not(#rq-h):not(#rq-i):not(#rq-j):not(#rq-k):not(#rq-l) .lbpa .lbpa-addr h2{font:500 clamp(16px,5.4cqi,19px)/1.1 Roboto,system-ui,sans-serif !important;letter-spacing:.01em;overflow-wrap:normal}
+html body.ux2:not(#rq-a):not(#rq-b):not(#rq-c):not(#rq-d):not(#rq-e):not(#rq-f):not(#rq-g):not(#rq-h):not(#rq-i):not(#rq-j):not(#rq-k):not(#rq-l) #uxIssue .rp-head{flex-direction:row !important;align-items:stretch;margin:0}
+html body.ux2:not(#rq-a):not(#rq-b):not(#rq-c):not(#rq-d):not(#rq-e):not(#rq-f):not(#rq-g):not(#rq-h):not(#rq-i):not(#rq-j):not(#rq-k):not(#rq-l) #uxIssue .rp-head .lbpa-no{min-width:46px;padding:0 8px;font:700 22px/1 Roboto,system-ui,sans-serif !important;border-right:var(--pb-bd);border-bottom:0}
+html body.ux2:not(#rq-a):not(#rq-b):not(#rq-c):not(#rq-d):not(#rq-e):not(#rq-f):not(#rq-g):not(#rq-h):not(#rq-i):not(#rq-j):not(#rq-k):not(#rq-l) #uxIssue .rp-head .lbpa-no.long{font-size:14px}
+html body.ux2:not(#rq-a):not(#rq-b):not(#rq-c):not(#rq-d):not(#rq-e):not(#rq-f):not(#rq-g):not(#rq-h):not(#rq-i):not(#rq-j):not(#rq-k):not(#rq-l) #uxIssue .rp-head .rp-ic svg{width:26px;height:26px}
+html body.ux2:not(#rq-a):not(#rq-b):not(#rq-c):not(#rq-d):not(#rq-e):not(#rq-f):not(#rq-g):not(#rq-h):not(#rq-i):not(#rq-j):not(#rq-k):not(#rq-l) #uxIssue .rp-head .lbpa-addr{padding:7px 8px 7px 10px;gap:3px}
+html body.ux2:not(#rq-a):not(#rq-b):not(#rq-c):not(#rq-d):not(#rq-e):not(#rq-f):not(#rq-g):not(#rq-h):not(#rq-i):not(#rq-j):not(#rq-k):not(#rq-l) #uxIssue .rp-head .lbpa-sub{font-size:11px;letter-spacing:.08em}
+html body.ux2:not(#rq-a):not(#rq-b):not(#rq-c):not(#rq-d):not(#rq-e):not(#rq-f):not(#rq-g):not(#rq-h):not(#rq-i):not(#rq-j):not(#rq-k):not(#rq-l) #uxIssue .rp-head .lbpa-side{display:flex;align-items:center;padding:0 8px 0 0}
+html body.ux2:not(#rq-a):not(#rq-b):not(#rq-c):not(#rq-d):not(#rq-e):not(#rq-f):not(#rq-g):not(#rq-h):not(#rq-i):not(#rq-j):not(#rq-k):not(#rq-l) #uxIssue .rp-hero,html body.ux2:not(#rq-a):not(#rq-b):not(#rq-c):not(#rq-d):not(#rq-e):not(#rq-f):not(#rq-g):not(#rq-h):not(#rq-i):not(#rq-j):not(#rq-k):not(#rq-l) #uxIssue .rp-bins,html body.ux2:not(#rq-a):not(#rq-b):not(#rq-c):not(#rq-d):not(#rq-e):not(#rq-f):not(#rq-g):not(#rq-h):not(#rq-i):not(#rq-j):not(#rq-k):not(#rq-l) #uxIssue .rp-media,html body.ux2:not(#rq-a):not(#rq-b):not(#rq-c):not(#rq-d):not(#rq-e):not(#rq-f):not(#rq-g):not(#rq-h):not(#rq-i):not(#rq-j):not(#rq-k):not(#rq-l) #uxIssue .rp-truck{gap:7px}
+html body.ux2:not(#rq-a):not(#rq-b):not(#rq-c):not(#rq-d):not(#rq-e):not(#rq-f):not(#rq-g):not(#rq-h):not(#rq-i):not(#rq-j):not(#rq-k):not(#rq-l) #uxIssue .lbpa-body{gap:8px}
+html body.ux2:not(#rq-a):not(#rq-b):not(#rq-c):not(#rq-d):not(#rq-e):not(#rq-f):not(#rq-g):not(#rq-h):not(#rq-i):not(#rq-j):not(#rq-k):not(#rq-l) #uxIssue .rp-bin{gap:0 !important;min-height:48px !important}
+html body.ux2:not(#rq-a):not(#rq-b):not(#rq-c):not(#rq-d):not(#rq-e):not(#rq-f):not(#rq-g):not(#rq-h):not(#rq-i):not(#rq-j):not(#rq-k):not(#rq-l) #uxIssue .rp-bin .lbpb-sbox{align-self:stretch;height:auto;width:100px;justify-content:flex-start;gap:7px;padding:0 9px;border-radius:0}
+html body.ux2:not(#rq-a):not(#rq-b):not(#rq-c):not(#rq-d):not(#rq-e):not(#rq-f):not(#rq-g):not(#rq-h):not(#rq-i):not(#rq-j):not(#rq-k):not(#rq-l) #uxIssue .rp-bin .lbpb-sbox b{font:600 17px/1 Roboto,system-ui,sans-serif}
+html body.ux2:not(#rq-a):not(#rq-b):not(#rq-c):not(#rq-d):not(#rq-e):not(#rq-f):not(#rq-g):not(#rq-h):not(#rq-i):not(#rq-j):not(#rq-k):not(#rq-l) #uxIssue .rp-ser{padding-left:10px}
+html body.ux2:not(#rq-a):not(#rq-b):not(#rq-c):not(#rq-d):not(#rq-e):not(#rq-f):not(#rq-g):not(#rq-h):not(#rq-i):not(#rq-j):not(#rq-k):not(#rq-l) #uxIssue button.rp-bin.on{border:var(--pb-bd) !important;box-shadow:var(--pb-sh) !important}
+/* the report tiles: the picture big and faded behind, the words over it */
+html body.ux2:not(#rq-a):not(#rq-b):not(#rq-c):not(#rq-d):not(#rq-e):not(#rq-f):not(#rq-g):not(#rq-h):not(#rq-i):not(#rq-j):not(#rq-k):not(#rq-l) #uxIssue .rp-grid button.rp-t,html body.ux2:not(#rq-a):not(#rq-b):not(#rq-c):not(#rq-d):not(#rq-e):not(#rq-f):not(#rq-g):not(#rq-h):not(#rq-i):not(#rq-j):not(#rq-k):not(#rq-l) #uxIssue button.rp-sq{position:relative;overflow:hidden;display:flex !important;flex-direction:row !important;align-items:center !important;justify-content:center !important;height:58px !important;min-height:58px !important;padding:0 8px !important;text-align:center}
+html body.ux2:not(#rq-a):not(#rq-b):not(#rq-c):not(#rq-d):not(#rq-e):not(#rq-f):not(#rq-g):not(#rq-h):not(#rq-i):not(#rq-j):not(#rq-k):not(#rq-l) #uxIssue .rp-grid .rp-t>i{position:absolute !important;inset:0 !important;width:auto !important;display:flex !important;align-items:center;justify-content:center;background:none !important;border:0 !important;opacity:.22;color:var(--pb-acc) !important}
+html body.ux2:not(#rq-a):not(#rq-b):not(#rq-c):not(#rq-d):not(#rq-e):not(#rq-f):not(#rq-g):not(#rq-h):not(#rq-i):not(#rq-j):not(#rq-k):not(#rq-l) #uxIssue .rp-grid .rp-t>i svg{width:50px !important;height:50px !important}
+html body.ux2:not(#rq-a):not(#rq-b):not(#rq-c):not(#rq-d):not(#rq-e):not(#rq-f):not(#rq-g):not(#rq-h):not(#rq-i):not(#rq-j):not(#rq-k):not(#rq-l) #uxIssue .rp-grid .rp-t>span,html body.ux2:not(#rq-a):not(#rq-b):not(#rq-c):not(#rq-d):not(#rq-e):not(#rq-f):not(#rq-g):not(#rq-h):not(#rq-i):not(#rq-j):not(#rq-k):not(#rq-l) #uxIssue button.rp-sq>span{position:relative;z-index:1;font:700 13px/1.15 Roboto,system-ui,sans-serif;letter-spacing:.04em;text-transform:uppercase;padding:0;text-align:center}
+html body.ux2:not(#rq-a):not(#rq-b):not(#rq-c):not(#rq-d):not(#rq-e):not(#rq-f):not(#rq-g):not(#rq-h):not(#rq-i):not(#rq-j):not(#rq-k):not(#rq-l) #uxIssue button.rp-sq>span{white-space:nowrap;font-size:12px}
+html body.ux2:not(#rq-a):not(#rq-b):not(#rq-c):not(#rq-d):not(#rq-e):not(#rq-f):not(#rq-g):not(#rq-h):not(#rq-i):not(#rq-j):not(#rq-k):not(#rq-l) #uxIssue button.rp-sq svg{position:absolute !important;left:50%;top:50%;transform:translate(-50%,-50%);width:46px !important;height:46px !important;opacity:.22}
+html body.ux2:not(#rq-a):not(#rq-b):not(#rq-c):not(#rq-d):not(#rq-e):not(#rq-f):not(#rq-g):not(#rq-h):not(#rq-i):not(#rq-j):not(#rq-k):not(#rq-l) #uxIssue .rp-grid .rp-t.red>i{background:none !important;color:#fff !important}
+/* the fuel button that comes up at the depot: a square like the ones at the top */
+html body.ux2:not(#rq-a):not(#rq-b):not(#rq-c):not(#rq-d):not(#rq-e):not(#rq-f):not(#rq-g):not(#rq-h) #lbFuelFab{position:fixed;left:calc(50% - 24px);transform:none !important;top:calc(118px + var(--ux-safe-t,0px));z-index:2600;width:48px !important;height:48px !important;padding:0;display:none;align-items:center;justify-content:center;border:3px solid #000;border-radius:6px;box-shadow:3px 3px 0 #000;background:#ffd21f;color:#000}
+html body.ux2 #lbFuelFab svg{width:26px !important;height:26px !important;stroke-width:1.9 !important}
+html body.ux2:not(#rq-a):not(#rq-b):not(#rq-c):not(#rq-d):not(#rq-e):not(#rq-f):not(#rq-g):not(#rq-h)[data-ux-screen="map"] #lbFuelFab{display:flex}
+</style>
 <style id="lb-sheet-style">
 /* ==== Pop-ups the Android way (Fox, 1 Nov: designs 1 and 2 of "Pop-ups · the four Android kinds") ==== */
 /* 2 - the dialog (customConfirm): in the middle of a darkened screen, the words, the buttons bottom right */
