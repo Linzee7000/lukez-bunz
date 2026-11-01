@@ -5331,6 +5331,8 @@ const STREET_LITTER_SERVICE_LEVELS = {"seasons":[{"key":"tourist1","label":"Tour
   function logEdit(edit){
     edit.editId = edit.editId || genEditId();
     masterEditsLog.push(edit);
+    // flags, ratings, property / bin edits go to the other phones a few seconds later, without the full sync
+    if (/^(PROPERTY_|BIN_|STRAY_)/.test(edit.editType || '') && typeof window.lbSyncEditsSoon === 'function') window.lbSyncEditsSoon(8000);
     return edit;
   }
   function updateSyncButtonIcon() {
@@ -13159,6 +13161,75 @@ window.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
+  /* ---- Edits from the other phones (Fox, 2 Nov: "Flags, ratings, property edits need to be synced") ----
+     Edits always went UP to the Edits sheet, but only Street Litter patches ever came back DOWN, so a flag, rating or property
+     change made on one phone never reached another. The script's GET already returns every row of the Edits sheet; this
+     merges the ones this phone has not seen (by editId) into the log and applies just those to the live records.
+     Only call it right after this phone's own edits were sent (lastSyncedEditCount === log length): it re-sorts the log by
+     time, which would move unsent edits past the sent mark. */
+  const LB_REMOTE_STR = ['day','weekLetter','garRun','recRun','recSummerRun','fogRun','garFlag','recFlag','fogFlag','lat','lng','stream','serial','propId','siteId'];
+  async function lbMergeRemoteEdits(remote) {
+    if (!Array.isArray(remote) || !remote.length) return 0;
+    if (masterEditsLog.length !== lastSyncedEditCount) return 0;   // this phone has edits not sent yet: merge on the next pass
+    const have = new Set(masterEditsLog.map(e => e && e.editId).filter(Boolean));
+    const fresh = [];
+    remote.forEach(r => {
+      if (!r || !r.editId || have.has(String(r.editId)) || r.editType === 'SYNC_PING' || !r.editType) return;
+      const ed = {};
+      Object.keys(r).forEach(k => { if (r[k] !== '' && r[k] !== null && r[k] !== undefined) ed[k] = r[k]; else ed[k] = ''; });
+      LB_REMOTE_STR.forEach(k => { if (ed[k] !== '' && ed[k] != null) ed[k] = String(ed[k]); });
+      ed.editId = String(r.editId);
+      const t = new Date(r.timestamp); ed.timestamp = isNaN(t) ? String(r.timestamp || '') : t.toISOString();
+      if (ed.editType === 'PROPERTY_RATING') ed.ratingStars = Number(ed.ratingStars) || 0;
+      if (ed.editType === 'PROPERTY_UPDATE') { Object.keys(ed).forEach(k => { if (ed[k] === '' && k !== 'runFlags' && k !== 'recSummerRun' && k !== 'garRun' && k !== 'recRun' && k !== 'fogRun' && k !== 'day' && k !== 'weekLetter') delete ed[k]; }); }
+      fresh.push(ed);
+    });
+    if (!fresh.length) return 0;
+    // an older remote edit must not undo a newer one made on this phone for the same thing
+    const keyOf = e => [e.editType, e.propId || e.siteId, e.stream || '', e.serial || ''].join('|');
+    const newestLocal = {};
+    masterEditsLog.forEach(e => { if (!e || !e.editType) return; const k = keyOf(e); if (!newestLocal[k] || String(e.timestamp) > newestLocal[k]) newestLocal[k] = String(e.timestamp); });
+    const toApply = fresh.filter(e => !(newestLocal[keyOf(e)] && newestLocal[keyOf(e)] > e.timestamp)).sort((a, b) => a.timestamp < b.timestamp ? -1 : 1);
+    masterEditsLog = masterEditsLog.concat(fresh);
+    masterEditsLog.sort((a, b) => String(a.timestamp) < String(b.timestamp) ? -1 : String(a.timestamp) > String(b.timestamp) ? 1 : 0);
+    lastSyncedEditCount = masterEditsLog.length;
+    await saveToDB('lastSyncedEditCount', lastSyncedEditCount);
+    siteRecords = mergeEditsIntoRecords(siteRecords, toApply);
+    await saveToDB('masterRecords', siteRecords);
+    await saveToDB('masterEditsLog', masterEditsLog);
+    try { if (typeof refreshUPropViews === 'function') refreshUPropViews(); } catch (e) {}
+    try { triggerUniversalDataRefresh(); } catch (e) {}
+    try { if (typeof window.lbEditsPulled === 'function') window.lbEditsPulled(toApply.length); } catch (e) {}
+    return toApply.length;
+  }
+  // The light version of the sync: send this phone's new edits, bring the others' in. No dataset download, no progress bar.
+  // Runs a few seconds after a property / flag / rating edit, when the app opens or comes back to the front, and every few minutes.
+  let lbEditsBusy = false;
+  window.lbSyncEdits = async function() {
+    if (lbEditsBusy || !SCRIPT_URL || (typeof navigator !== 'undefined' && navigator.onLine === false)) return 0;
+    if (!siteRecords || !siteRecords.length) return 0;
+    lbEditsBusy = true;
+    try {
+      const pending = masterEditsLog.slice(lastSyncedEditCount);
+      if (pending.length) {
+        await fetch(SCRIPT_URL, { method: 'POST', mode: 'no-cors', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'payload=' + encodeURIComponent(JSON.stringify({ edits: pending })) });
+        lastSyncedEditCount = masterEditsLog.length;
+        await saveToDB('lastSyncedEditCount', lastSyncedEditCount);
+        hasUnsyncedChanges = false; updateSyncButtonIcon();
+      }
+      const state = await (await fetch(SCRIPT_URL)).json();
+      // the edits just sent may not be on the sheet yet, and the merge must leave unsent ones alone
+      if (masterEditsLog.length === lastSyncedEditCount) return await lbMergeRemoteEdits(state && state.edits);
+    } catch (e) { console.warn('Edit sync will retry:', e); }
+    finally { lbEditsBusy = false; }
+    return 0;
+  };
+  let lbEditsTimer = null;
+  window.lbSyncEditsSoon = function(ms) { clearTimeout(lbEditsTimer); lbEditsTimer = setTimeout(() => { window.lbSyncEdits(); }, ms || 6000); };
+  setTimeout(() => { window.lbSyncEdits(); }, 20000);
+  setInterval(() => { if (!document.hidden) window.lbSyncEdits(); }, 180000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) window.lbSyncEditsSoon(2500); });
+
   async function startUpdateProcess() {
     const btn = document.getElementById('syncBtn');
     if (btn) {
@@ -13226,6 +13297,7 @@ window.addEventListener('DOMContentLoaded', async () => {
         try {
           const stateRes = await fetch(SCRIPT_URL);
           const state = await stateRes.json();
+          try { await lbMergeRemoteEdits(state && state.edits); } catch (reErr) { console.warn('Edit pull failed:', reErr); }
           if (state && state.streetLitterEdits && typeof state.streetLitterEdits === 'object') {
             streetLitterOverrides = { ...streetLitterOverrides, ...state.streetLitterEdits };
             applyStreetLitterOverrides();
