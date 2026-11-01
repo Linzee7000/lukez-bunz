@@ -120,4 +120,4 @@ The Apps Script project behind `SCRIPT_URL` (standalone, `executeAs` the owner, 
 - Icons are `<img class="icon-img" src="name.png">`. Stream colours are Garbage red, Recycling yellow, FOGO green.
 - New UI goes in the `ux2` layer as another IIFE that wraps existing globals. Don't restructure the earlier blocks.
 
-**Report tiles (`lb-zoomfont-style`, `#tl-a..l` prefix):** every tile (Photo / Voice / Scan / GPS log and the what-is-wrong ones) is the same 58px rectangle, 3 across (4 across on the Bin tab, smaller), big icon on the left, label in Barlow Condensed 500 (not bold, Fox asked) (bundled in `fonts/`, so it works offline). Fox rejected the faded icon behind the text; keep the icon beside it. Tabs are icon-only.
+**Report tiles (`lb-zoomfont-style`, `#tl-a..l` prefix):** every tile (Photo / Voice / Scan / GPS log and the what-is-wrong ones) is the same 58px rectangle, 3 across (4 across on the Bin tab, smaller), big faded icon on the left with the label centred OVER it (Fox asked three times: text over the icon, never beside it), in Barlow Condensed 500 (not bold, Fox asked) (bundled in `fonts/`, so it works offline). Tabs are icon-only.
