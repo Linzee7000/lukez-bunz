@@ -58022,5 +58022,67 @@ html body.ux2:not(#tl-a):not(#tl-b):not(#tl-c):not(#tl-d):not(#tl-e):not(#tl-f):
   }, 1000);
 })();
 </script>
+<script id="lb-remsync-script">
+/* Reminders shared between phones (Fox, 2 Nov: "What if another driver is doing the run next week and no reminder pops up?").
+   siteReminders was only ever on the phone that set it (the sync sent the whole object up, where the next phone's copy
+   overwrote it, and nothing came back down). Now each reminder travels as its own outbox place (kind 'reminder', id
+   rem_<key>), so two phones can't wipe each other: the newest change per key wins, and a done / deleted reminder is a
+   tombstone (del: 1) so it goes from every phone. The many places that write siteReminders (the sheet, the property page, the
+   next bin box, issue clean-up...) are not touched: this watches the stored object and sends what changed.
+   lbRemSynced = what this phone last sent or received, per key (so a change, not just a difference, is what gets sent). */
+(function(){
+  'use strict';
+  function ls(k, d){ try { var v = JSON.parse(localStorage.getItem(k)); return v == null ? d : v; } catch (e) { return d; } }
+  function lw(k, v){ try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
+  function pid(key){ return 'rem_' + String(key).replace(/[^A-Za-z0-9_-]/g, '_'); }
+  function sig(r){ return r ? String(r.message || '') + '|' + String(r.triggerDate || '') : ''; }
+  function setLive(all){ try { (new Function('v', 'if (typeof siteReminders !== "undefined") siteReminders = v'))(all); } catch (e) {} }
+  function send(p){ try { if (window.lbOutbox && window.lbOutbox.sendPlace) { window.lbOutbox.sendPlace(p); return true; } } catch (e) {} return false; }
+
+  function scan(){
+    var cur = ls('siteReminders', {}) || {}, syn = ls('lbRemSynced', {}) || {}, meta = ls('lbRemMeta', {}) || {}, ch = false, now = Date.now();
+    Object.keys(cur).forEach(function(k){
+      var r = cur[k]; if (!r || !r.message) return;
+      if (syn[k] === sig(r)) return;
+      var u = syn[k] !== undefined ? now : (r.created || now);       // a changed one is "now"; one found for the first time keeps its own age
+      var p = { id: pid(k), kind: 'reminder', key: k, message: r.message, triggerDate: r.triggerDate || null, created: r.created || u, u: u, del: 0 };
+      if (send(p)) { syn[k] = sig(r); meta[k] = u; ch = true; }
+    });
+    Object.keys(syn).forEach(function(k){
+      if (cur[k] && cur[k].message) return;
+      var u = now, p = { id: pid(k), kind: 'reminder', key: k, message: '', triggerDate: null, created: 0, u: u, del: 1 };
+      if (send(p)) { delete syn[k]; meta[k] = u; ch = true; }
+    });
+    if (ch) { lw('lbRemSynced', syn); lw('lbRemMeta', meta); }
+  }
+
+  // the other phones' reminders: newest per key; a change made here since is only replaced by something newer
+  function take(places){
+    var cur = ls('siteReminders', {}) || {}, syn = ls('lbRemSynced', {}) || {}, meta = ls('lbRemMeta', {}) || {}, ch = false;
+    Object.keys(places || {}).forEach(function(id){
+      var p = places[id]; if (!p || p.kind !== 'reminder' || !p.key) return;
+      var k = p.key, u = +p.u || 0;
+      if (u <= (meta[k] || 0)) return;
+      var mine = cur[k], unsent = mine && mine.message && syn[k] !== sig(mine);
+      if (unsent) return;                                              // an edit made here, not yet sent: it goes up first
+      if (p.del) { if (cur[k]) { delete cur[k]; ch = true; } delete syn[k]; meta[k] = u; return; }
+      if (!p.message) return;
+      cur[k] = { message: p.message, triggerDate: p.triggerDate || null, created: p.created || u };
+      syn[k] = sig(cur[k]); meta[k] = u; ch = true;
+    });
+    if (ch) { lw('siteReminders', cur); setLive(cur); try { var s = (new Function('return typeof lastTelemetrySite !== "undefined" ? lastTelemetrySite : null'))(); if (s && typeof renderCurrentAddressTelemetry === 'function') renderCurrentAddressTelemetry(s); } catch (e) {} }
+    lw('lbRemSynced', syn); lw('lbRemMeta', meta);
+  }
+  document.addEventListener('lb-places', function(ev){ try { take(ev && ev.detail); } catch (e) {} });
+
+  setInterval(function(){ try { scan(); } catch (e) {} }, 4000);
+  var lastPull = 0;
+  document.addEventListener('visibilitychange', function(){
+    if (document.hidden || Date.now() - lastPull < 60000) return; lastPull = Date.now();
+    try { if (window.lbOutbox && window.lbOutbox.pullPlaces) window.lbOutbox.pullPlaces(); } catch (e) {}
+  });
+  window.lbRemSync = { scan: scan, take: take };
+})();
+</script>
 </body>
 </html>
