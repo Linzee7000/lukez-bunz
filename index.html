@@ -12496,12 +12496,25 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
     window.lbPlaceholderBinsDropped = n;
     return records;
   }
+  function lbNewSiteRecord(ed){
+    const addr = String(ed.address || '').toUpperCase().trim(), parts = addr.split(',');
+    return { siteId: '', propId: String(ed.propId), addressText: addr, baseStreetLine: (parts[0] || '').trim(), suburbLine: (parts[1] || '').trim(),
+      soloSchedule: { day: ed.day || '', weekLetter: ed.weekLetter || '', weekFormatted: ed.weekLetter ? 'Week ' + ed.weekLetter : '', garRun: '', recRun: '', recSummerRun: '', fogRun: '', garFlag: '', recFlag: '', fogFlag: '' },
+      soloStreams: { Garbage: [], Recycling: [], FOGO: [] }, councilStreams: { Garbage: [], Recycling: [], FOGO: [] },
+      runFlags: '', parentSiteAddress: '', councilPropType: 'DWELLING', lat: String(ed.lat), lng: String(ed.lng), addedInApp: true };
+  }
+  window.lbNewSiteRecord = lbNewSiteRecord;
   function mergeEditsIntoRecords(records, edits) {
     lbApplyBinFixes(records);
     lbApplyRunHomes(records);
     if (!edits || edits.length === 0) return lbDropPlaceholderBins(records);
 
     edits.forEach(ed => {
+      // a property added in the app (a new house on a vacant lot): made from its edit, so it is back after every sync
+      if (ed.editType === "PROPERTY_ADDED") {
+        if (!records.some(s => String(s.propId || s.siteId) === String(ed.propId))) records.push(lbNewSiteRecord(ed));
+        return;
+      }
       const site = records.find(s => String(s.propId || s.siteId) === String(ed.propId || ed.siteId));
       if (!site) return;
 
@@ -37623,7 +37636,9 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var sites = r.sites.slice(0, MAX_SITES);
     var html = r.sites.length > 1 ? summaryHTML(r.sites) : '<div class="map-popup ux-lot-pop">'
       + (r.sites.length > 1 ? '<div class="map-popup-meta">' + r.sites.length + ' addresses on this lot' + (r.sites.length > MAX_SITES ? ' (first ' + MAX_SITES + ')' : '') + '</div>' : '')
-      + (sites.length ? sites.map(siteHTML).join('') : '<div class="map-popup-title">No address on this lot</div><div class="map-popup-meta">Nobody\'s bins are listed here.</div>')
+      + (sites.length ? sites.map(siteHTML).join('') : '<div class="map-popup-title">No address on this lot</div><div class="map-popup-meta">Nobody\'s bins are listed here.</div>' +
+          // a vacant lot that has bins after all (a new house): add it, then its bins and runs on the property page
+          (typeof window.lbAddPropertyAt === 'function' ? '<div class="map-popup-actions"><button type="button" class="map-popup-btn lb-addprop-btn" data-lat="' + latlng.lat + '" data-lng="' + latlng.lng + '">Add property</button></div>' : ''))
       + '</div>';
     ours = L.popup({ maxWidth: 290, autoPanPadding: [20, 90], className: 'ux-lot-popup' }).setLatLng(latlng).setContent(html);
     ours.on('remove', function(){ clear(); ours = null; });
@@ -57314,6 +57329,47 @@ html body.ux2:not(#rp-a):not(#rp-b):not(#rp-c) #lbFuel .lbpb button.lbpb-t.lbfu-
   hook();
   // the idle timer is restarted by every touch of the map; while a pop-up is open it must not run out
   setInterval(function(){ if (open && window.mapManualOverrideActive) { try { clearTimeout(window.mapManualOverrideIdleTimer); } catch (e) {} } }, 500);
+})();
+</script>
+<script id="lb-addprop-script">
+/* "Add property" on a vacant lot's map pop-up (Fox, 1 Nov): asks for the address (the street and suburb of the houses next to it
+   filled in), makes the property where the lot was tapped (edit PROPERTY_ADDED, so it goes to the sheet and comes back after each
+   sync), and opens its property page on Bins, where Add bin is - and the runs are on the Property tab. */
+(function(){
+  'use strict';
+  function g(n){ try { return (new Function('return typeof ' + n + ' !== "undefined" ? ' + n + ' : undefined'))(); } catch (e) { return undefined; } }
+  function near(lat, lng){
+    var best = null, bd = 1e9, kx = Math.cos(lat * Math.PI / 180);
+    (g('siteRecords') || []).forEach(function(s){ var a = +s.lat, b = +s.lng; if (!a) return; var d = Math.hypot((b - lng) * kx, a - lat); if (d < bd) { bd = d; best = s; } });
+    return bd < 0.0012 ? best : null;   // within about 130 m
+  }
+  window.lbAddPropertyAt = function(lat, lng){
+    var n = near(lat, lng), guess = '';
+    if (n) { var a = String(n.addressText || '').toUpperCase(), m = /^\s*[\w\/-]*\d[\w\/-]*\s+(.+)$/.exec(a.split(',')[0] || ''); guess = ' ' + (m ? m[1] : '') + (a.indexOf(',') > 0 ? ',' + a.split(',').slice(1).join(',') : ''); }
+    var ask = typeof window.customPrompt === 'function' ? window.customPrompt('Address of the new property (number, street, suburb)', guess) : Promise.resolve(window.prompt('Address', guess));
+    Promise.resolve(ask).then(function(v){
+      v = String(v || '').trim().toUpperCase(); if (!v || !/\d/.test(v)) return;
+      var ed = { timestamp: new Date().toISOString(), editType: 'PROPERTY_ADDED', propId: 'APP' + Date.now().toString(36).toUpperCase(), siteId: '', address: v, lat: (+lat).toFixed(6), lng: (+lng).toFixed(6),
+        day: n && n.soloSchedule ? n.soloSchedule.day || '' : '', weekLetter: n && n.soloSchedule ? n.soloSchedule.weekLetter || '' : '' };
+      var site = window.lbNewSiteRecord(ed), recs = g('siteRecords');
+      if (!recs) return;
+      recs.push(site);
+      if (typeof window.logEdit === 'function') window.logEdit(ed);
+      try { (new Function('hasUnsyncedChanges = true'))(); } catch (e) {}
+      try { if (typeof window.updateSyncButtonIcon === 'function') window.updateSyncButtonIcon(); } catch (e) {}
+      try { var sv = g('saveToDB'); if (sv) { sv('masterRecords', recs); sv('masterEditsLog', g('masterEditsLog')); } } catch (e) {}
+      try { if (window.lbParcels && window.lbParcels.matchSite) window.lbParcels.matchSite(site); } catch (e) {}
+      try { var m = g('leafletMap'); if (m) m.closePopup(); } catch (e) {}
+      try { if (typeof window.lbPropTab === 'function') window.lbPropTab('bins'); } catch (e) {}
+      if (typeof window.openPropertyInspectModal === 'function') window.openPropertyInspectModal(site.propId, 'Settings');
+      try { if (typeof window.customAlert === 'function') window.customAlert(v.split(',')[0] + ' added · now add its bins, and its runs on the Property tab'); } catch (e) {}
+    });
+  };
+  document.addEventListener('click', function(ev){
+    var b = ev.target.closest ? ev.target.closest('.lb-addprop-btn') : null; if (!b) return;
+    ev.preventDefault(); ev.stopPropagation();
+    window.lbAddPropertyAt(+b.getAttribute('data-lat'), +b.getAttribute('data-lng'));
+  }, true);
 })();
 </script>
 </body>
