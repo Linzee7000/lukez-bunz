@@ -12512,7 +12512,9 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
     edits.forEach(ed => {
       // a property added in the app (a new house on a vacant lot): made from its edit, so it is back after every sync
       if (ed.editType === "PROPERTY_ADDED") {
-        if (!records.some(s => String(s.propId || s.siteId) === String(ed.propId))) records.push(lbNewSiteRecord(ed));
+        const had = records.find(s => String(s.propId || s.siteId) === String(ed.propId));
+        if (!had) records.push(lbNewSiteRecord(ed));
+        else { const nw = lbNewSiteRecord(ed); had.addressText = nw.addressText; had.baseStreetLine = nw.baseStreetLine; had.suburbLine = nw.suburbLine; }   // (its address typed in later)
         return;
       }
       const site = records.find(s => String(s.propId || s.siteId) === String(ed.propId || ed.siteId));
@@ -56011,6 +56013,8 @@ html body.ux2:not(#cs-a):not(#cs-b):not(#cs-c):not(#cs-d):not(#cs-e):not(#cs-f):
 html body.ux2:not(#cs-a):not(#cs-b):not(#cs-c):not(#cs-d):not(#cs-e):not(#cs-f):not(#cs-g):not(#cs-h):not(#cs-i):not(#cs-j) .lbpa :is(.lbpb-none,.uprop-meta-line){font:400 13px/1.35 Roboto,system-ui,-apple-system,sans-serif !important;color:var(--pb-dim) !important;text-transform:none !important;letter-spacing:0 !important}
 /* rows in lists (street houses, flip points, history): one size of name */
 html body.ux2:not(#cs-a):not(#cs-b):not(#cs-c):not(#cs-d):not(#cs-e):not(#cs-f):not(#cs-g):not(#cs-h):not(#cs-i):not(#cs-j) .lbpa :is(.lbpa-hmid>b,.lbpa-fm b,.lbpa-at b,.lbpb-at b){font-size:14px !important;font-weight:600 !important;letter-spacing:.02em}
+/* a property added in the app: its address typed into the heading itself (no question box) */
+html body.ux2:not(#lbpa-a):not(#lbpa-b):not(#lbpa-c):not(#lbpa-d) .lbpa input.lbpa-addrin{width:100% !important;height:44px !important;box-sizing:border-box;padding:0 10px !important;background:var(--pb-tile) !important;color:var(--pb-text) !important;border:var(--pb-bd) !important;border-radius:var(--pb-rad) !important;font:700 18px Roboto,system-ui,sans-serif !important;text-transform:uppercase !important}
 /* a phone held upright: the page is the whole screen, the map and next bin box don't show under a short tab */
 @media (orientation:portrait){
   html body.ux2:not(.lb-pc):not(#lbpa-a):not(#lbpa-b):not(#lbpa-c):not(#lbpa-d):not(#lbpa-e) #propInspectModal.modal-overlay .modal-box:has(.lbpa) > .mn-top{margin:0 !important;top:0 !important;width:auto !important;max-width:none !important;align-self:stretch !important}
@@ -56420,7 +56424,7 @@ html body.ux2:not(#cs-a):not(#cs-b):not(#cs-c):not(#cs-d):not(#cs-e):not(#cs-f):
     var sp = splitAddr(site), sub = suburbOf(site), dt = distTxt(site), stars = +site.ratingStars || 0;
     return '<div class="lbpa-head"><div class="lbpa-hrow">' +
       (sp.no ? '<div class="lbpa-no' + (sp.no.length > 3 ? ' long' : '') + '">' + esc(sp.no) + '</div>' : '') +
-      '<div class="lbpa-addr"><h2>' + esc(sp.street) + '</h2><div class="lbpa-sub">' + esc([sub, dt].filter(Boolean).join(' · ')) + '</div></div>' +
+      '<div class="lbpa-addr">' + (site.addedInApp ? '<input type="text" id="lbpaAddrIn" class="lbpa-addrin" value="' + esc(addr(site).toUpperCase()) + '" placeholder="Number and street" autocomplete="off" autocapitalize="characters" aria-label="Address">' : '<h2>' + esc(sp.street) + '</h2>') + '<div class="lbpa-sub">' + esc([sub, dt].filter(Boolean).join(' · ')) + '</div></div>' +
       '<div class="lbpa-side"><button type="button" class="lbpa-emos" data-pa-tab="rev" aria-label="Rating, tap for the review">' + emoRow(site) + '</button>' +
       '<button type="button" class="lbpb-t" data-pa-map="1"><i>' + SVG('<path d="m3 6 6-3 6 3 6-3v15l-6 3-6-3-6 3V6Z"/><path d="M9 3v15M15 6v15"/>') + '</i><span>Map</span></button></div></div>' + nextHtml(site) + '</div>';
   }
@@ -56797,6 +56801,13 @@ html body.ux2:not(#cs-a):not(#cs-b):not(#cs-c):not(#cs-d):not(#cs-e):not(#cs-f):
     var t = ev.target; if (!t || !t.closest || !t.closest('.lbpb')) return;
     var site = siteById(String(window.__uPropId || '')); if (!site) return;
     if (t.hasAttribute('data-pa-fedit')) { var list = parseFlags(site.runFlags), n = +t.getAttribute('data-pa-fedit'); if (!list[n]) return; list[n].t = t.value; if (!clean(t.value)) list.splice(n, 1); site.runFlags = joinFlags(list); saveProp(site, 'flags'); }
+    if (t.id === 'lbpaAddrIn') {
+      var nv = clean(t.value).toUpperCase(); if (!nv) return;
+      var sub = suburbOf(site), full = nv.indexOf(',') > 0 ? nv : nv + (sub ? ', ' + sub : '');
+      site.addressText = full; site.baseStreetLine = full.split(',')[0].trim(); site.suburbLine = (full.split(',')[1] || '').trim();
+      if (typeof window.logEdit === 'function') window.logEdit({ timestamp: new Date().toISOString(), editType: 'PROPERTY_ADDED', propId: site.propId, siteId: '', address: full, lat: site.lat, lng: site.lng, day: (site.soloSchedule || {}).day || '', weekLetter: (site.soloSchedule || {}).weekLetter || '' });
+      saveProp(site, 'none'); return;
+    }
     if (t.id === 'lbpaNote') { var r = parseRating(site); site.ratingComment = ratingComment(r.why, t.value, r.st); saveProp(site, 'rating'); }
     if (t.id === 'lbpaNewFlag' && clean(t.value)) { var l2 = parseFlags(site.runFlags); l2.push({ t: clean(t.value), g: true, r: true, f: true }); site.runFlags = joinFlags(l2); saveProp(site, 'flags'); }
   }, true);
@@ -57346,9 +57357,9 @@ html body.ux2:not(#rp-a):not(#rp-b):not(#rp-c) #lbFuel .lbpb button.lbpb-t.lbfu-
   window.lbAddPropertyAt = function(lat, lng){
     var n = near(lat, lng), guess = '';
     if (n) { var a = String(n.addressText || '').toUpperCase(), m = /^\s*[\w\/-]*\d[\w\/-]*\s+(.+)$/.exec(a.split(',')[0] || ''); guess = ' ' + (m ? m[1] : '') + (a.indexOf(',') > 0 ? ',' + a.split(',').slice(1).join(',') : ''); }
-    var ask = typeof window.customPrompt === 'function' ? window.customPrompt('Address of the new property (number, street, suburb)', guess) : Promise.resolve(window.prompt('Address', guess));
-    Promise.resolve(ask).then(function(v){
-      v = String(v || '').trim().toUpperCase(); if (!v || !/\d/.test(v)) return;
+    // no question box: the property is made straight away and its page opens with the address to type in its heading
+    var v = guess.trim().replace(/^,\s*/, '');
+    (function(){
       var ed = { timestamp: new Date().toISOString(), editType: 'PROPERTY_ADDED', propId: 'APP' + Date.now().toString(36).toUpperCase(), siteId: '', address: v, lat: (+lat).toFixed(6), lng: (+lng).toFixed(6),
         day: n && n.soloSchedule ? n.soloSchedule.day || '' : '', weekLetter: n && n.soloSchedule ? n.soloSchedule.weekLetter || '' : '' };
       var site = window.lbNewSiteRecord(ed), recs = g('siteRecords');
@@ -57360,10 +57371,9 @@ html body.ux2:not(#rp-a):not(#rp-b):not(#rp-c) #lbFuel .lbpb button.lbpb-t.lbfu-
       try { var sv = g('saveToDB'); if (sv) { sv('masterRecords', recs); sv('masterEditsLog', g('masterEditsLog')); } } catch (e) {}
       try { if (window.lbParcels && window.lbParcels.matchSite) window.lbParcels.matchSite(site); } catch (e) {}
       try { var m = g('leafletMap'); if (m) m.closePopup(); } catch (e) {}
-      try { if (typeof window.lbPropTab === 'function') window.lbPropTab('bins'); } catch (e) {}
       if (typeof window.openPropertyInspectModal === 'function') window.openPropertyInspectModal(site.propId, 'Settings');
-      try { if (typeof window.customAlert === 'function') window.customAlert(v.split(',')[0] + ' added · now add its bins, and its runs on the Property tab'); } catch (e) {}
-    });
+      setTimeout(function(){ var a = document.getElementById('lbpaAddrIn'); if (a) { a.focus(); try { a.setSelectionRange(0, 0); } catch (e) {} } }, 300);
+    })();
   };
   document.addEventListener('click', function(ev){
     var b = ev.target.closest ? ev.target.closest('.lb-addprop-btn') : null; if (!b) return;
