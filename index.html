@@ -37544,7 +37544,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       + '<div class="map-popup-title">' + h(addr) + '</div>'
       + '<div class="map-popup-meta">' + h([sub, sch.day].filter(Boolean).join(' · ')) + '</div>'
       + (notes ? '<div class="ux-lot-flag"><i></i><span>' + h(notes) + '</span></div>' : '')
-      + (+site.ratingStars > 0 ? '<div class="ux-lot-stars">' + '★'.repeat(Math.min(5, +site.ratingStars)) + '<span style="opacity:.35">' + '★'.repeat(5 - Math.min(5, +site.ratingStars)) + '</span>' + (site.ratingComment ? '<em>' + h(site.ratingComment) + '</em>' : '') + '</div>' : '')
+      + (function(){ var em = window.lbRateEmo ? window.lbRateEmo(site) : [], cm = String(site.ratingComment || '').replace(/^\s*\{[^}]*\}\s*/, '');
+          return em.length ? '<div class="ux-lot-stars ux-lot-emos">' + em.map(function(f){ return '<img src="' + f + '" alt="">'; }).join('') + (cm ? '<em>' + h(cm) + '</em>' : '') + '</div>' : ''; })()
       + rows
       + (id && typeof openPropertyInspectModal === 'function' ? '<div class="map-popup-actions"><button type="button" class="map-popup-btn" onclick="openPropertyInspectModal(\'' + id.replace(/[^\w.-]/g, '') + '\')">Property</button></div>' : '')
       + '</div>';
@@ -45871,6 +45872,17 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
       if (typeof window.openBinReminderModal === 'function') window.openBinReminderModal(k2, escape(ad || (site ? (site.addressText || '') : '')), sr);
       return;
     }
+    if (a === 'remsnz' || a === 'remok') {
+      var rk = t.getAttribute('data-k'), all = g('siteReminders') || {};
+      if (a === 'remok') { if (typeof window.dismissBinReminder === 'function') window.dismissBinReminder(rk); }
+      else if (all[rk]) {
+        // snoozed till tomorrow: it comes back the next time the truck is at the house
+        var tm = new Date(Date.now() + 864e5); all[rk].triggerDate = tm.getFullYear() + '-' + ('0' + (tm.getMonth() + 1)).slice(-2) + '-' + ('0' + tm.getDate()).slice(-2);
+        try { localStorage.setItem('siteReminders', JSON.stringify(all)); } catch (e) {}
+      }
+      try { if (typeof window.customAlert === 'function') window.customAlert(a === 'remok' ? 'Reminder done' : 'Reminder snoozed till next time'); } catch (e) {}
+      paintBins(true); return;
+    }
     if (a === 'find') { rdFind = true; rdFindQ = ''; rdIssOpen = ''; paintBins(true); setTimeout(function(){ var i = $('rdFindQ'); if (i) i.focus(); }, 30); return; }
     if (a === 'fx') { rdFind = false; rdFindQ = ''; rdPin = ''; paintBins(true); return; }
     if (a === 'fscan') {
@@ -45916,7 +45928,10 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
     if (act) rdGrp.forEach(function(m){
       var mb = rdSrc(m)[act.key] || []; if (!mb.length) return;
       var iss = rdIssueOf(m, mb), rem = rdRemOf(m, mb);
-      turns.push({ s: m, iss: iss, rem: rem, msg: false });
+      // two or three bins of this stream: one at a time, taking turns, so the band stays one line high (Fox, 1 Nov: two serials
+      // stacked made the box grow and shrink as it turned to a reminder). Four or more keep the count / list below.
+      if (mb.length >= 2 && mb.length <= 3) mb.forEach(function(b, bi){ turns.push({ s: m, iss: iss, rem: rem, msg: false, bi: bi }); });
+      else turns.push({ s: m, iss: iss, rem: rem, msg: false });
       if (iss) turns.push({ s: m, iss: iss, rem: rem, msg: true });
       if (rem) turns.push({ s: m, iss: iss, rem: rem, msg: 'rem' });
     });
@@ -45932,10 +45947,12 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
     var many = bins.length > 3, big = !many && (bins.length <= 1 || stopped);                  // two bins or more: only the big digits when stopped
     var propId = rdPid(shownSite), rems = g('siteReminders') || {};
     var off = !!g('lbOffRunNow');
+    var one = !!(turn && turn.bi != null && bins[turn.bi]);
     var items = bins.map(function(b, i){
       var bk = propId + '_' + (b.serial || i), rem = rems[bk], today = new Date().toISOString().slice(0, 10);
-      return { b: b, i: i, k: bk, text: rdSerialText(bins, i), rem: rem ? (!rem.triggerDate || rem.triggerDate <= today ? 'due' : 'set') : '' };
+      return { b: b, i: i, k: bk, text: one ? rdSerialText([b], 0) : rdSerialText(bins, i), rem: rem ? (!rem.triggerDate || rem.triggerDate <= today ? 'due' : 'set') : '' };
     });
+    if (one) { items = items.filter(function(x){ return x.i === turn.bi; }); many = false; big = true; }
     var addBtn = document.querySelector('#mapBinsAtAddress .lb-offrun-add'), addTxt = addBtn ? (addBtn.textContent || '').replace(/^\s*\+\s*/, '').trim() : '';
     if (rdManyFor !== propId) { rdManyFor = propId; rdMany = false; }
     var sig = [many ? (rdMany ? 'M1' : 'M0') : '', addTxt, propId, act ? act.key : '-', eligible.map(function(d){ return d.key + rdRunLabel(site, d); }).join(','), side, big ? 1 : 0, off ? 1 : 0,
@@ -45946,8 +45963,10 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
     if (hn) { txt(hel, hn); hel.style.fontSize = hn.length > 5 ? '13px' : hn.length > 3 ? '17px' : ''; }
     oel.style.fontSize = '';
     // a 5-star house (a Christmas gift and the like, the property page's Review tab): a gold star by its number
-    var star = !!(window.lbStarOf && window.lbStarOf(shownSite));
-    hel.classList.toggle('rd-star', star); oel.classList.remove('rd-star');
+    // a rated house (the property page's Review tab): its emoji by its number - the stream's own when this stream has one
+    var emo = window.lbRateOf ? window.lbRateOf(shownSite, (act || tint) ? (act || tint).key : '') : null;
+    hel.classList.remove('rd-star'); oel.classList.remove('rd-star'); oel.classList.remove('rd-emo');
+    hel.classList.toggle('rd-emo', !!emo); if (emo) hel.style.setProperty('--rd-emo', 'url("' + emo.file + '")');
     if (rdGrp.length > 1) rdGrp.forEach(function(m){
       if (m === shownSite) return;
       var ms = rdSide(m, nl, nr), mn = rdHouseNo(m);
@@ -45976,7 +45995,12 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
     if (act && turn && turn.msg === 'rem') {
       // a reminder (the clock, or the check a report leaves at the address): its words, tap to change or finish it
       h = '<div class="rd-band rd-msg ' + (side === 'R' ? 'r ' : '') + 'big" style="--bc:' + bandBg + ';--bt:' + bandFg + '"><div class="rd-area">' +
-        '<button type="button" class="rd-mtx rd-rtx" data-a="rem" data-k="' + escH(turn.rem.k) + '" data-sr="' + escH(turn.rem.serial) + '" data-ad="' + escH(turn.s.addressText || '') + '" aria-label="Reminder: ' + escH(turn.rem.text) + '">' + RD_SVG_CLOCK + '<span>' + escH(turn.rem.text) + '</span></button></div></div>';
+        '<button type="button" class="rd-mtx rd-rtx" data-a="rem" data-k="' + escH(turn.rem.k) + '" data-sr="' + escH(turn.rem.serial) + '" data-ad="' + escH(turn.s.addressText || '') + '" aria-label="Reminder: ' + escH(turn.rem.text) + '">' + RD_SVG_CLOCK + '<span>' + escH(turn.rem.text) + '</span></button></div>' +
+        // change it, put it off till next time, or tick it off
+        '<div class="rd-oth rd-ico rd-remb">' +
+          '<button type="button" data-a="rem" data-k="' + escH(turn.rem.k) + '" data-sr="' + escH(turn.rem.serial) + '" data-ad="' + escH(turn.s.addressText || '') + '" aria-label="Change the reminder"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20h4L19 9l-4-4L4 16v4Z"/></svg></button>' +
+          '<button type="button" data-a="remsnz" data-k="' + escH(turn.rem.k) + '" aria-label="Snooze it till next time"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5h6l-6 7h6M13 11h5l-5 7h5"/></svg></button>' +
+          '<button type="button" data-a="remok" data-k="' + escH(turn.rem.k) + '" aria-label="Done, clear the reminder"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4 12 5 5L20 6"/></svg></button></div></div>';
     } else if (act && turn && turn.msg) {
       var d = new Date(turn.iss.ts), dd = ('0' + d.getDate()).slice(-2) + '/' + ('0' + (d.getMonth() + 1)).slice(-2);
       h = '<div class="rd-band rd-msg ' + (side === 'R' ? 'r ' : '') + 'big" style="--bc:' + bandBg + ';--bt:' + bandFg + '"><div class="rd-area">' +
@@ -52875,6 +52899,11 @@ html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):
 }
 html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) .leaflet-popup .map-popup-actions:has(.lb-addbin-btn){display:flex !important;flex-wrap:nowrap !important;gap:6px !important}
 html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g) .leaflet-popup .map-popup-actions:has(.lb-addbin-btn) > button{flex:0 0 auto !important;width:auto !important;margin:0 !important;white-space:nowrap !important}
+/* the map pop-up's Property / Add buttons share its width (they ran off the right side, so it scrolled sideways) */
+html body.ux2:not(#pp-a):not(#pp-b):not(#pp-c):not(#pp-d):not(#pp-e):not(#pp-f):not(#pp-g):not(#pp-h):not(#pp-i) .leaflet-popup .map-popup-actions{flex-wrap:nowrap !important;gap:6px !important;width:100% !important;min-width:min(256px,calc(100vw - 80px)) !important;max-width:100% !important;overflow:visible !important}
+html body.ux2:not(#pp-a):not(#pp-b):not(#pp-c):not(#pp-d):not(#pp-e):not(#pp-f):not(#pp-g):not(#pp-h):not(#pp-i) .leaflet-popup .map-popup-actions > button{flex:1 1 0 !important;min-width:0 !important;width:auto !important;max-width:none !important;margin:0 !important}
+html body.ux2:not(#pp-a):not(#pp-b):not(#pp-c):not(#pp-d):not(#pp-e):not(#pp-f):not(#pp-g):not(#pp-h):not(#pp-i) .leaflet-popup .map-popup-actions > button > :first-child{width:36px !important;min-width:36px !important;flex:none !important}
+html body.ux2:not(#pp-a):not(#pp-b):not(#pp-c):not(#pp-d):not(#pp-e):not(#pp-f):not(#pp-g):not(#pp-h):not(#pp-i) .leaflet-popup .map-popup-actions > button > :last-child:not(:first-child){padding:0 6px !important;flex:1 1 auto !important;min-width:0 !important;justify-content:center !important;overflow:hidden;text-overflow:ellipsis}
 html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g).ux-days :is(#lbStartFab,#uxHazardBtn){display:none !important}
 </style>
 <script>
@@ -55895,6 +55924,15 @@ html body.ux2:not(#lbpa-a):not(#lbpa-b):not(#lbpa-c):not(#lbpa-d):not(#lbpa-e):n
 html body.ux2:not(#lbpa-a):not(#lbpa-b):not(#lbpa-c):not(#lbpa-d):not(#lbpa-e):not(#lbpa-f):not(#lbpa-g):not(#lbpa-h):not(#lbpa-i):not(#lbpa-j) .lbpa .lbpb-ed .modal-actions > button > :first-child{width:34px !important;min-width:34px !important;flex:none !important}
 html body.ux2:not(#lbpa-a):not(#lbpa-b):not(#lbpa-c):not(#lbpa-d):not(#lbpa-e):not(#lbpa-f):not(#lbpa-g):not(#lbpa-h):not(#lbpa-i):not(#lbpa-j) .lbpa .lbpb-ed .modal-actions > button.mn-t{min-width:0 !important}
 html body.ux2:not(#lbpa-a):not(#lbpa-b):not(#lbpa-c):not(#lbpa-d):not(#lbpa-e):not(#lbpa-f):not(#lbpa-g):not(#lbpa-h):not(#lbpa-i):not(#lbpa-j) .lbpa .lbpb-ed .modal-actions > button > :last-child:not(:first-child){padding:0 6px !important;flex:1 1 auto;justify-content:center}
+/* the next collections: one line, date then that day's runs */
+html body.ux2:not(#lbpa-a):not(#lbpa-b):not(#lbpa-c) .lbpa .lbpa-head .lbpa-nxs{display:flex !important;align-items:stretch;gap:0;border-top:var(--pb-bd)}
+.lbpa .lbpa-head .lbpa-nxs>.lbpa-nxd{flex:none;display:flex;align-items:center;padding:0 7px;background:var(--pb-tile);color:var(--pb-text);font:400 15px/1 'Share Tech Mono',ui-monospace,monospace;border-right:var(--pb-bd)}
+html body.ux2:not(#lbpa-a):not(#lbpa-b):not(#lbpa-c) .lbpa .lbpa-head button.lbpa-nx{flex:1 1 0 !important}
+.lbpa .lbpa-head .lbpa-nx .lbpa-nxr{height:34px;font-size:15px;gap:4px;padding:0 4px}
+.lbpa .lbpa-head .lbpa-nx .lbpa-nxr img{width:18px;height:18px}
+html body.ux2:not(#lbpa-a):not(#lbpa-b):not(#lbpa-c) .lbpa .lbpa-head button.lbpa-nx.on{box-shadow:inset 0 -4px 0 #fff !important}
+/* the street tab's heading in the normal font */
+.lbpa .lbpa-sth b{font:700 14px/1.2 Roboto,system-ui,-apple-system,sans-serif !important;letter-spacing:.06em}
 /* a phone held upright: the page is the whole screen, the map and next bin box don't show under a short tab */
 @media (orientation:portrait){
   html body.ux2:not(.lb-pc):not(#lbpa-a):not(#lbpa-b):not(#lbpa-c):not(#lbpa-d):not(#lbpa-e) #propInspectModal.modal-overlay .modal-box:has(.lbpa) > .mn-top{margin:0 !important;top:0 !important;width:auto !important;max-width:none !important;align-self:stretch !important}
@@ -56292,6 +56330,10 @@ html body.ux2:not(#lbpa-a):not(#lbpa-b):not(#lbpa-c):not(#lbpa-d):not(#lbpa-e):n
     var d = metres({ lat: loc.lat, lng: loc.lng != null ? loc.lng : loc.lon }, site); if (!isFinite(d)) return '';
     return d > 999 ? (d / 1000).toFixed(1) + ' km' : Math.round(d) + ' m';
   }
+  function emoRow(site){
+    var list = window.lbRateEmo(site);
+    return list.length ? list.map(function(f){ return emoImg(f); }).join('') : '<span class="lbpa-emo0">' + emoImg('rate-good.png', 'off') + '<small>Rate</small></span>';
+  }
   function starsHtml(n, big){
     var s = ''; for (var i = 1; i <= 5; i++) s += '<button type="button" class="lbpa-star' + (i <= n ? ' on' : '') + '" data-pa-star="' + i + '" aria-label="' + i + ' stars"' + (big ? ' style="font-size:38px;width:42px;height:48px"' : '') + '>★</button>';
     return s;
@@ -56301,7 +56343,7 @@ html body.ux2:not(#lbpa-a):not(#lbpa-b):not(#lbpa-c):not(#lbpa-d):not(#lbpa-e):n
     return '<div class="lbpa-head"><div class="lbpa-hrow">' +
       (sp.no ? '<div class="lbpa-no' + (sp.no.length > 3 ? ' long' : '') + '">' + esc(sp.no) + '</div>' : '') +
       '<div class="lbpa-addr"><h2>' + esc(sp.street) + '</h2><div class="lbpa-sub">' + esc([sub, dt].filter(Boolean).join(' · ')) + '</div></div>' +
-      '<div class="lbpa-side"><div class="lbpa-stars" data-pa-tab="rev" role="button" aria-label="Rating ' + stars + ' of 5, tap for the review">' + starsHtml(stars) + '</div>' +
+      '<div class="lbpa-side"><button type="button" class="lbpa-emos" data-pa-tab="rev" aria-label="Rating, tap for the review">' + emoRow(site) + '</button>' +
       '<button type="button" class="lbpb-t" data-pa-map="1"><i>' + SVG('<path d="m3 6 6-3 6 3 6-3v15l-6 3-6-3-6 3V6Z"/><path d="M9 3v15M15 6v15"/>') + '</i><span>Map</span></button></div></div>' + nextHtml(site) + '</div>';
   }
   // bits the Report sheet (HUD script, earlier in the file) draws its head and bin rows with, so it matches this page
@@ -56312,13 +56354,20 @@ html body.ux2:not(#lbpa-a):not(#lbpa-b):not(#lbpa-c):not(#lbpa-d):not(#lbpa-e):n
     var sch = site.soloSchedule || {}, dates = {};
     try { if (window.rbDatesFrom && typeof window.buildNextBinDaySummaryHtml === 'function') dates = window.rbDatesFrom(window.buildNextBinDaySummaryHtml(sch)) || {}; } catch (e) {}
     var key = { Garbage: 'gar', Recycling: 'rec', FOGO: 'fog' };
-    var tiles = STREAMS.filter(function(st){ return runText(site, st); }).map(function(st){
-      return '<button type="button" class="lbpa-nx' + (runPick === st.k ? ' on' : '') + '" data-pa-run="' + st.k + '" aria-label="' + st.k + ' run ' + esc(runText(site, st)) + ', next ' + esc(dates[key[st.k]] || '') + '"><span class="lbpa-nxr" style="--sc:' + st.bg + ';--sf:' + st.fg + '"' + (isDark(st.fg) ? ' data-dark' : '') + '><img src="' + st.icon + '" alt="">' + esc(runText(site, st)) + '</span>' +
-        '<span class="lbpa-nxd">' + esc(dates[key[st.k]] || '—') + '</span></button>';
-    });
-    if (!tiles.length) return '';
+    // one line: each date, then the runs collected that day (Fox: "Date | 204 | 220A | Date | 350A")
+    var withRun = STREAMS.filter(function(st){ return runText(site, st); });
+    if (!withRun.length) return '';
+    var dnum = function(d){ var m = /(\d{1,2})\/(\d{1,2})/.exec(d || ''); return m ? +m[2] * 100 + +m[1] : 9999; };
+    var groups = [];
+    withRun.forEach(function(st){ var d = dates[key[st.k]] || '—', gr = groups.filter(function(x){ return x.d === d; })[0]; if (!gr) groups.push(gr = { d: d, l: [] }); gr.l.push(st); });
+    groups.sort(function(a, b){ return dnum(a.d) - dnum(b.d); });
+    var cells = groups.map(function(gr){
+      return '<span class="lbpa-nxd">' + esc(gr.d) + '</span>' + gr.l.map(function(st){
+        return '<button type="button" class="lbpa-nx' + (runPick === st.k ? ' on' : '') + '" data-pa-run="' + st.k + '" aria-label="' + st.k + ' run ' + esc(runText(site, st)) + ', next ' + esc(gr.d) + '"><span class="lbpa-nxr" style="--sc:' + st.bg + ';--sf:' + st.fg + '"' + (isDark(st.fg) ? ' data-dark' : '') + '><img src="' + st.icon + '" alt="">' + esc(runText(site, st)) + '</span></button>';
+      }).join('');
+    }).join('');
     var pk = runPick && STREAMS.filter(function(st){ return st.k === runPick && runText(site, st); })[0];
-    return '<div class="lbpa-nxs" style="--n:' + tiles.length + '">' + tiles.join('') + '</div>' +
+    return '<div class="lbpa-nxs">' + cells + '</div>' +
       (pk ? '<div class="lbpa-runact"><button type="button" class="lbpb-t" data-pa-runview="' + pk.k + '"><i>' + SVG('<path d="m3 6 6-3 6 3 6-3v15l-6 3-6-3-6 3V6Z"/><path d="M9 3v15M15 6v15"/>') + '</i><span>View ' + esc(runText(site, pk)) + '</span></button>' +
         '<button type="button" class="lbpb-t lb-lead-only" data-pa-runchg="1"><i>' + SVG('<path d="M4 20h4L19 9l-4-4L4 16v4Z"/>') + '</i><span>Change</span></button></div>' : '');
   }
@@ -56415,19 +56464,52 @@ html body.ux2:not(#lbpa-a):not(#lbpa-b):not(#lbpa-c):not(#lbpa-d):not(#lbpa-e):n
 
   // Review: the stars, why (kept at the front of the rating comment: "[Christmas gift, Friendly] note"), a note, and how it shows
   var REASONS = ['Christmas gift', 'Friendly', 'Bins always out', 'Tidy bins', 'Hard to get to'];
+  // The rating is emojis, not stars (Fox, 1 Nov): the property as a whole good (cool star) or bad (swearing star), and each stream
+  // good or bad (garbage: a basket of stars / poo in the basket, recycle: a star / poo in the arrows, FOGO: a fern in the basket /
+  // a smelly plant). Stored where the stars were, so it syncs the same way: ratingStars 5 = good, 1 = bad, 0 = not rated (an old
+  // 1-5 star rating reads 5 good, 1-2 bad, 3-4 not rated), and the streams at the front of the rating comment as {G+ R- F+},
+  // then the reasons [Christmas gift, Friendly], then the note.
+  var EMO = { all: { g: 'rate-good.png', b: 'rate-bad.png' }, G: { g: 'gar-good.png', b: 'gar-bad.png' }, R: { g: 'rec-good.png', b: 'rec-bad.png' }, F: { g: 'fogo-good.png', b: 'fogo-bad.png' } };
+  var RKEY = { Garbage: "G", Recycling: "R", FOGO: "F" };
   function parseRating(site){
-    var c = String(site.ratingComment || ''), m = /^\s*\[([^\]]*)\]\s*/.exec(c);
-    return { stars: +site.ratingStars || 0, why: m ? m[1].split(',').map(function(x){ return x.trim(); }).filter(Boolean) : [], note: m ? c.slice(m[0].length) : c };
+    var c = String(site.ratingComment || ''), st = {}, m0 = /^\s*\{([^}]*)\}\s*/.exec(c);
+    if (m0) { m0[1].replace(/([GRF])([+-])/g, function(_, k, v){ st[k] = v === '+' ? 'g' : 'b'; }); c = c.slice(m0[0].length); }
+    var m = /^\s*\[([^\]]*)\]\s*/.exec(c), n = +site.ratingStars || 0;
+    return { stars: n, all: n >= 5 ? 'g' : (n > 0 && n <= 2) ? 'b' : '', st: st,
+      why: m ? m[1].split(',').map(function(x){ return x.trim(); }).filter(Boolean) : [], note: m ? c.slice(m[0].length) : c };
   }
-  function ratingComment(why, note){ return (why.length ? '[' + why.join(', ') + '] ' : '') + clean(note); }
+  function ratingComment(why, note, st){
+    var sp = st ? ['G', 'R', 'F'].filter(function(k){ return st[k]; }).map(function(k){ return k + (st[k] === 'g' ? '+' : '-'); }).join(' ') : '';
+    return (sp ? '{' + sp + '} ' : '') + (why.length ? '[' + why.join(', ') + '] ' : '') + clean(note);
+  }
+  function emoImg(file, cls){ return '<img class="lbpa-emo' + (cls ? ' ' + cls : '') + '" src="' + file + '" alt="">'; }
+  // the emoji for a house: the stream's own when one is being worked and it has one, else the property's
+  function rateOf(site, streamKey){
+    var r = parseRating(site || {}), k = RKEY[streamKey];
+    if (k && r.st[k]) return { file: EMO[k][r.st[k]], v: r.st[k], r: r };
+    if (r.all) return { file: EMO.all[r.all], v: r.all, r: r };
+    return null;
+  }
+  window.lbRateOf = rateOf;
+  window.lbRateEmo = function(site){
+    var r = parseRating(site || {}), out = [];
+    if (r.all) out.push(EMO.all[r.all]);
+    ['G', 'R', 'F'].forEach(function(k){ if (r.st[k]) out.push(EMO[k][r.st[k]]); });
+    return out;
+  };
   function revHtml(site){
     var r = parseRating(site), sp = splitAddr(site);
-    return '<div class="lbpa-bigstars">' + starsHtml(r.stars, true) + '</div>' +
+    var pick = function(k, v, file, lab){ var on = (k === 'all' ? r.all : r.st[k] || '') === v;
+      return '<button type="button" class="lbpa-rb' + (on ? ' on' : '') + (v ? ' ' + v : ' none') + '" data-pa-rate="' + k + '" data-v="' + v + '" aria-pressed="' + on + '" aria-label="' + lab + '">' + (file ? emoImg(file) : '<span>–</span>') + '</button>'; };
+    var row = function(k, ic, bg){ return '<div class="lbpa-rrow">' + (ic ? '<span class="lbpa-rlogo" style="background:' + bg + '"><img src="' + ic + '" alt=""' + (bg === '#ffd21f' ? ' data-dark' : '') + '></span>' : '<span class="lbpa-rlogo all">' + SVG(P.house, 2.2) + '</span>') +
+      pick(k, 'b', EMO[k].b, 'Bad') + pick(k, '', '', 'Not rated') + pick(k, 'g', EMO[k].g, 'Good') + '</div>'; };
+    var shown = rateOf(site, '');
+    return '<div class="lbpa-rate">' + row('all') + row('G', 'garbage.png', STREAMS[0].bg) + row('R', 'recycle.png', STREAMS[1].bg) + row('F', 'fogo.png', STREAMS[2].bg) + '</div>' +
       '<div class="lbpb-lab">Why</div><div class="lbpb-chips">' + REASONS.map(function(w){ return '<button type="button" class="lbpa-chip wide' + (r.why.indexOf(w) >= 0 ? ' on' : '') + '" data-pa-why="' + esc(w) + '" style="--cc:#f4cd46">' + esc(w) + '</button>'; }).join('') + '</div>' +
       '<input type="text" class="lbpa-inp" id="lbpaNote" value="' + esc(r.note) + '" placeholder="Note, e.g. leaves a slab of drinks at Christmas" aria-label="Review note">' +
       '<div class="lbpb-lab">How it shows</div><div class="lbpa-shows">' +
-        '<div class="lbpa-show map"><span class="lbpa-mapmk">' + SVG(P.house, 2.2) + (r.stars >= 5 ? GOLD : '') + '</span><small>' + (r.stars >= 5 ? 'Gold star on the map' : '5 stars: a gold star on the map') + '</small></div>' +
-        '<div class="lbpa-show nb"><div><span>' + esc(sp.street) + '</span><b class="' + (r.stars >= 5 ? 'rd-star' : '') + '">' + esc(sp.no || '') + '</b></div><small>' + (r.stars >= 5 ? 'Next bin box' + (r.why.length ? ' · ' + esc(r.why.join(', ')) : '') : '5 stars: a star in the next bin box') + '</small></div></div>';
+        '<div class="lbpa-show map"><span class="lbpa-mapmk">' + SVG(P.house, 2.2) + (shown ? emoImg(shown.file, 'mk') : '') + '</span><small>' + (shown ? 'On the map' : 'Rated houses show their emoji on the map') + '</small></div>' +
+        '<div class="lbpa-show nb"><div><span>' + esc(sp.street) + '</span><b>' + esc(sp.no || '') + (shown ? emoImg(shown.file, 'nb') : '') + '</b></div><small>' + (shown ? 'Next bin box: the stream\'s own emoji when it has one' + (r.why.length ? ' · ' + esc(r.why.join(', ')) : '') : 'And in the next bin box') + '</small></div></div>';
   }
 
   // History: each bin's last flip (date, and the time like the clock), then reports made at the property
@@ -56530,8 +56612,9 @@ html body.ux2:not(#lbpa-a):not(#lbpa-b):not(#lbpa-c):not(#lbpa-d):not(#lbpa-e):n
   var GOLD = '<svg width="26" height="26" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 2.5 2.9 5.9 6.5.9-4.7 4.6 1.1 6.5L12 17.3l-5.8 3.1 1.1-6.5-4.7-4.6 6.5-.9z" fill="#f4cd46" stroke="#000" stroke-width="1.8" stroke-linejoin="round"/></svg>';
   function paintStars(force){
     var map = g('leafletMap'); if (!map || typeof L === 'undefined') return;
-    var list = recs().filter(function(s){ return +s.ratingStars >= 5 && +s.lat; });
-    var sig = list.map(idOf).join('|');
+    var fs = String(g('activeFilterStream') || ''), sk = /gar/i.test(fs) ? 'Garbage' : /rec/i.test(fs) ? 'Recycling' : /fog/i.test(fs) ? 'FOGO' : '';
+    var list = recs().filter(function(s){ return +s.lat && (+s.ratingStars >= 5 || (+s.ratingStars > 0 && +s.ratingStars <= 2) || /^\s*\{/.test(String(s.ratingComment || ''))) && rateOf(s, sk); });
+    var sig = sk + ':' + list.map(function(s){ return idOf(s) + rateOf(s, sk).file; }).join('|');
     if (!force && sig === starSig && starMap === map) return;
     starSig = sig;
     if (!starLayer || starMap !== map) {
@@ -56542,19 +56625,19 @@ html body.ux2:not(#lbpa-a):not(#lbpa-b):not(#lbpa-c):not(#lbpa-d):not(#lbpa-e):n
     starLayer.clearLayers();
     if (list.length > 400) return;
     list.forEach(function(s){
-      var r = parseRating(s);
-      L.marker([+s.lat, +s.lng], { pane: 'lb-star-pane', keyboard: false, title: addr(s) + ' · ★' + r.stars + (r.why.length ? ' · ' + r.why.join(', ') : ''),
-        icon: L.divIcon({ className: 'lbi-mk', html: GOLD, iconSize: [26, 26], iconAnchor: [-4, 30] }) })
+      var ro = rateOf(s, sk), r = ro.r;
+      L.marker([+s.lat, +s.lng], { pane: 'lb-star-pane', keyboard: false, title: addr(s) + (r.why.length ? ' · ' + r.why.join(', ') : ''),
+        icon: L.divIcon({ className: 'lbi-mk lbpa-emomk', html: '<img src="' + ro.file + '" alt="" width="30" height="30">', iconSize: [30, 30], iconAnchor: [-2, 34] }) })
         .on('click', function(){ if (typeof window.openPropertyInspectModal === 'function') { pageFor = idOf(s); pageTab = 'rev'; window.openPropertyInspectModal(idOf(s), 'Settings'); } }).addTo(starLayer);
     });
   }
   setInterval(function(){ try { paintStars(false); } catch (e) {} }, 5000);
   setTimeout(function(){ try { paintStars(true); } catch (e) {} }, 3000);
-  window.lbStarOf = function(site){ var r = parseRating(site || {}); return r.stars >= 5 ? r : null; };
+  window.lbStarOf = function(site){ var r = parseRating(site || {}); return r.all === 'g' ? r : null; };
 
   // the clicks and typing on the page
   document.addEventListener('click', function(ev){
-    var t = ev.target.closest ? ev.target.closest('[data-pa-run],[data-pa-runview],[data-pa-runchg],[data-pa-remed],[data-pa-remdel],[data-pa-tab],[data-pa-star],[data-pa-map],[data-pa-gps],[data-pa-fs],[data-pa-fdel],[data-pa-fadd],[data-pa-why],[data-pa-sel],[data-pa-all],[data-pa-setm],[data-pa-house]') : null;
+    var t = ev.target.closest ? ev.target.closest('[data-pa-run],[data-pa-runview],[data-pa-runchg],[data-pa-remed],[data-pa-remdel],[data-pa-rate],[data-pa-tab],[data-pa-star],[data-pa-map],[data-pa-gps],[data-pa-fs],[data-pa-fdel],[data-pa-fadd],[data-pa-why],[data-pa-sel],[data-pa-all],[data-pa-setm],[data-pa-house]') : null;
     if (!t || !t.closest('.lbpb')) return;
     ev.preventDefault(); ev.stopPropagation();
     var id = String(window.__uPropId || ''), site = siteById(id); if (!site) return;
@@ -56573,6 +56656,13 @@ html body.ux2:not(#lbpa-a):not(#lbpa-b):not(#lbpa-c):not(#lbpa-d):not(#lbpa-e):n
       return;
     }
     if (t.hasAttribute('data-pa-remdel')) { if (typeof window.dismissBinReminder === 'function') window.dismissBinReminder(t.getAttribute('data-pa-remdel')); refreshProp(); return; }
+    if (t.hasAttribute('data-pa-rate')) {
+      var rr = parseRating(site), rk3 = t.getAttribute('data-pa-rate'), rv = t.getAttribute('data-v');
+      if (rk3 === 'all') site.ratingStars = rv === 'g' ? 5 : rv === 'b' ? 1 : 0;
+      else { if (rv) rr.st[rk3] = rv; else delete rr.st[rk3]; }
+      var nt = document.getElementById('lbpaNote');
+      site.ratingComment = ratingComment(rr.why, nt ? nt.value : rr.note, rr.st); saveProp(site, 'rating'); return;
+    }
     if (t.hasAttribute('data-pa-star')) {
       if (pageTab !== 'rev') { window.lbPropTab('rev'); return; }
       site.ratingStars = +t.getAttribute('data-pa-star'); saveProp(site, 'rating'); return;
@@ -56607,7 +56697,7 @@ html body.ux2:not(#lbpa-a):not(#lbpa-b):not(#lbpa-c):not(#lbpa-d):not(#lbpa-e):n
     if (t.hasAttribute('data-pa-why')) {
       var r = parseRating(site), w = t.getAttribute('data-pa-why'), at = r.why.indexOf(w);
       if (at >= 0) r.why.splice(at, 1); else r.why.push(w);
-      site.ratingComment = ratingComment(r.why, (document.getElementById('lbpaNote') || {}).value != null ? document.getElementById('lbpaNote').value : r.note);
+      site.ratingComment = ratingComment(r.why, (document.getElementById('lbpaNote') || {}).value != null ? document.getElementById('lbpaNote').value : r.note, r.st);
       saveProp(site, 'rating'); return;
     }
     if (t.hasAttribute('data-pa-sel')) { streetSel = streetSel ? null : {}; refreshProp(); return; }
@@ -56629,7 +56719,7 @@ html body.ux2:not(#lbpa-a):not(#lbpa-b):not(#lbpa-c):not(#lbpa-d):not(#lbpa-e):n
     var t = ev.target; if (!t || !t.closest || !t.closest('.lbpb')) return;
     var site = siteById(String(window.__uPropId || '')); if (!site) return;
     if (t.hasAttribute('data-pa-fedit')) { var list = parseFlags(site.runFlags), n = +t.getAttribute('data-pa-fedit'); if (!list[n]) return; list[n].t = t.value; if (!clean(t.value)) list.splice(n, 1); site.runFlags = joinFlags(list); saveProp(site, 'flags'); }
-    if (t.id === 'lbpaNote') { var r = parseRating(site); site.ratingComment = ratingComment(r.why, t.value); saveProp(site, 'rating'); }
+    if (t.id === 'lbpaNote') { var r = parseRating(site); site.ratingComment = ratingComment(r.why, t.value, r.st); saveProp(site, 'rating'); }
     if (t.id === 'lbpaNewFlag' && clean(t.value)) { var l2 = parseFlags(site.runFlags); l2.push({ t: clean(t.value), g: true, r: true, f: true }); site.runFlags = joinFlags(l2); saveProp(site, 'flags'); }
   }, true);
 
@@ -56761,6 +56851,31 @@ html body.ux2:not(#lbpa-a):not(#lbpa-b):not(#lbpa-c):not(#lbpa-d):not(#lbpa-e):n
 html body.ux2:not(#rp-a):not(#rp-b):not(#rp-c):not(#rp-d):not(#rp-e):not(#rp-f):not(#rp-g) #uxIssue .rp-box{display:flex !important;flex-direction:column;gap:0 !important;padding:0 !important;border:0 !important;background:var(--mn-bg,#1e1f23) !important;-webkit-backdrop-filter:none !important;backdrop-filter:none !important}
 html body.ux2:not(#rp-a):not(#rp-b):not(#rp-c):not(#rp-d):not(#rp-e):not(#rp-f):not(#rp-g) #uxIssue .rp-box > :is(.mn-top,.uxi-head,.rp){margin-left:0 !important;margin-right:0 !important;width:auto !important;max-width:none !important;align-self:stretch !important}
 #uxIssue .rp{padding:8px 10px 18px;gap:0}
+.rd-emo::after{content:"";display:inline-block;width:1.1em;height:1.1em;margin-left:4px;vertical-align:-.12em;background:var(--rd-emo) center/contain no-repeat}
+.lbpa-emo{display:block;width:30px;height:30px;object-fit:contain}
+html body.ux2:not(#lbpa-a):not(#lbpa-b):not(#lbpa-c) .lbpa button.lbpa-emos{display:flex !important;align-items:center;gap:2px;width:auto !important;min-width:0 !important;height:auto !important;min-height:0 !important;padding:0 !important;margin:0 !important;background:none !important;border:0 !important;box-shadow:none !important;cursor:pointer}
+.lbpa-emos .lbpa-emo{width:32px;height:32px}
+.lbpa-emo0{display:flex;align-items:center;gap:4px;color:var(--pb-dim);font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase}
+.lbpa-emo.off{width:24px;height:24px;filter:grayscale(1);opacity:.35}
+.lbpa-rate{display:flex;flex-direction:column;gap:8px}
+.lbpa-rrow{display:flex;align-items:center;gap:8px}
+.lbpa-rlogo{flex:none;width:44px;height:44px;display:flex;align-items:center;justify-content:center;border:3px solid #000;border-radius:6px}
+.lbpa-rlogo img{width:26px;height:26px}
+.lbpa-rlogo img[data-dark]{filter:invert(1)}
+.lbpa-rlogo.all{background:var(--pb-bar);color:var(--pb-text)}
+.lbpa-rlogo.all svg{width:24px;height:24px}
+html body.ux2:not(#lbpa-a):not(#lbpa-b):not(#lbpa-c) .lbpa button.lbpa-rb{flex:1 1 0 !important;min-width:0 !important;width:auto !important;height:52px !important;min-height:0 !important;margin:0 !important;padding:0 !important;display:flex !important;align-items:center;justify-content:center;background:var(--pb-bar) !important;color:var(--pb-dim) !important;border:3px solid #000 !important;border-radius:6px !important;box-shadow:var(--pb-sh) !important;cursor:pointer}
+.lbpa-rb .lbpa-emo{width:40px;height:40px;filter:grayscale(.85);opacity:.45}
+.lbpa-rb span{font-size:20px}
+html body.ux2:not(#lbpa-a):not(#lbpa-b):not(#lbpa-c) .lbpa button.lbpa-rb.on{box-shadow:inset 3px 3px 0 rgba(0,0,0,.55) !important;border-color:var(--pb-acc) !important}
+html body.ux2:not(#lbpa-a):not(#lbpa-b):not(#lbpa-c) .lbpa button.lbpa-rb.on.g{background:#1f5130 !important}
+html body.ux2:not(#lbpa-a):not(#lbpa-b):not(#lbpa-c) .lbpa button.lbpa-rb.on.b{background:#5a1f1f !important}
+.lbpa-rb.on .lbpa-emo{filter:none;opacity:1}
+.lbpa-mapmk .lbpa-emo.mk{position:absolute;top:-16px;right:-20px;width:30px;height:30px}
+.lbpa-show.nb b{display:flex;align-items:center;gap:3px}
+.lbpa-emo.nb{width:20px;height:20px}
+.lbpa-emomk img{display:block;filter:drop-shadow(1px 2px 0 rgba(0,0,0,.6))}
+.ux-lot-emos img{width:28px;height:28px;object-fit:contain}
 .rd-star::after{content:"\2605";display:inline-flex;align-items:center;justify-content:center;width:1.05em;height:1.05em;margin-left:4px;border-radius:50%;background:#141416;color:#f4cd46;font-size:.8em;line-height:1;vertical-align:.12em;font-family:system-ui,sans-serif}
 #uxIssue .rp-tabs{margin:0 0 0}
 #uxIssue .rp-body{margin:0;gap:12px}
@@ -56819,6 +56934,20 @@ html body.ux2:not(#rp-a):not(#rp-b):not(#rp-c) #uxIssue button.rp-chg{min-height
   html body.ux2:not(.lb-pc):not(#rp-a):not(#rp-b):not(#rp-c):not(#rp-d):not(#rp-e):not(#rp-f):not(#rp-g) #uxIssue.modal-overlay .modal-box.rp-box{position:fixed !important;inset:0 auto 0 0 !important;width:min(420px,60vw) !important;max-width:none !important;height:100% !important;max-height:none !important;margin:0 !important;border-radius:0 !important;overflow-y:auto !important;transform:none !important}
 }
 
+/* ---- full-screen pages: their top bar below the phone's status bar (the clock / signal icons sat on top of LUKEZ BUNZ) ---- */
+html body.ux2:not(#zz-a):not(#zz-b):not(#zz-c):not(#zz-d):not(#zz-e):not(#zz-f):not(#zz-g):not(#zz-h):not(#zz-i):not(#zz-j) :is(#propInspectModal,#uxIssue).modal-overlay .modal-box > .mn-top{padding-top:calc(8px + var(--ux-safe-t, env(safe-area-inset-top, 0px))) !important}
+#lbFuel .lbfu-top{padding-top:calc(10px + var(--ux-safe-t, env(safe-area-inset-top, 0px)))}
+/* ---- the street in the next bin box: one weight whatever the street (it went bold for a named one like GRAYDON HEIGHTS) ---- */
+html[data-ux-skin="rubbish"] body.ux2:not(#zz-a):not(#zz-b):not(#zz-c):not(#zz-d):not(#zz-e):not(#zz-f):not(#zz-g):not(#zz-h) #rbDash .rd-st b{font-weight:400 !important}
+/* ---- a bin's map pop-up with three buttons (Property, Add bin, Edit): two to a row, nothing cut off ---- */
+html body.ux2:not(#zz-a):not(#zz-b):not(#zz-c):not(#zz-d):not(#zz-e):not(#zz-f):not(#zz-g):not(#zz-h):not(#zz-i):not(#zz-j) .leaflet-popup .map-popup-actions:has(> :nth-child(3)){flex-wrap:wrap !important}
+html body.ux2:not(#zz-a):not(#zz-b):not(#zz-c):not(#zz-d):not(#zz-e):not(#zz-f):not(#zz-g):not(#zz-h):not(#zz-i):not(#zz-j) .leaflet-popup .map-popup-actions:has(> :nth-child(3)) > button{flex:1 1 calc(50% - 6px) !important}
+/* ---- the bin tools panel on a phone (select / move / delete bins): the normal font and small buttons, like on the PC ---- */
+html body.ux2:not(#zz-a):not(#zz-b):not(#zz-c):not(#zz-d):not(#zz-e):not(#zz-f):not(#zz-g):not(#zz-h):not(#zz-i):not(#zz-j) #propertyFocusToolbar .property-focus-header b{font:700 15px/1.2 Roboto,system-ui,-apple-system,sans-serif !important;letter-spacing:.04em;text-transform:uppercase}
+html body.ux2:not(#zz-a):not(#zz-b):not(#zz-c):not(#zz-d):not(#zz-e):not(#zz-f):not(#zz-g):not(#zz-h):not(#zz-i):not(#zz-j) #propertyFocusToolbar .property-focus-hint{font:600 12px/1.3 Roboto,system-ui,-apple-system,sans-serif !important;margin:0 0 6px}
+html body.ux2:not(#zz-a):not(#zz-b):not(#zz-c):not(#zz-d):not(#zz-e):not(#zz-f):not(#zz-g):not(#zz-h):not(#zz-i):not(#zz-j) #propertyFocusToolbar .property-focus-actions{display:flex !important;flex-wrap:wrap !important;gap:6px !important;margin:0 0 6px !important;grid-template-columns:none !important}
+html body.ux2:not(.lb-pc):not(#zz-a):not(#zz-b):not(#zz-c):not(#zz-d):not(#zz-e):not(#zz-f):not(#zz-g):not(#zz-h):not(#zz-i):not(#zz-j) #propertyFocusToolbar{z-index:4700 !important}
+html body.ux2:not(#zz-a):not(#zz-b):not(#zz-c):not(#zz-d):not(#zz-e):not(#zz-f):not(#zz-g):not(#zz-h):not(#zz-i):not(#zz-j) #propertyFocusToolbar .focus-tool-btn{flex:none !important;width:auto !important;height:34px !important;min-height:34px !important;padding:0 9px !important;font:700 12px/1 Roboto,system-ui,-apple-system,sans-serif !important;text-transform:uppercase;letter-spacing:.02em;white-space:nowrap !important;display:inline-flex !important;align-items:center;gap:6px;flex-direction:row !important}
 /* ---- truck readings and fuel (in the Report sheet's Truck tab and the depot fuel page) ---- */
 .lbfu-two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
 .lbfu-f{display:flex;flex-direction:column;gap:6px;min-width:0}
