@@ -15256,6 +15256,20 @@ window.addEventListener('DOMContentLoaded', async () => {
       const al = f.aliases || {}, valid = { boundaries: {}, aliases: {}, extras: (f.extras && typeof f.extras === 'object') ? f.extras : {} };
       Object.keys(f.boundaries).forEach(k => { const v = f.boundaries[k]; if (Array.isArray(v) && v.length >= 3) valid.boundaries[k] = v; });
       Object.keys(al).forEach(k => { if (valid.boundaries[al[k]]) valid.aliases[k] = al[k]; });
+      // A run somebody edited, redrew or deleted by hand must not be written over just because the shared file got a new
+      // version: kept when it no longer matches what the file last gave (lbSharedBase), was sent/received as a boundary
+      // change (lbBoundarySent) or was deleted here (lbBoundaryDeleted). The next push shares the keeper.
+      try {
+        const sb0 = lbSharedBase(); let sent0 = {}, dead0 = {};
+        try { sent0 = JSON.parse(localStorage.getItem('lbBoundarySent') || '{}') || {}; } catch (e) {}
+        try { dead0 = JSON.parse(localStorage.getItem('lbBoundaryDeleted') || '{}') || {}; } catch (e) {}
+        const mine = k => { const cur = customRunBorders[k]; if (dead0[k] && !(cur && cur.length >= 3)) return true; if (!(cur && cur.length >= 3)) return false;
+          if (sent0[k] && sent0[k].h !== 'gone') return true; return !!(sb0[k] && sb0[k] !== lbBorderHash(cur)); };
+        let kept = 0;
+        Object.keys(valid.boundaries).forEach(k => { if (mine(k)) { delete valid.boundaries[k]; kept++; } });
+        Object.keys(valid.aliases).forEach(k => { if (!valid.boundaries[valid.aliases[k]] || mine(k)) delete valid.aliases[k]; });
+        window.lbSharedKept = kept;
+      } catch (e) {}
       const keys = Object.keys(valid.boundaries).concat(Object.keys(valid.aliases));
       const diff = keys.filter(k => { const src = valid.boundaries[k] || valid.boundaries[valid.aliases[k]]; return lbBorderHash(customRunBorders[k]) !== lbBorderHash(src); });
       if (diff.length) {
@@ -35456,6 +35470,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       row('uxStrayRow', WARN, 'Location problems: check and export') +
       row('uxBdRebuild', I_BUILD, 'Rebuild all run boundaries from the houses') +
       row('uxBdUndo', I_SYNC, 'Undo the last rebuild') +
+      (lead() ? row('uxBdPush', I_SYNC, 'Push out boundary & property changes') + row('uxBdAuto', I_SYNC, autoLabel()) : '') +
       row('uxEdChk', I_SYNC, 'Property edits: check the sync') +
       row('uxEdSend', I_SYNC, 'Property edits: send missing ones and get the others') +
       row('uxBdPull', I_SYNC, 'Get run boundaries from the sync') +
@@ -35463,13 +35478,28 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       row('uxBdImport', GO, 'Import run boundaries (file)');
     body.insertBefore(d, body.firstChild);
     var wrap = d.querySelector('#uxBdPull'); if (wrap) wrap.querySelector('.ux-warn-ico').style.color = 'var(--ux-text-2)';
-    ['uxEdChk', 'uxEdSend'].forEach(function(i){ var e = d.querySelector('#' + i); if (e) e.querySelector('.ux-warn-ico').style.color = 'var(--ux-text-2)'; });
+    ['uxEdChk', 'uxEdSend', 'uxBdPush', 'uxBdAuto'].forEach(function(i){ var e = d.querySelector('#' + i); if (e) e.querySelector('.ux-warn-ico').style.color = 'var(--ux-text-2)'; });
     ['uxBdExport', 'uxBdImport', 'uxBdRebuild', 'uxBdUndo'].forEach(function(i){ var e = d.querySelector('#' + i); if (e) e.querySelector('.ux-warn-ico').style.color = 'var(--ux-text-2)'; });
     var u = d.querySelector('#uxBdUndo'); if (u) { u.style.display = 'none'; if (window.lbHasBoundaryBackup) window.lbHasBoundaryBackup().then(function(y){ if (y && u.isConnected) u.style.display = ''; }); }
   }
   function alertMsg(m){ try { return (window.customAlert || alert)(m); } catch (e) {} }
   function borders(){ return g('customRunBorders') || {}; }
   function countB(o){ var n = 0; Object.keys(o).forEach(function(k){ if (Array.isArray(o[k]) && o[k].length >= 3) n++; }); return n; }
+  function lead(){ try { return typeof window.uxIsLead === 'function' && !!window.uxIsLead(); } catch (e) { return false; } }
+  function autoLabel(){ var a = window.lbBoundaryShare && window.lbBoundaryShare.auto(); return 'Share my changes automatically: ' + (a ? 'On' : 'Off'); }
+  async function pushOut(){
+    var S = window.lbBoundaryShare; if (!S) return;
+    var el = $('uxBdPush'), lab = el && el.querySelector('.lb-label');
+    if (lab) lab.textContent = 'Pushing out...';
+    var r = null; try { r = await S.pushNow(); } catch (e) {}
+    if (lab) lab.textContent = 'Push out boundary & property changes';
+    alertMsg(r ? 'Pushed out ' + r.boundaries + ' boundary change' + (r.boundaries === 1 ? '' : 's') + ' and ' + r.edits + ' property edit' + (r.edits === 1 ? '' : 's') + (r.got ? '; got what the others sent.' : '. Could not reach the sync to get theirs.') : 'Could not reach the sync. Check the connection and try again.');
+  }
+  function toggleAuto(){
+    var S = window.lbBoundaryShare; if (!S) return;
+    S.auto(!S.auto());
+    var el = $('uxBdAuto'); if (el) el.querySelector('.lb-label').textContent = autoLabel();
+  }
   async function edCheck(send){
     if (typeof window.lbEditsCheck !== 'function') return;
     alertMsg(send ? 'Sending...' : 'Checking...');
@@ -35534,10 +35564,12 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     document.body.appendChild(inp); inp.click(); setTimeout(function(){ try { inp.remove(); } catch (e) {} }, 60000);
   }
   document.addEventListener('click', function(ev){
-    var t = ev.target && ev.target.closest ? ev.target.closest('#uxStrayRow,#uxEdChk,#uxEdSend,#uxBdPull,#uxBdExport,#uxBdImport,#uxBdRebuild,#uxBdUndo') : null;
+    var t = ev.target && ev.target.closest ? ev.target.closest('#uxStrayRow,#uxEdChk,#uxEdSend,#uxBdPush,#uxBdAuto,#uxBdPull,#uxBdExport,#uxBdImport,#uxBdRebuild,#uxBdUndo') : null;
     if (!t) return;
     ev.preventDefault(); ev.stopPropagation();
     if (t.id === 'uxEdChk' || t.id === 'uxEdSend') { edCheck(t.id === 'uxEdSend'); return; }
+    if (t.id === 'uxBdPush') { pushOut(); return; }
+    if (t.id === 'uxBdAuto') { toggleAuto(); return; }
     if (t.id === 'uxStrayRow') openSheet(); else if (t.id === 'uxBdPull') pullB(); else if (t.id === 'uxBdRebuild') rebuildB(); else if (t.id === 'uxBdUndo') undoB(); else if (t.id === 'uxBdExport') exportB(); else importB();
   }, true);
   var po = window.lbOpenSettings;
@@ -51077,8 +51109,12 @@ document.addEventListener('click', function(ev){
   function sharedBase(){ return lsGet('lbSharedBoundaryBase', {}) || {}; }
   function ready(){ var o = g('customRunBorders'); return o && typeof o === 'object' && window.lbOutbox && window.lbOutbox.sendPlace; }
 
-  function pushChanges(){
-    if (!ready()) return;
+  function isLead(){ try { return typeof window.uxIsLead === 'function' ? !!window.uxIsLead() : false; } catch (e) { return false; } }
+  // "Share my changes automatically" (default on); the manual button works either way. Leading hand only for now.
+  function auto(v){ if (v !== undefined) { try { localStorage.setItem('lbBoundaryAuto', v ? '1' : '0'); } catch (e) {} } try { return localStorage.getItem('lbBoundaryAuto') !== '0'; } catch (e) { return true; } }
+  function pushChanges(manual){
+    var n0 = 0;
+    if (!ready() || !isLead()) return 0;
     var cb = g('customRunBorders'), S = sent(), base = sharedBase(), dead = lsGet('lbBoundaryDeleted', {}) || {}, now = Date.now(), ch = false;
     Object.keys(cb).forEach(function(k){
       var v = cb[k]; if (!Array.isArray(v) || v.length < 3) return;
@@ -51086,16 +51122,25 @@ document.addEventListener('click', function(ev){
       if (base[k] && base[k] === h) return;                       // came from the shared file
       if (S[k] && S[k].h === h) return;                           // already sent, or taken from the fleet
       window.lbOutbox.sendPlace({ id: 'bd_' + k, kind: 'boundary', key: k, ring: thin(v, 1000), ts: now, by: driver() });
-      S[k] = { h: h, ts: now }; ch = true;
+      S[k] = { h: h, ts: now }; ch = true; n0++;
       if (dead[k]) { delete dead[k]; lsSet('lbBoundaryDeleted', dead); }   // redrawn after a delete
     });
     Object.keys(dead).forEach(function(k){
       if (cb[k] && cb[k].length >= 3) return;
       if (S[k] && S[k].h === 'gone' && S[k].ts >= dead[k]) return;
       window.lbOutbox.sendPlace({ id: 'bd_' + k, kind: 'boundary', key: k, ring: null, ts: dead[k] || now, by: driver() });
-      S[k] = { h: 'gone', ts: dead[k] || now }; ch = true;
+      S[k] = { h: 'gone', ts: dead[k] || now }; ch = true; n0++;
     });
     if (ch) lsSet('lbBoundarySent', S);
+    return n0;
+  }
+  // the button: boundaries, then property edits, then bring in what the others sent
+  async function pushNow(){
+    var out = { boundaries: pushChanges(true), edits: 0, got: false };
+    try { if (typeof window.lbEditsCheck === 'function') { var r = await window.lbEditsCheck(true); out.edits = (r && r.sent) || 0; } } catch (e) {}
+    try { if (window.lbOutbox && window.lbOutbox.pullPlaces) { await window.lbOutbox.pullPlaces(); out.got = true; } } catch (e) {}
+    try { applyFleet(); } catch (e) {}
+    return out;
   }
 
   function applyFleet(){
@@ -51116,9 +51161,9 @@ document.addEventListener('click', function(ev){
   }
 
   document.addEventListener('lb-house-access', function(){ try { applyFleet(); } catch (e) {} });   // fires after each places pull
-  setTimeout(function(){ try { applyFleet(); pushChanges(); } catch (e) {} }, 9000);
-  setInterval(function(){ try { pushChanges(); } catch (e) {} }, 15000);
-  window.lbBoundaryShare = { push: pushChanges, apply: applyFleet, _t: { thin: thin, hash: hash } };
+  setTimeout(function(){ try { applyFleet(); if (auto()) pushChanges(); } catch (e) {} }, 9000);
+  setInterval(function(){ try { if (auto()) pushChanges(); } catch (e) {} }, 15000);
+  window.lbBoundaryShare = { push: pushChanges, pushNow: pushNow, auto: auto, apply: applyFleet, _t: { thin: thin, hash: hash } };
 })();
 </script>
 
