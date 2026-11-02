@@ -5854,6 +5854,8 @@ const STREET_LITTER_SERVICE_LEVELS = {"seasons":[{"key":"tourist1","label":"Tour
   window.lbKmzClipOn = function(){ return !!kmzClipToBoundary; };
   window.lbPaintKmzClipBtn = paintKmzClipBtn;
   document.addEventListener('DOMContentLoaded', paintKmzClipBtn);
+  // the bin points inside a KML / KMZ (thousands of dots on a day's run) are off until switched on in Edit > Truck line
+  let kmzLiftsVisible = (function(){ try { return localStorage.getItem('lukezBunzKmzLifts') === '1'; } catch (e) { return false; } })();
   let kmzLayersVisible = (function(){ try { return localStorage.getItem('lukezBunzKmzLayers') === '1'; } catch (e) { return false; } })();
   let mapKmzRouteLayer = null;
   let mapKmzLiftLayer = null;
@@ -8584,7 +8586,7 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
         // route heat above. Bins are always shown as a filled circle -
         // direction is conveyed by the route's own arrows rather than by
         // turning individual bin markers into arrows.
-        file.lifts.forEach((lift,i)=>{
+        if(kmzLiftsVisible) file.lifts.forEach((lift,i)=>{
           const frac=file.lifts.length>1 ? i/(file.lifts.length-1) : 0;
           const dotColor = multiRun ? runColor : (snailTrailColorByAge ? gpsTrailAgeColorCss(frac*GPS_TRAIL_AGE_MAX_MS) : runColor);
 
@@ -9461,6 +9463,11 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
       candidates.map((x,i)=>`${i+1}. ${x.site.addressText} — ${Math.round(x.distance)} m${x.site.runFlags?` (${x.site.runFlags})`:''}`).join('\n'));
   }
 
+  window.toggleKmzLifts = function(){
+    kmzLiftsVisible=!kmzLiftsVisible;
+    try { localStorage.setItem('lukezBunzKmzLifts', kmzLiftsVisible ? '1' : '0'); } catch (e) {}
+    if (typeof renderKmzEvidence === 'function') renderKmzEvidence();
+  };
   function toggleKmzLayers(){
     kmzLayersVisible=!kmzLayersVisible;
     try { localStorage.setItem('lukezBunzKmzLayers', kmzLayersVisible ? '1' : '0'); } catch (e) {}
@@ -49666,7 +49673,7 @@ document.addEventListener('click', function(ev){
   function closeHub(){
     var h = $('lbHub'); if (h) h.classList.remove('on');
     document.body.classList.remove('lbe-open'); form = null; undoStack = []; redoStack = [];
-    tlStop(); tl.undo = []; tl.redo = []; tlPush(true);
+    tlStop(); klStop(); tl.undo = []; tl.redo = []; tlPush(true);
     if (tab === 'route' && window.renderKmzEvidence) { try { window.renderKmzEvidence(); } catch (e) {} }     // the picked run's truck line goes with the panel
     syncMode();
   }
@@ -50766,6 +50773,152 @@ document.addEventListener('click', function(ev){
     };
   })();
   function truckFiles(run){ try { var m = g('kmzDataByRun'), d = m && m.get ? m.get(mk(run)) : null; return d && d.files ? d.files.length : 0; } catch (e) { return 0; } }
+
+  /* ---- editing the line that came from a KML / KMZ file: pick points, move, add, delete, straighten, T-turn, undo ----
+     Works on route.coordinates of the picked run's loaded file (per phone, saved with the other imported data). The
+     line is drawn whole here (the map's own copy may be clipped to the boundary) with a dot at every point. */
+  var kl = { on: false, fi: 0, ri: 0, sel: [], mode: '', layer: null, line: null, rend: null, undo: [], dots: [], drag: null, t: 0 };
+  function klList(){
+    var a = activeName(), m = g('kmzDataByRun'), d = a && m && m.get ? m.get(mk(a)) : null, out = [];
+    if (d && d.files) d.files.forEach(function(f, fi){ (f.routes || []).forEach(function(r, ri){ if (r.coordinates && r.coordinates.length > 1) out.push([fi, ri]); }); });
+    return out;
+  }
+  function klRoute(){
+    var a = activeName(), m = g('kmzDataByRun'), d = a && m && m.get ? m.get(mk(a)) : null, l = klList();
+    if (!d || !l.length) return null;
+    if (!l.some(function(x){ return x[0] === kl.fi && x[1] === kl.ri; })) { kl.fi = l[0][0]; kl.ri = l[0][1]; kl.sel = []; }
+    return d.files[kl.fi].routes[kl.ri];
+  }
+  function klSave(){
+    clearTimeout(kl.t);
+    kl.t = setTimeout(function(){
+      try { var sv = g('saveToDB'), m = g('kmzDataByRun'); if (sv && m) sv('kmzDataByRun', Object.fromEntries(m)); } catch (e) {}
+      try { if (window.renderKmzEvidence) window.renderKmzEvidence(); } catch (e) {}
+    }, 500);
+  }
+  function klSnap(r){ kl.undo.push(JSON.stringify(r.coordinates)); if (kl.undo.length > 30) kl.undo.shift(); }
+  function klClear(){ try { if (kl.layer) kl.layer.clearLayers(); } catch (e) {} kl.line = null; kl.dots = []; }
+  function klDraw(){
+    var map = g('leafletMap'), r = kl.on ? klRoute() : null;
+    if (!map) return;
+    if (!kl.layer) kl.layer = L.layerGroup().addTo(map);
+    if (!kl.rend) kl.rend = L.canvas({ padding: 0.5 });
+    klClear();
+    if (!r) return;
+    var ll = r.coordinates.map(function(p){ return [p.lat, p.lng]; });
+    kl.line = L.polyline(ll, { color: '#ffb300', weight: 4, opacity: 0.9, interactive: false, renderer: kl.rend }).addTo(kl.layer);
+    var rad = ('ontouchstart' in window) ? 7 : 5;
+    ll.forEach(function(q, i){
+      var picked = kl.sel.indexOf(i) >= 0;
+      var d = L.circleMarker(q, { radius: picked ? rad + 2 : rad, color: '#000', weight: 1.5, fillColor: picked ? '#ff5722' : '#fff', fillOpacity: 1, renderer: kl.rend, bubblingMouseEvents: false }).addTo(kl.layer);
+      d.on('click', function(e){ if (kl.drag && kl.drag.moved) return; klTapPoint(i); });
+      d.on('mousedown', function(e){ klDragStart(i, e); });
+      kl.dots[i] = d;
+    });
+  }
+  function klTapPoint(i){
+    var j = kl.sel.indexOf(i); if (j >= 0) kl.sel.splice(j, 1); else kl.sel.push(i);
+    kl.sel.sort(function(a, b){ return a - b; });
+    klRecolour(); paint();
+  }
+  function klRecolour(){ var rad = ('ontouchstart' in window) ? 7 : 5; kl.dots.forEach(function(d, i){ var p = kl.sel.indexOf(i) >= 0; d.setStyle({ fillColor: p ? '#ff5722' : '#fff', radius: p ? rad + 2 : rad }); }); }
+  function klDragStart(i, e){
+    var map = g('leafletMap'), r = klRoute(); if (!map || !r || !e.originalEvent || e.originalEvent.button) return;
+    kl.drag = { i: i, moved: false, snap: JSON.stringify(r.coordinates) };
+    map.dragging.disable();
+    function mv(ev){
+      var q = ev.latlng; if (!q) return; kl.drag.moved = true;
+      r.coordinates[i].lat = q.lat; r.coordinates[i].lng = q.lng; kl.dots[i].setLatLng(q);
+      kl.line.setLatLngs(r.coordinates.map(function(p){ return [p.lat, p.lng]; }));
+    }
+    function up(){
+      map.off('mousemove', mv); map.off('mouseup', up); map.dragging.enable();
+      var d = kl.drag; setTimeout(function(){ kl.drag = null; }, 50);
+      if (d && d.moved) { kl.undo.push(d.snap); if (kl.undo.length > 30) kl.undo.shift(); klSave(); paint(); }
+    }
+    map.on('mousemove', mv); map.on('mouseup', up);
+  }
+  function klMapClick(e){
+    if (!kl.on || !kl.mode) return;
+    var r = klRoute(), map = g('leafletMap'); if (!r) return;
+    if (kl.mode === 'move' && kl.sel.length === 1) {
+      klSnap(r); var p = r.coordinates[kl.sel[0]]; p.lat = e.latlng.lat; p.lng = e.latlng.lng; kl.mode = ''; klDraw(); klSave(); paint();
+    } else if (kl.mode === 'add') {
+      var z = map.getZoom(), P = map.project(e.latlng, z), best = -1, bd = 1e12, c = r.coordinates, bt = 0;
+      for (var i = 0; i < c.length - 1; i++) {
+        var A = map.project([c[i].lat, c[i].lng], z), B = map.project([c[i + 1].lat, c[i + 1].lng], z), dx = B.x - A.x, dy = B.y - A.y, l = dx * dx + dy * dy;
+        var t = l ? Math.max(0, Math.min(1, ((P.x - A.x) * dx + (P.y - A.y) * dy) / l)) : 0, ex = A.x + t * dx - P.x, ey = A.y + t * dy - P.y, d2 = ex * ex + ey * ey;
+        if (d2 < bd) { bd = d2; best = i; bt = t; }
+      }
+      if (best < 0) return;
+      klSnap(r); var a0 = c[best], b0 = c[best + 1];
+      c.splice(best + 1, 0, { lat: a0.lat + (b0.lat - a0.lat) * bt, lng: a0.lng + (b0.lng - a0.lng) * bt });
+      kl.sel = [best + 1]; klDraw(); klSave(); paint();
+    }
+  }
+  function klOffset(p, bearingDeg, m){
+    var b = bearingDeg * Math.PI / 180;
+    return { lat: p.lat + m * Math.cos(b) / 111320, lng: p.lng + m * Math.sin(b) / (111320 * Math.cos(p.lat * Math.PI / 180)) };
+  }
+  function klBearing(a, b){
+    var y = Math.sin((b.lng - a.lng) * Math.PI / 180) * Math.cos(b.lat * Math.PI / 180), x = Math.cos(a.lat * Math.PI / 180) * Math.sin(b.lat * Math.PI / 180) - Math.sin(a.lat * Math.PI / 180) * Math.cos(b.lat * Math.PI / 180) * Math.cos((b.lng - a.lng) * Math.PI / 180);
+    return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+  }
+  function klStart(){
+    if (!klRoute()) return;
+    kl.on = true; kl.sel = []; kl.mode = ''; kl.undo = [];
+    var map = g('leafletMap'); if (map && !kl.bound) { map.on('click', klMapClick); kl.bound = true; }
+    klDraw(); paint();
+  }
+  function klStop(){
+    if (!kl.on) return;
+    kl.on = false; kl.sel = []; kl.mode = ''; klClear();
+    clearTimeout(kl.t); try { var sv = g('saveToDB'), m = g('kmzDataByRun'); if (sv && m) sv('kmzDataByRun', Object.fromEntries(m)); } catch (e) {}
+    try { if (window.renderKmzEvidence) window.renderKmzEvidence(); } catch (e) {}
+  }
+  function klAct(a){
+    var r = klRoute(); if (!r) { klStop(); paint(); return; }
+    var c = r.coordinates, s = kl.sel, lo = s.length ? s[0] : -1, hi = s.length ? s[s.length - 1] : -1;
+    if (a === 'k-on') { if (kl.on) { klStop(); paint(); } else klStart(); return; }
+    if (a === 'k-next') { var l = klList(), at = 0; l.forEach(function(x, i){ if (x[0] === kl.fi && x[1] === kl.ri) at = i; }); var n = l[(at + 1) % l.length]; kl.fi = n[0]; kl.ri = n[1]; kl.sel = []; klDraw(); paint(); return; }
+    if (a === 'k-undo') { var u = kl.undo.pop(); if (!u) return; r.coordinates = JSON.parse(u); kl.sel = []; klDraw(); klSave(); paint(); return; }
+    if (a === 'k-between') { if (s.length < 2) return; kl.sel = []; for (var i = lo; i <= hi; i++) kl.sel.push(i); klRecolour(); paint(); return; }
+    if (a === 'k-straight') {
+      if (s.length < 2 || hi - lo < 2) return;
+      klSnap(r); c.splice(lo + 1, hi - lo - 1); kl.sel = [lo, lo + 1]; klDraw(); klSave(); paint(); return;
+    }
+    if (a === 'k-del') {
+      if (!s.length || c.length - s.length < 2) return;
+      klSnap(r); for (var j = s.length - 1; j >= 0; j--) c.splice(s[j], 1); kl.sel = []; klDraw(); klSave(); paint(); return;
+    }
+    if (a === 'k-move') { if (s.length !== 1) return; kl.mode = kl.mode === 'move' ? '' : 'move'; paint(); return; }
+    if (a === 'k-add') { kl.mode = kl.mode === 'add' ? '' : 'add'; paint(); return; }
+    if (a === 'k-tturn') {
+      if (s.length !== 1) return;
+      var i0 = s[0], P = c[i0], from = c[Math.max(0, i0 - 1)], to = c[Math.min(c.length - 1, i0 + 1)], b = klBearing(from === P ? P : from, to === P ? P : to);
+      klSnap(r);
+      // forward into the road on the left, back past the street into the road on the right (reversing), forward to where it started
+      c.splice(i0 + 1, 0, klOffset(P, b - 90, 14), klOffset(P, b + 90, 14), { lat: P.lat, lng: P.lng });
+      kl.sel = [i0]; klDraw(); klSave(); paint(); return;
+    }
+  }
+  function klHtml(){
+    var h = '', l = klList(), r = kl.on ? klRoute() : null, ns = kl.sel.length;
+    h += head('Edit the file line');
+    if (!l.length) return h + note('Load a KML / KMZ for this run to edit its line.');
+    h += tile('k-on', 'move', kl.on ? 'Finish editing' : 'Edit line', { on: kl.on, tip: 'Show a dot on every point of the line from the file' });
+    if (!kl.on) return h;
+    h += note(kl.mode === 'move' ? 'Tap where the point should go.' : kl.mode === 'add' ? 'Tap the line where the new point goes.' : ns ? ns + ' point' + (ns === 1 ? '' : 's') + ' picked of ' + (r ? r.coordinates.length : 0) + '. Drag a dot to move it.' : 'Tap dots to pick them, or drag one to move it.');
+    h += tile('k-between', 'between', 'Pick between', { off: ns < 2, tip: 'Pick every point from the first picked to the last' });
+    h += tile('k-straight', 'straight', 'Straighten', { off: ns < 2, tip: 'Take out the points between the first and last picked: a straight line' });
+    h += tile('k-del', 'bin', 'Delete points', { off: !ns, danger: true });
+    h += tile('k-move', 'pin', 'Move point', { on: kl.mode === 'move', off: ns !== 1, tip: 'Pick one point, press this, tap where it goes' });
+    h += tile('k-add', 'plus', 'Add point', { on: kl.mode === 'add', tip: 'Tap the line to put a new point on it' });
+    h += tile('k-tturn', 'tturn', 'T-turn', { off: ns !== 1, tip: 'At the picked point: forward into the left road, back across into the right road, forward again' });
+    h += tile('k-undo', 'undo', 'Undo', { off: !kl.undo.length });
+    if (l.length > 1) h += tile('k-next', 'route', 'Next line (' + l.length + ')', { tip: 'This run has more than one line in its files' });
+    return h;
+  }
   function routeHtml(){
     var ak = activeKey(), a = ak ? runOf(ak) : '', h = '', lead = isLead(), nm = ak ? labelOf(ak) : '';
     if ((tl.draw || tl.rub) && a) tlPenFor();
@@ -50786,8 +50939,10 @@ document.addEventListener('click', function(ev){
     h += head('From a file');
     h += tile('r-add', 'kml', 'Add KML / KMZ', { off: !a, tip: 'Bring in the line from a KML or KMZ file' });
     h += tile('r-edit', 'files', 'Edit or delete', { tip: 'The KML / KMZ truck lines already loaded' });
+    if (a && files) h += klHtml();
     h += head('Show on the map');
     h += tile('r-show', 'eye', 'Truck lines', { on: !!g('kmzLayersVisible') });
+    h += tile('r-lifts', 'bins', 'Bin points', { on: !!g('kmzLiftsVisible'), tip: 'The bin dots inside a KML / KMZ file (off unless you want them)' });
     h += tile('r-arrows', 'arrows', 'Arrows', { on: !!g('kerbsideRouteArrowsOn'), tip: 'Arrows on the KML / KMZ lines. A drawn line always has them.' });
     h += tile('r-heat', 'heat', 'Colour by time', { on: !!g('kerbsideRouteHeatmapOn') });
     h += tile('tgl-clip', 'cut', 'Cut to boundary', { on: !!(window.lbKmzClipOn && window.lbKmzClipOn()), tip: 'Hide the parts of a KML / KMZ line that are outside the run boundary' });
@@ -50923,12 +51078,12 @@ document.addEventListener('click', function(ev){
     var t = ev.target.closest ? ev.target.closest('[data-h]') : null; if (!t || t.disabled || t.hasAttribute('disabled')) return;
     var a = t.dataset.h, i = +t.dataset.i;
     if (a === 'close' || a === 'done') { closeHub(); return; }
-    if (a === 'tab') { if (tab === t.dataset.t && !form) return; var was = tab; if (was === 'route') tlStop(); tab = t.dataset.t; form = null; paint(); await syncMode(); if ((tab === 'route' || was === 'route') && window.renderKmzEvidence) window.renderKmzEvidence(); return; }
+    if (a === 'tab') { if (tab === t.dataset.t && !form) return; var was = tab; if (was === 'route') { tlStop(); klStop(); } tab = t.dataset.t; form = null; paint(); await syncMode(); if ((tab === 'route' || was === 'route') && window.renderKmzEvidence) window.renderKmzEvidence(); return; }
     if (a === 'undo') { if (tab === 'route') tlUndo(); else undo(); return; }
     if (a === 'redo') { if (tab === 'route') tlRedo(); else redo(); return; }
     if (a === 'pickrun') {
       if (g('isRoadSnapEditing')) setActive(t.dataset.k, false);          // the map stays where it is: Zoom to run goes to it
-      else { activeKeys = [t.dataset.k]; paint(); if (tab === 'route' && window.renderKmzEvidence) window.renderKmzEvidence(); }
+      else { activeKeys = [t.dataset.k]; if (kl.on) { kl.sel = []; kl.mode = ''; kl.fi = kl.ri = 0; kl.undo = []; klDraw(); } paint(); if (tab === 'route' && window.renderKmzEvidence) window.renderKmzEvidence(); }
       return;
     }
     if (a === 'several') { several = !several; if (!several && activeKeys.length > 1) { activeKeys = [activeKeys[activeKeys.length - 1]]; sel = {}; if (g('isRoadSnapEditing')) window.enableBoundaryVertexHandles(); } paint(); return; }
@@ -50989,6 +51144,8 @@ document.addEventListener('click', function(ev){
     if (a === 'r-rub') { if (!isLead()) return; tl.rub = !tl.rub; tl.draw = false; tl.rev = false; if (tl.rub) tlPenFor(); tlMode(); tlRender(); paint(); return; }
     if (a === 'r-clear') { await tlClear(); return; }
     if (a === 'r-add') { var rn1 = activeName(), lk = g('loadKmzForCurrentRun'); if (rn1 && lk) withOnlyRun(rn1, lk); return; }
+    if (a.indexOf('k-') === 0 && a !== 'k-') { klAct(a); return; }
+    if (a === 'r-lifts') { if (window.toggleKmzLifts) window.toggleKmzLifts(); paint(); return; }
     if (a === 'r-edit') { if (window.openKmlEditModal) window.openKmlEditModal(); return; }
     if (a === 'r-show' || a === 'r-arrows' || a === 'r-heat') {
       var fn = g({ 'r-show': 'toggleKmzLayers', 'r-arrows': 'toggleKerbsideRouteArrows', 'r-heat': 'toggleKerbsideRouteHeatmap' }[a]); if (fn) fn();
@@ -51033,6 +51190,7 @@ document.addEventListener('click', function(ev){
     if (ev.key === 'Escape') {
       var dlg = $('customDialogOverlay'); if ((dlg && dlg.style.display !== 'none') || document.querySelector('.modal-overlay.open')) return;   // a question or a pop-up is up: Esc is theirs
       if (box) { boxEnd(false); return; }
+      if (kl.on) { klStop(); paint(); return; }
       if (tl.draw || tl.rub) { tlStop(); return; }
       if (houseMode) { if (g('collectionPointMode') && window.cancelCollectionPointMode) { window.cancelCollectionPointMode(); return; } if (houseCount()) { houseClear(); return; } }
       if (selCount()) { clearPicked(); return; }
