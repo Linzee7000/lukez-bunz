@@ -5856,7 +5856,7 @@ const STREET_LITTER_SERVICE_LEVELS = {"seasons":[{"key":"tourist1","label":"Tour
   document.addEventListener('DOMContentLoaded', paintKmzClipBtn);
   // the bin points inside a KML / KMZ (thousands of dots on a day's run) are off until switched on in Edit > Truck line
   let kmzLiftsVisible = (function(){ try { return localStorage.getItem('lukezBunzKmzLifts') === '1'; } catch (e) { return false; } })();
-  let kmzLayersVisible = (function(){ try { return localStorage.getItem('lukezBunzKmzLayers') === '1'; } catch (e) { return false; } })();
+  let kmzLayersVisible = (function(){ try { return localStorage.getItem('lukezBunzKmzLayers') !== '0'; } catch (e) { return true; } })();   // (on until the driver turns the truck route off)
   let mapKmzRouteLayer = null;
   let mapKmzLiftLayer = null;
   let recyclingLiftColor = '#facc15';
@@ -11865,6 +11865,7 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
     const chosenStars = Number(document.getElementById('modalRatingValue').value);
     const chosenComment = document.getElementById('modalRatingComment').value.trim();
 
+    const lbWas = { g: site.soloSchedule.garRun || '', r: site.soloSchedule.recRun || '', s: site.soloSchedule.recSummerRun || '', f: site.soloSchedule.fogRun || '' };   // (a run the driver clears is sent as '-': a blank in an edit means 'not changed')
     site.soloSchedule.day = chosenDay;
     site.soloSchedule.weekLetter = chosenWeek;
     site.soloSchedule.weekFormatted = `Week ${chosenWeek}`;
@@ -11885,9 +11886,9 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
     logEdit({
       timestamp: new Date().toISOString(), editType: "PROPERTY_UPDATE",
       propId: site.propId, siteId: site.siteId, address: site.addressText,
-      day: chosenDay, weekLetter: chosenWeek, garRun: chosenGarRun,
-      recRun: chosenRecRun,
-      recSummerRun: chosenRecSummerRun, fogRun: chosenFogRun,
+      day: chosenDay, weekLetter: chosenWeek, garRun: chosenGarRun || (lbWas.g ? '-' : ''),
+      recRun: chosenRecRun || (lbWas.r ? '-' : ''),
+      recSummerRun: chosenRecSummerRun || (lbWas.s ? '-' : ''), fogRun: chosenFogRun || (lbWas.f ? '-' : ''),
       runFlags: chosenFlags, lat: chosenLat, lng: chosenLng
     });
     logEdit({
@@ -12545,17 +12546,20 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
       if (!site) return;
 
       if (ed.editType === "PROPERTY_UPDATE") {
-        if (ed.day !== undefined) site.soloSchedule.day = ed.day;
-        if (ed.weekLetter !== undefined) {
+        // A blank run / day / week in an edit means "not changed" (the sheet has one column each, so an edit that touched only one run
+        // comes back with the rest blank - applying those wiped runs off houses). A run cleared on purpose is '-'.
+        const lbSet = (k, v) => { if (v === undefined || v === null || v === '') return; site.soloSchedule[k] = (v === '-') ? '' : v; };
+        lbSet('day', ed.day);
+        if (ed.weekLetter !== undefined && ed.weekLetter !== '') {
           site.soloSchedule.weekLetter = ed.weekLetter;
           site.soloSchedule.weekFormatted = `Week ${ed.weekLetter}`;
         }
-        if (ed.garRun !== undefined) site.soloSchedule.garRun = ed.garRun;
+        lbSet('garRun', ed.garRun);
         if (ed.garFlag !== undefined) site.soloSchedule.garFlag = ed.garFlag;
-        if (ed.recRun !== undefined) site.soloSchedule.recRun = ed.recRun;
+        lbSet('recRun', ed.recRun);
         if (ed.recFlag !== undefined) site.soloSchedule.recFlag = ed.recFlag;
-        if (ed.recSummerRun !== undefined) site.soloSchedule.recSummerRun = ed.recSummerRun;
-        if (ed.fogRun !== undefined) site.soloSchedule.fogRun = ed.fogRun;
+        lbSet('recSummerRun', ed.recSummerRun);
+        lbSet('fogRun', ed.fogRun);
         if (ed.fogFlag !== undefined) site.soloSchedule.fogFlag = ed.fogFlag;
         if (ed.runFlags !== undefined) site.runFlags = ed.runFlags;
         if (ed.lat !== undefined) site.lat = ed.lat;
@@ -13203,7 +13207,7 @@ window.addEventListener('DOMContentLoaded', async () => {
       ed.editId = String(r.editId);
       const t = new Date(r.timestamp); ed.timestamp = isNaN(t) ? String(r.timestamp || '') : t.toISOString();
       if (ed.editType === 'PROPERTY_RATING') ed.ratingStars = Number(ed.ratingStars) || 0;
-      if (ed.editType === 'PROPERTY_UPDATE') { Object.keys(ed).forEach(k => { if (ed[k] === '' && k !== 'runFlags' && k !== 'recSummerRun' && k !== 'garRun' && k !== 'recRun' && k !== 'fogRun' && k !== 'day' && k !== 'weekLetter') delete ed[k]; }); }
+      if (ed.editType === 'PROPERTY_UPDATE') { Object.keys(ed).forEach(k => { if (ed[k] === '' && k !== 'runFlags') delete ed[k]; }); }
       fresh.push(ed);
     });
     if (!fresh.length) return 0;
@@ -23587,6 +23591,7 @@ body.stream-slr .lb-layers-head .icon-img { filter: brightness(0); }
     ['streetModes','toggleStreetModes',           'img:route.png',    'Reverse in / drive in streets'],
     ['geofence', 'toggleGeofenceLayerVisibility', '🚧',               'Geofences'],
     ['nextBin',  'toggleNextBinBox',              '📍',               'Next bin box'],
+    ['kmz',      'toggleKmzLayers',               'img:truck-garbage.png','Truck route'],
     ['sat',      'toggleSatelliteView',           'img:satellite.png','Satellite'],
 
     ['sect', 'Trail'],
@@ -23597,7 +23602,6 @@ body.stream-slr .lb-layers-head .icon-img { filter: brightness(0); }
     ['act', 'confirmClearSnailTrail','img:minus.png',  'Clear trail',  true],
 
     ['sect', 'KML routes'],
-    ['kmz',      'toggleKmzLayers',                 '🚛', 'Show KMZ runs'],
     ['kerbArr',  'toggleKerbsideRouteArrows',       '➡️', 'Kerbside arrows'],
     ['kerbHeat', 'toggleKerbsideRouteHeatmap',      '🎨', 'Kerbside heatmap'],
     ['slArr',    'toggleStreetLitterRouteArrows',   '➡️', 'Street litter arrows'],
