@@ -49948,7 +49948,49 @@ document.addEventListener('click', function(ev){
     h += tile('h-side', 'oneside', 'One side', { off: !n, tip: 'Every bin goes on one side of the street' });
     h += head('Notes and bins');
     h += tile('notes', 'note', 'Access notes') + tile('h-bincheck', 'bins', 'Bin check');
+    h += head('Move to another run');
+    h += tile('h-move', 'nbr', moveAsk ? 'Cancel move' : 'Move to run', { off: !n && !moveAsk, on: !!moveAsk, tip: 'Put the picked houses on another run' });
+    if (moveAsk && n) {
+      h += note('Which stream?');
+      h += '<div class="lbe-runs lbe-mvs">' + [['Garbage', 'garbage.png'], ['Recycling', 'recycle.png'], ['FOGO', 'fogo.png']].map(function(x){
+        return '<button type="button" class="lbe-run' + (moveAsk.stream === x[0] ? ' on' : '') + '" data-h="mv-s" data-k="' + x[0] + '" title="' + x[0] + '"><img class="icon-img" src="' + x[1] + '" alt="' + x[0] + '" style="width:22px;height:22px"></button>'; }).join('') + '</div>';
+      if (moveAsk.stream) {
+        var list = moveRuns(moveAsk.stream); moveAsk.list = list;
+        h += note(list.length ? 'Which run do the ' + n + ' houses go to?' : 'No runs found for this stream.');
+        h += '<div class="lbe-runs">' + list.map(function(r, i){
+          var c = window.lbRunChip ? window.lbRunChip(r.stream, r.run, r.week, '') : esc(String(r.run).toUpperCase());
+          return '<button type="button" class="lbe-run" data-h="mv-go" data-k="' + i + '">' + c + ' ' + esc(String(r.dayText || '').slice(0, 3).toUpperCase()) + '</button>'; }).join('') + '</div>';
+      }
+    }
     return h;
+  }
+  var moveAsk = null;                                                            // "Move to run": { stream, list }
+  function moveRuns(stream){
+    var gr = g('lbRunGroups'), out = [];
+    try { (gr ? gr(stream) : []).forEach(function(r){ var s0 = r.sites && r.sites[0], sc = s0 && s0.soloSchedule || {}; out.push({ stream: stream, run: r.run, week: r.week, dayText: sc.day || r.day, weekLetter: sc.weekLetter || '', n: r.sites.length }); }); } catch (e) {}
+    var ord = { MON: 1, TUE: 2, WED: 3, THU: 4, FRI: 5, SAT: 6, SUN: 7 };
+    return out.sort(function(x, y){ return (ord[String(x.dayText).slice(0, 3).toUpperCase()] || 9) - (ord[String(y.dayText).slice(0, 3).toUpperCase()] || 9) || String(x.run).localeCompare(String(y.run), undefined, { numeric: true }) || String(x.week).localeCompare(String(y.week)); });
+  }
+  // the picked houses go on the chosen run: that stream's run number (and the day / week when the run is on another one), as a property edit that syncs
+  async function moveGo(r){
+    var ids = houseIds(); if (!ids || !ids.size || !r) return;
+    var recs = g('siteRecords') || [], field = { Garbage: 'garRun', Recycling: 'recRun', FOGO: 'fogRun' }[r.stream], le = g('logEdit'), n = 0;
+    Array.from(ids).forEach(function(id){
+      var site = recs.find(function(x){ return String(x.propId || x.siteId) === String(id); }); if (!site) return;
+      var sc = site.soloSchedule = site.soloSchedule || {}, ed = { timestamp: new Date().toISOString(), editType: 'PROPERTY_UPDATE', propId: site.propId, siteId: site.siteId, address: site.addressText };
+      sc[field] = r.run; ed[field] = r.run;
+      if (r.dayText && String(sc.day || '').toLowerCase() !== String(r.dayText).toLowerCase()) { sc.day = r.dayText; ed.day = r.dayText; }
+      if (r.stream !== 'Garbage' && r.weekLetter && String(sc.weekLetter || '').toUpperCase() !== String(r.weekLetter).toUpperCase()) { sc.weekLetter = r.weekLetter; sc.weekFormatted = 'Week ' + r.weekLetter; ed.weekLetter = r.weekLetter; }
+      try { if (le) le(ed); } catch (e) {}
+      n++;
+    });
+    try { setLet('hasUnsyncedChanges', true); var u = g('updateSyncButtonIcon'); if (u) u(); } catch (e) {}
+    moveAsk = null; houseClear();
+    try { var tr = g('triggerUniversalDataRefresh'); if (tr) tr(); } catch (e) {}
+    try { window.customAlert(n + ' house' + (n === 1 ? '' : 's') + ' moved to ' + String(r.run).toUpperCase() + (r.week ? r.week : '') + ' ' + String(r.dayText || '').slice(0, 3).toUpperCase()); } catch (e) {}
+    paint();
+    // (saving 57,000 records takes a few seconds: after the screen has been put right, not before)
+    try { var sv = g('saveToDB'); await sv('masterRecords', g('siteRecords')); await sv('masterEditsLog', g('masterEditsLog')); } catch (e) {}
   }
 
   /* ====================================================================================================
@@ -50825,6 +50867,9 @@ document.addEventListener('click', function(ev){
     if (a === 'tgl-clip') { if (window.toggleKmzClip) window.toggleKmzClip(); paint(); return; }
     // houses tab
     if (a === 'h-clear') { houseClear(); return; }
+    if (a === 'h-move') { moveAsk = moveAsk ? null : { stream: null, list: [] }; paint(); return; }
+    if (a === 'mv-s') { if (moveAsk) { moveAsk.stream = t.dataset.k; paint(); } return; }
+    if (a === 'mv-go') { if (moveAsk && moveAsk.list) await moveGo(moveAsk.list[+t.dataset.k]); return; }
     if (a === 'h-cp') {
       var n1 = houseCount(), sc = g('startCollectionPointMode'); if (!n1 || !sc) return;
       sc();
@@ -58173,6 +58218,8 @@ body.lb-pc .leaflet-popup-pane .leaflet-popup:has([onclick*="openPropertyInspect
         var mm = /openPropertyInspectModal\('([^']+)'/.exec(html);
         if (!mm || /ux-lot-multi/.test(html) || !siteOf(mm[1])) return;
         var pop = e.popup;
+        // picking houses (Edit > Houses, select mode, drawing): the tap only picks, so no property page and no pop-up (Fox 2 Nov: a menu opened behind the Houses panel)
+        if (g('collectionSelectionActive') || g('mapEditingActive') || g('mapSelectMode')) { setTimeout(function(){ try { m.closePopup(pop); } catch (x) {} }, 0); return; }
         setTimeout(function(){ try { m.closePopup(pop); } catch (x) {} try { window.openPropertyInspectModal(mm[1]); } catch (x) {} }, 0);
       } catch (x) {}
     });
