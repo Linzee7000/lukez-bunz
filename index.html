@@ -13171,6 +13171,11 @@ window.addEventListener('DOMContentLoaded', async () => {
       throw new Error(msg);
     }
 
+    // a safety copy of every house's day / week / runs as they are now, so a sync can be undone (Edit & settings > Data > Undo the last sync)
+    try {
+      const bk = {}; (siteRecords || []).forEach(s0 => { const c = s0 && s0.soloSchedule; if (c) bk[String(s0.propId || s0.siteId)] = [c.day || '', c.weekLetter || '', c.garRun || '', c.recRun || '', c.recSummerRun || '', c.fogRun || '']; });
+      if (Object.keys(bk).length) await saveToDB('runsBackup', { at: new Date().toISOString(), d: bk });
+    } catch (e) {}
     siteRecords = mergeEditsIntoRecords(parsed, masterEditsLog);
     buildFastStreetIndex();
     await saveToDB("masterRecords", siteRecords);
@@ -13187,6 +13192,16 @@ window.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
+  window.lbRunsRestore = async function() {
+    const b = await loadFromDB('runsBackup'); if (!b || !b.d) return -1;
+    let n = 0;
+    siteRecords.forEach(s0 => { const v = b.d[String(s0.propId || s0.siteId)]; if (!v || !s0.soloSchedule) return; const c = s0.soloSchedule;
+      if ((c.day || '') !== v[0] || (c.weekLetter || '') !== v[1] || (c.garRun || '') !== v[2] || (c.recRun || '') !== v[3] || (c.recSummerRun || '') !== v[4] || (c.fogRun || '') !== v[5]) {
+        c.day = v[0]; c.weekLetter = v[1]; c.weekFormatted = v[1] ? 'Week ' + v[1] : ''; c.garRun = v[2]; c.recRun = v[3]; c.recSummerRun = v[4]; c.fogRun = v[5]; n++; } });
+    await saveToDB('masterRecords', siteRecords);
+    try { triggerUniversalDataRefresh(); } catch (e) {}
+    return n;
+  };
   /* ---- Edits from the other phones (Fox, 2 Nov: "Flags, ratings, property edits need to be synced") ----
      Edits always went UP to the Edits sheet, but only Street Litter patches ever came back DOWN, so a flag, rating or property
      change made on one phone never reached another. The script's GET already returns every row of the Edits sheet; this
@@ -35479,6 +35494,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var d = document.createElement('details'); d.className = 'lb-sect-details'; d.setAttribute('open', '');
     d.innerHTML = '<summary class="lb-layers-sect">Data</summary>' +
       row('uxFullSync', I_SYNC, 'Full sync: send my edits, reload all data and runs') +
+      row('uxRunsUndo', I_SYNC, 'Undo the last sync (put runs back as they were)') +
       row('uxStrayRow', WARN, 'Location problems: check and export') +
       row('uxBdRebuild', I_BUILD, 'Rebuild all run boundaries from the houses') +
       row('uxBdUndo', I_SYNC, 'Undo the last rebuild') +
@@ -35490,7 +35506,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       row('uxBdImport', GO, 'Import run boundaries (file)');
     body.insertBefore(d, body.firstChild);
     var wrap = d.querySelector('#uxBdPull'); if (wrap) wrap.querySelector('.ux-warn-ico').style.color = 'var(--ux-text-2)';
-    ['uxFullSync', 'uxEdChk', 'uxEdSend', 'uxBdPush', 'uxBdAuto'].forEach(function(i){ var e = d.querySelector('#' + i); if (e) e.querySelector('.ux-warn-ico').style.color = 'var(--ux-text-2)'; });
+    ['uxRunsUndo', 'uxFullSync', 'uxEdChk', 'uxEdSend', 'uxBdPush', 'uxBdAuto'].forEach(function(i){ var e = d.querySelector('#' + i); if (e) e.querySelector('.ux-warn-ico').style.color = 'var(--ux-text-2)'; });
     ['uxBdExport', 'uxBdImport', 'uxBdRebuild', 'uxBdUndo'].forEach(function(i){ var e = d.querySelector('#' + i); if (e) e.querySelector('.ux-warn-ico').style.color = 'var(--ux-text-2)'; });
     var u = d.querySelector('#uxBdUndo'); if (u) { u.style.display = 'none'; if (window.lbHasBoundaryBackup) window.lbHasBoundaryBackup().then(function(y){ if (y && u.isConnected) u.style.display = ''; }); }
   }
@@ -35576,9 +35592,10 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     document.body.appendChild(inp); inp.click(); setTimeout(function(){ try { inp.remove(); } catch (e) {} }, 60000);
   }
   document.addEventListener('click', function(ev){
-    var t = ev.target && ev.target.closest ? ev.target.closest('#uxFullSync,#uxStrayRow,#uxEdChk,#uxEdSend,#uxBdPush,#uxBdAuto,#uxBdPull,#uxBdExport,#uxBdImport,#uxBdRebuild,#uxBdUndo') : null;
+    var t = ev.target && ev.target.closest ? ev.target.closest('#uxRunsUndo,#uxFullSync,#uxStrayRow,#uxEdChk,#uxEdSend,#uxBdPush,#uxBdAuto,#uxBdPull,#uxBdExport,#uxBdImport,#uxBdRebuild,#uxBdUndo') : null;
     if (!t) return;
     ev.preventDefault(); ev.stopPropagation();
+    if (t.id === 'uxRunsUndo') { (async function(){ try { var n = await window.lbRunsRestore(); alertMsg(n < 0 ? 'No copy to go back to: nothing has been synced since this update.' : n + ' house' + (n === 1 ? '' : 's') + ' put back as before the last sync.'); } catch (e) { alertMsg('Could not undo the sync.'); } })(); return; }
     if (t.id === 'uxFullSync') { try { if (typeof window.lbCloseSettings === 'function') window.lbCloseSettings(); } catch (e) {} try { startUpdateProcess(); } catch (e) { try { document.getElementById('syncBtn').click(); } catch (e2) {} } return; }
     if (t.id === 'uxEdChk' || t.id === 'uxEdSend') { edCheck(t.id === 'uxEdSend'); return; }
     if (t.id === 'uxBdPush') { pushOut(); return; }
