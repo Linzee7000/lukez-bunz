@@ -5657,7 +5657,7 @@ const STREET_LITTER_SERVICE_LEVELS = {"seasons":[{"key":"tourist1","label":"Tour
     const id=String(site.propId||site.siteId||'');
 
     const mode = (typeof houseStreetModes!=='undefined') ? (houseStreetModes[id] || (typeof lbSharedHouseModesNow === 'function' ? lbSharedHouseModesNow()[id] : null)) : null;
-    if(mode){
+    if(mode && mode.type!=='normal'){
       notes.push({icon:'🚚', text:`${mode.label} — ${formatRunsBadge(mode.runs)}`});
     }
 
@@ -18977,7 +18977,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   function activeStreetModeForSite(site){
     const id = String(site.propId||site.siteId||'');
     const mode = houseStreetModes[id] || (showStreetModes ? lbSharedHouseModesNow()[id] : null);
-    if(!mode) return null;
+    if(!mode || mode.type==='normal') return null;      // 'normal': taken off the street line's drive in / reverse in by hand
     return runsApplyToSelection(mode.runs) ? mode : null;
   }
   function activeCollectionPointForSite(site){
@@ -49864,8 +49864,22 @@ document.addEventListener('click', function(ev){
     if (!ok) { redraw(); return; }
     try { if (window.uxCullMarkers) window.uxCullMarkers(); } catch (e) {}
   }
+  // tapping the PROPERTY picks the houses on that lot: no need for the Houses layer, nor to hit the small house marker
+  var lotHooked = null;
+  function houseLotTap(e){
+    if (!houseMode || !hubOpen() || tab !== 'houses' || tool === 'box' || Date.now() - lastBoxAt < 500 || g('collectionPointMode')) return;
+    var P = window.lbParcels, r, ids = houseIds(); if (!P || !P.sitesAt || !ids) return;
+    try { r = P.sitesAt(e.latlng.lat, e.latlng.lng); } catch (x) { return; }
+    if (!r || !r.sites || !r.sites.length) return;
+    var list = r.sites.map(function(st){ return String(st.propId || st.siteId || ''); }).filter(function(id){ return id && drawn[id]; });
+    if (!list.length) return;
+    var all = list.every(function(id){ return ids.has(id); });
+    list.forEach(function(id){ if (all) ids.delete(id); else ids.add(id); });
+    houseKeep(); redrawHouses(list); paintSoon();
+  }
   function houseOn(){
     if (houseMode) return; houseMode = true; tool = 'move';
+    try { var mp = g('leafletMap'); if (mp && lotHooked !== mp) { lotHooked = mp; mp.on('click', houseLotTap); } } catch (e) {}
     try { if (window.lbDisableGpsFollow) window.lbDisableGpsFollow(); } catch (e) {}
     houseKeep(); boxHook();
     try { var u = g('updateMapTelemetryVisibility'); if (u) u(); } catch (e) {}
@@ -50138,13 +50152,14 @@ document.addEventListener('click', function(ev){
   function housesHtml(){
     var n = houseCount(), h = '';
     h += head(n ? n + ' house' + (n === 1 ? '' : 's') + ' picked' : 'Pick houses');
-    h += note(n ? 'Tap a picked house again to drop it.' : 'Zoom in, then tap houses or drag a box round them.');
+    h += note(n ? 'Tap a picked house or property again to drop it.' : 'Zoom in, then tap a property (or a house) or drag a box round them.');
     h += tile('tool-box', 'box', 'Box select', { on: tool === 'box' }) + tile('h-clear', 'clear', 'Clear', { off: !n });
     h += head('Mark the picked houses');
     h += tile('h-cp', 'pin', 'Collection point', { off: !n, tip: 'These houses put their bins out at one spot' });
     h += tile('h-drive', 'up', 'Drive in', { off: !n, tip: 'Drive in, reverse out' });
     h += tile('h-rev', 'down', 'Reverse in', { off: !n, tip: 'Reverse in, drive out' });
     h += tile('h-side', 'oneside', 'One side', { off: !n, tip: 'Every bin goes on one side of the street' });
+    h += tile('h-normal', 'clear', 'Normal', { off: !n, tip: 'Take the picked houses off Drive in / Reverse in / One side, back to a normal street' });
     h += head('Notes and bins');
     h += tile('notes', 'note', 'Access notes') + tile('h-bincheck', 'bins', 'Bin check');
     h += head('Move to another run');
@@ -50878,6 +50893,80 @@ document.addEventListener('click', function(ev){
   setTimeout(function(){ tlLoad().then(function(){ tlWait.splice(0).forEach(tlFleet); }); }, 1500);
   setInterval(function(){ try { tlPush(false); } catch (e) {} }, 15000);
 
+  /* ---- the line from a KML / KMZ file reaches every phone (the bins in the file do not: too many, and off by default) ----
+     Each file goes as outbox places of kind 'kmzRoute' (id kz_<run>_<name hash>_<part>), the routes packed with TL.enc, newest ts
+     wins, and a file taken off here goes as a tombstone. A phone only takes one over when it has no edit of its own waiting. */
+  function kzHashStr(t){ var h = 5381; for (var i = 0; i < t.length; i++) h = ((h << 5) + h + t.charCodeAt(i)) | 0; return (h >>> 0).toString(36); }
+  function kzId(run, name){ return 'kz_' + String(run).replace(/[^A-Za-z0-9]+/g, '_') + '_' + kzHashStr(String(name || '')); }
+  function kzHash(f){
+    var h = 5381, n = 0; (f.routes || []).forEach(function(r){ (r.coordinates || []).forEach(function(q){ n++; h = ((h << 5) + h + Math.round(q.lat * 1e5) * 31 + Math.round(q.lng * 1e5)) | 0; }); });
+    return h + ':' + n + ':' + (f.routes || []).length;
+  }
+  function kzParts(run, d, f, ts){
+    var rows = [], MAXC = 24000;
+    (f.routes || []).forEach(function(r, ri){
+      var p = r.coordinates || []; if (p.length < 2) return;
+      for (var i = 0; i < p.length - 1; i += 2500) rows.push([ri, r.name || '', TL.enc(p.slice(i, i + 2501).map(function(q){ return [q.lat, q.lng]; }))]);
+    });
+    var parts = [[]], size = 0;
+    rows.forEach(function(r){ var n = r[2].length + String(r[1]).length + 12; if (size + n > MAXC && parts[parts.length - 1].length) { parts.push([]); size = 0; } parts[parts.length - 1].push(r); size += n; });
+    var id = kzId(run, f.fileName);
+    return parts.map(function(rs, i){ return { id: id + '_' + i, kind: 'kmzRoute', run: run, runName: d.run || run, file: f.fileName, ts: ts, part: i, parts: parts.length, routes: rs, by: ((lsGet('lbDriver', {}) || {}).name || '') }; });
+  }
+  function kzPush(){
+    if (!window.lbOutbox || !window.lbOutbox.sendPlace || !isLead()) return 0;
+    var m = g('kmzDataByRun'); if (!m || !m.forEach) return 0;
+    var S = lsGet('lbKmzSent', {}) || {}, now = Date.now(), n = 0, have = {};
+    m.forEach(function(d, run){
+      (d && d.files || []).forEach(function(f){
+        var id = kzId(run, f.fileName); have[id] = 1;
+        if (!(f.routes || []).some(function(r){ return r.coordinates && r.coordinates.length > 1; })) return;
+        var h = kzHash(f); if (S[id] && S[id].h === h) return;
+        try { kzParts(run, d, f, now).forEach(function(p){ window.lbOutbox.sendPlace(p); }); S[id] = { h: h, ts: now, run: run, file: f.fileName, name: d.run || run }; n++; } catch (e) {}
+      });
+    });
+    Object.keys(S).forEach(function(id){
+      if (have[id] || S[id].h === 'gone') return;
+      window.lbOutbox.sendPlace({ id: id + '_0', kind: 'kmzRoute', run: S[id].run, runName: S[id].name, file: S[id].file, ts: now, part: 0, parts: 1, routes: [], gone: 1 });
+      S[id] = { h: 'gone', ts: now, run: S[id].run, file: S[id].file, name: S[id].name }; n++;
+    });
+    if (n) lsSet('lbKmzSent', S);
+    return n;
+  }
+  function kzFleet(places){
+    var m = g('kmzDataByRun'); if (!m || !m.get) return;
+    var by = {}, S = lsGet('lbKmzSent', {}) || {}, ch = false;
+    Object.keys(places || {}).forEach(function(k){ var p = places[k]; if (p && p.kind === 'kmzRoute' && p.run && p.file) (by[kzId(p.run, p.file)] = by[kzId(p.run, p.file)] || []).push(p); });
+    Object.keys(by).forEach(function(id){
+      var ts = 0; by[id].forEach(function(p){ if ((p.ts || 0) > ts) ts = p.ts || 0; });
+      var parts = by[id].filter(function(p){ return (p.ts || 0) === ts; }).sort(function(a, b){ return a.part - b.part; }), p0 = parts[0];
+      if (!p0 || parts.length !== p0.parts || parts.some(function(p, i){ return p.part !== i; })) return;       // parts still on their way
+      if (S[id] && S[id].ts >= ts) return;                                                                    // ours is as new or newer
+      var d = m.get(p0.run), loc = d && (d.files || []).filter(function(f){ return f.fileName === p0.file; })[0];
+      if (loc && (!S[id] || S[id].h !== kzHash(loc))) return;                                                // an edit here is waiting to go: it wins
+      if (p0.gone) { if (d && loc) { d.files.splice(d.files.indexOf(loc), 1); ch = true; } S[id] = { h: 'gone', ts: ts, run: p0.run, file: p0.file, name: p0.runName }; return; }
+      var routes = [];
+      parts.forEach(function(p){ (p.routes || []).forEach(function(r){
+        var pts = TL.dec(r[2]).map(function(q){ return { lat: q[0], lng: q[1] }; }); if (pts.length < 2) return;
+        var last = routes[r[0]];
+        if (last) last.coordinates = last.coordinates.concat(pts.slice(1)); else routes[r[0]] = { name: r[1] || 'Route', coordinates: pts };
+      }); });
+      routes = routes.filter(Boolean); if (!routes.length) return;
+      if (!d) { d = { run: p0.runName || p0.run, files: [] }; m.set(p0.run, d); }
+      if (loc) loc.routes = routes; else { loc = { fileName: p0.file, routes: routes, lifts: [], importedAt: new Date(ts).toISOString() }; d.files.push(loc); }
+      S[id] = { h: kzHash(loc), ts: ts, run: p0.run, file: p0.file, name: p0.runName || p0.run }; ch = true;
+    });
+    lsSet('lbKmzSent', S);
+    if (!ch) return;
+    try { var sv = g('saveToDB'); if (sv) sv('kmzDataByRun', Object.fromEntries(m)); } catch (e) {}
+    try { if (window.renderKmzEvidence) window.renderKmzEvidence(); } catch (e) {}
+    try { if (kl.on) klDraw(); } catch (e) {}
+  }
+  document.addEventListener('lb-places', function(ev){ try { kzFleet((ev && ev.detail) || {}); } catch (e) {} });
+  setInterval(function(){ try { kzPush(); } catch (e) {} }, 15000);
+  setTimeout(function(){ try { kzPush(); } catch (e) {} }, 12000);
+  window.lbKmzShare = { push: kzPush, fleet: kzFleet, hash: kzHash };
+
   // The map only draws truck lines for runs chosen in the filter. On this tab the picked run's line shows as well, so a
   // whole day's runs can stay on the map while one run's line is looked at. Drawn lines are put on after the imported ones.
   (function(){
@@ -51194,7 +51283,7 @@ document.addEventListener('click', function(ev){
     var t = ev.target.closest ? ev.target.closest('[data-h]') : null; if (!t || t.disabled || t.hasAttribute('disabled')) return;
     var a = t.dataset.h, i = +t.dataset.i;
     if (a === 'close' || a === 'done') { closeHub(); return; }
-    if (a === 'tab') { if (tab === t.dataset.t && !form) return; var was = tab; if (was === 'route') { tlStop(); klStop(); } tab = t.dataset.t; form = null; paint(); await syncMode(); if ((tab === 'route' || was === 'route') && window.renderKmzEvidence) window.renderKmzEvidence(); return; }
+    if (a === 'tab') { if (tab === t.dataset.t && !form) return; var was = tab; if (was === 'route') { tlStop(); klStop(); } tab = t.dataset.t; if (tab === 'route') { try { window.lbOutbox.pullPlaces(); } catch (e) {} } form = null; paint(); await syncMode(); if ((tab === 'route' || was === 'route') && window.renderKmzEvidence) window.renderKmzEvidence(); return; }
     if (a === 'undo') { if (tab === 'route') tlUndo(); else undo(); return; }
     if (a === 'redo') { if (tab === 'route') tlRedo(); else redo(); return; }
     if (a === 'pickrun') {
@@ -51249,6 +51338,19 @@ document.addEventListener('click', function(ev){
     if (a === 'h-drive' || a === 'h-rev' || a === 'h-side') {
       if (window.startRoadMode) await window.startRoadMode({ 'h-drive': 'drive-reverse-out', 'h-rev': 'reverse-in-drive-out', 'h-side': 'one-side-collection' }[a]);
       houseKeep(); paint(); return;
+    }
+    if (a === 'h-normal') {
+      var nids = houseIds(); if (!nids || !nids.size) return;
+      var nho = houseStreetObj() || {}, nsh = {}; try { nsh = (window.lbSharedHouseModesNow && window.lbSharedHouseModesNow()) || {}; } catch (e) {}
+      var nn = 0, nwas = Array.from(nids);
+      nwas.forEach(function(id){
+        var had = !!nho[id] && nho[id].type !== 'normal'; delete nho[id];
+        if (nsh[id]) { nho[id] = { type: 'normal', label: 'Normal', runs: ['ALL'] }; nn++; } else if (had) nn++;      // a mode that comes off the street line needs a 'normal' mark to override it
+      });
+      try { localStorage.setItem('lukezBunzHouseStreetModes', JSON.stringify(nho)); } catch (e) {}
+      nids.clear(); houseKeep();
+      try { var rm = g('renderMapData'); if (rm) rm(); } catch (e) {}
+      paintSoon(); say(nn + ' house' + (nn === 1 ? ' is' : 's are') + ' back to normal.'); return;
     }
     if (a === 'h-bincheck') { if (window.openBinMismatchModal) window.openBinMismatchModal(); return; }
     // truck line tab
@@ -51411,6 +51513,7 @@ document.addEventListener('click', function(ev){
   // the button: boundaries, then property edits, then bring in what the others sent
   async function pushNow(){
     var out = { boundaries: pushChanges(true), edits: 0, got: false };
+    try { if (window.lbKmzShare) window.lbKmzShare.push(); } catch (e) {}
     try { if (typeof window.lbEditsCheck === 'function') { var r = await window.lbEditsCheck(true); out.edits = (r && r.sent) || 0; } } catch (e) {}
     try { if (window.lbOutbox && window.lbOutbox.pullPlaces) { await window.lbOutbox.pullPlaces(); out.got = true; } } catch (e) {}
     try { applyFleet(); } catch (e) {}
