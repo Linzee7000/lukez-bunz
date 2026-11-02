@@ -57830,6 +57830,29 @@ html body.ux2:not(#sh-a):not(#sh-b):not(#sh-c):not(#sh-d):not(#sh-e):not(#sh-f):
 body.lb-sheet-on .leaflet-pane .leaflet-popup{visibility:hidden !important}
 body.lb-sheet-on .leaflet-pane .leaflet-popup *{visibility:hidden !important;pointer-events:none !important}
 </style>
+<script id="lb-marker-speed-script">
+/* Drawing a run puts thousands of house and bin markers on the map. Each marker adds its own zoom listeners to the map, and before
+   adding one Leaflet reads through every listener already there to see whether this marker is in it ("_listens"), so the cost grows
+   with the SQUARE of the markers: picking one run at zoom 16 froze Chrome ("Page unresponsive", Fox 2 Nov). A marker is only ever
+   added to the map once (addLayer checks hasLayer) and removed again with its listeners, so for a marker the answer is always "not
+   there yet": skip the reading. */
+(function(){
+  try {
+    if (!window.L || !L.Map || !L.Marker || L.Map.prototype._lbFastListens) return;
+    // (only the ADD path: Leaflet's own removal ("_off") uses _listens to find the listener, so that must stay as it is)
+    var origOn = L.Map.prototype._on;
+    L.Map.prototype._on = function(type, fn, ctx, once){
+      if (typeof fn === 'function' && ctx && ctx instanceof L.Marker) {
+        var nl = { fn: fn, ctx: ctx }; if (once) nl.once = true;
+        this._events = this._events || {}; (this._events[type] = this._events[type] || []).push(nl);
+        return;
+      }
+      return origOn.apply(this, arguments);
+    };
+    L.Map.prototype._lbFastListens = true;
+  } catch (e) {}
+})();
+</script>
 <style id="lb-pcpop-style">
 /* PC: a tapped house's pop-up is closed the moment it opens (its property page goes in the side panel); hide it from the first frame so it never flashes */
 body.lb-pc .leaflet-popup-pane .leaflet-popup:has([onclick*="openPropertyInspectModal"]):not(:has(.ux-lot-multi)){visibility:hidden !important}
