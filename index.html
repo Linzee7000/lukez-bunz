@@ -13172,10 +13172,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     }
 
     // a safety copy of every house's day / week / runs as they are now, so a sync can be undone (Edit & settings > Data > Undo the last sync)
-    try {
-      const bk = {}; (siteRecords || []).forEach(s0 => { const c = s0 && s0.soloSchedule; if (c) bk[String(s0.propId || s0.siteId)] = [c.day || '', c.weekLetter || '', c.garRun || '', c.recRun || '', c.recSummerRun || '', c.fogRun || '']; });
-      if (Object.keys(bk).length) await saveToDB('runsBackup', { at: new Date().toISOString(), d: bk });
-    } catch (e) {}
+    try { await lbRunsBackupNow(); } catch (e) {}
     siteRecords = mergeEditsIntoRecords(parsed, masterEditsLog);
     buildFastStreetIndex();
     await saveToDB("masterRecords", siteRecords);
@@ -13194,19 +13191,31 @@ window.addEventListener('DOMContentLoaded', async () => {
 
   // What undoing the last sync would change, grouped (stream + run now -> run before) so the driver can pick which to put back.
   const LB_UNDO_F = [['garRun', 'Garbage', 'garbage.png'], ['recRun', 'Recycling', 'recycle.png'], ['recSummerRun', 'Summer', 'summer.png'], ['fogRun', 'FOGO', 'fogo.png'], ['day', 'Day', ''], ['weekLetter', 'Week', '']];
-  window.lbRunsPreview = async function() {
-    const b = await loadFromDB('runsBackup'); if (!b || !b.d) return null;
+  window.lbRunsPreview = async function(src) {
+    const b = src || await loadFromDB('runsBackup'); if (!b || !b.d) return null;
     const idx = { day: 0, weekLetter: 1, garRun: 2, recRun: 3, recSummerRun: 4, fogRun: 5 }, groups = {};
-    siteRecords.forEach(s0 => { const v = b.d[String(s0.propId || s0.siteId)]; const c = s0.soloSchedule; if (!v || !c) return;
-      LB_UNDO_F.forEach(f => { const was = v[idx[f[0]]] || '', now = c[f[0]] || ''; if (was === now) return;
+    siteRecords.forEach(s0 => { const v = b.d[src ? String(s0.siteId || '') : String(s0.propId || s0.siteId)]; const c = s0.soloSchedule; if (!v || !c) return;
+      LB_UNDO_F.forEach(f => { const was = v[idx[f[0]]] || '', now = c[f[0]] || ''; if (was === now || (src && !was)) return;
         const k = f[0] + '|' + now + '|' + was; (groups[k] = groups[k] || { field: f[0], name: f[1], icon: f[2], now: now, was: was, sites: [] }).sites.push(s0); }); });
     return { at: b.at, groups: Object.keys(groups).map(k => Object.assign({ key: k }, groups[k])).sort((a, c) => c.sites.length - a.sites.length) };
   };
-  window.lbRunsRestore = async function(keys) {
-    const p = await window.lbRunsPreview(); if (!p) return -1;
+  async function lbRunsBackupNow() {
+    const bk = {}; (siteRecords || []).forEach(s0 => { const c = s0 && s0.soloSchedule; if (c) bk[String(s0.propId || s0.siteId)] = [c.day || '', c.weekLetter || '', c.garRun || '', c.recRun || '', c.recSummerRun || '', c.fogRun || '']; });
+    if (Object.keys(bk).length) await saveToDB('runsBackup', { at: new Date().toISOString(), d: bk });
+  }
+  // the run allocations in the depot's site list (data/site-runs.json, made from the site list CSV): blanks in it never overwrite a run
+  window.lbRunsSiteList = async function() {
+    const r = await fetch('data/site-runs.json', { cache: 'no-cache' }); if (!r.ok) return null;
+    const j = await r.json(), d = {}; Object.keys(j.s).forEach(k => { d[k] = j.t[j.s[k]]; });
+    return { at: j.at, d: d, skipBlank: true };
+  };
+  window.lbRunsRestore = async function(keys, src) {
+    const p = await window.lbRunsPreview(src); if (!p) return -1;
+    if (src) { try { await lbRunsBackupNow(); } catch (e) {} }   // (so Undo last sync can put it back)
     const pick = keys ? new Set(keys) : null; let n = 0;
     p.groups.forEach(g => { if (pick && !pick.has(g.key)) return;
       g.sites.forEach(s0 => { s0.soloSchedule[g.field] = g.was; if (g.field === 'weekLetter') s0.soloSchedule.weekFormatted = g.was ? 'Week ' + g.was : ''; n++; }); });
+    if (src) { try { siteRecords = mergeEditsIntoRecords(siteRecords, masterEditsLog) || siteRecords; } catch (e) {} }   // (edits made in the app stay on top of the file)
     await saveToDB('masterRecords', siteRecords);
     try { triggerUniversalDataRefresh(); } catch (e) {}
     return n;
@@ -35494,29 +35503,31 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   document.addEventListener('keydown', function(ev){ if (ev.key === 'Escape' && sheet && sheet.classList.contains('open')) closeSheet(); });
 
   // "Undo last sync": shows what would be put back, grouped, each ticked; nothing changes until Put back is tapped
-  async function undoBox(){
+  async function undoBox(site){
     var old = $('lbUndoBox'); if (old) old.remove();
-    var p = null; try { p = await window.lbRunsPreview(); } catch (e) {}
+    var src = null, p = null;
+    if (site) { try { src = await window.lbRunsSiteList(); } catch (e) {} if (!src) { alertMsg('Could not get the site list runs. Check the connection and try again.'); return; } }
+    try { p = await window.lbRunsPreview(src); } catch (e) {}
     var box = document.createElement('div'); box.id = 'lbUndoBox';
     var esc2 = function(x){ return String(x).replace(/[&<>"]/g, function(c){ return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); };
     if (!p) { alertMsg('No copy to go back to yet: one is made the next time you sync.'); return; }
-    if (!p.groups.length) { alertMsg('Nothing to undo: every house is the same as before the last sync.'); return; }
+    if (!p.groups.length) { alertMsg(site ? 'Nothing to change: the runs already match the site list.' : 'Nothing to undo: every house is the same as before the last sync.'); return; }
     var when = ''; try { when = new Date(p.at).toLocaleString('en-AU', { weekday: 'short', hour: 'numeric', minute: '2-digit' }).toUpperCase(); } catch (e) {}
     var rows = p.groups.map(function(g, i){
       var lab = (g.icon ? '<img src="' + g.icon + '" alt="' + g.name + '">' : '<b>' + g.name + '</b>') + '<span>' + esc2(g.now || 'none') + ' &rarr; ' + esc2(g.was || 'none') + '</span><i>' + g.sites.length + '</i>';
       return '<label class="ub-r"><input type="checkbox" data-k="' + esc2(g.key) + '" checked>' + lab + '</label>'; }).join('');
-    box.innerHTML = '<div class="ub-card"><div class="ub-h">Undo last sync' + (when ? ' <small>copy from ' + when + '</small>' : '') + '</div><div class="ub-s">Tick what to put back. Each line: now &rarr; before, and how many houses.</div><div class="ub-l">' + rows + '</div><div class="ub-f"><button type="button" data-a="go" class="ub-go">Put back</button><button type="button" data-a="no">Cancel</button></div></div>';
+    box.innerHTML = '<div class="ub-card"><div class="ub-h">' + (site ? 'Runs from site list' : 'Undo last sync') + (when && !site ? ' <small>copy from ' + when + '</small>' : '') + '</div><div class="ub-s">' + (site ? 'Tick what to apply. Each line: now &rarr; site list, and how many houses. Blanks in the list change nothing; edits made in the app stay on top. Undo last sync reverses it.' : 'Tick what to put back. Each line: now &rarr; before, and how many houses.') + '</div><div class="ub-l">' + rows + '</div><div class="ub-f"><button type="button" data-a="go" class="ub-go">' + (site ? 'Apply' : 'Put back') + '</button><button type="button" data-a="no">Cancel</button></div></div>';
     document.body.appendChild(box);
     var go = box.querySelector('.ub-go');
-    function count(){ var n = 0; box.querySelectorAll('input:checked').forEach(function(c){ var g = p.groups.filter(function(x){ return x.key === c.dataset.k; })[0]; if (g) n += g.sites.length; }); go.textContent = n ? 'Put back ' + n : 'Put back'; go.disabled = !n; }
+    function count(){ var n = 0; box.querySelectorAll('input:checked').forEach(function(c){ var g = p.groups.filter(function(x){ return x.key === c.dataset.k; })[0]; if (g) n += g.sites.length; }); go.textContent = (site ? 'Apply' : 'Put back') + (n ? ' ' + n : ''); go.disabled = !n; }
     count();
     box.addEventListener('change', count);
     box.addEventListener('click', async function(ev){
       var a = ev.target.closest && ev.target.closest('button'); if (!a) { if (ev.target === box) box.remove(); return; }
       if (a.dataset.a === 'no') { box.remove(); return; }
       var keys = Array.prototype.map.call(box.querySelectorAll('input:checked'), function(c){ return c.dataset.k; });
-      box.remove(); alertMsg('Putting the runs back...');
-      try { var n = await window.lbRunsRestore(keys); alertMsg(n + ' change' + (n === 1 ? '' : 's') + ' put back.'); } catch (e) { alertMsg('Could not undo the sync.'); }
+      box.remove(); alertMsg(site ? 'Applying the site list runs...' : 'Putting the runs back...');
+      try { var n = await window.lbRunsRestore(keys, src); alertMsg(n + ' change' + (n === 1 ? '' : 's') + (site ? ' applied.' : ' put back.')); } catch (e) { alertMsg('Could not undo the sync.'); }
     });
   }
   // ---- Edit & settings: a "Data" section on top -----------------------------------------
@@ -35530,6 +35541,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var d = document.createElement('details'); d.className = 'lb-sect-details'; d.setAttribute('open', '');
     d.innerHTML = '<summary class="lb-layers-sect">Data</summary>' +
       row('uxFullSync', I_SYNC, 'Full sync') +
+      row('uxRunsFile', I_SYNC, 'Runs from site list') +
       row('uxRunsUndo', I_SYNC, 'Undo last sync') +
       row('uxStrayRow', WARN, 'Location problems') +
       row('uxMoreTools', I_BUILD, 'More tools') +
@@ -35543,7 +35555,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       rowA('uxBdImport', GO, 'Import boundaries');
     body.insertBefore(d, body.firstChild);
     var wrap = d.querySelector('#uxBdPull'); if (wrap) wrap.querySelector('.ux-warn-ico').style.color = 'var(--ux-text-2)';
-    ['uxRunsUndo', 'uxFullSync', 'uxEdChk', 'uxEdSend', 'uxBdPush', 'uxBdAuto'].forEach(function(i){ var e = d.querySelector('#' + i); if (e) e.querySelector('.ux-warn-ico').style.color = 'var(--ux-text-2)'; });
+    ['uxRunsFile', 'uxRunsUndo', 'uxFullSync', 'uxEdChk', 'uxEdSend', 'uxBdPush', 'uxBdAuto'].forEach(function(i){ var e = d.querySelector('#' + i); if (e) e.querySelector('.ux-warn-ico').style.color = 'var(--ux-text-2)'; });
     ['uxBdExport', 'uxBdImport', 'uxBdRebuild', 'uxBdUndo'].forEach(function(i){ var e = d.querySelector('#' + i); if (e) e.querySelector('.ux-warn-ico').style.color = 'var(--ux-text-2)'; });
     var u = d.querySelector('#uxBdUndo'); if (u) { u.style.display = 'none'; if (window.lbHasBoundaryBackup) window.lbHasBoundaryBackup().then(function(y){ if (y && u.isConnected) u.style.display = ''; }); }
   }
@@ -35629,11 +35641,12 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     document.body.appendChild(inp); inp.click(); setTimeout(function(){ try { inp.remove(); } catch (e) {} }, 60000);
   }
   document.addEventListener('click', function(ev){
-    var t = ev.target && ev.target.closest ? ev.target.closest('#uxMoreTools,#uxRunsUndo,#uxFullSync,#uxStrayRow,#uxEdChk,#uxEdSend,#uxBdPush,#uxBdAuto,#uxBdPull,#uxBdExport,#uxBdImport,#uxBdRebuild,#uxBdUndo') : null;
+    var t = ev.target && ev.target.closest ? ev.target.closest('#uxRunsFile,#uxMoreTools,#uxRunsUndo,#uxFullSync,#uxStrayRow,#uxEdChk,#uxEdSend,#uxBdPush,#uxBdAuto,#uxBdPull,#uxBdExport,#uxBdImport,#uxBdRebuild,#uxBdUndo') : null;
     if (!t) return;
     ev.preventDefault(); ev.stopPropagation();
     if (t.id === 'uxMoreTools') { var on = document.body.classList.toggle('lb-data-more'); var lb = t.querySelector('.lb-label'); if (lb) lb.textContent = on ? 'Fewer tools' : 'More tools'; return; }
     if (t.id === 'uxRunsUndo') { undoBox(); return; }
+    if (t.id === 'uxRunsFile') { undoBox(true); return; }
     if (t.id === 'uxFullSync') { alertMsg('Syncing... keep this open until it says done.'); try { var sm = document.getElementById('syncStatusMsg'); if (sm && !sm.__lbWatch) { sm.__lbWatch = true; new MutationObserver(function(){ var x = (sm.innerText || sm.textContent || '').trim(); if (x) alertMsg(x); }).observe(sm, { childList: true, characterData: true, subtree: true }); } } catch (e) {} try { startUpdateProcess(); } catch (e) { try { document.getElementById('syncBtn').click(); } catch (e2) {} } return; }
     if (t.id === 'uxEdChk' || t.id === 'uxEdSend') { edCheck(t.id === 'uxEdSend'); return; }
     if (t.id === 'uxBdPush') { pushOut(); return; }
