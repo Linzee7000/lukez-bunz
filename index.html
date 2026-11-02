@@ -23619,7 +23619,7 @@ body.stream-slr .lb-layers-head .icon-img { filter: brightness(0); }
       + sw('border:2px dashed #39ff14;background:rgba(57,255,20,.08)', 'Green dashed box: the street you searched', 'Only a highlight. It goes when you search for something else.')
       + sw('border:3px solid #ffd21f;background:rgba(255,210,31,.3)', 'Yellow thick: the house you picked', 'Goes when you close its sheet.')
       + '</div>');
-    if (keyAt > -1) pieces.splice(keyAt, 0, keyHtml); else pieces.push(keyHtml);
+    pieces.push(keyHtml);   // at the bottom of the panel (Fox, 2 Nov)
     body.innerHTML = timerHtml() + '<div class="lb-hold-hint">Tap to turn on or off · hold to edit</div>' + pieces.join('');
     if (typeof window.lbCollapseSections === 'function') {
       window.lbCollapseSections(body, '.lb-layers-sect', 'lbSect:layers');
@@ -57963,7 +57963,7 @@ body.lb-sheet-on .leaflet-pane .leaflet-popup *{visibility:hidden !important;poi
   }
   function stop(){
     if (!cur) return; var c = cur; cur = null;
-    try { c.grp.remove(); } catch (e) {} try { c.bar.remove(); } catch (e) {}
+    try { c.grp.remove(); } catch (e) {} try { c.line.remove(); } catch (e) {} try { c.bar.remove(); } catch (e) {}
     try { c.pl.setStyle({ opacity: .85 }); } catch (e) {}
     refreshHouses(); try { renderMapData(); } catch (e) {}
   }
@@ -57971,10 +57971,10 @@ body.lb-sheet-on .leaflet-pane .leaflet-popup *{visibility:hidden !important;poi
   function paint(){
     if (!cur) return; var seg = cur.seg, m = g('leafletMap'); cur.grp.clearLayers();
     var ll = seg.points.map(function(p){ return [p[0], p[1]]; });
-    try { cur.pl.setLatLngs(ll); cur.pl.setStyle({ color: colour(seg.type) }); } catch (e) {}
+    try { cur.line.setLatLngs(ll); cur.line.setStyle({ color: colour(seg.type) }); cur.pl.setLatLngs(ll); } catch (e) {}
     seg.points.forEach(function(p, i){
       var mk = L.marker(p, { icon: DOT('v'), draggable: true, zIndexOffset: 900 }).addTo(cur.grp);
-      mk.on('drag', function(){ var q = mk.getLatLng(); seg.points[i] = [q.lat, q.lng]; cur.pl.setLatLngs(seg.points); });
+      mk.on('drag', function(){ var q = mk.getLatLng(); seg.points[i] = [q.lat, q.lng]; cur.line.setLatLngs(seg.points); });
       mk.on('dragend', function(){ save(seg); paint(); });
       mk.on('dblclick', function(ev){ if (ev.originalEvent) { L.DomEvent.stop(ev.originalEvent); } if (seg.points.length > 2) { seg.points.splice(i, 1); save(seg); paint(); } });
       if (i) {
@@ -57987,7 +57987,7 @@ body.lb-sheet-on .leaflet-pane .leaflet-popup *{visibility:hidden !important;poi
     var n = seg.points.length, cx = 0, cy = 0; seg.points.forEach(function(p){ cx += p[0] / n; cy += p[1] / n; });
     var all = L.marker([cx, cy], { icon: DOT('a'), draggable: true, zIndexOffset: 950 }).addTo(cur.grp), start = null, orig = null;
     all.on('dragstart', function(){ start = all.getLatLng(); orig = seg.points.map(function(p){ return p.slice(); }); });
-    all.on('drag', function(){ var q = all.getLatLng(), dy = q.lat - start.lat, dx = q.lng - start.lng; seg.points = orig.map(function(p){ return [p[0] + dy, p[1] + dx]; }); cur.pl.setLatLngs(seg.points); });
+    all.on('drag', function(){ var q = all.getLatLng(), dy = q.lat - start.lat, dx = q.lng - start.lng; seg.points = orig.map(function(p){ return [p[0] + dy, p[1] + dx]; }); cur.line.setLatLngs(seg.points); });
     all.on('dragend', function(){ save(seg); paint(); });
   }
   function bar(){
@@ -58006,7 +58006,11 @@ body.lb-sheet-on .leaflet-pane .leaflet-popup *{visibility:hidden !important;poi
   function begin(pl){
     var seg = pl._lbSeg, m = g('leafletMap'); if (!seg || !m || !lead()) return; remember(seg); stop();
     try { m.closePopup(); } catch (e) {}
-    cur = { seg: seg, pl: pl, grp: L.layerGroup().addTo(m), bar: bar() }; title(); paint();
+    cur = { seg: seg, pl: pl, grp: L.layerGroup().addTo(m), bar: bar() };
+    // the line being edited is drawn here, on top, so it follows the drag whatever the original layer does (it is redrawn by the map and can be gone)
+    cur.line = L.polyline(seg.points, { color: colour(seg.type), weight: 6, opacity: 1, dashArray: '10 6', interactive: false }).addTo(m);
+    try { pl.setStyle({ opacity: 0 }); } catch (e) {}
+    title(); paint();
   }
   // an "Edit line" button in the dashed line's pop-up (leading hand only)
   function hook(){
@@ -58600,6 +58604,8 @@ html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#ik-a):no
 /* PC: the outline key is always on the map, never folded away (Fox, 2 Nov: "Nothing should be hidden") */
 #lbMapKey{display:none;position:fixed;left:calc(var(--pc-side-w, 0px) + 14px);bottom:14px;z-index:900;pointer-events:none;flex-direction:column;gap:5px;padding:9px 12px;background:rgba(20,20,22,.86);color:#fff;border:var(--rb-bd2, 2px solid #000);border-radius:6px;font:400 13px/1.2 Roboto,sans-serif}
 html body.lb-pc[data-ux-screen="map"] #lbMapKey{display:flex}
+/* the same key is in the Layers panel: not twice at once */
+html body.lb-pc.lb-layers-open[data-ux-screen="map"] #lbMapKey{display:none}
 #lbMapKey b{font:500 11px/1 Roboto,sans-serif;letter-spacing:.14em;text-transform:uppercase;opacity:.7;margin-bottom:2px}
 #lbMapKey div{display:flex;align-items:center;gap:8px}
 #lbMapKey i{flex:none;width:26px;height:14px;border-radius:2px;display:inline-block}
