@@ -55713,6 +55713,9 @@ body.dark-mode #lbFc .fc-sb img{filter:brightness(0) invert(1)}
 #lbFc .fc-grid > b{font-size:13px;font-weight:400;color:var(--mn-text2)}
 #lbFc .fc-grid > span:not(.fc-gh){text-align:right;font-size:17px;font-weight:400;line-height:1.25;font-variant-numeric:tabular-nums;white-space:nowrap}
 #lbFc .fc-grid .fc-dash{color:var(--mn-text2);opacity:.5}
+/* (a time on the yellow last-year highlight: the hours were yellow on yellow and vanished) */
+html body #lbFc:not(#fx-a):not(#fx-b):not(#fx-c) .fc-hl .lb-clk i{color:#000 !important}
+html body #lbFc:not(#fx-a):not(#fx-b):not(#fx-c) .fc-hl .lb-clk i.h{opacity:.75}
 #lbFc .fc-card .fc-det{margin-top:8px;padding-top:8px;border-top:var(--mn-bd);font-size:13px;cursor:auto}
 #lbFc .fc-sum{grid-template-columns:repeat(auto-fill,minmax(300px,1fr))}
 #lbFc .fc-sb{padding:0 4px}
@@ -55824,6 +55827,15 @@ html body #lbFc .lb-clk, html body #lbFc .lb-clk i{font-family:inherit !importan
     }).catch(function(){ drvP = null; drvState = 'net'; return null; });
     return drvP;
   }
+  /* Last year's hours flipping and bins per hour for a run (Fox, 2 Nov): only with the drivers file - it comes from the Apps Script
+     with the leading hand PIN, because the public file has no hours per day. All drivers on the run that day added up; the bins
+     are the public file's (worked out from the weight when the lift counter was wrong). */
+  function lyWork(r, x){
+    if (!DRV || !x.ly) return null;
+    var rows = ((DRV.runs[r.k] || {})[iso(x.lyDate)] || []).filter(function(q){ return q[2] >= 10 || q[3] >= 0.1; });
+    var h = rows.reduce(function(a, q){ return a + (+q[3] || 0); }, 0);
+    return h >= 0.25 ? { h: h, b: x.ly.n } : null;
+  }
   function drvMsg(){
     return ({ loading: 'Getting the drivers&hellip;', pin: 'Driver details need this phone&rsquo;s leading hand PIN to be the one set on the script (LEAD_PIN).',
       nopin: 'Driver details aren&rsquo;t switched on yet: set LEAD_PIN on the Apps Script.', nofile: 'Driver details: the history file isn&rsquo;t in Google Drive yet (lukez-bunz-run-history.json).',
@@ -55884,6 +55896,8 @@ html body #lbFc .lb-clk, html body #lbFc .lb-clk i{font-family:inherit !importan
     build(); el.classList.add('open'); sel = null;
     day = dateStr ? new Date(dateStr + 'T00:00') : (day || startDay());
     paint(); load().then(paint);
+    // (the drivers file straight away, not only when a run is tapped: last year's hours and bins per hour come from it)
+    if (!DRV) loadDrivers().then(function(){ if (isOpen()) paint(); });
   }
   function close(){ if (el) el.classList.remove('open'); }
   window.lbForecast = { addTile: addTile, open: open, close: close, _t: { drivers: function(d){ DRV = d; drvState = d ? 'ok' : ''; }, drvState: function(){ return drvState; }, runs: function(d){ return runsFor(new Date(d + 'T00:00')).map(function(r){ var x = est(r, new Date(d + 'T00:00')); return [r.k, x.n, x.h, x.ly && x.ly.n]; }); }, data: function(){ return H; } } };
@@ -55913,22 +55927,23 @@ html body #lbFc .lb-clk, html body #lbFc .lb-clk i{font-family:inherit !importan
     };
     var hl = function(v){ return '<span class="fc-hl">' + v + '</span>'; };
     var sum = '<div class="fc-sum">' + streams.filter(function(s){ return flt === 'all' || s === flt; }).map(function(s){
-      var n = 0, h = 0, l = 0, lk = 0, lyAll = true, kg = 0, kgh = 0, T = 0, TH = 0, R = 0, RH = 0, RW = 0;
+      var n = 0, h = 0, l = 0, lk = 0, lyAll = true, kg = 0, kgh = 0, T = 0, TH = 0, R = 0, RH = 0, RW = 0, LT = 0, LB = 0;
       rs.filter(function(r){ return r.stream === s; }).forEach(function(r){ var x = est(r, d); n += x.n || 0; h += x.h || 0; kg += (x.n || 0) * (x.kg || 0); kgh += (x.h || 0) * (x.kg || 0);
         if (x.ly) { l += x.ly.n; lk += x.ly.kg || 0; } else lyAll = false;
+        var lw = lyWork(r, x); if (lw) { LT += lw.h; LB += lw.b; }
         T += x.t || 0; TH += x.th || 0; if (x.r && x.n) { R += x.r * x.n; RH += (x.rh || x.r) * x.n; RW += x.n; } });   // (bins per hour averaged over the runs, by their bins)
       return '<div class="fc-tile">' + grid('<span class="fc-g fc-' + GCLS[s] + '">' + glyph(s) + '</span>', [
         ['Bins', fmt(n), fmt(h), l ? hl(fmt(l) + (lyAll ? '' : '+')) : ''],
-        ['Hours', T ? hrs(T) : '', TH ? hrs(TH) : '', ''],
-        ['Bins/hr', RW ? Math.round(R / RW) : '', RW ? Math.round(RH / RW) : '', ''],
+        ['Hours', T ? hrs(T) : '', TH ? hrs(TH) : '', LT ? hl(hrs(LT)) : ''],
+        ['Bins/hr', RW ? Math.round(R / RW) : '', RW ? Math.round(RH / RW) : '', LT ? hl(Math.round(LB / LT)) : ''],
         ['Weight', kg ? t(kg) : '', kgh ? t(kgh) : '', lk ? hl(t(lk)) : '']]) + '</div>';
     }).join('') + '</div>';
     var rows = show.map(function(r){
-      var x = est(r, d), on = sel === r.k;
+      var x = est(r, d), on = sel === r.k, lw = lyWork(r, x);
       return '<div class="fc-card' + (on ? ' sel' : '') + '" data-fc-k="' + esc(r.k) + '">' + grid(chip(r), [
         ['Bins', fmt(x.n), fmt(x.h), x.ly ? hl(fmt(x.ly.n) + (x.ly.star ? '*' : '')) : ''],
-        ['Hours', x.t ? hrs(x.t) : '', x.th ? hrs(x.th) : '', ''],
-        ['Bins/hr', x.r || '', x.rh || '', ''],
+        ['Hours', x.t ? hrs(x.t) : '', x.th ? hrs(x.th) : '', lw ? hl(hrs(lw.h)) : ''],
+        ['Bins/hr', x.r || '', x.rh || '', lw ? hl(Math.round(lw.b / lw.h)) : ''],
         ['Weight', x.n && x.kg ? t(x.n * x.kg) : '', x.h && x.kg ? t(x.h * x.kg) : '', x.ly && x.ly.kg ? hl(t(x.ly.kg)) : '']]) +
         (on ? detail(r, x) : '') + '</div>';
     }).join('');
