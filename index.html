@@ -13239,6 +13239,30 @@ window.addEventListener('DOMContentLoaded', async () => {
     finally { lbEditsBusy = false; }
     return 0;
   };
+  // "Is my edit on the sync?" (Fox, 2 Nov: Windows PC property edits were not on the Mac). Counts this device's edits against the
+  // sheet's by editId. resend = send the ones the sheet does not have (in batches, the sheet skips any it already holds), then pull.
+  window.lbEditsCheck = async function(resend) {
+    const out = { local: masterEditsLog.length, waiting: Math.max(0, masterEditsLog.length - lastSyncedEditCount), server: 0, missing: 0, notHere: 0, sent: 0 };
+    const state = await (await fetch(SCRIPT_URL)).json();
+    const remote = (state && Array.isArray(state.edits)) ? state.edits : [];
+    const rid = new Set(remote.map(r => r && r.editId ? String(r.editId) : '').filter(Boolean));
+    const lid = new Set(masterEditsLog.map(e => e && e.editId ? String(e.editId) : '').filter(Boolean));
+    out.server = remote.length;
+    const miss = masterEditsLog.filter(e => e && e.editId && /^(PROPERTY_|BIN_|STRAY_)/.test(e.editType || '') && !rid.has(String(e.editId)));
+    out.missing = miss.length;
+    out.notHere = remote.filter(r => r && r.editId && r.editType && r.editType !== 'SYNC_PING' && !lid.has(String(r.editId))).length;
+    if (resend && miss.length) {
+      for (let i = 0; i < miss.length; i += 100) {
+        await fetch(SCRIPT_URL, { method: 'POST', mode: 'no-cors', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'payload=' + encodeURIComponent(JSON.stringify({ edits: miss.slice(i, i + 100) })) });
+        out.sent += Math.min(100, miss.length - i);
+      }
+    }
+    if (resend) {
+      lastSyncedEditCount = masterEditsLog.length; await saveToDB('lastSyncedEditCount', lastSyncedEditCount);
+      out.pulled = await window.lbSyncEdits();
+    }
+    return out;
+  };
   let lbEditsTimer = null;
   window.lbSyncEditsSoon = function(ms) { clearTimeout(lbEditsTimer); lbEditsTimer = setTimeout(() => { window.lbSyncEdits(); }, ms || 6000); };
   setTimeout(() => { window.lbSyncEdits(); }, 20000);
@@ -35432,17 +35456,30 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       row('uxStrayRow', WARN, 'Location problems: check and export') +
       row('uxBdRebuild', I_BUILD, 'Rebuild all run boundaries from the houses') +
       row('uxBdUndo', I_SYNC, 'Undo the last rebuild') +
+      row('uxEdChk', I_SYNC, 'Property edits: check the sync') +
+      row('uxEdSend', I_SYNC, 'Property edits: send missing ones and get the others') +
       row('uxBdPull', I_SYNC, 'Get run boundaries from the sync') +
       row('uxBdExport', DL, 'Export run boundaries (file)') +
       row('uxBdImport', GO, 'Import run boundaries (file)');
     body.insertBefore(d, body.firstChild);
     var wrap = d.querySelector('#uxBdPull'); if (wrap) wrap.querySelector('.ux-warn-ico').style.color = 'var(--ux-text-2)';
+    ['uxEdChk', 'uxEdSend'].forEach(function(i){ var e = d.querySelector('#' + i); if (e) e.querySelector('.ux-warn-ico').style.color = 'var(--ux-text-2)'; });
     ['uxBdExport', 'uxBdImport', 'uxBdRebuild', 'uxBdUndo'].forEach(function(i){ var e = d.querySelector('#' + i); if (e) e.querySelector('.ux-warn-ico').style.color = 'var(--ux-text-2)'; });
     var u = d.querySelector('#uxBdUndo'); if (u) { u.style.display = 'none'; if (window.lbHasBoundaryBackup) window.lbHasBoundaryBackup().then(function(y){ if (y && u.isConnected) u.style.display = ''; }); }
   }
   function alertMsg(m){ try { return (window.customAlert || alert)(m); } catch (e) {} }
   function borders(){ return g('customRunBorders') || {}; }
   function countB(o){ var n = 0; Object.keys(o).forEach(function(k){ if (Array.isArray(o[k]) && o[k].length >= 3) n++; }); return n; }
+  async function edCheck(send){
+    if (typeof window.lbEditsCheck !== 'function') return;
+    alertMsg(send ? 'Sending...' : 'Checking...');
+    try {
+      var r = await window.lbEditsCheck(send);
+      alertMsg('This device: ' + r.local + ' edits' + (r.waiting ? ' (' + r.waiting + ' waiting to send)' : '') + '. The sync holds ' + r.server + '. ' +
+        r.missing + ' of this device\'s property edits are not on the sync' + (send ? ' (sent ' + r.sent + ')' : '') + '; ' + r.notHere + ' on the sync were not here' + (send ? ' (brought in ' + (r.pulled || 0) + ')' : '') + '.' +
+        (!send && (r.missing || r.notHere) ? ' Tap the other row to fix that.' : ''));
+    } catch (e) { alertMsg('Could not reach the sync. Check the connection and try again.'); }
+  }
   async function pullB(){
     if (typeof window.lbPullBoundaries !== 'function') return;
     var el = $('uxBdPull'); if (el) el.querySelector('.lb-label').textContent = 'Getting run boundaries...';
@@ -35497,9 +35534,10 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     document.body.appendChild(inp); inp.click(); setTimeout(function(){ try { inp.remove(); } catch (e) {} }, 60000);
   }
   document.addEventListener('click', function(ev){
-    var t = ev.target && ev.target.closest ? ev.target.closest('#uxStrayRow,#uxBdPull,#uxBdExport,#uxBdImport,#uxBdRebuild,#uxBdUndo') : null;
+    var t = ev.target && ev.target.closest ? ev.target.closest('#uxStrayRow,#uxEdChk,#uxEdSend,#uxBdPull,#uxBdExport,#uxBdImport,#uxBdRebuild,#uxBdUndo') : null;
     if (!t) return;
     ev.preventDefault(); ev.stopPropagation();
+    if (t.id === 'uxEdChk' || t.id === 'uxEdSend') { edCheck(t.id === 'uxEdSend'); return; }
     if (t.id === 'uxStrayRow') openSheet(); else if (t.id === 'uxBdPull') pullB(); else if (t.id === 'uxBdRebuild') rebuildB(); else if (t.id === 'uxBdUndo') undoB(); else if (t.id === 'uxBdExport') exportB(); else importB();
   }, true);
   var po = window.lbOpenSettings;
