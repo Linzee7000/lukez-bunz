@@ -133,6 +133,19 @@ def main(files):
             e['n'] = int(st.median(norm)); e['h'] = norm[int(0.9 * (len(norm) - 1))]; e['nd'] = len(norm)
         if len(hl) >= 2:
             e['hn'] = int(st.median(hl)); e['hh'] = hl[int(0.9 * (len(hl) - 1))]
+        # hours flipping (breaks out, every driver on the run that day added up) and bins per hour, same days as the bins:
+        # t / th = normal and long day's hours, r / rh = normal and fast day's bins per hour; ht / hth / hr / hrh in holidays.
+        # Only run totals of many days - nothing per driver (Fox, 2 Nov: "normal hours & high hours, normal bins/hr & high bins/hr")
+        hrs = {d: sum(x[4] for x in xs) for d, xs in byday.items()}
+        def hstats(days, pre):
+            hs = sorted(hrs[d] for d in days if hrs[d] >= 0.5)
+            rs = sorted(good[d] / hrs[d] for d in days if hrs[d] >= 0.5 and 20 <= good[d] / hrs[d] <= 500)
+            if len(hs) >= 3: e[pre + 't'] = round(st.median(hs), 2); e[pre + 'th'] = round(hs[int(0.9 * (len(hs) - 1))], 2)
+            if len(rs) >= 3: e[pre + 'r'] = int(st.median(rs)); e[pre + 'rh'] = int(rs[int(0.9 * (len(rs) - 1))])
+        if summer: hstats([d for d in good if d >= since13], '')
+        else:
+            hstats([d for d in good if d >= since6 and not hol(d)], '')
+            hstats([d for d in good if d >= since13 and hol(d)], 'h')
         recent = [x[5] / x[3] for x in v if (summer or x[0] >= since6) and x[5] > 0 and x[3] >= 20 and not x[6]]
         if recent: e['kg'] = round(st.median(recent), 1)
         kg1 = e.get('kg')
