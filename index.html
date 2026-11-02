@@ -49950,6 +49950,7 @@ document.addEventListener('click', function(ev){
     h += tile('notes', 'note', 'Access notes') + tile('h-bincheck', 'bins', 'Bin check');
     h += head('Move to another run');
     h += tile('h-move', 'nbr', moveAsk ? 'Cancel move' : 'Move to run', { off: !n && !moveAsk, on: !!moveAsk, tip: 'Put the picked houses on another run' });
+    h += tile('h-movecsv', 'exportf', 'All moves (CSV)', { tip: 'Every move made on this phone, with from and to, to check before uploading to WasteTrack' });
     if (moveAsk && n) {
       h += note('Which stream?');
       h += '<div class="lbe-runs lbe-mvs">' + [['Garbage', 'garbage.png'], ['Recycling', 'recycle.png'], ['FOGO', 'fogo.png']].map(function(x){
@@ -49971,19 +49972,41 @@ document.addEventListener('click', function(ev){
     var ord = { MON: 1, TUE: 2, WED: 3, THU: 4, FRI: 5, SAT: 6, SUN: 7 };
     return out.sort(function(x, y){ return (ord[String(x.dayText).slice(0, 3).toUpperCase()] || 9) - (ord[String(y.dayText).slice(0, 3).toUpperCase()] || 9) || String(x.run).localeCompare(String(y.run), undefined, { numeric: true }) || String(x.week).localeCompare(String(y.week)); });
   }
+  // The moves report: a CSV with one row per house and stream, laid out like the master list (Site Id, Property ID, Address, Suburb,
+  // Postcode, the day / week / run) with From and To beside each, to check before the changes are uploaded to WasteTrack.
+  // Downloaded as soon as houses are moved; "All moves" downloads every move recorded on this phone since.
+  function moveLog(){ try { var v = JSON.parse(localStorage.getItem('lbMoveLog') || '[]'); return Array.isArray(v) ? v : []; } catch (e) { return []; } }
+  function moveRow(site, stream, from, to){
+    var sl = String(site.suburbLine || ''), pc = (/\b(\d{4})\b/.exec(sl) || [])[1] || site.postcode || '', sub = sl.replace(/\s*\b\d{4}\b\s*$/, '').trim() || site.suburb || '';
+    var bins = []; try { ((site.soloStreams || {})[stream] || []).forEach(function(b){ if (b && b.serial) bins.push(String(b.serial)); }); } catch (e) {}
+    return { at: new Date().toISOString(), siteId: site.siteId || '', propId: site.propId || '', address: site.addressText || '', suburb: sub, postcode: pc, stream: stream, bins: bins.join(' '), from: from, to: to, lat: site.lat || '', lng: site.lng || '' };
+  }
+  function moveCsv(rows, label){
+    if (!rows || !rows.length) { try { window.customAlert('No moves recorded on this phone yet.'); } catch (e) {} return; }
+    var H = ['Site Id', 'Property ID', 'Address', 'Suburb', 'Postcode', 'Stream', 'Bin serials', 'From Collection Day', 'To Collection Day', 'From Week', 'To Week', 'From Run', 'To Run', 'Lat', 'Lng', 'Moved'];
+    var q = function(v){ return '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"'; };
+    var lines = [H.map(q).join(',')].concat(rows.map(function(x){ return [x.siteId, x.propId, x.address, x.suburb, x.postcode, x.stream, x.bins, x.from.day, x.to.day, x.from.week, x.to.week, x.from.run, x.to.run, x.lat, x.lng, x.at].map(q).join(','); }));
+    var blob = new Blob(['\ufeff' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8;' }), a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = 'LukezBunz_' + label + '_' + new Date().toISOString().replace(/[:.]/g, '-').slice(0, 16) + '.csv';
+    document.body.appendChild(a); a.click(); setTimeout(function(){ try { URL.revokeObjectURL(a.href); a.remove(); } catch (e) {} }, 4000);
+  }
+  window.lbMovesCsv = function(){ moveCsv(moveLog(), 'AllMoves'); };
   // the picked houses go on the chosen run: that stream's run number (and the day / week when the run is on another one), as a property edit that syncs
   async function moveGo(r){
     var ids = houseIds(); if (!ids || !ids.size || !r) return;
-    var recs = g('siteRecords') || [], field = { Garbage: 'garRun', Recycling: 'recRun', FOGO: 'fogRun' }[r.stream], le = g('logEdit'), n = 0;
+    var recs = g('siteRecords') || [], field = { Garbage: 'garRun', Recycling: 'recRun', FOGO: 'fogRun' }[r.stream], le = g('logEdit'), n = 0, batch = [];
     Array.from(ids).forEach(function(id){
       var site = recs.find(function(x){ return String(x.propId || x.siteId) === String(id); }); if (!site) return;
       var sc = site.soloSchedule = site.soloSchedule || {}, ed = { timestamp: new Date().toISOString(), editType: 'PROPERTY_UPDATE', propId: site.propId, siteId: site.siteId, address: site.addressText };
+      var was = { day: sc.day || '', week: sc.weekLetter || '', run: sc[field] || '' };
       sc[field] = r.run; ed[field] = r.run;
       if (r.dayText && String(sc.day || '').toLowerCase() !== String(r.dayText).toLowerCase()) { sc.day = r.dayText; ed.day = r.dayText; }
       if (r.stream !== 'Garbage' && r.weekLetter && String(sc.weekLetter || '').toUpperCase() !== String(r.weekLetter).toUpperCase()) { sc.weekLetter = r.weekLetter; sc.weekFormatted = 'Week ' + r.weekLetter; ed.weekLetter = r.weekLetter; }
       try { if (le) le(ed); } catch (e) {}
       n++;
+      batch.push(moveRow(site, r.stream, was, { day: sc.day || '', week: sc.weekLetter || '', run: r.run }));
     });
+    if (batch.length) { try { var lg = moveLog(); batch.forEach(function(x){ lg.push(x); }); localStorage.setItem('lbMoveLog', JSON.stringify(lg.slice(-5000))); } catch (e) {} moveCsv(batch, 'Moves'); }
     try { setLet('hasUnsyncedChanges', true); var u = g('updateSyncButtonIcon'); if (u) u(); } catch (e) {}
     moveAsk = null; houseClear();
     try { var tr = g('triggerUniversalDataRefresh'); if (tr) tr(); } catch (e) {}
@@ -50868,6 +50891,7 @@ document.addEventListener('click', function(ev){
     // houses tab
     if (a === 'h-clear') { houseClear(); return; }
     if (a === 'h-move') { moveAsk = moveAsk ? null : { stream: null, list: [] }; paint(); return; }
+    if (a === 'h-movecsv') { window.lbMovesCsv(); return; }
     if (a === 'mv-s') { if (moveAsk) { moveAsk.stream = t.dataset.k; paint(); } return; }
     if (a === 'mv-go') { if (moveAsk && moveAsk.list) await moveGo(moveAsk.list[+t.dataset.k]); return; }
     if (a === 'h-cp') {
