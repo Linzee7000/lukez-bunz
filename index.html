@@ -11801,6 +11801,7 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
           <div class="uprop-flat-btn-row lb-lead-only">
             <button type="button" class="uprop-flat-btn" onclick="window.startPropertyBoundaryDraw('${propIdEsc}')"><img class="icon-img" src="boundary.png" alt="">${boundaryPts ? 'Redraw' : 'Draw'} Boundary</button>
             <button type="button" class="uprop-flat-btn" onclick="window.autoDetectPropertyBoundary('${propIdEsc}')">🌐 Auto-Detect (Vicmap)</button>
+            <button type="button" class="uprop-flat-btn" onclick="window.lbJoinLots && window.lbJoinLots('${propIdEsc}')"><img class="icon-img" src="boundary.png" alt=""> Join lots</button>
           </div>
           <div class="uprop-meta-line lb-lead-only" style="margin-top:6px;">
             ${boundaryStatusHTML}
@@ -13605,6 +13606,21 @@ window.addEventListener('DOMContentLoaded', async () => {
     refreshUPropViews();
     window.lbParcels.refresh();
     customAlert(r.message);
+  };
+
+  // One boundary for a property that sits on several lots (the depot is on three titles): the lots picked with Join lots,
+  // merged. Saved exactly like a hand-drawn one (site.boundary, PROPERTY_BOUNDARY), so it shows orange, syncs, and can be Cleared.
+  window.lbSetPropertyBoundary = async function(propId, ring) {
+    const site = siteRecords.find(s => String(s.propId || s.siteId) === String(propId));
+    if (!site || !Array.isArray(ring) || ring.length < 3) return false;
+    site.boundary = ring.map(p => [p[0], p[1]]);
+    hasUnsyncedChanges = true; updateSyncButtonIcon();
+    logEdit({ timestamp: new Date().toISOString(), editType: "PROPERTY_BOUNDARY", propId: site.propId, siteId: site.siteId, address: site.addressText, boundary: JSON.stringify(site.boundary) });
+    await saveToDB("masterRecords", siteRecords);
+    await saveToDB("masterEditsLog", masterEditsLog);
+    refreshUPropViews();
+    triggerUniversalDataRefresh();
+    return true;
   };
 
   window.clearPropertyBoundary = async function(propId) {
@@ -23582,7 +23598,7 @@ body.stream-slr .lb-layers-head .icon-img { filter: brightness(0); }
     const sw = (css, label, how) => '<div class="lbkey-row"><span class="lbkey-sw" style="' + css + '"></span><span class="lbkey-tx"><b>' + label + '</b><i>' + how + '</i></span></div>';
     const keyAt = pieces.findIndex(p => p.indexOf('>Trail<') > -1);   // sits after "On the map", before Trail
     const keyHtml = ('<div class="lb-layers-sect">What the outlines mean</div><div class="lbkey">'
-      + sw('border:2px solid #0369a1;background:rgba(14,165,233,.15)', 'Blue: the property lot', 'From Vicmap, can\'t be edited. To change one, open the property and Redraw Boundary: your own orange outline then replaces it.')
+      + sw('border:2px solid #0369a1;background:rgba(14,165,233,.15)', 'Blue: the property lot', 'From Vicmap, can\'t be edited. To change or join lots (a property on 3 titles): open the property > Property > Join lots, tap the lots, Make one boundary. Your own orange outline then replaces them.')
       + sw('border:2px dashed #c2410c;background:rgba(249,115,22,.15)', 'Orange dashed: a boundary you drew', 'Property page > Property > Redraw Boundary. Clear puts the blue lot back.')
       + sw('border:1px solid #94a3b8', 'Grey / white thin: neighbouring lots', 'Only there for context. Turn off in Layers: Property boundaries.')
       + sw('border:2px solid #e11d48;background:rgba(225,29,72,.12)', 'Coloured solid (pink, green, blue...): a run\'s boundary', 'Each run has its own colour, so pink is one run, not a mistake. Edit in the menu > Edit map > Boundary. Turn off: Run boundaries.')
@@ -25908,6 +25924,107 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     upd();
     return upd;
   }
+
+
+  /* ---- Join lots (Fox, 2 Nov: "if we can select 3 lots and make them one"; the depot sits on 3 titles) ----
+     Tap lots on the map (the blue ones, or the neighbouring grey ones) to pick or un-pick them, then Make one boundary: the lots are
+     merged (they must touch) and saved as the property's own boundary, the same as one drawn by hand. */
+  let join = null;
+  function ringHas(o, x, y) {
+    let c = false;
+    for (let i = 0, j = o.length - 2; i < o.length; j = i, i += 2) {
+      const xi = o[i], yi = o[i + 1], xj = o[j], yj = o[j + 1];
+      if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) c = !c;
+    }
+    return c;
+  }
+  function lotsAtPoint(lat, lng) {
+    const out = [], seen = new Set(), v = { w: lng - 0.0005, e: lng + 0.0005, s: lat - 0.0005, n: lat + 0.0005 };
+    const take = (o, h, b) => {
+      if (!o || (b && !hits(b, v)) || !ringHas(o, lng, lat)) return;
+      if (h && h.some(hh => ringHas(hh, lng, lat))) return;
+      const id = o[0] + ',' + o[1] + ',' + o.length; if (seen.has(id)) return; seen.add(id); out.push({ id, o, h, b });
+    };
+    parcelIdsInView(v).forEach(pid => { const P = store.parcels[pid]; if (P) take(P.o, P.h, P.b); });
+    tiles.forEach(t => t.parcels.forEach(P => P.parts.forEach(part => take(part.o, part.h, part.b))));
+    return out;
+  }
+  function joinPoly(o) {
+    const ring = []; for (let i = 0; i < o.length; i += 2) ring.push([o[i], o[i + 1]]);
+    ring.push(ring[0]); return turf.polygon([ring]);
+  }
+  function joinTitle() {
+    const n = join.picks.size;
+    return (join.name || 'Property') + ' · ' + (n ? n + ' lot' + (n === 1 ? '' : 's') + ' picked: tap more, or Make one boundary' : 'tap each lot it sits on');
+  }
+  function joinBar() {
+    if (typeof window.setMapTopBarContext !== 'function') return;
+    window.setMapTopBarContext(joinTitle(), [
+      { label: 'Undo', icon: '↩️', onClick: () => { const k = Array.from(join.picks.keys()).pop(); if (k) join.picks.delete(k); joinPaint(); } },
+      { label: 'Make one boundary', icon: '✔️', onClick: () => joinFinish(), variant: 'primary' }
+    ], () => joinStop());
+  }
+  function joinPaint() {
+    if (!join) return;
+    join.layer.clearLayers();
+    join.picks.forEach(p => L.polygon(toLatLngs(p.o, p.h), { color: '#ffd21f', weight: 3, fillColor: '#ffd21f', fillOpacity: 0.35, interactive: false }).addTo(join.layer));
+    joinBar();
+  }
+  function joinClick(ev) {
+    if (!join || !map) return;
+    if (ev.target && ev.target.closest && ev.target.closest('.leaflet-control, #mapFixedLeftControls, .map-header-panel, button')) return;
+    ev.stopPropagation(); ev.preventDefault();
+    const ll = map.mouseEventToLatLng(ev), hit = lotsAtPoint(ll.lat, ll.lng);
+    if (!hit.length) return;
+    const sz = q => q.b ? (q.b[2] - q.b[0]) * (q.b[3] - q.b[1]) : 1e9;
+    hit.sort((a, b) => sz(a) - sz(b));
+    const p = hit[0];                            // the smallest wins when lots overlap (a lot inside a bigger reserve)
+    if (join.picks.has(p.id)) join.picks.delete(p.id); else join.picks.set(p.id, p);
+    joinPaint();
+  }
+  async function joinFinish() {
+    if (!join) return;
+    const lots = Array.from(join.picks.values());
+    if (!lots.length) { try { window.customAlert('Tap the lots first'); } catch (e) {} return; }
+    try {
+      const grow = 0.0002;   // 20 cm each way, so two lots whose shared edge is a hair apart still join
+      let acc = null;
+      lots.forEach(l => { const b = turf.buffer(joinPoly(l.o), grow, { units: 'kilometers' }); acc = acc ? turf.union(acc, b) : b; });
+      acc = turf.buffer(acc, -grow, { units: 'kilometers' });
+      if (!acc || !acc.geometry) throw new Error('empty');
+      if (acc.geometry.type !== 'Polygon') { try { window.customAlert('Those lots don\'t all touch each other: pick lots that join up'); } catch (e) {} return; }
+      const ring = acc.geometry.coordinates[0].slice(0, -1).map(c => [Math.round(c[1] * 1e6) / 1e6, Math.round(c[0] * 1e6) / 1e6]);
+      const id = join.propId;
+      await window.lbSetPropertyBoundary(id, ring);
+      joinStop();
+      try { window.lbParcels.refresh(); } catch (e) {}
+      try { window.customAlert('Saved: one boundary from ' + lots.length + ' lot' + (lots.length === 1 ? '' : 's')); } catch (e) {}
+    } catch (e) { try { window.customAlert('Could not join those lots'); } catch (x) {} }
+  }
+  function joinStop() {
+    if (!join) return;
+    try { map.getContainer().removeEventListener('click', joinClick, true); } catch (e) {}
+    try { map.removeLayer(join.layer); } catch (e) {}
+    join = null;
+    try { if (typeof window.clearMapTopBarContext === 'function') window.clearMapTopBarContext(); else if (typeof window.setMapTopBarContext === 'function') window.setMapTopBarContext('', [], null); } catch (e) {}
+  }
+  window.lbJoinLots = function (propId) {
+    const site = (typeof siteRecords !== 'undefined' ? siteRecords : []).find(s => String(s.propId || s.siteId) === String(propId));
+    if (!site) return;
+    const p = (typeof gps === 'function') ? gps(site.lat, site.lng) : null;
+    if (!p) { try { window.customAlert('This property needs GPS coordinates first'); } catch (e) {} return; }
+    try { mapFocusPropId = String(propId); } catch (e) {}
+    try { if (!isOn() && typeof window.togglePropertyBoundaries === 'function') window.togglePropertyBoundaries(); } catch (e) {}
+    try { switchMainTab('map'); } catch (e) {}
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      if (!ensureMap()) return;
+      try { leafletMap.setView([p.lat, p.lng], 19); } catch (e) {}
+      if (join) joinStop();
+      join = { propId: String(propId), name: (site.baseStreetLine || site.addressText || 'Property').trim(), picks: new Map(), layer: L.layerGroup().addTo(map) };
+      map.getContainer().addEventListener('click', joinClick, true);
+      joinPaint();
+    }));
+  };
 
   window.lbParcels = {
     onMapReady: function () { ensureMap(); ensureLoaded().then(scheduleRefresh); },
