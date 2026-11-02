@@ -7972,7 +7972,7 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
     roadModes.forEach(r=>{ if(!Array.isArray(r.points)||r.points.length<2)return; const label=r.type==='drive-reverse-out'?'Drive in · reverse out':'Reverse in · drive out'; L.polyline(r.points.map(p=>[p.lat,p.lng]),{color:roadModeColors[r.type]||'#f97316',weight:7,opacity:.9}).bindPopup(mapPopupHTML({title:label})).addTo(mapSeqLayer); });
     // Shared street modes: dashed, so they read as "from the run maps" next to the solid lines drawn by hand. Not for Street Litter.
     if(showStreetModes && !/^Street/.test(activeFilterStream||'')){
-      sharedStreetModes.forEach(s=>{ if(!Array.isArray(s.points)||s.points.length<2)return; const label=s.type==='drive-reverse-out'?'Drive in · reverse out':'Reverse in · drive out'; L.polyline(s.points,{color:roadModeColors[s.type]||'#f97316',weight:5,opacity:.85,dashArray:'10 6'}).bindPopup(mapPopupHTML({title:label,lines:[s.street?esc(s.street):'','From the run maps - position is approximate']})).addTo(mapSeqLayer); });
+      sharedStreetModes.forEach(s=>{ if(!Array.isArray(s.points)||s.points.length<2)return; const label=s.type==='drive-reverse-out'?'Drive in · reverse out':'Reverse in · drive out'; L.polyline(s.points,{color:roadModeColors[s.type]||'#f97316',weight:5,opacity:.85,dashArray:'10 6'}).bindPopup(mapPopupHTML({title:label,lines:[s.street?esc(s.street):'','From the run maps - position is approximate']})).addTo(mapSeqLayer)._lbSeg = s; });
     }
   }
   function toggleStreetModes(){
@@ -57829,6 +57829,143 @@ html body.ux2:not(#sh-a):not(#sh-b):not(#sh-c):not(#sh-d):not(#sh-e):not(#sh-f):
 /* the map's own pop-up stays open (it is what Leaflet and the rest of the app know about) but is not drawn */
 body.lb-sheet-on .leaflet-pane .leaflet-popup{visibility:hidden !important}
 body.lb-sheet-on .leaflet-pane .leaflet-popup *{visibility:hidden !important;pointer-events:none !important}
+</style>
+<script id="lb-modeedit-script">
+/* "Drive in, reverse out" and "Reverse in, drive out" streets (data/street-modes.json, read off the route-map PDFs) can be moved and
+   changed by a leading hand (Fox, 2 Nov: one was on the wrong street). Tap a dashed line > Edit line: drag its dots, drag the middle
+   dot to move the whole line, tap a small dot between two to add a point, double-tap a dot to remove it, Flip swaps the two kinds,
+   Delete removes the line. The file is not touched: each change is kept as an override per line (id = street + source + where the
+   line first started) in localStorage 'lbModeEdits', and shared between phones as outbox places (kind 'streetMode', id sm_<id>, the
+   newest change wins), so it needs no Apps Script change. The houses along a line take their mode from it, so moving the line moves them. */
+(function(){
+  'use strict';
+  function g(n){ try { return (new Function('return typeof ' + n + ' !== "undefined" ? ' + n + ' : undefined'))(); } catch (e) { return undefined; } }
+  function ls(k, d){ try { var v = JSON.parse(localStorage.getItem(k)); return v == null ? d : v; } catch (e) { return d; } }
+  function lw(k, v){ try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
+  function lead(){ try { return typeof window.uxIsLead === 'function' ? !!window.uxIsLead() : false; } catch (e) { return false; } }
+  var R5 = function(x){ return Math.round(x * 1e5) / 1e5; };
+  var edits = ls('lbModeEdits', {}) || {};
+  function idOf(seg){
+    if (seg._lbId) return seg._lbId;
+    var o = seg._lbO || seg.points || [], f = o[0] || [0, 0];
+    return seg._lbId = String(seg.street || '') .toLowerCase().replace(/[^a-z0-9]/g, '') + '_' + String(seg.src || '').replace(/[^A-Za-z0-9]/g, '').slice(0, 24) + '_' + Math.round(f[0] * 1e4) + '_' + Math.round(f[1] * 1e4);
+  }
+  function remember(seg){ if (!seg._lbO) { seg._lbO = { points: seg.points.map(function(p){ return p.slice(); }), type: seg.type }; } }
+  function applyOne(seg){
+    remember(seg); var e = edits[idOf(seg)]; if (!e) return;
+    seg.type = e.type || seg._lbO.type;
+    seg.points = e.del ? [] : e.pts.map(function(p){ return p.slice(); });
+  }
+  function refreshHouses(){ try { (new Function("lbSharedHouseSig = ''"))(); } catch (e) {} }
+  var lastList = null;
+  function applyAll(){
+    var list = g('sharedStreetModes'); if (!list || !list.length) return false;
+    if (list === lastList) return true; lastList = list;
+    list.forEach(function(s){ if (Array.isArray(s.points) && s.points.length) applyOne(s); });
+    if (Object.keys(edits).length) { refreshHouses(); try { if (g('leafletMap')) renderMapData(); } catch (e) {} }
+    return true;
+  }
+  var tries = 0, iv = setInterval(function(){ try { if (applyAll() || ++tries > 60) clearInterval(iv); } catch (e) { clearInterval(iv); } }, 1000);
+
+  // ---- sharing
+  function send(id, e){
+    try { if (window.lbOutbox && window.lbOutbox.sendPlace) window.lbOutbox.sendPlace({ id: 'sm_' + id, kind: 'streetMode', sid: id, type: e.type || '', del: e.del ? 1 : 0, u: e.u, pts: (e.pts || []).map(function(p){ return [R5(p[0]), R5(p[1])]; }) }); } catch (x) {}
+  }
+  document.addEventListener('lb-places', function(ev){
+    try {
+      var pl = ev && ev.detail || {}, ch = false;
+      Object.keys(pl).forEach(function(k){
+        var p = pl[k]; if (!p || p.kind !== 'streetMode' || !p.sid) return;
+        var mine = edits[p.sid]; if (mine && (mine.u || 0) >= (+p.u || 0)) return;
+        edits[p.sid] = { type: p.type, del: !!p.del, pts: p.pts || [], u: +p.u || 0 }; ch = true;
+        var list = g('sharedStreetModes') || []; list.forEach(function(s){ if (s._lbO && idOf(s) === p.sid) applyOne(s); });
+      });
+      if (ch) { lw('lbModeEdits', edits); refreshHouses(); try { renderMapData(); } catch (x) {} }
+    } catch (x) {}
+  });
+
+  // ---- editing
+  var cur = null;   // { seg, pl, grp, bar }
+  var DOT = function(cls){ return L.divIcon({ className: 'lbme-dot ' + cls, iconSize: [18, 18], iconAnchor: [9, 9] }); };
+  function save(seg){
+    var id = idOf(seg), u = Date.now();
+    edits[id] = { type: seg.type, del: !seg.points.length, pts: seg.points.map(function(p){ return [R5(p[0]), R5(p[1])]; }), u: u };
+    lw('lbModeEdits', edits); send(id, edits[id]);
+  }
+  function stop(){
+    if (!cur) return; var c = cur; cur = null;
+    try { c.grp.remove(); } catch (e) {} try { c.bar.remove(); } catch (e) {}
+    try { c.pl.setStyle({ opacity: .85 }); } catch (e) {}
+    refreshHouses(); try { renderMapData(); } catch (e) {}
+  }
+  function colour(t){ return t === 'drive-reverse-out' ? '#f97316' : '#2563eb'; }
+  function paint(){
+    if (!cur) return; var seg = cur.seg, m = g('leafletMap'); cur.grp.clearLayers();
+    var ll = seg.points.map(function(p){ return [p[0], p[1]]; });
+    try { cur.pl.setLatLngs(ll); cur.pl.setStyle({ color: colour(seg.type) }); } catch (e) {}
+    seg.points.forEach(function(p, i){
+      var mk = L.marker(p, { icon: DOT('v'), draggable: true, zIndexOffset: 900 }).addTo(cur.grp);
+      mk.on('drag', function(){ var q = mk.getLatLng(); seg.points[i] = [q.lat, q.lng]; cur.pl.setLatLngs(seg.points); });
+      mk.on('dragend', function(){ save(seg); paint(); });
+      mk.on('dblclick', function(ev){ if (ev.originalEvent) { L.DomEvent.stop(ev.originalEvent); } if (seg.points.length > 2) { seg.points.splice(i, 1); save(seg); paint(); } });
+      if (i) {
+        var a = seg.points[i - 1], mid = [(a[0] + p[0]) / 2, (a[1] + p[1]) / 2];
+        var mm = L.marker(mid, { icon: DOT('m'), zIndexOffset: 800 }).addTo(cur.grp);
+        mm.on('click', function(ev){ if (ev.originalEvent) L.DomEvent.stop(ev.originalEvent); seg.points.splice(i, 0, mid); save(seg); paint(); });
+      }
+    });
+    // the middle dot moves the whole line
+    var n = seg.points.length, cx = 0, cy = 0; seg.points.forEach(function(p){ cx += p[0] / n; cy += p[1] / n; });
+    var all = L.marker([cx, cy], { icon: DOT('a'), draggable: true, zIndexOffset: 950 }).addTo(cur.grp), start = null, orig = null;
+    all.on('dragstart', function(){ start = all.getLatLng(); orig = seg.points.map(function(p){ return p.slice(); }); });
+    all.on('drag', function(){ var q = all.getLatLng(), dy = q.lat - start.lat, dx = q.lng - start.lng; seg.points = orig.map(function(p){ return [p[0] + dy, p[1] + dx]; }); cur.pl.setLatLngs(seg.points); });
+    all.on('dragend', function(){ save(seg); paint(); });
+  }
+  function bar(){
+    var d = document.createElement('div'); d.id = 'lbModeBar';
+    d.innerHTML = '<span class="lbmb-t"></span><button type="button" data-a="flip">Flip</button><button type="button" data-a="del">Delete</button><button type="button" data-a="done" class="y">Done</button>';
+    document.body.appendChild(d);
+    d.addEventListener('click', function(ev){
+      var b = ev.target.closest('button'); if (!b || !cur) return; var a = b.getAttribute('data-a'), seg = cur.seg;
+      if (a === 'flip') { seg.type = seg.type === 'drive-reverse-out' ? 'reverse-in-drive-out' : 'drive-reverse-out'; save(seg); paint(); title(); }
+      else if (a === 'del') { seg.points = []; save(seg); stop(); }
+      else stop();
+    });
+    return d;
+  }
+  function title(){ if (cur) cur.bar.querySelector('.lbmb-t').textContent = (cur.seg.type === 'drive-reverse-out' ? 'Drive in · reverse out' : 'Reverse in · drive out') + (cur.seg.street ? ' · ' + cur.seg.street : ''); }
+  function begin(pl){
+    var seg = pl._lbSeg, m = g('leafletMap'); if (!seg || !m || !lead()) return; remember(seg); stop();
+    try { m.closePopup(); } catch (e) {}
+    cur = { seg: seg, pl: pl, grp: L.layerGroup().addTo(m), bar: bar() }; title(); paint();
+  }
+  // an "Edit line" button in the dashed line's pop-up (leading hand only)
+  function hook(){
+    var m = g('leafletMap'); if (!m || !m.on) { setTimeout(hook, 1000); return; }
+    m.on('popupopen', function(e){
+      try {
+        var src = e.popup && e.popup._source; if (!src || !src._lbSeg || !lead()) return;
+        var c = e.popup.getElement && e.popup.getElement(); var box = c && c.querySelector('.map-popup'); if (!box || box.querySelector('.lbme-edit')) return;
+        var b = document.createElement('button'); b.type = 'button'; b.className = 'map-popup-btn lbme-edit'; b.textContent = 'Edit line';
+        b.addEventListener('click', function(ev){ ev.stopPropagation(); begin(src); });
+        box.appendChild(b);
+      } catch (x) {}
+    });
+  }
+  hook();
+  window.lbModeEdit = { _t: { edits: function(){ return edits; }, begin: begin, stop: stop, cur: function(){ return cur; }, paint: paint, save: save } };
+})();
+</script>
+<style id="lb-modeedit-style">
+.lbme-dot{border-radius:50%;box-sizing:border-box}
+.lbme-dot.v{background:#fff;border:3px solid #111;width:18px !important;height:18px !important}
+.lbme-dot.m{background:#fff8;border:2px solid #111;width:12px !important;height:12px !important;margin:3px 0 0 3px !important}
+.lbme-dot.a{background:#facc15;border:3px solid #111;width:22px !important;height:22px !important;margin:-2px 0 0 -2px !important}
+#lbModeBar{position:fixed;left:50%;bottom:calc(var(--ux-dock-total,0px) + 18px);transform:translateX(-50%);z-index:5200;display:flex;align-items:center;gap:6px;padding:6px 8px;background:#111;border:2px solid #000;border-radius:6px;box-shadow:3px 3px 0 #000;color:#fff;max-width:96vw}
+#lbModeBar .lbmb-t{font:500 13px/1.1 Roboto,sans-serif;padding:0 6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:46vw}
+#lbModeBar button{font:500 12px/1 Roboto,sans-serif;text-transform:uppercase;padding:9px 10px;background:#3a3a3e;color:#fff;border:2px solid #000;border-radius:4px;box-shadow:2px 2px 0 #000}
+#lbModeBar button.y{background:#facc15;color:#111}
+body.lb-pc #lbModeBar{bottom:18px}
 </style>
 <script id="lb-marker-speed-script">
 /* Drawing a run puts thousands of house and bin markers on the map. Each marker adds its own zoom listeners to the map, and before
