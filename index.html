@@ -13192,12 +13192,21 @@ window.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
-  window.lbRunsRestore = async function() {
-    const b = await loadFromDB('runsBackup'); if (!b || !b.d) return -1;
-    let n = 0;
-    siteRecords.forEach(s0 => { const v = b.d[String(s0.propId || s0.siteId)]; if (!v || !s0.soloSchedule) return; const c = s0.soloSchedule;
-      if ((c.day || '') !== v[0] || (c.weekLetter || '') !== v[1] || (c.garRun || '') !== v[2] || (c.recRun || '') !== v[3] || (c.recSummerRun || '') !== v[4] || (c.fogRun || '') !== v[5]) {
-        c.day = v[0]; c.weekLetter = v[1]; c.weekFormatted = v[1] ? 'Week ' + v[1] : ''; c.garRun = v[2]; c.recRun = v[3]; c.recSummerRun = v[4]; c.fogRun = v[5]; n++; } });
+  // What undoing the last sync would change, grouped (stream + run now -> run before) so the driver can pick which to put back.
+  const LB_UNDO_F = [['garRun', 'Garbage', 'garbage.png'], ['recRun', 'Recycling', 'recycle.png'], ['recSummerRun', 'Summer', 'summer.png'], ['fogRun', 'FOGO', 'fogo.png'], ['day', 'Day', ''], ['weekLetter', 'Week', '']];
+  window.lbRunsPreview = async function() {
+    const b = await loadFromDB('runsBackup'); if (!b || !b.d) return null;
+    const idx = { day: 0, weekLetter: 1, garRun: 2, recRun: 3, recSummerRun: 4, fogRun: 5 }, groups = {};
+    siteRecords.forEach(s0 => { const v = b.d[String(s0.propId || s0.siteId)]; const c = s0.soloSchedule; if (!v || !c) return;
+      LB_UNDO_F.forEach(f => { const was = v[idx[f[0]]] || '', now = c[f[0]] || ''; if (was === now) return;
+        const k = f[0] + '|' + now + '|' + was; (groups[k] = groups[k] || { field: f[0], name: f[1], icon: f[2], now: now, was: was, sites: [] }).sites.push(s0); }); });
+    return { at: b.at, groups: Object.keys(groups).map(k => Object.assign({ key: k }, groups[k])).sort((a, c) => c.sites.length - a.sites.length) };
+  };
+  window.lbRunsRestore = async function(keys) {
+    const p = await window.lbRunsPreview(); if (!p) return -1;
+    const pick = keys ? new Set(keys) : null; let n = 0;
+    p.groups.forEach(g => { if (pick && !pick.has(g.key)) return;
+      g.sites.forEach(s0 => { s0.soloSchedule[g.field] = g.was; if (g.field === 'weekLetter') s0.soloSchedule.weekFormatted = g.was ? 'Week ' + g.was : ''; n++; }); });
     await saveToDB('masterRecords', siteRecords);
     try { triggerUniversalDataRefresh(); } catch (e) {}
     return n;
@@ -35484,6 +35493,32 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   window.uxOpenStraySheet = openSheet;
   document.addEventListener('keydown', function(ev){ if (ev.key === 'Escape' && sheet && sheet.classList.contains('open')) closeSheet(); });
 
+  // "Undo last sync": shows what would be put back, grouped, each ticked; nothing changes until Put back is tapped
+  async function undoBox(){
+    var old = $('lbUndoBox'); if (old) old.remove();
+    var p = null; try { p = await window.lbRunsPreview(); } catch (e) {}
+    var box = document.createElement('div'); box.id = 'lbUndoBox';
+    var esc2 = function(x){ return String(x).replace(/[&<>"]/g, function(c){ return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); };
+    if (!p) { alertMsg('No copy to go back to yet: one is made the next time you sync.'); return; }
+    if (!p.groups.length) { alertMsg('Nothing to undo: every house is the same as before the last sync.'); return; }
+    var when = ''; try { when = new Date(p.at).toLocaleString('en-AU', { weekday: 'short', hour: 'numeric', minute: '2-digit' }).toUpperCase(); } catch (e) {}
+    var rows = p.groups.map(function(g, i){
+      var lab = (g.icon ? '<img src="' + g.icon + '" alt="' + g.name + '">' : '<b>' + g.name + '</b>') + '<span>' + esc2(g.now || 'none') + ' &rarr; ' + esc2(g.was || 'none') + '</span><i>' + g.sites.length + '</i>';
+      return '<label class="ub-r"><input type="checkbox" data-k="' + esc2(g.key) + '" checked>' + lab + '</label>'; }).join('');
+    box.innerHTML = '<div class="ub-card"><div class="ub-h">Undo last sync' + (when ? ' <small>copy from ' + when + '</small>' : '') + '</div><div class="ub-s">Tick what to put back. Each line: now &rarr; before, and how many houses.</div><div class="ub-l">' + rows + '</div><div class="ub-f"><button type="button" data-a="go" class="ub-go">Put back</button><button type="button" data-a="no">Cancel</button></div></div>';
+    document.body.appendChild(box);
+    var go = box.querySelector('.ub-go');
+    function count(){ var n = 0; box.querySelectorAll('input:checked').forEach(function(c){ var g = p.groups.filter(function(x){ return x.key === c.dataset.k; })[0]; if (g) n += g.sites.length; }); go.textContent = n ? 'Put back ' + n : 'Put back'; go.disabled = !n; }
+    count();
+    box.addEventListener('change', count);
+    box.addEventListener('click', async function(ev){
+      var a = ev.target.closest && ev.target.closest('button'); if (!a) { if (ev.target === box) box.remove(); return; }
+      if (a.dataset.a === 'no') { box.remove(); return; }
+      var keys = Array.prototype.map.call(box.querySelectorAll('input:checked'), function(c){ return c.dataset.k; });
+      box.remove(); alertMsg('Putting the runs back...');
+      try { var n = await window.lbRunsRestore(keys); alertMsg(n + ' change' + (n === 1 ? '' : 's') + ' put back.'); } catch (e) { alertMsg('Could not undo the sync.'); }
+    });
+  }
   // ---- Edit & settings: a "Data" section on top -----------------------------------------
   var I_BUILD = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true"><path d="M4 8l5-4 6 3 5-3v13l-5 3-6-3-5 4V8z"/><path d="M9 4v13M15 7v13"/></svg>';
   var I_SYNC = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true"><path d="M20 8A8 8 0 0 0 5.5 6M4 4v4h4M4 16a8 8 0 0 0 14.5 2M20 20v-4h-4"/></svg>';
@@ -35598,7 +35633,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     if (!t) return;
     ev.preventDefault(); ev.stopPropagation();
     if (t.id === 'uxMoreTools') { var on = document.body.classList.toggle('lb-data-more'); var lb = t.querySelector('.lb-label'); if (lb) lb.textContent = on ? 'Fewer tools' : 'More tools'; return; }
-    if (t.id === 'uxRunsUndo') { (async function(){ alertMsg('Putting the runs back...'); try { var n = await window.lbRunsRestore(); alertMsg(n < 0 ? 'No copy to go back to: nothing has been synced since this update.' : n + ' house' + (n === 1 ? '' : 's') + ' put back as before the last sync.'); } catch (e) { alertMsg('Could not undo the sync.'); } })(); return; }
+    if (t.id === 'uxRunsUndo') { undoBox(); return; }
     if (t.id === 'uxFullSync') { alertMsg('Syncing... keep this open until it says done.'); try { var sm = document.getElementById('syncStatusMsg'); if (sm && !sm.__lbWatch) { sm.__lbWatch = true; new MutationObserver(function(){ var x = (sm.innerText || sm.textContent || '').trim(); if (x) alertMsg(x); }).observe(sm, { childList: true, characterData: true, subtree: true }); } } catch (e) {} try { startUpdateProcess(); } catch (e) { try { document.getElementById('syncBtn').click(); } catch (e2) {} } return; }
     if (t.id === 'uxEdChk' || t.id === 'uxEdSend') { edCheck(t.id === 'uxEdSend'); return; }
     if (t.id === 'uxBdPush') { pushOut(); return; }
@@ -58905,6 +58940,21 @@ html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#ub-a):no
 html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#ub-a):not(#ub-b):not(#ub-c):not(#ub-d):not(#ub-e):not(#ub-f):not(#ub-g):not(#ub-h):not(#ub-i):not(#ub-j):not(#ub-k):not(#ub-l):not(#ub-m):not(#ub-n):not(#ub-o):not(#ub-p):not(#ub-q):not(#ub-r):not(#ub-s):not(#ub-t):not(#ub-u):not(#ub-v):not(#ub-w):not(#ub-x) #mapBinsAtAddress .unassigned-bin-banner .ub-b:active{transform:var(--rb-press,translateY(2px)) !important;box-shadow:none !important}
 html:is([data-ux-skin="rubbish"],[data-ux-skin="speedo"]) body.ux2:not(#ub-a):not(#ub-b):not(#ub-c):not(#ub-d):not(#ub-e):not(#ub-f):not(#ub-g):not(#ub-h):not(#ub-i):not(#ub-j):not(#ub-k):not(#ub-l):not(#ub-m):not(#ub-n):not(#ub-o):not(#ub-p):not(#ub-q):not(#ub-r):not(#ub-s):not(#ub-t):not(#ub-u):not(#ub-v):not(#ub-w):not(#ub-x) #mapBinsAtAddress .lb-offrun-add ~ .unassigned-bin-banner .ub-add{display:none !important}
 body:not(.lb-data-more) #lbSettingsBody .lb-adv{display:none !important}
+#lbUndoBox{position:fixed;inset:0;z-index:40000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.55);padding:14px}
+#lbUndoBox .ub-card{width:min(440px,100%);max-height:86vh;display:flex;flex-direction:column;gap:8px;padding:12px;background:var(--mn-tile,#1b1c21);color:#fff;border:var(--rb-bd2,2px solid #000);border-radius:8px;box-shadow:var(--rb-sh-lg,0 5px 0 #000)}
+#lbUndoBox .ub-h{font:500 22px/1 "Barlow Condensed",sans-serif;letter-spacing:.03em;text-transform:uppercase}
+#lbUndoBox .ub-h small{font-size:14px;opacity:.7;margin-left:6px}
+#lbUndoBox .ub-s{font:400 13px/1.3 -apple-system,Roboto,sans-serif;opacity:.8}
+#lbUndoBox .ub-l{overflow:auto;display:flex;flex-direction:column;gap:5px}
+#lbUndoBox .ub-r{display:flex;align-items:center;gap:8px;padding:6px 8px;background:#2b2c31;border:2px solid #000;border-radius:6px;font:500 17px/1 "Barlow Condensed",sans-serif;letter-spacing:.02em;cursor:pointer}
+#lbUndoBox .ub-r img{width:22px;height:22px;filter:brightness(0) invert(1)}
+#lbUndoBox .ub-r span{flex:1}
+#lbUndoBox .ub-r i{font-style:normal;opacity:.75}
+#lbUndoBox .ub-r input{width:20px;height:20px;accent-color:#f97316}
+#lbUndoBox .ub-f{display:flex;gap:8px;justify-content:flex-end}
+#lbUndoBox .ub-f button{width:auto;padding:8px 14px 7px;border:2px solid #000;border-radius:6px;box-shadow:0 2px 0 #000;background:#2b2c31;color:#fff;font:500 17px/1 "Barlow Condensed",sans-serif;letter-spacing:.03em;text-transform:uppercase}
+#lbUndoBox .ub-f .ub-go{background:#f97316;color:#000}
+#lbUndoBox .ub-f button:disabled{opacity:.4}
 </style>
 <script id="lb-zoomfont-script">
 (function(){
