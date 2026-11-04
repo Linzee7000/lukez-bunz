@@ -32523,6 +32523,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     rec.trail = saveTrail(rec);
     var h = history(); h.push(rec); lsSet('lbShiftHistory', h.slice(-90));
     try { recordReading(rec.truck, o.km, o.hrs); } catch (e) {}
+    try { var pl = window.lbRunSheet && window.lbRunSheet.pendingLoad ? window.lbRunSheet.pendingLoad(SH.id) : null; recordReading(rec.truck, null, null, { load: { n: pl ? pl.n : 0, t: now } }); loadSent = pl ? pl.n : 0; } catch (e) {}
     SH = null; saveSh();
     try { if (window.lbBreakClock && window.lbBreakClock.endShift) window.lbBreakClock.endShift(); } catch (e) {}
     return rec;
@@ -32910,7 +32911,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   window.lbFleetUse = function(unit){ return FLEET_USE[String(unit || '').trim()] || ''; };
   window.lbFleetRego = function(unit){ var k = String(unit || '').trim().toLowerCase(), rg = lsGet('lbRegos', {}) || {}; return rg[k] || FLEET[k] || ''; };
   function newDraft(){ var d = me(), rg = lsGet('lbRegos', {}) || {}; draft = draft || { driver: d.name || '', emp: d.emp || '', truck: d.truck || '', rego: rg[String(d.truck || '').toLowerCase()] || '', km: '', hrs: '', photo: null, checks: {}, stream: streamForTruck(d.truck) };
-    if (!draft._ap) { draft._ap = 1; applyLast(draft); } refreshLast(); }
+    if (!draft._ap) { draft._ap = 1; applyLast(draft); applyLoad(draft); } refreshLast(); }
   /* The last odometer / engine hours for a truck - the newest of this phone's own and what other phones sent
      (kind 'truckReading' places, pulled with the fleet's places), so the next driver starts from where the last
      one finished. */
@@ -32926,6 +32927,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var k = unit.toLowerCase(), all = lsGet('lbTruckReadings', {}) || {}, prev = window.lbTruckLast(unit) || {};
     var rec = { id: 'truck_' + k.replace(/[^a-z0-9]/g, ''), kind: 'truckReading', unit: unit, km: km != null ? km : (prev.km == null ? null : prev.km), hrs: hrs != null ? hrs : (prev.hrs == null ? null : prev.hrs), ts: Date.now(), driver: (SH && SH.driver) || me().name || '' };
     if ((extra && extra.tank) || prev.tank) rec.tank = (extra && extra.tank) || prev.tank;
+    // the bins still in the hopper (not tipped) stay with the TRUCK, not the driver: the next shift on it starts from them
+    if (extra && extra.load) rec.load = extra.load; else if (prev.load) rec.load = prev.load;
     all[k] = rec; lsSet('lbTruckReadings', all);
     try { if (window.lbOutbox && window.lbOutbox.sendPlace) window.lbOutbox.sendPlace(rec); } catch (e) {}
   }
@@ -32935,11 +32938,22 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     if (!d.kmT && L.km != null) d.km = String(L.km);
     if (!d.hrsT && L.hrs != null) d.hrs = String(L.hrs);
   }
+  // Bins on the truck at the start of a shift: what the truck last said it held (a suggestion, typed over freely)
+  function applyLoad(d){
+    if (!d || d.loadT) return;
+    var L = d.truck ? window.lbTruckLast(d.truck) : null;
+    d.load = L && L.load && L.load.n > 0 ? String(L.load.n) : '';
+  }
+  function loadHtml(o){
+    var L = o && o.truck ? window.lbTruckLast(o.truck) : null, last = L && L.load;
+    return '<div class="drv-sect"><span>Bins on the truck now</span></div>' + field('uxsLoad', 'Bins already in ' + (o.truck ? esc(o.truck) : 'the truck') + ' (not tipped)', o.load || '', 'number', '0') +
+      '<div class="drv-hint2">' + (last ? 'Last known on ' + esc(o.truck) + ': ' + esc(last.n) + ' bin' + (last.n === 1 ? '' : 's') + (last.t ? ' \u00b7 ' + esc(dateStr(last.t)) : '') + '. Change it if it is different.' : 'Leave it empty if the truck is empty.') + '</div>';
+  }
   var lastPull = 0;
   function refreshLast(){
     if (Date.now() - lastPull < 45000) return; lastPull = Date.now();
     try { var pr = window.lbOutbox && window.lbOutbox.pullPlaces && window.lbOutbox.pullPlaces();
-      if (pr && pr.then) pr.then(function(){ if (draft && !SH) { var b4 = draft.km + '|' + draft.hrs; applyLast(draft); if (b4 !== draft.km + '|' + draft.hrs) paint(); } }); } catch (e) {}
+      if (pr && pr.then) pr.then(function(){ if (draft && !SH) { var b4 = draft.km + '|' + draft.hrs + '|' + draft.load; applyLast(draft); applyLoad(draft); if (b4 !== draft.km + '|' + draft.hrs + '|' + draft.load) paint(); } }); } catch (e) {}
   }
   function lastHint(o){
     var L = o && o.truck ? window.lbTruckLast(o.truck) : null; if (!L) return '';
@@ -33123,7 +33137,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
         (oosT ? '<div class="drv-stopbox">' + I.warn + '<span><b>' + esc(oosT.truck) + ' is out of service.</b> Brakes were at ' + oosT.min + '% on ' + esc(dateStr(oosT.ts)) + '. Do not use it until the brakes are replaced and your leading hand clears it.</span></div>' : '') +
         '<div class="drv-sect"><span>Your run</span></div>' +
         runPickerHtml(dr, 'sstream', 'srun') +
-        '<div class="drv-sect"><span>Truck info</span></div><div class="drv-row2">' + field('uxsTruck', 'Unit', dr.truck, 'text', 'Fleet no.') + field('uxsRego', 'Rego', dr.rego || '', 'text', 'Number plate') + '</div>' + readingsHtml(dr, 'uxsS') + checksHtml(dr.checks) +
+        '<div class="drv-sect"><span>Truck info</span></div><div class="drv-row2">' + field('uxsTruck', 'Unit', dr.truck, 'text', 'Fleet no.') + field('uxsRego', 'Rego', dr.rego || '', 'text', 'Number plate') + '</div>' + readingsHtml(dr, 'uxsS') + loadHtml(dr) + checksHtml(dr.checks) +
         (faults.length ? '<div class="drv-warnbox">' + I.warn + '<span>' + faults.length + ' fault' + (faults.length > 1 ? 's' : '') + ': ' + esc(faults.map(function(k){ return CHK[k]; }).join(', ')) + '. Log each one as a defect (you’ll be asked after starting).</span></div>' : '') +
         '<div class="drv-foot"><button type="button" class="drv-btn" data-a="history">' + I.list + 'Past shifts</button><button type="button" class="drv-btn drv-go" data-a="start"' + (ready ? '' : ' disabled') + '>Start shift</button></div>' +
         (ready ? '' : '<div class="drv-hint">' + esc(oosT && !isLead() ? 'This truck can’t be started.' : !runOk ? 'Pick your stream and run.' : !dr.driver.trim() ? 'Put your name in.' : ((dr.km === '' || dr.hrs === '') && !dr.photo) ? 'Put in the km and hours, or take a photo of the dash.' : 'Tick every pre-start item.') + '</div>') + roleHtml();
@@ -33282,13 +33296,13 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     if (view === 'main' && !SH && draft) {
       if (id === 'uxsName') draft.driver = t.value; else if (id === 'uxsEmp') draft.emp = t.value; else if (id === 'uxsTruck') {
         // fill the rego from the fleet list, unless the driver has typed their own
-        var auto = window.lbFleetRego(draft.truck); draft.truck = t.value; applyLast(draft);
+        var auto = window.lbFleetRego(draft.truck); draft.truck = t.value; applyLast(draft); applyLoad(draft); { var lde = $('uxsLoad'); if (lde && document.activeElement !== lde) lde.value = draft.load || ''; }
         if (!draft.rego || draft.rego === auto) { draft.rego = window.lbFleetRego(t.value); var rgEl = $('uxsRego'); if (rgEl) rgEl.value = draft.rego; }
         // the truck's usual stream is picked for them (still changeable), unless they've already chosen one
         var use = streamForTruck(t.value);
         if (use && !draft.run && draft.stream !== use) { draft.stream = use; clearTimeout(draft._pt); draft._pt = setTimeout(function(){ var f = document.activeElement, id0 = f && f.id, pos = f && f.selectionStart; paint(); var f2 = id0 && $(id0); if (f2) { f2.focus(); try { f2.setSelectionRange(pos, pos); } catch (e) {} } }, 600); }
       } else if (id === 'uxsRego') draft.rego = t.value;
-      else if (id === 'uxsSKm') { draft.km = t.value; draft.kmT = true; } else if (id === 'uxsSHrs') { draft.hrs = t.value; draft.hrsT = true; } else return;
+      else if (id === 'uxsSKm') { draft.km = t.value; draft.kmT = true; } else if (id === 'uxsSHrs') { draft.hrs = t.value; draft.hrsT = true; } else if (id === 'uxsLoad') { draft.load = t.value; draft.loadT = true; } else return;
       paintSoon();
     } else if (view === 'end' && endDraft) {
       if (id === 'uxsEKm') endDraft.km = t.value; else if (id === 'uxsEHrs') endDraft.hrs = t.value; else if (id === 'uxsENote') endDraft.note = t.value; else if (id === 'uxsETruckCount') endDraft.truckBinCount = t.value;
@@ -33369,6 +33383,13 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       try { stranded = window.lbRunSheet ? window.lbRunSheet.truckChanged(SH.id, { from: fromTruck, to: toTruck, reason: truckDraft.reason, note: truckDraft.note }) : null; } catch (e) {}
       SH.truckChanges = SH.truckChanges || [];
       SH.truckChanges.push({ ts: Date.now(), from: fromTruck, to: toTruck, reason: truckDraft.reason, note: truckDraft.note, strandedBins: stranded ? stranded.n : 0 });
+      // the bins stay with the truck being left; the new truck brings the bins it already held
+      try {
+        if (fromTruck) recordReading(fromTruck, null, null, { load: { n: stranded ? stranded.n : 0, t: Date.now() } });
+        var nl0 = window.lbTruckLast(toTruck), nn0 = nl0 && nl0.load ? nl0.load.n : 0;
+        if (nn0 > 0 && window.lbRunSheet && window.lbRunSheet.carryLoad) window.lbRunSheet.carryLoad(SH.id, nn0);
+        loadSent = nn0;
+      } catch (e) {}
       SH.truck = toTruck;
       if (truckDraft.rego.trim()) SH.rego = truckDraft.rego.trim().toUpperCase();
       saveSh();
@@ -33383,22 +33404,9 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       var tgtD = view === 'end' ? endDraft : view === 'prestart' ? pre : draft;
       takePhoto('dash').then(function(id){ if (!id) return; if (tgtD.photo) mDel(tgtD.photo); tgtD.photo = id; paint(); }); return;
     }
-    if (a === 'start' && !startChecked) {
-      // Fox: bins still on the truck from the last shift (not tipped) are asked about before this one starts
-      var hist0 = history(), prev0 = hist0[hist0.length - 1], pend0 = null;
-      try { if (prev0 && window.lbRunSheet && window.lbRunSheet.pendingLoad && Date.now() - (prev0.end || prev0.start) < 4 * 86400000) pend0 = window.lbRunSheet.pendingLoad(prev0.id); } catch (e) {}
-      if (pend0 && pend0.n > 0) {
-        confirmIt('The truck still had ' + pend0.n + ' bin' + (pend0.n === 1 ? '' : 's') + ' on it from your last shift (' + dateStr(prev0.start) + ') that were not tipped.\n\nOK = they are still on the truck (they count in your first load).\nCancel = they are not on it any more.').then(function(yes){
-          startCarry = yes ? pend0.n : 0;
-          try { window.lbRunSheet.clearLoad(prev0.id); } catch (e) {}
-          startChecked = true; var b2 = sheet && sheet.querySelector('[data-a="start"]'); if (b2) b2.click(); else startChecked = false;
-        });
-        return;
-      }
-    }
     if (a === 'start') {
-      startChecked = false; var carry0 = startCarry; startCarry = 0;
-      var dr = draft;
+      startChecked = false; startCarry = 0;
+      var dr = draft, carry0 = Math.max(0, parseInt(dr.load, 10) || 0);
       lsSet('lbDriver', { name: dr.driver.trim(), emp: String(dr.emp || '').trim(), truck: dr.truck.trim() });
       // The rego is remembered per unit, so the next shift on the same truck (and the accident card) fill it in.
       if (dr.truck && dr.rego) { var rgS = lsGet('lbRegos', {}) || {}; rgS[String(dr.truck).trim().toLowerCase()] = String(dr.rego).trim().toUpperCase(); lsSet('lbRegos', rgS); }
@@ -33690,6 +33698,17 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     }).then(function(){ liveBusy = false; }, function(){ liveBusy = false; });
   }
   setInterval(function(){ try { if (SH && Date.now() - liveLast >= 120000) { liveSend(false); liveThumbs(); } } catch (e) { liveBusy = false; } }, 15000);
+  // the truck's load (bins since the last tip) is kept up to date on the truck's own record while a shift is on, so a breakdown or a
+  // dead phone still leaves the right number for whoever drives it next (and the other phones get it)
+  var loadSent = null;
+  setInterval(function(){
+    try {
+      if (!SH || !SH.truck || !window.lbRunSheet || !window.lbRunSheet.pendingLoad) return;
+      var pl = window.lbRunSheet.pendingLoad(SH.id), n = pl ? pl.n : 0;
+      if (loadSent === null) { loadSent = n; return; }
+      if (n !== loadSent) { recordReading(SH.truck, null, null, { load: { n: n, t: Date.now() } }); loadSent = n; }
+    } catch (e) {}
+  }, 30000);
   /* (Fox, 27 Oct: "No signal 20 minutes" - can it not send in the background?) A phone with the screen off or the app in the
      background stops the page's timers, so the 2-minute send above stopped too. In the phone app the background GPS keeps
      calling the page with each fix even then, so the progress goes with the fixes as well. (In a browser tab nothing runs in
