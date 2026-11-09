@@ -33850,6 +33850,32 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   function fire(){ listeners.forEach(function(f){ try { f(); } catch (e) {} }); try { document.dispatchEvent(new CustomEvent('lb-outbox')); } catch (e) {} }
 
   function findE(rid){ for (var i = 0; i < Q.length; i++) if (Q[i].rid === rid) return Q[i]; return null; }
+  // a report folded into a batch (see send) lives inside another entry: find that entry
+  function findBatch(rid){ for (var i = 0; i < Q.length; i++) if (Q[i].parts && Q[i].parts.some(function(p){ return p.rid === rid; })) return Q[i]; return null; }
+  // Batching: a driver logging three defects (or several bin issues) in a row used to send three emails. Reports of the
+  // same kind, to the same people, about the same truck that are logged within BATCH_MS of the first go out as ONE email.
+  // Urgent ones (NOT SAFE TO DRIVE, help, injury) are never held back.
+  var BATCH_MS = 45000;
+  function batchKey(o){
+    var k = String(o.kind || '');
+    if (o.urgent || o.hold || o.raw || o.batch === false) return '';
+    if (!(k === 'defect' || k === 'issue' || k === 'bin' || k === 'binedit' || (/^driver-/.test(k) && k !== 'driver-todo'))) return '';
+    return k + '|' + (o.to || ['lead']).join(',') + '|' + ((o.data && o.data.truck) || '');
+  }
+  // rebuild the one email from its parts
+  function rebuild(e){
+    var P = e.parts, n = P.length, seen = {};
+    e.media = []; e.to = []; e.srcs = [];
+    P.forEach(function(p){
+      (p.media || []).forEach(function(id){ e.media.push(id); });
+      (p.to || []).forEach(function(r){ if (!seen[r]) { seen[r] = 1; e.to.push(r); } });
+      if (p.src) e.srcs.push(p.src);
+    });
+    e.text = n === 1 ? P[0].text : n + ' reports (' + e.kind + ')\n\n' + P.map(function(p, i){ return '--- ' + (i + 1) + ' of ' + n + ' ---\n' + p.text; }).join('\n\n');
+    e.subject = n === 1 ? P[0].subject : n + ' reports: ' + P[0].subject + ' + ' + (n - 1) + ' more';
+    e.quiet = !!(e.media.length && !e.hold);
+    e.finalText = e.quiet ? e.text : null;
+  }
 
   /* ---- network ---- */
   function post(obj){
@@ -33954,10 +33980,12 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     return n > (s.finalN || 0);                              // more photos since
   }
   function markSynced(e){
-    if (!e.src) return;
-    var all = lsGet(e.src.key, []); if (!Array.isArray(all)) return;
-    var ch = false; all.forEach(function(r){ if (r && r.id === e.src.id && !r.synced) { r.synced = true; r.syncedAt = Date.now(); ch = true; } });
-    if (ch) lsSet(e.src.key, all);
+    if (!e.src && !(e.srcs && e.srcs.length)) return;
+    (e.srcs && e.srcs.length ? e.srcs : [e.src]).forEach(function(src){
+      var all = lsGet(src.key, []); if (!Array.isArray(all)) return;
+      var ch = false; all.forEach(function(r){ if (r && r.id === src.id && !r.synced) { r.synced = true; r.syncedAt = Date.now(); ch = true; } });
+      if (ch) lsSet(src.key, all);
+    });
   }
 
   /* ---- the loop ---- */
@@ -34010,11 +34038,30 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       if (e.done && (o.media || o.finalText != null)) { e.done = 0; e.doneAt = 0; }     // more photos after it was finished
       e.next = 0; save(); fire(); flush(); return rid;
     }
+    var bk = batchKey(o);
+    if (bk) {
+      var now0 = Date.now(), host = null;
+      Q.forEach(function(x){ if (!host && x.batchKey === bk && x.parts && !x.done && !x.cancelled && !(x.s && x.s.msg) && (x.notBefore || 0) > now0) host = x; });
+      if (host) {
+        host.parts.push({ rid: rid, subject: o.subject || 'Report', text: o.text || '', media: (o.media || []).slice(), to: o.to || ['lead'], src: o.src || null });
+        rebuild(host); save(); fire();
+        return rid;
+      }
+    }
+    var quiet0 = !!o.quiet;
+    // One email, not two: with photos / voice notes the first (text only) email is skipped and the one with them attached
+    // is the only one. Urgent ones and held ones (accident) still go at once; a dash warning always goes at once (its
+    // "I've got it" link). (A script from before 'quiet' ignores this and emails both, as it always did.)
+    if (!quiet0 && (o.media || []).length && !o.urgent && !o.hold && !o.raw && o.kind !== 'dash') quiet0 = true;
     e = { rid: rid, kind: o.kind || 'report', to: o.to || ['lead'], urgent: !!o.urgent, subject: o.subject || 'Report', text: o.text || '', data: o.data || {}, media: (o.media || []).slice(),
-          finalText: o.finalText == null ? (o.quiet ? (o.text || '') : null) : o.finalText, hold: !!o.hold, src: o.src || null, ts: Date.now(),
+          finalText: o.finalText == null ? (quiet0 ? (o.text || '') : null) : o.finalText, hold: !!o.hold, src: o.src || null, ts: Date.now(),
           // quiet: the script keeps the message but sends no email for it; the one email is the final one, with the PDF attached
-          // (a script from before this ignores it and emails both, as it always did)
-          quiet: !!o.quiet, notBefore: o.delayMs ? Date.now() + o.delayMs : 0, s: {}, tries: 0 };
+          quiet: quiet0, notBefore: o.delayMs ? Date.now() + o.delayMs : 0, s: {}, tries: 0 };
+    if (bk) {
+      e.batchKey = bk; e.notBefore = Date.now() + Math.max(o.delayMs || 0, BATCH_MS);
+      e.parts = [{ rid: rid, subject: e.subject, text: e.text, media: e.media.slice(), to: e.to.slice(), src: e.src }];
+      o.delayMs = Math.max(o.delayMs || 0, BATCH_MS);
+    }
     Q.push(e); save(); fire();
     if (e.notBefore) setTimeout(function(){ flush(); }, o.delayMs + 200); else flush();
     return rid;
@@ -34030,11 +34077,19 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     if (!scriptUrl() || navigator.onLine === false || !place || !place.id) return Promise.resolve(false);
     return post({ type: 'place', key: place.id, place: place }).then(function(){ return true; }, function(){ return false; });
   }
-  function cancel(rid){ var e = findE(rid); if (e && !(e.s && e.s.msg)) { e.cancelled = true; save(); fire(); } }
+  function cancel(rid){
+    var e = findE(rid), b = e ? null : findBatch(rid);
+    if (b && !(b.s && b.s.msg)) {                              // one report of a batch: take just that one out
+      b.parts = b.parts.filter(function(p){ return p.rid !== rid; });
+      if (b.parts.length) rebuild(b); else b.cancelled = true;
+      save(); fire(); return;
+    }
+    if (e && !(e.s && e.s.msg)) { e.cancelled = true; save(); fire(); }
+  }
 
   /* ---- public: how is it going? ---- */
   function status(rid){
-    var e = findE(rid); if (!e) return { state: 'none' };
+    var e = findE(rid) || findBatch(rid); if (!e) return { state: 'none' };
     var s = e.s || {}, media = (e.media || []).length, up = 0; (e.media || []).forEach(function(id){ if (s.up && s.up[id] === 1) up++; });
     var st = e.done ? 'done' : s.delivered ? 'sent' : e.err === 'old-script' ? 'old' : e.err === 'no-recipients' ? 'norecip' : e.tries > 0 || navigator.onLine === false ? 'wait' : 'sending';
     return { state: st, delivered: !!s.delivered, emailed: s.emailed || 0, photos: up, photosTotal: media, final: !!s.final, err: e.err || '', tries: e.tries || 0, next: e.next || 0 };
@@ -37965,7 +38020,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       await window.lbMedia.put({ id: id, kind: 'file', type: 'text/csv', blob: new Blob([text], { type: 'text/csv' }), ts: Date.now(), ref: 'gps-log', synced: false });
       var who = (d.name || 'Driver') + (truck ? ' · truck ' + truck : '');
       window.lbOutbox.send({ rid: 'g_' + id, kind: 'gps-log', to: ['lead'], subject: 'GPS log: ' + who,
-        text: 'GPS log from ' + who + ' - ' + n + ' readings (last 15 minutes).' + (note ? '\n' + note : '') + '\nThe CSV is in the Drive folder.',
+        text: 'GPS log from ' + who + ' - ' + n + ' readings (last 15 minutes).' + (note ? '\n' + note : '') + '\nThe CSV is in the Drive folder (not emailed).',
         data: { driver: d.name || '', truck: truck, readings: n, lat: loc && loc.lat, lng: loc && loc.lng, ts: Date.now() }, media: [id] });
       customAlert('GPS log sent (' + n + ' readings). It goes into the Lukez Bunz Reports folder in Google Drive.');
     } catch (e) { window.lbSendGpsLog(note); }
