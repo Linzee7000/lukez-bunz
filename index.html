@@ -18915,6 +18915,7 @@ window.addEventListener('DOMContentLoaded', async () => {
       const seen = new Set();
       lbFlipNow.sort((a, b) => a.d - b.d).filter(x => !seen.has(x.id) && seen.add(x.id)).slice(0, lbMayFlip).forEach(({ m: markerObj, id: binId }) => {
         servicedBinSerials.add(binId); lbStopVisit.n++;
+        try { (window.lbMyFlips || (window.lbMyFlips = [])).push([binId, Date.now()]); } catch (e) {}   // (shared with a truck on the same run: lb-runmate-script)
         if (markerObj.provisional) confirmProvisionalBinLocation(markerObj, userCurrentLocation);
         if (mapMarkersLayer && markerObj.layer) mapMarkersLayer.removeLayer(markerObj.layer);
         // With data source "All" a bin is drawn twice - from Solo's list and from the council's (a rough dot at the
@@ -32851,7 +32852,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       if (lastLoc && !brk) { var dd = dist(lastLoc, loc); if (dd >= 4 && dd < 400) { SH.dist = (SH.dist || 0) + dd; ch = true; lastLoc = loc; } else if (dd >= 400) lastLoc = loc; }
       else lastLoc = loc;
     }
-    var set = g('servicedBinSerials'), size = set && typeof set.size === 'number' ? set.size : -1, rk = runKey();
+    // (bins another truck on the same run flipped are added to the set by lb-runmate-script: they are not this truck's bins)
+    var set = g('servicedBinSerials'), size = set && typeof set.size === 'number' ? set.size - (window.lbMateCount ? window.lbMateCount() : 0) : -1, rk = runKey();
     if (size >= 0) {
       if (rk !== lastRunKey || lastSize < 0 || size < lastSize) { lastRunKey = rk; lastSize = size; }
       else if (size > lastSize) {
@@ -34316,7 +34318,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   }
   function pullPlaces(){
     if (!scriptUrl() || navigator.onLine === false) return Promise.resolve();
-    return getJ('places=1&skip=liveRun,issueThumb').then(function(r){
+    return getJ('places=1&skip=liveRun,issueThumb,runMate').then(function(r){
       if (!r || r.status !== 'success' || !r.places) return;
       var mine = lsGet('lbPlaces', []), have = {}; mine.forEach(function(p){ have[p.id] = 1; });
       var fleet = Object.keys(r.places).map(function(k){ var p = r.places[k]; if (p && p.lat != null) { p.id = p.id || k; p.fleet = true; return p; } return null; }).filter(Boolean);
@@ -46313,14 +46315,14 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
     var el = buildCluster(); if (!el) return;
     // on truck (the run sheet's count since the last tip); with a load from two or more runs it takes
     // turns: the total, then each run's share. With no run sheet going, bins collected.
-    var T = onTruck(), tk = $('rbTruck'), lab = 'Collected', val = doneCount();
-    if (T) {
-      lab = 'On truck'; val = T.n;
-      if (T.runs.length > 1) {
-        var i = Math.floor(Date.now() / 3000) % (T.runs.length + 1);
-        if (i > 0) { lab = 'From ' + T.runs[i - 1].run; val = T.runs[i - 1].n; }
-      }
-    }
+    // Only bins THIS truck flipped (bins a second truck on the same run flipped are done on the map but are not on this truck).
+    // It takes turns: everything on the truck since the last tip, then what was flipped on the run being driven now, then (a
+    // load from more than one run) each other run's share.
+    var T = onTruck(), tk = $('rbTruck'), sh0 = shift(), items = [];
+    if (T) items.push({ l: 'On truck', v: T.n }); else items.push({ l: sh0 ? 'Flipped' : 'Collected', v: sh0 ? (sh0.bins || 0) : doneCount() });
+    if (sh0 && sh0.leg && sh0.leg.run) items.push({ l: 'This run', v: Math.max(0, (sh0.bins || 0) - (sh0.leg.bins0 || 0)) });
+    if (T && T.runs.length > 1) T.runs.forEach(function(r){ if (!(sh0 && sh0.leg && String(r.run) === String(sh0.leg.run))) items.push({ l: 'From ' + r.run, v: r.n }); });
+    var it0 = items[Math.floor(Date.now() / 3000) % items.length], lab = it0.l, val = it0.v;
     txt(tk.querySelector('.rb-k'), lab); txt(tk.querySelector('b'), val);
     attr(tk, 'aria-label', lab + ' ' + val);
     attr(tk, 'data-n', String(val).length);          // how many characters: Speedo's round dials shrink long ones
@@ -59548,6 +59550,109 @@ html body.lb-pc.lb-layers-open[data-ux-screen="map"] #lbMapKey{display:none}
     try { if (window.lbOutbox && window.lbOutbox.pullPlaces) window.lbOutbox.pullPlaces(); } catch (e) {}
   });
   window.lbRemSync = { scan: scan, take: take };
+})();
+</script>
+<script id="lb-runmate-script">
+/* ========== Two trucks on the same run (Fox, 10 Nov) ==========
+   Each truck on a kerbside run sends, every 45 s, one place (kind runMate, id rm_<driver>): the run, the bins THIS truck
+   flipped (window.lbMyFlips, pushed by the flip code in the main script) and its snail trail (last ~250 points of this
+   shift). Every phone on the same run pulls the others' places and
+     - marks their bins done on its own map (added to servicedBinSerials, so "Bins to go" and the run's bins left follow) -
+       but remembers them (lbMateFlips) so they never count as THIS truck's bins (window.lbMateCount is taken off the size
+       in the shift tick: bins flipped, "On truck", bins/h all stay this truck's own);
+     - draws their trail in a different colour (purple, cyan, orange...) with a dot and the truck number at the end.
+   Needs nothing new in the Apps Script (places, ?kinds=runMate). The kind is first in the JSON, as the script reads it
+   from the front of the row. */
+(function(){
+  var MATES = new Set(), LAYER = null, KEY = 'lbMyFlipsSaved', COLS = ['#a855f7', '#06b6d4', '#f97316', '#ec4899'], busy = false;
+  function lsGet(k, d){ try { var v = JSON.parse(localStorage.getItem(k)); return v == null ? d : v; } catch (e) { return d; } }
+  function lsSet(k, v){ try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
+  function shift(){ try { return window.uxShiftState ? window.uxShiftState() : null; } catch (e) { return null; } }
+  function slug(v){ return String(v || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 30) || 'x'; }
+  function ok(sh){ return !!(sh && sh.run && !/^Street/i.test(String(sh.stream || ''))); }
+  // bins flipped by other trucks that are in the done set right now
+  window.lbMateCount = function(){
+    if (!MATES.size) return 0;
+    var set; try { set = servicedBinSerials; } catch (e) { return 0; }
+    if (!set || !set.has) return 0;
+    var n = 0; MATES.forEach(function(x){ if (set.has(x)) n++; });
+    return n;
+  };
+  window.lbMateFlips = MATES;
+  // flips made before the app was last closed
+  (function(){ var sv = lsGet(KEY, null); if (sv && Array.isArray(sv.list)) window.lbMyFlips = sv.list.concat(window.lbMyFlips || []); })();
+
+  function myFlips(sh){
+    var seen = {}, out = [], set; try { set = servicedBinSerials; } catch (e) { set = null; }
+    (window.lbMyFlips || []).forEach(function(f){
+      if (!f || f[1] < sh.start || seen[f[0]] || MATES.has(f[0]) || (set && set.has && !set.has(f[0]))) return;
+      seen[f[0]] = 1; out.push(f[0]);
+    });
+    return out;
+  }
+  function myTrail(sh){
+    var pts, br, ts; try { pts = gpsTrailPoints; br = gpsTrailBreaks; ts = gpsTrailTimes; } catch (e) { return []; }
+    if (!pts || !pts.length) return [];
+    var idx = []; for (var i = 0; i < pts.length; i++) if (!ts[i] || ts[i] >= sh.start) idx.push(i);
+    var step = Math.max(1, Math.ceil(idx.length / 250)), segs = [], cur = null;
+    idx.forEach(function(i, k){
+      if (k % step && k !== idx.length - 1) { if (br[i]) cur = null; return; }
+      if (!cur || br[i]) { cur = []; segs.push(cur); }
+      cur.push([+pts[i][0].toFixed(5), +pts[i][1].toFixed(5)]);
+    });
+    return segs.filter(function(sg){ return sg.length > 1; });
+  }
+  function send(sh){
+    if (!window.lbOutbox || !window.lbOutbox.postPlace) return;
+    var fl = myFlips(sh);
+    lsSet(KEY, { list: (window.lbMyFlips || []).filter(function(f){ return f && f[1] >= Date.now() - 16 * 3600000; }).slice(-3000) });
+    var loc = null; try { loc = userCurrentLocation; } catch (e) {}
+    var d = {}; try { d = JSON.parse(localStorage.getItem('lbDriver') || '{}') || {}; } catch (e) {}
+    var p = { kind: 'runMate', id: 'rm_' + slug(d.name || sh.driver || sh.truck || sh.id), shift: sh.id, ts: Date.now(), stream: sh.stream, run: String(sh.run), week: sh.week || '', day: sh.day || '',
+      truck: sh.truck || '', driver: d.name || sh.driver || '', at: loc ? [+loc.lat.toFixed(5), +loc.lng.toFixed(5)] : null, fl: fl.slice(-1200), tr: myTrail(sh) };
+    if (JSON.stringify(p).length > 42000) { p.fl = p.fl.slice(-600); p.tr = p.tr.slice(-3); }
+    window.lbOutbox.postPlace(p);
+  }
+  function sameRun(sh, p){
+    if (String(p.stream) !== String(sh.stream) || String(p.run) !== String(sh.run)) return false;
+    if (p.week && sh.week && String(p.week) !== String(sh.week)) return false;
+    return new Date(p.ts).toDateString() === new Date().toDateString();
+  }
+  function apply(sh, places){
+    var mates = Object.keys(places || {}).map(function(k){ return places[k]; }).filter(function(p){
+      return p && p.kind === 'runMate' && p.shift !== sh.id && sameRun(sh, p);
+    }).sort(function(a, b){ return String(a.id).localeCompare(String(b.id)); });
+    // their bins, done on this map too
+    var set; try { set = servicedBinSerials; } catch (e) { return; }
+    var fresh = new Set();
+    mates.forEach(function(p){ (p.fl || []).forEach(function(s){ if (!set.has(s)) { set.add(s); MATES.add(s); fresh.add(s); try { if (missedBinSerials.has(s)) missedBinSerials.delete(s); } catch (e) {} } }); });
+    if (fresh.size) {
+      try { activeMapCircleMarkers.forEach(function(o, k){ var id = o.serial || k; if (fresh.has(id) && o.layer && mapMarkersLayer) mapMarkersLayer.removeLayer(o.layer); }); } catch (e) {}
+      try { updateFlippedBinCount(); } catch (e) {}
+      try { saveRunProgress(); } catch (e) {}
+    }
+    // their trail
+    var map = null; try { map = leafletMap; } catch (e) {}
+    if (!map || typeof L === 'undefined') return;
+    if (!LAYER || LAYER._map !== map) { try { if (LAYER) LAYER.remove(); } catch (e) {} LAYER = L.layerGroup().addTo(map); }
+    LAYER.clearLayers();
+    mates.forEach(function(p, i){
+      var col = COLS[i % COLS.length];
+      (p.tr || []).forEach(function(sg){ L.polyline(sg, { color: col, weight: 4, opacity: 0.85, interactive: false }).addTo(LAYER); });
+      if (p.at) L.circleMarker(p.at, { radius: 7, color: '#fff', weight: 2, fillColor: col, fillOpacity: 1, interactive: false }).bindTooltip(String(p.truck || p.driver || 'Truck'), { permanent: true, direction: 'top', offset: [0, -6] }).addTo(LAYER);
+    });
+  }
+  function cycle(){
+    var sh = shift();
+    if (!ok(sh)) { if (LAYER) { try { LAYER.clearLayers(); } catch (e) {} } return; }
+    if (busy) return; busy = true;
+    try { send(sh); } catch (e) {}
+    var go = (window.lbOutbox && window.lbOutbox.getPlaces) ? window.lbOutbox.getPlaces('kinds=runMate&since=' + (Date.now() - 6 * 3600000)) : Promise.resolve(null);
+    go.then(function(r){ if (r && r.places) apply(sh, r.places); }).catch(function(){}).then(function(){ busy = false; });
+  }
+  setInterval(function(){ try { if (!document.hidden) cycle(); } catch (e) { busy = false; } }, 45000);
+  setTimeout(function(){ try { cycle(); } catch (e) {} }, 8000);
+  window.lbRunMate = { _t: { cycle: cycle, apply: function(places){ var sh = shift(); if (sh) apply(sh, places); }, mates: MATES } };
 })();
 </script>
 </body>
