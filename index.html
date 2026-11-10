@@ -27410,7 +27410,7 @@ body.lb-settings-open #lbNextBinTab { display: none !important; }
     ev.preventDefault();
     const act = btn.dataset.lbbreak;
     if (act === 'begin') newShift(Date.now());
-    else if (act === 'start') startBreak();
+    else if (act === 'start') { startBreak(); try { if (window.lbLaterPrompt) setTimeout(function(){ window.lbLaterPrompt('break'); }, 500); } catch (e) {} }
     else if (act === 'end') endBreak();
     else if (act === 'past') { if (window.lbPastBreak) window.lbPastBreak.open(true); }
     else if (act === 'early') {
@@ -31277,6 +31277,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
             '<div class="lbpa-lab rp-lab" id="uxiLab"></div>' +
             '<div class="lbpb-grid2 rp-grid" id="uxiGrid"></div>' +
             '<label class="rp-note"><span class="lbpa-lab">Note (optional)</span><input type="text" id="uxiNote" autocomplete="off" placeholder="e.g. cracked lid, left side of drive"></label>' +
+            '<button type="button" class="lbpb-t rp-later" id="uxiLater" data-later="1" style="width:100%;margin-top:10px;justify-content:center"><span>Fill out later</span></button>' +
           '</div>' +
         '</div>' +
       '</div>';
@@ -31312,6 +31313,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
         cur.picking = false; paintSheet(); return;
       }
       var sr = b.getAttribute('data-ser'); if (sr !== null) { cur.serial = sr; cur.stream = b.getAttribute('data-stream') || ''; paintSheet(); return; }
+      if (b.getAttribute('data-later')) { doLater(); return; }
       var act = b.getAttribute('data-act'); if (act) { doAct(act, b.getAttribute('data-label')); return; }
       var emb = b.getAttribute('data-emp'); if (emb) { var ev0 = ''; try { ev0 = (JSON.parse(localStorage.getItem('lbDriver') || '{}').emp) || ''; } catch (e) {} var setEmp = function(nv){ if (nv == null) return; try { var dd0 = JSON.parse(localStorage.getItem('lbDriver') || '{}'); dd0.emp = String(nv).trim(); localStorage.setItem('lbDriver', JSON.stringify(dd0)); } catch (e) {} paintSheet(); };
         if (typeof customPrompt === 'function') Promise.resolve(customPrompt('Employee number', ev0)).then(setEmp); else setEmp(window.prompt('Employee number', ev0)); return; }
@@ -31433,6 +31435,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     paintMedia();
     var LAB = { bin: 'What is wrong with the bin', house: 'What is wrong at the house', street: 'What is wrong in the street', truck: 'Report', driver: 'You' };
     $('uxiLab').textContent = LAB[cur.scope] || '';
+    var lb0 = $('uxiLater'); if (lb0) lb0.style.display = (ISSUES[cur.scope].act || cur.editId) ? 'none' : '';
+    if (cur.editId) $('uxiTitle').textContent = 'Change report'; else if (cur.laterId) $('uxiTitle').textContent = 'Fill out report';
     var tr = $('uxiTruck'); if (tr) { tr.innerHTML = cur.scope === 'truck' && window.lbFuel ? window.lbFuel.truckHtml() : ''; tr.style.display = tr.innerHTML ? '' : 'none'; }
     $('uxiGrid').innerHTML = ISSUES[cur.scope].items.map(function(it){
       return '<button type="button" class="lbpb-t rp-t' + (it[0] === 'accident' ? ' red' : '') + '" ' + (ISSUES[cur.scope].act ? 'data-act="' : 'data-code="') + it[0] + '" data-label="' + esc(it[1]) + '"><i>' + ico(it[2]) + '</i><span>' + esc(it[1]).replace(/[A-Za-z]{10,}/g, function(w){ var h = Math.ceil(w.length / 2); return w.slice(0, h) + '&shy;' + w.slice(h); }) + '</span></button>';
@@ -31442,7 +31446,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   function openIssue(scope, opt){
     buildSheet();
     try { var dn = String((JSON.parse(localStorage.getItem('lbDriver') || '{}') || {}).name || '').trim().split(/\s+/)[0]; $('uxiTitle').textContent = dn ? 'Report from ' + dn : 'Report an issue'; } catch (e) {}
-    if (cur && cur.media && cur.media.length && window.lbMedia) cur.media.forEach(function(id){ window.lbMedia.del(id); });
+    if (cur && cur.media && cur.media.length && window.lbMedia && !cur.laterId && !cur.editId) cur.media.forEach(function(id){ window.lbMedia.del(id); });
     cur = { scope: scope || 'bin', serial: (opt && opt.serial) || '', stream: (opt && opt.stream) || '', media: [], site: null, street: '', scanMiss: false, picking: false, q: '' };
     if (opt && opt.site) cur.site = (typeof opt.site === 'object') ? opt.site : findSite(opt.site);
     var n = $('uxiNote'); if (n) n.value = '';
@@ -31450,6 +31454,38 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     sheet.classList.add('open');
   }
   function closeIssue(){ if (sheet) sheet.classList.remove('open'); }
+  // ---- fill out later / change a report afterwards ---------------------------------------------------
+  // "Fill out later" keeps where and when it happened (GPS, house, street, run, photos) and leaves what it was for the
+  // shift screen (Reports), which asks on a break and at the end of the shift. A report already sent can be changed
+  // there too: it goes again headed CORRECTED.
+  function doLater(){
+    if (!window.lbLater) return;
+    var site = cur.site || S.site, loc = null; try { loc = userCurrentLocation; } catch (e) {}
+    var lat = (cur.site && site && site.lat) ? +Number(site.lat).toFixed(6) : loc ? +loc.lat.toFixed(6) : (site && site.lat ? +Number(site.lat).toFixed(6) : null);
+    var lng = (cur.site && site && site.lng) ? +Number(site.lng).toFixed(6) : loc ? +loc.lng.toFixed(6) : (site && site.lng ? +Number(site.lng).toFixed(6) : null);
+    var d = { scope: cur.scope, serial: cur.scope === 'bin' ? cur.serial : '', stream: cur.scope === 'bin' ? cur.stream : '', propId: site ? String(site.propId || site.siteId || '') : '', address: site ? siteAddress(site) : '',
+      street: cur.street || (cur.site ? siteStreet(site) : (gpsStreet() || siteStreet(site))), run: runLabel(), note: clean(($('uxiNote') || {}).value), media: (cur.media || []).slice(), picked: !!cur.site };
+    var id = window.lbLater.add({ kind: 'issue', ts: Date.now(), lat: lat, lng: lng, draft: d });
+    if (cur.laterId) window.lbLater.remove(cur.laterId, false);
+    cur.media = []; cur.laterId = null;
+    closeIssue();
+    toast('for later: Shift screen > Reports');
+  }
+  window.uxIssueFromLater = function(item){
+    if (!item || !item.draft) return;
+    buildSheet();
+    var d = item.draft;
+    cur = { scope: d.scope || 'bin', serial: d.serial || '', stream: d.stream || '', media: (d.media || []).slice(), site: d.propId ? findSite(d.propId) : null, street: d.street || '', scanMiss: false, picking: false, q: '', laterId: item.id, fixTs: item.ts, fixLoc: { lat: item.lat, lng: item.lng } };
+    var n = $('uxiNote'); if (n) n.value = d.note || '';
+    paintSheet(); sheet.classList.add('open');
+  };
+  window.uxIssueEdit = function(id){
+    var r = log.filter(function(i){ return i.id === id; })[0]; if (!r) return;
+    buildSheet();
+    cur = { scope: r.scope || 'bin', serial: r.serial || '', stream: r.stream || '', media: (r.media || []).slice(), site: r.propId ? findSite(r.propId) : null, street: r.street || '', scanMiss: false, picking: false, q: '', editId: r.id };
+    var n = $('uxiNote'); if (n) n.value = r.note || '';
+    paintSheet(); sheet.classList.add('open');
+  };
   function allRecs(){ try { return Array.isArray(siteRecords) ? siteRecords : []; } catch (e) { return []; } }
   function findSite(id){ id = String(id); return allRecs().find(function(x){ return String(x.propId || x.siteId) === id; }) || null; }
 
@@ -31502,6 +31538,19 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   function commit(code, label){
     var site = cur.site || S.site;
     var loc = null; try { loc = userCurrentLocation; } catch (e) {}
+    if (cur.editId) {                                       // changing a report already sent: update it and send it again as CORRECTED
+      var er = log.filter(function(i){ return i.id === cur.editId; })[0];
+      if (er) {
+        er.scope = cur.scope; er.code = code; er.label = label; er.serial = cur.scope === 'bin' ? cur.serial : ''; er.stream = cur.scope === 'bin' ? cur.stream : '';
+        er.note = clean(($('uxiNote') || {}).value); er.media = (cur.media || []).slice(); er.edited = Date.now(); er.synced = false;
+        saveLog(log);
+        try { if (window.lbOutbox) window.lbOutbox.report('issue', er, 'edited'); } catch (e) {}
+        cur.media = []; cur.editId = null; closeIssue(); cache.__hk = null; tick();
+        toast('changed: ' + er.label);
+        try { if (window.uxShiftOpenReports) window.uxShiftOpenReports(); } catch (e) {}
+        return;
+      }
+    }
     var rec = {
       id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
       ts: Date.now(), scope: cur.scope, code: code, label: label,
@@ -31514,6 +31563,13 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       note: clean(($('uxiNote') || {}).value),
       media: (cur.media || []).slice(), driver: ((function(){ try { return JSON.parse(localStorage.getItem('lbDriver') || '{}').name || ''; } catch (e) { return ''; } })()), synced: false
     };
+    if (cur.laterId) {                                      // filled in later: it happened when and where it was put aside
+      rec.ts = cur.fixTs || rec.ts;
+      if (cur.fixLoc && cur.fixLoc.lat != null) { rec.lat = cur.fixLoc.lat; rec.lng = cur.fixLoc.lng; }
+      try { window.lbLater.remove(cur.laterId, false); } catch (e) {}
+      cur.laterId = null;
+      try { if (window.uxShiftOpenReports) setTimeout(function(){ window.uxShiftOpenReports(true); }, 400); } catch (e) {}
+    }
     cur.media = [];
     log.push(rec); saveLog(log);
     // a damaged bin goes to operations / bin maintenance (a few seconds later, so Undo can stop it)
@@ -31960,9 +32016,31 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   function keep(){ if (persisted) return; persisted = true; try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (e) {} }
 
   // a photo: straight to the camera on a phone, a file picker on a computer. Shrunk to 1600 px JPEG.
-  function takePhoto(ref){
+  // Reports (issue, defect, dash warning, brakes, accident, bin edit) ask "Take photo" or "From your phone" first: a photo
+  // taken earlier (or one a workmate sent) can be attached from the gallery. Anything else goes straight to the camera.
+  var CHOOSE_REF = /^(issue|defect|dash|dash-warning|brakes|accident-.*|binedit)$/;
+  function choosePhotoSource(){
     return new Promise(function(resolve){
-      var inp = document.createElement('input'); inp.type = 'file'; inp.accept = 'image/*'; inp.setAttribute('capture', 'environment');
+      var ov = document.createElement('div');
+      ov.style.cssText = 'position:fixed;inset:0;z-index:2147483000;background:rgba(0,0,0,.55);display:flex;align-items:flex-end;justify-content:center';
+      ov.innerHTML = '<div style="width:100%;max-width:480px;background:#1b1f27;color:#fff;border-radius:16px 16px 0 0;padding:14px 16px calc(14px + env(safe-area-inset-bottom));display:flex;flex-direction:column;gap:10px;font:600 17px/1.2 Roboto,system-ui,sans-serif">' +
+        '<button type="button" data-s="camera" style="padding:16px;border:0;border-radius:12px;background:#2563eb;color:#fff;font:inherit">Take a photo</button>' +
+        '<button type="button" data-s="gallery" style="padding:16px;border:0;border-radius:12px;background:#374151;color:#fff;font:inherit">Choose from your phone</button>' +
+        '<button type="button" data-s="" style="padding:12px;border:0;border-radius:12px;background:transparent;color:#cbd5e1;font:inherit">Cancel</button></div>';
+      ov.addEventListener('click', function(ev){
+        var b = ev.target.closest && ev.target.closest('button'); if (!b && ev.target !== ov) return;
+        ov.remove(); resolve(b ? (b.getAttribute('data-s') || null) : null);
+      });
+      document.body.appendChild(ov);
+    });
+  }
+  function takePhoto(ref){
+    if (CHOOSE_REF.test(String(ref || ''))) return choosePhotoSource().then(function(src){ return src ? pickPhoto(ref, src) : null; });
+    return pickPhoto(ref, 'camera');
+  }
+  function pickPhoto(ref, src){
+    return new Promise(function(resolve){
+      var inp = document.createElement('input'); inp.type = 'file'; inp.accept = 'image/*'; if (src !== 'gallery') inp.setAttribute('capture', 'environment');
       inp.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0';
       document.body.appendChild(inp);
       var done = false;
@@ -32961,7 +33039,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var L = o && o.truck ? window.lbTruckLast(o.truck) : null; if (!L) return '';
     return '<div class="drv-hint2 uxl-last">Last on ' + esc(o.truck) + ': ' + (L.km != null ? esc(L.km) + ' km' : '') + (L.hrs != null ? ' \u00b7 ' + esc(L.hrs) + ' h' : '') + (L.driver ? ' \u00b7 ' + esc(L.driver) : '') + (L.ts ? ' \u00b7 ' + esc(dateStr(L.ts)) : '') + '</div>';
   }
-  var brakeDraft = null, dashDraft = null, brakeRes = null, pendingEnd = false;
+  var brakeDraft = null, dashDraft = null, brakeRes = null, pendingEnd = false, endLaterAsked = false;
   function newBrake(why){
     var lb = lastBrake(SH && SH.truck || me().truck), p = lb ? lb.vals.map(String) : null;   /* keep last week's three numbers; change them if the dash reads different */
     return { a: p ? p[0] : '', b: p ? p[1] : '', c: p ? p[2] : '', photo: null, why: why || 'manual', prev: lb ? { vals: lb.vals, ts: lb.ts } : null };
@@ -32977,6 +33055,25 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     return lv === 'stop' ? '<b>' + m + '%: DO NOT USE THIS TRUCK until the brakes are replaced.</b>' : lv === 'low' ? '<b>' + m + '%: below ' + BRAKE_LOW + '%. The workshop will be told.</b>' : '<b>' + m + '%</b><span>: fine.</span>';
   }
   function newDefect(item){ defDraft = { item: item || '', sev: 'ok', note: '', media: [] }; }
+  // ---- reports put aside to fill out later (lbLater), and reports changed afterwards ----
+  function laterList(){ var a = lsGet('lbLater', []); return Array.isArray(a) ? a : []; }
+  function laterSave(a){ lsSet('lbLater', a.slice(-100)); try { document.dispatchEvent(new CustomEvent('lb-later')); } catch (e) {} }
+  window.lbLater = {
+    list: laterList, count: function(){ return laterList().length; },
+    get: function(id){ return laterList().filter(function(x){ return x.id === id; })[0] || null; },
+    add: function(it){ var a = laterList(); it.id = it.id || 'l_' + uid(); it.ts = it.ts || Date.now(); it.shiftId = SH ? SH.id : ''; a.push(it); laterSave(a); return it.id; },
+    // delMedia: the photos go with it (deleted); false when they have moved into the finished report
+    remove: function(id, delMedia){ var a = laterList(), it = a.filter(function(x){ return x.id === id; })[0]; laterSave(a.filter(function(x){ return x.id !== id; })); if (delMedia && it && it.draft) (it.draft.media || []).forEach(function(m){ mDel(m); }); }
+  };
+  window.uxShiftOpenReports = function(onlyIfPending){ if (onlyIfPending && !laterList().length) return; openSheet('reports'); };
+  // asked when a break starts and before End shift: "N reports to fill out - now?"
+  var lastLaterAsk = 0;
+  window.lbLaterPrompt = function(why){
+    var n = laterList().length; if (!n || Date.now() - lastLaterAsk < 20000) return Promise.resolve(false);
+    lastLaterAsk = Date.now();
+    return confirmIt('You have ' + n + ' report' + (n === 1 ? '' : 's') + ' to fill out. Do ' + (n === 1 ? 'it' : 'them') + ' now?').then(function(ok){ if (ok) window.uxShiftOpenReports(); return !!ok; });
+  };
+  (function(){ var bc = window.lbBreakClock; if (!bc || !bc.startBreak || bc.__lbLater) return; bc.__lbLater = 1; var prev = bc.startBreak; bc.startBreak = function(){ var r = prev.apply(this, arguments); try { setTimeout(function(){ window.lbLaterPrompt('break'); }, 500); } catch (e) {} return r; }; })();
 
   // Number fields are text inputs with the number keypad, not type="number": every keystroke repaints the
   // sheet and puts the cursor back where it was, and a number input won't say where its cursor is
@@ -33006,14 +33103,14 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     if (!sheet) return;
     var body = $('uxsBody'), title = 'Shift', h = '';
     if (view === 'defect') {
-      title = 'Truck defect';
+      title = defDraft && defDraft.editId ? 'Change defect' : 'Truck defect';
       var d = defDraft || (newDefect(), defDraft);
       h = '<div class="drv-note-top">' + I.truck + '<span>' + esc((SH && SH.truck) || me().truck || 'Truck') + '</span></div>' +
         '<label class="drv-f"><span>What’s wrong</span><select id="uxsDItem"><option value="">Choose…</option>' + CHECKS.map(function(c){ return '<option value="' + c[0] + '"' + (d.item === c[0] ? ' selected' : '') + '>' + esc(c[1]) + '</option>'; }).join('') + '<option value="other"' + (d.item === 'other' ? ' selected' : '') + '>Something else</option></select></label>' +
         '<div class="drv-seg"><button type="button" data-sev="ok" class="' + (d.sev === 'ok' ? 'on' : '') + '">Safe to drive</button><button type="button" data-sev="stop" class="bad ' + (d.sev === 'stop' ? 'on' : '') + '">Not safe · don’t drive</button></div>' +
         field('uxsDNote', 'Details', d.note, 'text', 'e.g. left rear indicator out') +
         '<div class="drv-media">' + d.media.map(function(id){ return thumb(id, true); }).join('') + '<button type="button" class="drv-btn" data-a="dphoto">' + I.cam + 'Photo</button><button type="button" class="drv-btn" data-a="dvoice">' + I.mic + 'Record sound</button></div>' +
-        '<div class="drv-foot"><button type="button" class="drv-btn" data-a="back">Cancel</button><button type="button" class="drv-btn drv-go" data-a="dsave"' + (d.item ? '' : ' disabled') + '>Save defect</button></div>';
+        '<div class="drv-foot"><button type="button" class="drv-btn" data-a="back">Cancel</button>' + (d.editId ? '' : '<button type="button" class="drv-btn" data-a="dlater">Fill out later</button>') + '<button type="button" class="drv-btn drv-go" data-a="dsave"' + (d.item ? '' : ' disabled') + '>' + (d.editId ? 'Save changes' : 'Save defect') + '</button></div>';
     } else if (view === 'truck') {
       try { var dn5 = String((JSON.parse(localStorage.getItem('lbDriver') || '{}') || {}).name || '').trim().split(/\s+/)[0]; title = dn5 ? 'Report from ' + dn5 : 'Report an issue'; } catch (e) { title = 'Truck'; }
       var od = oosList();
@@ -33054,8 +33151,30 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
         '<div class="drv-seg drv-seg3"><button type="button" data-dsev="red" class="bad ' + (dd.sev === 'red' ? 'on' : '') + '">Red light</button><button type="button" data-dsev="amber" class="' + (dd.sev === 'amber' ? 'on' : '') + '">Amber light</button><button type="button" data-dsev="msg" class="' + (dd.sev === 'msg' ? 'on' : '') + '">Message only</button></div>' +
         '<div class="drv-seg"><button type="button" data-dsafe="1" class="' + (dd.safe ? 'on' : '') + '">Still driving</button><button type="button" data-dsafe="0" class="bad ' + (!dd.safe ? 'on' : '') + '">Pulled over / stopped</button></div>' +
         field('uxsDashNote', 'What does it say (optional)', dd.note, 'text', 'e.g. engine warning, AdBlue low') +
-        '<div class="drv-foot"><button type="button" class="drv-btn" data-a="back">Cancel</button><button type="button" class="drv-btn drv-go" data-a="dashsave"' + (dd.media.length ? '' : ' disabled') + '>Send to leading hand</button></div>' +
+        '<div class="drv-foot"><button type="button" class="drv-btn" data-a="back">Cancel</button>' + (dd.editId ? '' : '<button type="button" class="drv-btn" data-a="dashlater">Fill out later</button>') + '<button type="button" class="drv-btn drv-go" data-a="dashsave"' + (dd.media.length ? '' : ' disabled') + '>' + (dd.editId ? 'Save changes' : 'Send to leading hand') + '</button></div>' +
         (dd.media.length ? '' : '<div class="drv-hint">A photo is needed.</div>');
+    } else if (view === 'reports') {
+      title = 'Reports';
+      var KN = { defect: 'Truck defect', dash: 'Dash warning', issue: 'Issue' };
+      var lt = laterList().slice().reverse();
+      var since = Date.now() - 36 * 3600000;
+      var sent = [].concat(
+        defects().filter(function(x){ return x.ts >= since; }).map(function(x){ return { k: 'defect', id: x.id, ts: x.ts, t: x.label, n: x.note, m: x.media }; }),
+        dashReps().filter(function(x){ return x.ts >= since; }).map(function(x){ return { k: 'dash', id: x.id, ts: x.ts, t: x.label, n: '', m: x.media }; }),
+        ((window.uxIssueLog && window.uxIssueLog()) || []).filter(function(x){ return x.ts >= since && x.scope !== 'driver'; }).map(function(x){ return { k: 'issue', id: x.id, ts: x.ts, t: (x.label || 'Issue') + (x.serial ? ' · bin ' + x.serial : x.address ? ' · ' + x.address : x.street ? ' · ' + x.street : ''), n: x.note, m: x.media }; })
+      ).sort(function(a, b){ return b.ts - a.ts; });
+      h = '<div class="drv-sect"><span>To fill out</span><em>' + lt.length + '</em></div>' +
+        (lt.length ? '<div class="drv-list">' + lt.map(function(x){
+          var dr = x.draft || {}, nm = x.kind === 'defect' ? (dr.item ? (dr.item === 'other' ? 'Something else' : (CHK[dr.item] || dr.item)) : 'Truck defect') : x.kind === 'dash' ? 'Dash warning' : ('Issue' + (dr.serial ? ' · bin ' + dr.serial : dr.address ? ' · ' + dr.address : dr.street ? ' · ' + dr.street : ''));
+          return '<div class="drv-li"><b>' + esc(nm) + '</b><span>' + esc(clock(x.ts)) + (dr.note ? ' · ' + esc(dr.note) : '') + ' · not sent yet</span>' + ((dr.media || []).length ? '<button type="button" data-a="media" data-ids="' + esc(dr.media.join(',')) + '">' + I.cam + dr.media.length + '</button>' : '') +
+            '<button type="button" class="drv-link" data-a="lfill" data-id="' + esc(x.id) + '">Fill out</button><button type="button" class="drv-link" data-a="ldel" data-id="' + esc(x.id) + '">Delete</button></div>';
+        }).join('') + '</div>' : '<div class="drv-hint">Nothing waiting. Use “Fill out later” on any report to put it here.</div>') +
+        '<div class="drv-sect"><span>Sent (last 36 hours)</span><em>' + sent.length + '</em></div>' +
+        (sent.length ? '<div class="drv-list">' + sent.map(function(x){
+          return '<div class="drv-li"><b>' + esc(x.t) + '</b><span>' + esc(clock(x.ts)) + ' · ' + esc(KN[x.k]) + (x.n ? ' · ' + esc(x.n) : '') + '</span>' + ((x.m || []).length ? '<button type="button" data-a="media" data-ids="' + esc(x.m.join(',')) + '">' + I.cam + x.m.length + '</button>' : '') +
+            '<button type="button" class="drv-link" data-a="redit" data-k="' + x.k + '" data-id="' + esc(x.id) + '">Change</button></div>';
+        }).join('') + '</div><div class="drv-hint">Changing a report sends it again, headed CORRECTED.</div>' : '<div class="drv-hint">No reports yet.</div>') +
+        '<div class="drv-foot"><button type="button" class="drv-btn drv-go" data-a="back">Done</button></div>';
     } else if (view === 'end') {
       title = 'End shift';
       var e = endDraft || (endDraft = { km: '', hrs: '', photo: null, note: '', truckBinCount: '' }), r = rates();
@@ -33172,6 +33291,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
         '<div class="sx-who"><span class="sx-run">' + runLbl + '</span><button type="button" class="sx-btn" data-a="changerun">Change run</button></div>' +
         // things that need doing come first, so they are not lost between the numbers
         (SH.prestart ? '' : alertBox('warn', 'Pre-start check not done.', 'prestart', 'Do it now')) +
+        (laterList().length ? alertBox('warn', laterList().length + ' report' + (laterList().length === 1 ? '' : 's') + ' to fill out.', 'reports', 'Fill out') : '') +
         (brakeDue() ? alertBox('warn', 'Friday: brake wear is due. Enter it when you’re back at the depot.', 'brakes', 'Enter now') : '') +
         (oosFor(SH.truck) ? alertBox('stop', '<b>This truck is marked out of service.</b> Tell your leading hand.') : '') +
         (bd ? alertBox('stop', '<b>Breakdown</b> logged at ' + (function(d){ return window.lbClk ? window.lbClk(d.getHours(), d.getMinutes()) : esc(hhmm(SH.log.bdStart)); })(new Date(SH.log.bdStart)) + '.', 'bdend', 'Breakdown over') : '') +
@@ -33196,6 +33316,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
           (SH.run && !isStreet(SH.stream) ? T('runmap', sv('<path d="M3 6l6-2 6 2 6-2v14l-6 2-6-2-6 2z"/><path d="M9 4v14M15 6v14"/>'), 'Run map') + T('todo', sv('<path d="M9 6h11M9 12h11M9 18h11M4 6l1 1 2-2M4 12l1 1 2-2M4 18l1 1 2-2"/>'), 'To do') + T('runcheck', sv('<path d="m3 6 2 2 3-4M3 15l2 2 3-4M12 6h9M12 15h9"/>'), 'Check my run') : '') +
           (window.lbPaperwork ? T('paper', sv('<path d="M8 4h8v3H8zM6 6H5v15h14V6h-1"/><path d="m9 14 2 2 4-5"/>'), 'Check the paperwork', '', 'data-a="paper" data-id="' + SH.id + '"') : '') +
           T('issues', I.list, 'Issues (' + iss.length + ')') +
+          T('reports', I.list, 'Reports' + (laterList().length ? ' (' + laterList().length + ' to fill out)' : ''), laterList().length ? 'on' : '') +
         '</div>' +
         '<div class="mn-h">Truck</div>' +
         '<div class="sx-note">' + esc([SH.truck || 'No truck number', SH.rego, SH.startKm != null ? SH.startKm + ' km at start' : '', SH.startHrs != null ? SH.startHrs + ' h at start' : ''].filter(Boolean).join(' · ')) + '</div>' +
@@ -33360,7 +33481,10 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     if (!a) return;
     if (a === 'close') { closeSheet(); return; }
     if (a.indexOf('rs:') === 0) { closeSheet(); if (window.lbRunSheet) window.lbRunSheet.open(a.slice(3), b.getAttribute('data-id') || (SH && SH.id)); return; }
-    if (a === 'back') { view = 'main'; defDraft = null; paint(); return; }
+    if (a === 'back') {
+      var toRep = (defDraft && (defDraft.laterId || defDraft.editId)) || (dashDraft && (dashDraft.laterId || dashDraft.editId));
+      view = toRep ? 'reports' : 'main'; defDraft = null; if (toRep) dashDraft = null; paint(); return;
+    }
     if (a === 'changerun') { crDraft = { stream: SH ? SH.stream : '', run: SH ? SH.run : '', truckBinCount: '' }; view = 'changerun'; paint(); return; }
     if (a === 'crsave') {
       if (!SH || !crDraft) { view = 'main'; paint(); return; }
@@ -33441,22 +33565,65 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     if (a === 'accident') { closeSheet(); if (window.uxAccidentOpen) window.uxAccidentOpen(); return; }
     if (a === 'retrysend') { if (window.lbOutbox) window.lbOutbox.flush(); toast('Trying to send…'); return; }
     if (a === 'newdef') { view = 'defect'; newDefect(''); paint(); return; }
+    if (a === 'reports') { view = 'reports'; paint(); return; }
+    if (a === 'dlater') {
+      var dl = defDraft, locL = here(); if (!dl || !window.lbLater) return;
+      window.lbLater.add({ kind: 'defect', lat: locL && locL.lat, lng: locL && locL.lng, draft: { item: dl.item, sev: dl.sev, note: dl.note, media: dl.media.slice() } });
+      if (dl.laterId) window.lbLater.remove(dl.laterId, false);
+      defDraft = null; pendingFaults = []; view = SH ? 'main' : 'truck'; toast('Saved to fill out later'); paint(); return;
+    }
+    if (a === 'dashlater') {
+      var zl = dashDraft, locQ = here(); if (!zl || !window.lbLater) return;
+      window.lbLater.add({ kind: 'dash', lat: locQ && locQ.lat, lng: locQ && locQ.lng, draft: { sev: zl.sev, safe: zl.safe, note: zl.note, media: zl.media.slice() } });
+      if (zl.laterId) window.lbLater.remove(zl.laterId, false);
+      dashDraft = null; view = SH ? 'main' : 'truck'; toast('Saved to fill out later'); paint(); return;
+    }
+    if (a === 'lfill') {
+      var li = window.lbLater && window.lbLater.get(b.getAttribute('data-id')); if (!li) return;
+      if (li.kind === 'defect') { defDraft = Object.assign({ item: '', sev: 'ok', note: '', media: [] }, li.draft, { media: (li.draft.media || []).slice(), laterId: li.id, laterTs: li.ts, lat: li.lat, lng: li.lng }); view = 'defect'; paint(); }
+      else if (li.kind === 'dash') { dashDraft = Object.assign(newDash(), li.draft, { media: (li.draft.media || []).slice(), laterId: li.id, laterTs: li.ts, lat: li.lat, lng: li.lng }); view = 'dash'; paint(); }
+      else { closeSheet(); if (window.uxIssueFromLater) window.uxIssueFromLater(li); }
+      return;
+    }
+    if (a === 'ldel') { var ldId = b.getAttribute('data-id'); confirmIt('Delete this report? Its photos go too.').then(function(ok){ if (!ok) return; window.lbLater.remove(ldId, true); paint(); }); return; }
+    if (a === 'redit') {
+      var rk = b.getAttribute('data-k'), rId = b.getAttribute('data-id');
+      if (rk === 'defect') { var rd = defects().filter(function(x){ return x.id === rId; })[0]; if (!rd) return; defDraft = { item: rd.item, sev: rd.sev, note: rd.note || '', media: (rd.media || []).slice(), editId: rd.id }; view = 'defect'; paint(); }
+      else if (rk === 'dash') { var rz = dashReps().filter(function(x){ return x.id === rId; })[0]; if (!rz) return; dashDraft = { sev: rz.sev, safe: rz.safe, note: rz.note || '', media: (rz.media || []).slice(), editId: rz.id }; view = 'dash'; paint(); }
+      else { closeSheet(); if (window.uxIssueEdit) window.uxIssueEdit(rId); }
+      return;
+    }
     if (a === 'dphoto') { takePhoto('defect').then(function(id){ if (id && defDraft) { defDraft.media.push(id); paint(); } }); return; }
     if (a === 'dvoice') { recordVoice('defect').then(function(id){ if (id && defDraft) { defDraft.media.push(id); paint(); } }); return; }
     if (a === 'dsave') {
       var dd = defDraft, loc = here();
+      if (dd.editId) {                                       // a defect changed after it was sent: update it, send again as CORRECTED
+        var ed = defects(), er = ed.filter(function(x){ return x.id === dd.editId; })[0];
+        if (er) {
+          er.item = dd.item; er.label = dd.item === 'other' ? (dd.note || 'Other defect') : (CHK[dd.item] || dd.item); er.sev = dd.sev; er.note = dd.note; er.media = dd.media.slice(); er.edited = Date.now(); er.synced = false;
+          lsSet('lbDefects', ed);
+          try { if (window.lbOutbox) window.lbOutbox.report('defect', er, 'edited'); } catch (e) {}
+          toast('Defect changed'); defDraft = null; view = 'reports'; paint(); return;
+        }
+      }
       var recD = { id: 'd_' + uid(), ts: Date.now(), shiftId: SH ? SH.id : '', driver: (SH && SH.driver) || me().name || '', truck: (SH && SH.truck) || me().truck || '',
         item: dd.item, label: dd.item === 'other' ? (dd.note || 'Other defect') : (CHK[dd.item] || dd.item), sev: dd.sev, note: dd.note, media: dd.media.slice(), lat: loc && loc.lat, lng: loc && loc.lng, synced: false };
+      if (dd.laterId) { recD.ts = dd.laterTs || recD.ts; if (dd.lat != null) { recD.lat = dd.lat; recD.lng = dd.lng; } try { window.lbLater.remove(dd.laterId, false); } catch (e) {} }
       var all = defects(); all.push(recD); lsSet('lbDefects', all.slice(-500));
       try { if (window.lbOutbox) window.lbOutbox.report('defect', recD); } catch (e) {}
       if (SH) { SH.defects = (SH.defects || []).concat([recD.id]); saveSh(); }
       toast(recD.sev === 'stop' ? 'Defect saved: NOT SAFE TO DRIVE. Tell your leading hand.' : 'Defect saved');
-      if (pendingFaults.length) { newDefect(pendingFaults.shift()); } else { defDraft = null; view = 'main'; }
+      if (pendingFaults.length) { newDefect(pendingFaults.shift()); } else { defDraft = null; view = (dd.laterId && laterList().length) ? 'reports' : 'main'; }
       paint(); return;
     }
     if (a === 'media') { viewMedia((b.getAttribute('data-ids') || '').split(',')); return; }
     if (a === 'issues') { closeSheet(); if (window.uxOpenIssueLog) window.uxOpenIssueLog(); return; }
     if (a === 'end') {
+      if (laterList().length && !endLaterAsked) {
+        endLaterAsked = true; var nEnd = laterList().length;
+        confirmIt('You have ' + nEnd + ' report' + (nEnd === 1 ? '' : 's') + ' to fill out. Do ' + (nEnd === 1 ? 'it' : 'them') + ' before you finish?').then(function(ok){ if (ok) { view = 'reports'; paint(); } else { setTimeout(function(){ endLaterAsked = false; }, 60000); b.click(); } });
+        return;
+      }
       if (brakeDue()) { pendingEnd = true; brakeDraft = newBrake('depot'); view = 'brakes'; paint(); return; }
       endDraft = { km: '', hrs: '', photo: null, note: '' }; view = 'end'; paint(); return;
     }
@@ -33489,12 +33656,23 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     if (a === 'dashvoice') { recordVoice('dash-warning').then(function(id){ if (id && dashDraft) { dashDraft.media.push(id); paint(); } }); return; }
     if (a === 'dashsave') {
       var dz = dashDraft, locZ = here(), nowZ = Date.now();
+      if (dz.editId) {                                       // changed after it was sent: update it, send again as CORRECTED (no new "I've got it" / escalation)
+        var ez = dashReps(), erz = ez.filter(function(x){ return x.id === dz.editId; })[0];
+        if (erz) {
+          erz.sev = dz.sev; erz.safe = dz.safe; erz.note = dz.note; erz.media = dz.media.slice(); erz.edited = nowZ; erz.synced = false;
+          erz.label = (dz.sev === 'red' ? 'Red warning light' : dz.sev === 'amber' ? 'Amber warning light' : 'Dash message') + (dz.note ? ': ' + dz.note : '');
+          lsSet('lbDashReports', ez);
+          try { if (window.lbOutbox) window.lbOutbox.report('dash', erz, 'edited'); } catch (e) {}
+          toast('Dash warning changed'); dashDraft = null; view = 'reports'; paint(); return;
+        }
+      }
       var recZ = { id: 'w_' + uid(), ts: nowZ, shiftId: SH ? SH.id : '', driver: (SH && SH.driver) || me().name || '', truck: (SH && SH.truck) || me().truck || '', sev: dz.sev, safe: dz.safe, note: dz.note,
         label: (dz.sev === 'red' ? 'Red warning light' : dz.sev === 'amber' ? 'Amber warning light' : 'Dash message') + (dz.note ? ': ' + dz.note : ''), media: dz.media.slice(), lat: locZ && locZ.lat, lng: locZ && locZ.lng,
         route: 'lead', status: 'waiting', escalateAt: nowZ + DASH_ESCALATE_MS, synced: false };
+      if (dz.laterId) { recZ.ts = dz.laterTs || recZ.ts; if (dz.lat != null) { recZ.lat = dz.lat; recZ.lng = dz.lng; } try { window.lbLater.remove(dz.laterId, false); } catch (e) {} }
       var allZ = dashReps(); allZ.push(recZ); lsSet('lbDashReports', allZ.slice(-200));
       try { if (window.lbOutbox) window.lbOutbox.report('dash', recZ); } catch (e) {}
-      dashDraft = null; view = SH ? 'main' : 'truck';
+      dashDraft = null; view = (dz.laterId && laterList().length) ? 'reports' : (SH ? 'main' : 'truck');
       toast('Sending to your leading hand… If nobody answers by ' + clock(recZ.escalateAt) + ' it goes to the mechanic.' + (dz.sev === 'red' || !dz.safe ? ' Don’t drive on until you hear back.' : ''));
       paint(); return;
     }
@@ -34038,6 +34216,16 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       if (e.done && (o.media || o.finalText != null)) { e.done = 0; e.doneAt = 0; }     // more photos after it was finished
       e.next = 0; save(); fire(); flush(); return rid;
     }
+    // changed before the (batched) email has gone out: the change replaces that report in it, no CORRECTED email needed
+    if (o.replaces) {
+      var hostR = null, now1 = Date.now();
+      Q.forEach(function(x){ if (!hostR && x.parts && !x.done && !x.cancelled && !(x.s && x.s.msg) && x.parts.some(function(p){ return p.rid === o.replaces; })) hostR = x; });
+      if (hostR) {
+        hostR.parts.forEach(function(p){ if (p.rid === o.replaces) { p.subject = String(o.subject).replace(/^CORRECTED: /, ''); p.text = String(o.text).replace(/^CORRECTION:[^\n]*\n\n/, ''); p.media = (o.media || []).slice(); } });
+        rebuild(hostR); save(); fire();
+        return rid;
+      }
+    }
     var bk = batchKey(o);
     if (bk) {
       var now0 = Date.now(), host = null;
@@ -34186,14 +34374,27 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   function loc(r){ return r.lat != null ? 'Location: ' + r.lat + ', ' + r.lng : 'Location: not known'; }
   function base(r){ return { driver: r.driver || '', emp: r.emp || (function(){ try { return JSON.parse(localStorage.getItem('lbDriver') || '{}').emp || ''; } catch (e) { return ''; } })(), truck: r.truck || '', lat: r.lat == null ? null : r.lat, lng: r.lng == null ? null : r.lng, ts: r.ts }; }
 
-  function report(kind, r){
+  // A report changed afterwards (wrong item picked...): goes again under a new id, headed CORRECTED, so it is its own email
+  // and never counts as a duplicate of the first. A corrected dash warning is not a new dash warning (no "I've got it"
+  // link, no escalation to the mechanic).
+  function corrected(o, cx){
+    if (!cx) return o;
+    o.replaces = o.rid;
+    o.rid = o.rid + '_c' + Date.now().toString(36);
+    o.subject = 'CORRECTED: ' + o.subject;
+    o.text = 'CORRECTION: the driver changed this report. It replaces the earlier one.\n\n' + o.text;
+    o.src = null; o.urgent = false;
+    if (o.kind === 'dash') { o.kind = 'dash-correction'; }
+    return o;
+  }
+  function report(kind, r, cx){
     if (!r) return null;
     if (kind === 'defect') {
       var stop = r.sev === 'stop';
-      return send({ rid: 'd_' + r.id.replace(/^d_/, ''), kind: 'defect', urgent: stop, to: stop ? ['mechanic', 'lead'] : ['mechanic'],
+      return send(corrected({ rid: 'd_' + r.id.replace(/^d_/, ''), kind: 'defect', urgent: stop, to: stop ? ['mechanic', 'lead'] : ['mechanic'],
         subject: (stop ? 'NOT SAFE TO DRIVE: ' : 'Truck defect: ') + (r.label || 'defect') + ' · ' + (r.truck || 'truck'),
         text: (stop ? 'TRUCK NOT SAFE TO DRIVE\n' : '') + 'Truck defect\n' + who(r) + '\n' + when(r.ts) + '\nWhat: ' + (r.label || '') + (r.note ? '\nDetails: ' + r.note : '') + '\n' + loc(r),
-        data: base(r), media: r.media || [], src: { key: 'lbDefects', id: r.id } });
+        data: base(r), media: r.media || [], src: { key: 'lbDefects', id: r.id } }, cx));
     }
     if (kind === 'brake') {
       if (r.level === 'ok') return null;
@@ -34206,10 +34407,10 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     }
     if (kind === 'dash') {
       var red = r.sev === 'red' || r.safe === false;
-      return send({ rid: 'w_' + r.id.replace(/^w_/, ''), kind: 'dash', urgent: red, to: ['lead'],
+      return send(corrected({ rid: 'w_' + r.id.replace(/^w_/, ''), kind: 'dash', urgent: red, to: ['lead'],
         subject: (red ? 'DASH WARNING: ' : 'Dash warning: ') + (r.label || '') + ' · ' + (r.truck || 'truck'),
         text: (r.label || 'Dash warning') + '\n' + who(r) + '\n' + when(r.ts) + '\n' + (r.safe === false ? 'The driver has pulled over / stopped.' : 'The driver is still driving.') + '\n' + loc(r) + '\n\nPhoto follows. If nobody taps "I\'ve got it" this goes to the mechanic.',
-        data: base(r), media: r.media || [], src: { key: 'lbDashReports', id: r.id } });
+        data: base(r), media: r.media || [], src: { key: 'lbDashReports', id: r.id } }, cx));
     }
     if (kind === 'bin') {
       return send({ rid: 'i_' + r.id, kind: 'bin', urgent: false, to: ['binmaint', 'ops'], delayMs: 9000,
@@ -34219,10 +34420,10 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     }
     if (kind === 'issue') {
       // every issue a driver logs goes to the leading hand as soon as it is logged, with its photos (and voice notes)
-      return send({ rid: 'il_' + r.id, kind: 'issue', urgent: false, to: ['lead'], delayMs: 4000,
+      return send(corrected({ rid: 'il_' + r.id, kind: 'issue', urgent: false, to: ['lead'], delayMs: 4000,
         subject: (r.label || 'Issue') + (r.serial ? ' · bin ' + r.serial : '') + (r.address ? ' · ' + r.address : r.street ? ' · ' + r.street : ''),
         text: (r.label || 'Issue') + '\n' + who(r) + '\n' + when(r.ts) + '\n' + (r.serial ? 'Bin: ' + r.serial + (r.stream ? ' (' + r.stream + ')' : '') + '\n' : '') + (r.address ? 'Address: ' + r.address + '\n' : '') + (r.street ? 'Street: ' + r.street + '\n' : '') + (r.run ? 'Run: ' + r.run + '\n' : '') + (r.note ? 'Note: ' + r.note + '\n' : '') + loc(r) + (r.media && r.media.length ? '\nPhotos attached.' : ''),
-        data: { driver: r.driver || '', lat: r.lat, lng: r.lng, ts: r.ts, serial: r.serial || '', propId: r.propId || '' }, media: r.media || [], src: { key: 'lbIssueLog', id: r.id } });
+        data: { driver: r.driver || '', lat: r.lat, lng: r.lng, ts: r.ts, serial: r.serial || '', propId: r.propId || '' }, media: r.media || [], src: { key: 'lbIssueLog', id: r.id } }, cx));
     }
     if (kind === 'binedit') {
       return send({ rid: 'e_' + r.id.replace(/^e_/, ''), kind: 'binedit', urgent: false, to: ['binmaint', 'ops'], delayMs: 6000,
