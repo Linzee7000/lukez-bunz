@@ -28449,6 +28449,9 @@ body.ux2.ux-gta-game #uxGtaHealth{display:flex;flex-direction:column;align-items
 #lbStickerPop .lbsp-b3 button{flex:1 1 40%}
 #lbStickerPop .lbsp-b3 button.go{flex-basis:100%}
 #lbStickerPop .lbsp-b4{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+#lbStickerPop .lbsp-cnt{display:grid !important;grid-template-columns:1fr 1fr 1.6fr 1fr 1fr;gap:6px;align-items:stretch}
+#lbStickerPop .lbsp-cnt button{padding:0 !important;min-width:0 !important}
+#lbStickerPop .lbsp-cnt input{min-width:0;width:100%;box-sizing:border-box;text-align:center;font:800 24px/1 "Share Tech Mono",ui-monospace,monospace;background:#000;color:var(--ui-accent,#ffd21f);border:var(--rb-bd,3px solid #000);border-radius:6px}
 #lbStickerPop .lbsp-b4 button{padding:0 8px;font-size:14px}
 #lbStickerPop[data-stage="3"], #lbStickerPop[data-stage="4"]{border-left-color:var(--ux-info, #60a5fa)}
 #lbStickerPop .lbsp-b button.go{background:var(--ui-accent, #b5451b);border-color:transparent;color:var(--ui-accent-ink, #fff)}
@@ -38790,6 +38793,14 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   }
   // For the live "Change truck" screen to show the driver what's about to be left behind, before
   // they confirm - read-only, doesn't touch anything.
+  // the driver's count of the bins on board (Swapping sides: matched to the truck's own counter) - the load is set to it
+  function setLoad(n){
+    var live = window.uxShiftState ? window.uxShiftState() : null; if (!live || !isFinite(n) || n < 0) return false;
+    var R0 = getOrMake(live.id), was = R0.cur.n;
+    R0.cur.n = Math.round(n); R0.cur.adj = (R0.cur.adj || []).concat([{ t: Date.now(), from: was, to: R0.cur.n }]).slice(-20);
+    if (!R0.cur.first && R0.cur.n > 0) R0.cur.first = { t: Date.now(), km: odoNow(live), d: live.dist || 0 };
+    save(R0); return true;
+  }
   function pendingLoad(id){
     var sh = shiftFor(id); if (!sh) return null;
     var R0 = getOrMake(sh.s.id);
@@ -39276,7 +39287,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   }
   window.lbRunSheet = { addFuel: addFuel, carryLoad: function(id, n){ var sh = shiftFor(id); if (!sh) return; var R0 = getOrMake(sh.s.id); R0.cur = { n: n, first: null, last: null }; R0.carried = n; save(R0); },
     clearLoad: function(id){ var sh = shiftFor(id); if (!sh) return; var R0 = getOrMake(sh.s.id); R0.cur = { n: 0, first: null, last: null }; save(R0); },
-    autoSend: autoSend, formImage: formImage, open: open, missing: missing, text: function(id){ var sh = shiftFor(id); if (!sh) return ''; SHc = sh; R = getOrMake(sh.s.id); return sheetText(); }, truckChanged: truckChanged, pendingLoad: pendingLoad, data: function(id){
+    autoSend: autoSend, formImage: formImage, open: open, missing: missing, text: function(id){ var sh = shiftFor(id); if (!sh) return ''; SHc = sh; R = getOrMake(sh.s.id); return sheetText(); }, truckChanged: truckChanged, pendingLoad: pendingLoad, setLoad: setLoad, data: function(id){
     var sh = shiftFor(id); if (!sh) return null; SHc = sh; R = getOrMake(sh.s.id);
     var d = sheetData(), s = d.s, sum = function(a){ var t = 0, any = false; (a || []).forEach(function(x){ var v = parseFloat(x.litres); if (isFinite(v)) { t += v; any = true; } }); return any ? t : null; };
     var n = function(v){ v = parseFloat(v); return isFinite(v) ? v : null; };
@@ -39587,6 +39598,15 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     el.addEventListener('click', function(ev){
       var b = ev.target.closest ? ev.target.closest('button') : null; if (!b) return;
       var a = b.getAttribute('data-a'), st = el._st || {}, stage = shown, BC = window.lbBreakClock;
+      // the bins-on-board count: + / - change the number in place, the pop-up stays up
+      if (a === 'cnt') { var ci = el.querySelector('#lbspCnt'); if (ci) ci.value = Math.max(0, (parseInt(ci.value, 10) || 0) + (+b.getAttribute('data-d') || 0)); return; }
+      if (a === 'cntok') {
+        var cv = parseInt((el.querySelector('#lbspCnt') || {}).value, 10);
+        hide();
+        if (isFinite(cv) && cv >= 0 && window.lbRunSheet && window.lbRunSheet.setLoad) window.lbRunSheet.setLoad(cv);
+        if (loadReady()) tipAsk(st); else note('Bins on board: ' + (isFinite(cv) ? cv : '?'), 'Swapping sides is on the run sheet.');
+        return;
+      }
       waved[(stage === 4 ? 'brk' + restBreak : key) + '|' + stage] = 1; hide();
       if (a === 'slash') { waved[key + '|1'] = waved[key + '|2'] = 1; if (window.rbSlash && window.rbSlash(firstName())) hide(); else note('Nature calls', 'Wash your hands, ' + firstName() + '.'); }
       else if (a === 'hot') {
@@ -39615,7 +39635,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
         var WHY = { jam: 'Hopper jam', cs: 'Customer service', pull: 'Pulled over', swap: 'Swapping sides' }[a];
         whySave(WHY, st);
         // (Fox, 12 Nov: only when the load is ready to tip - 200 bins or more on board, or the load started an hour or more ago)
-        if (a === 'swap' && loadReady()) tipAsk(st); else note(WHY + ' logged', 'It goes on the run sheet with this stop.');
+        // (Fox, 12 Nov: Swapping sides first asks for the bins on board, set to the truck's own counter)
+        if (a === 'swap') countAsk(st); else note(WHY + ' logged', 'It goes on the run sheet with this stop.');
       } else if (a === 'tipgo') {
         var tp = (st.tips || [])[+b.getAttribute('data-i')];
         if (tp) waze(tp);
@@ -39658,6 +39679,17 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       var pl = window.lbRunSheet.pendingLoad(sh.id); if (!pl) return false;
       return pl.n >= 200 || (pl.first && pl.first.t && Date.now() - pl.first.t >= 3600000);
     } catch (e) { return false; }
+  }
+  function countAsk(st){
+    var sh = window.uxShiftState ? window.uxShiftState() : null, n = 0;
+    try { var pl = sh && window.lbRunSheet && window.lbRunSheet.pendingLoad ? window.lbRunSheet.pendingLoad(sh.id) : null; n = pl ? pl.n : 0; } catch (e) {}
+    var e = build(); shown = 6; e._st = { stop: st && st.stop }; clearTimeout(noteTimer);
+    var pm = function(d){ return '<button type="button" data-a="cnt" data-d="' + d + '">' + (d > 0 ? '+' : '\u2212') + Math.abs(d) + '</button>'; };
+    e.innerHTML = '<div class="lbsp-t">Bins on board?</div><div class="lbsp-s">Swapping sides. Make it match the truck’s counter.</div>' +
+      '<div class="lbsp-b lbsp-cnt">' + pm(-10) + pm(-1) + '<input id="lbspCnt" type="text" inputmode="numeric" autocomplete="off" value="' + n + '" aria-label="Bins on board">' + pm(1) + pm(10) + '</div>' +
+      '<div class="lbsp-b"><button type="button" data-a="x">Skip</button><button type="button" class="go" data-a="cntok">Confirm</button></div>';
+    e.setAttribute('data-stage', '6'); e.classList.add('on');
+    noteTimer = setTimeout(function(){ if (shown === 6) hide(); }, 180000);
   }
   function tipAsk(st){
     var tips = tipList();
@@ -39727,7 +39759,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   }
   function tick(){
     refreshRest();
-    if (shown === 9 || shown === 5) return;                    // let a note finish; the tip question waits for an answer
+    if (shown === 9 || shown === 5 || shown === 6) return;     // let a note finish; the count and tip questions wait for an answer
     var sh = window.uxShiftState ? window.uxShiftState() : null;
     var cur = window.lbStops && window.lbStops.current ? window.lbStops.current() : null;
     var brk = clockBreak();
