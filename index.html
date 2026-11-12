@@ -38453,9 +38453,12 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   // in the reports' Drive folder (Lukez Bunz Reports / <date> gps-log <id> / gps-log-1.csv) and a line goes on the
   // Reports tab - no share sheet, and it waits and retries with no signal. Needs nothing new in the Apps Script: the
   // photo step stores whatever file type it is handed.
-  window.lbUploadGpsLog = async function(note){
+  // o (optional): { kind, subject, text, quiet, extra: [{ name, text }] } - the same log sent as another kind of report (Bin
+  // number changed: emailed, with the trail of the load as a second CSV to put against WasteTrack's KMZ)
+  window.lbUploadGpsLog = async function(note, o){
+    o = o || {};
     var n = (window.lbGpsLog || []).length;
-    if (!n) { customAlert('No GPS readings recorded yet - drive with the app open, then try again.'); return; }
+    if (!n && !o.kind) { customAlert('No GPS readings recorded yet - drive with the app open, then try again.'); return; }
     if (!window.lbMedia || !window.lbOutbox) { window.lbSendGpsLog(note); return; }
     var text = (note ? '# note: ' + String(note).replace(/\n/g, ' ') + '\n' : '') + csv();
     var d = {}; try { d = JSON.parse(localStorage.getItem('lbDriver') || '{}') || {}; } catch (e) {}
@@ -38465,10 +38468,16 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     try {
       await window.lbMedia.put({ id: id, kind: 'file', type: 'text/csv', blob: new Blob([text], { type: 'text/csv' }), ts: Date.now(), ref: 'gps-log', synced: false });
       var who = (d.name || 'Driver') + (truck ? ' · truck ' + truck : '');
-      window.lbOutbox.send({ rid: 'g_' + id, kind: 'gps-log', to: ['lead'], subject: 'GPS log: ' + who,
-        text: 'GPS log from ' + who + ' - ' + n + ' readings (last 15 minutes).' + (note ? '\n' + note : '') + '\nThe CSV is in the Drive folder (not emailed).',
-        data: { driver: d.name || '', truck: truck, readings: n, lat: loc && loc.lat, lng: loc && loc.lng, ts: Date.now() }, media: [id] });
-      customAlert('GPS log sent (' + n + ' readings). It goes into the Lukez Bunz Reports folder in Google Drive.');
+      var media = [id];
+      for (var xi = 0; xi < (o.extra || []).length; xi++) {
+        var xf = o.extra[xi], xid = 'gpx_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
+        await window.lbMedia.put({ id: xid, kind: 'file', type: 'text/csv', blob: new Blob([xf.text], { type: 'text/csv' }), ts: Date.now(), ref: xf.name || 'trail', synced: false });
+        media.push(xid);
+      }
+      window.lbOutbox.send({ rid: 'g_' + id, kind: o.kind || 'gps-log', to: ['lead'], subject: (o.subject || 'GPS log') + ': ' + who,
+        text: o.text ? o.text + '\n\nGPS log: ' + n + ' readings (last 15 minutes) attached.' : 'GPS log from ' + who + ' - ' + n + ' readings (last 15 minutes).' + (note ? '\n' + note : '') + '\nThe CSV is in the Drive folder (not emailed).',
+        data: { driver: d.name || '', truck: truck, readings: n, lat: loc && loc.lat, lng: loc && loc.lng, ts: Date.now() }, media: media, batch: false });
+      if (!o.quiet) customAlert('GPS log sent (' + n + ' readings). It goes into the Lukez Bunz Reports folder in Google Drive.');
     } catch (e) { window.lbSendGpsLog(note); }
   };
 })();
@@ -38846,14 +38855,32 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   // For the live "Change truck" screen to show the driver what's about to be left behind, before
   // they confirm - read-only, doesn't touch anything.
   // the driver's count of the bins on board (Swapping sides: matched to the truck's own counter) - the load is set to it
-  function setLoad(n){
+  function setLoad(n, why){
     var live = window.uxShiftState ? window.uxShiftState() : null; if (!live || !isFinite(n) || n < 0) return false;
     var R0 = getOrMake(live.id), was = R0.cur.n;
     if (R0.cur.app == null) R0.cur.app = was;                       // (what the app had counted itself stays as it was)
     R0.cur.n = Math.round(n); R0.cur.adj = (R0.cur.adj || []).concat([{ t: Date.now(), from: was, to: R0.cur.n }]).slice(-20);
     if (!R0.cur.first && R0.cur.n > 0) R0.cur.first = { t: Date.now(), km: odoNow(live), d: live.dist || 0 };
     if (R0.cur.first && !R0.cur.last) R0.cur.last = R0.cur.first;   // (the load page reads both)
-    save(R0); return true;
+    save(R0);
+    if (R0.cur.n !== was) { try { binCountEmail(live, R0, was, R0.cur.n, why); } catch (e) {} }
+    return true;
+  }
+  /* Bins on board changed by hand (Fox, 13 Nov): an email "Bin number changed" with the GPS log and the trail of this load
+     (time, lat, lng, from the first pick-up of the load) so the app's count can be put against WasteTrack's KMZ later. */
+  function binCountEmail(live, R0, from, to, why){
+    if (!window.lbUploadGpsLog) return;
+    var t0 = (R0.cur.first && R0.cur.first.t) || live.start, P = null, T = null;
+    try { P = new Function('return typeof gpsTrailPoints === "undefined" ? null : gpsTrailPoints')(); T = new Function('return typeof gpsTrailTimes === "undefined" ? null : gpsTrailTimes')(); } catch (e) {}
+    var rows = ['time,lat,lng'];
+    if (P && T) for (var i = 0; i < P.length; i++) if (T[i] >= t0) rows.push(new Date(T[i]).toISOString() + ',' + (+P[i][0]).toFixed(6) + ',' + (+P[i][1]).toFixed(6));
+    var app = R0.cur.app != null ? R0.cur.app : from;
+    var txt = 'Bins on board changed by hand' + (why ? ' (' + why + ')' : '') + ': ' + from + ' -> ' + to + '\n' +
+      'The app had counted ' + app + ' itself in this load' + (R0.cur.stolen ? ' (' + R0.cur.stolen + ' from other runs)' : '') + '.\n' +
+      'Run ' + (live.run || '?') + (live.stream ? ' ' + live.stream : '') + (live.truck ? ' · truck ' + live.truck : '') + ' · ' + new Date().toLocaleString('en-AU') + '\n' +
+      'Load started ' + new Date(t0).toLocaleTimeString('en-AU') + '. The trail of the load (time, lat, lng) is the second CSV, to compare with the WasteTrack KMZ.';
+    window.lbUploadGpsLog('Bin number changed ' + from + ' -> ' + to, { kind: 'bin-count', subject: 'Bin number changed ' + from + ' to ' + to, text: txt, quiet: true,
+      extra: [{ name: 'load-trail', text: rows.join('\n') }] });
   }
   function pendingLoad(id){
     var sh = shiftFor(id); if (!sh) return null;
@@ -39667,7 +39694,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       if (a === 'cntok') {
         var cv = parseInt((el.querySelector('#lbspCnt') || {}).value, 10);
         hide();
-        if (isFinite(cv) && cv >= 0 && window.lbRunSheet && window.lbRunSheet.setLoad) window.lbRunSheet.setLoad(cv);
+        if (isFinite(cv) && cv >= 0 && window.lbRunSheet && window.lbRunSheet.setLoad) window.lbRunSheet.setLoad(cv, 'swapping sides');
         if (loadReady()) tipAsk(st); else note('Bins on board: ' + (isFinite(cv) ? cv : '?'), 'Swapping sides is on the run sheet.');
         return;
       }
@@ -60008,7 +60035,61 @@ html body.lb-pc.lb-layers-open[data-ux-screen="map"] #lbMapKey{display:none}
 .lbx-btn.b{background:#3b82f6;color:#fff}
 .lbx-btn.g{background:var(--ux-c-fog,#2ecc62);color:#000}
 .lbx-btn.k{background:#2a2c31;color:#fff}
+.lbx-cnt{display:grid;grid-template-columns:1fr 1fr 1.6fr 1fr 1fr;gap:6px;margin-top:12px}
+.lbx-cnt .lbx-btn{padding:0;min-width:0}
+.lbx-cnt input{min-width:0;width:100%;box-sizing:border-box;height:40px;text-align:center;font:800 24px/1 "Share Tech Mono",ui-monospace,monospace;background:#000;color:var(--ui-accent,#ffd21f);border:var(--mn-bd,var(--rb-bd,3px solid #000));border-radius:6px}
+#rdLTruck,#rbTruck{-webkit-touch-callout:none;-webkit-user-select:none;user-select:none}
 </style>
+<script id="lb-onboard-edit-script">
+/* Hold the bins-on-board counter (the dash's truck counter, or "On truck" in the cluster) to change the number - to match the
+   truck's own counter (Fox, 13 Nov). A quick tap still opens the shift screen. A change goes on the load and is emailed
+   ("Bin number changed") with the GPS log - see setLoad in the run sheet. */
+(function(){
+  var SEL = '#rdLTruck, #rbTruck', timer = null, held = false, sx = 0, sy = 0, ov = null;
+  function shift(){ try { return window.uxShiftState ? window.uxShiftState() : null; } catch (e) { return null; } }
+  function open(){
+    var sh = shift();
+    if (!sh) { try { window.customAlert && window.customAlert('Start a shift first'); } catch (e) {} return; }
+    var pl = null; try { pl = window.lbRunSheet && window.lbRunSheet.pendingLoad ? window.lbRunSheet.pendingLoad(sh.id) : null; } catch (e) {}
+    var n = pl ? pl.n : 0;
+    if (ov) ov.remove();
+    ov = document.createElement('div'); ov.className = 'lbx-ov'; ov.id = 'lbOnBoardEdit';
+    var pm = function(d){ return '<button type="button" class="lbx-btn k" data-d="' + d + '">' + (d > 0 ? '+' : '\u2212') + Math.abs(d) + '</button>'; };
+    ov.innerHTML = '<div class="lbx-sheet"><div class="lbx-h"><b>Bins on board</b><button type="button" class="lbx-btn k" data-x="1">Cancel</button></div>' +
+      '<div class="lbx-s">Make it match the truck’s counter. The app has ' + n + '.</div>' +
+      '<div class="lbx-cnt">' + pm(-10) + pm(-1) + '<input id="lbObIn" type="text" inputmode="numeric" autocomplete="off" value="' + n + '" aria-label="Bins on board">' + pm(1) + pm(10) + '</div>' +
+      '<div class="lbx-btns"><button type="button" class="lbx-btn y lbx-big" data-ok="1" style="flex:1">Save</button></div></div>';
+    ov.addEventListener('click', function(ev){
+      if (ev.target === ov) { ov.remove(); ov = null; return; }
+      var b = ev.target.closest && ev.target.closest('button'); if (!b) return;
+      var inp = ov.querySelector('#lbObIn');
+      if (b.getAttribute('data-x')) { ov.remove(); ov = null; return; }
+      if (b.getAttribute('data-d')) { inp.value = Math.max(0, (parseInt(inp.value, 10) || 0) + (+b.getAttribute('data-d'))); return; }
+      if (b.getAttribute('data-ok')) {
+        var v = parseInt(inp.value, 10); ov.remove(); ov = null;
+        if (!isFinite(v) || v < 0 || v === n) return;
+        if (window.lbRunSheet && window.lbRunSheet.setLoad && window.lbRunSheet.setLoad(v, 'changed on the counter')) {
+          try { window.customAlert && window.customAlert('Bins on board: ' + n + ' \u2192 ' + v + '. Sent with the GPS log.'); } catch (e) {}
+        }
+      }
+    });
+    document.body.appendChild(ov);
+  }
+  function cancel(){ clearTimeout(timer); timer = null; }
+  document.addEventListener('pointerdown', function(ev){
+    var t = ev.target.closest && ev.target.closest(SEL); if (!t) return;
+    held = false; sx = ev.clientX; sy = ev.clientY; cancel();
+    timer = setTimeout(function(){ timer = null; held = true; try { navigator.vibrate && navigator.vibrate(40); } catch (e) {} open(); }, 600);
+  }, true);
+  document.addEventListener('pointermove', function(ev){ if (timer && Math.hypot(ev.clientX - sx, ev.clientY - sy) > 12) cancel(); }, true);
+  document.addEventListener('pointerup', cancel, true);
+  document.addEventListener('pointercancel', cancel, true);
+  // the tap that ends a hold must not also open the shift screen
+  document.addEventListener('click', function(ev){ if (held && ev.target.closest && ev.target.closest(SEL)) { held = false; ev.stopPropagation(); ev.preventDefault(); } }, true);
+  document.addEventListener('contextmenu', function(ev){ if (ev.target.closest && ev.target.closest(SEL)) ev.preventDefault(); }, true);
+  window.lbOnBoardEdit = open;   // (test hook)
+})();
+</script>
 <script id="lb-runmate-script">
 /* ========== Two trucks on the same run (Fox, 10 Nov) ==========
    Each truck on a kerbside run sends, every 45 s, one place (kind runMate, id rm_<driver>): the run, the bins THIS truck
