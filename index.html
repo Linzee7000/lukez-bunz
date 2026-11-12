@@ -23568,6 +23568,19 @@ body.stream-slr .lb-layers-head .icon-img { filter: brightness(0); }
     }
 
     if (typeof window.lbCloseDrawer === 'function') window.lbCloseDrawer();
+    // (Fox, 12 Nov: a search result opens the property card, not the map tools - those are the card's Map button)
+    if ((d.lbgo === 'prop' || d.lbgo === 'bin') && typeof window.openPropertyInspectModal === 'function') {
+      const site0 = recs().find(s => String(s.propId || s.siteId) === String(d.pid));
+      if (site0) {
+        const p0 = pt(site0.lat, site0.lng);
+        if (p0) goToMap(() => { const m = map(); if (!m) return; stopFollow(); m.setView([p0.lat, p0.lng], 18, { animate: true }); dropPin(p0.lat, p0.lng, streetLabelOf(site0)); });
+        setTimeout(() => {
+          if (d.lbgo === 'bin' && typeof window.lbOpenBinInfo === 'function') window.lbOpenBinInfo(d.pid, d.serial);
+          else window.openPropertyInspectModal(d.pid, 'Settings');
+        }, p0 ? 450 : 0);
+        return;
+      }
+    }
     if (d.lbgo === 'prop') window.showPropertyOnMap(d.pid);
     else if (d.lbgo === 'bin') window.lbFocusBin(d.pid, d.serial);
     else if (d.lbgo === 'sl') window.lbFocusSlSite(d.id);
@@ -31841,7 +31854,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
    Which tip each stream goes to (current as of Sep 2026 - change it here when the contracts do):
      Recycling  Cleanaway Hallam
      Garbage    Rye Landfill                 backup Cleanaway Dandenong (SEMTS)
-     FOGO       Mon: Bio Gro Dandenong       Tue-Fri: Cleanaway Dandenong (SEMTS)   backup Valoriza Dandenong
+     FOGO       Mon: Bio Gro Dandenong       Tue-Fri: Cleanaway SEOF   backup Cleanaway Dandenong (SEMTS), Valoriza Dandenong
    ===================================================================== */
 (function(){
   'use strict';
@@ -31871,15 +31884,14 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       use: [['Garbage', [], 'main']] },
     { id: 'semts', name: 'Cleanaway Dandenong (SEMTS)', addr: '72 Thomas Murrell Crescent, Dandenong South VIC 3175', uhf: '14',
       q: ['72 Thomas Murrell Crescent, Dandenong South, Victoria, Australia', 'Thomas Murrell Crescent, Dandenong South, Victoria, Australia'],
-      use: [['Garbage', [], 'backup'], ['FOGO', [2, 3, 4, 5], 'main']] },
+      use: [['Garbage', [], 'backup'], ['FOGO', [], 'backup']] },
     { id: 'biogro', name: 'Bio Gro Dandenong', addr: '80-82 Ordish Road, Dandenong South VIC 3175', uhf: '19', note: 'Monday only',
       q: ['80 Ordish Road, Dandenong South, Victoria, Australia', 'Ordish Road, Dandenong South, Victoria, Australia'],
       use: [['FOGO', [1], 'main']] },
-    // Cleanaway SEOF (organics), from the Solo tipping sites sheet (Oct 2026): known as a place with its UHF channel; which days
-    // FOGO goes there is not changed here (see `use`)
+    // Cleanaway SEOF (organics): FOGO Tuesday to Friday (Fox, 12 Nov; it was SEMTS)
     { id: 'seof', name: 'Cleanaway SEOF', addr: '88 Ordish Road, Dandenong South VIC 3175', uhf: '17',
       q: ['88 Ordish Road, Dandenong South, Victoria, Australia', 'Ordish Road, Dandenong South, Victoria, Australia'],
-      use: [] },
+      use: [['FOGO', [2, 3, 4, 5], 'main']] },
     { id: 'valoriza', name: 'Valoriza Dandenong', addr: '42-46 Villas Road, Dandenong South VIC 3175',
       q: ['42 Villas Road, Dandenong South, Victoria, Australia', 'Villas Road, Dandenong South, Victoria, Australia'],
       use: [['FOGO', [], 'backup']] }
@@ -31944,11 +31956,24 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   // Waze is opened from where the truck is. A link cannot turn tolls off: that is Waze's own setting (Settings > Navigation >
   // Avoid toll roads), set once and kept. Android doesn't let an app put itself back on screen, so on arriving (the
   // background GPS keeps running while Waze is up) a phone notification comes up: tapping it opens Lukez Bunz.
-  function wazeTo(p){
+  function wazeTo(p){ return navTo(p, 'waze'); }
+  // Google Maps with tolls off: in the phone app the Android navigation link (avoid=t) starts turn-by-turn straight away; in
+  // a browser the maps link with dirflg=t (avoid tolls). If the app link does nothing (no Google Maps), the web link follows.
+  function navTo(p, app){
     if (!p || p.lat == null) return false;
     lsSet('lbWazeTarget', { name: p.name, lat: +p.lat, lng: +p.lng, ts: Date.now() });
-    var url = 'https://waze.com/ul?ll=' + (+p.lat).toFixed(6) + ',' + (+p.lng).toFixed(6) + '&navigate=yes';
-    try { window.open(url, '_blank'); } catch (e) { location.href = url; }
+    var ll = (+p.lat).toFixed(6) + ',' + (+p.lng).toFixed(6), url;
+    if (app === 'google') {
+      var web = 'https://maps.google.com/maps?saddr=My+Location&daddr=' + ll + '&dirflg=t';
+      var cap = window.Capacitor, android = /Android/i.test(navigator.userAgent);
+      if (cap && cap.isNativePlatform && cap.isNativePlatform() && android) {
+        try { location.href = 'google.navigation:q=' + ll + '&avoid=t'; } catch (e) {}
+        setTimeout(function(){ if (!document.hidden) { try { window.open(web, '_blank'); } catch (e) {} } }, 1500);
+      } else { try { window.open(web, '_blank'); } catch (e) { location.href = web; } }
+    } else {
+      url = 'https://waze.com/ul?ll=' + ll + '&navigate=yes';
+      try { window.open(url, '_blank'); } catch (e) { location.href = url; }
+    }
     watchArrive();
     return true;
   }
@@ -31979,8 +32004,12 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   var DAYN = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'], SNAME = { Garbage: 'Garbage', Recycling: 'Recycling', SummerRecycling: 'Summer recycling', FOGO: 'FOGO' };
   function openList(kind){
     var tips = kind === 'tips', loc = mPos(), mine = myDepot().id;
-    var rows = (tips ? TIPS : DEPOTS).map(withPos).map(function(x, i){ x._i = i; x._d = (loc && x.lat != null) ? km(loc, x) : null; return x; });
-    rows.sort(function(a, b){ if (!tips && (a.id === mine) !== (b.id === mine)) return a.id === mine ? -1 : 1; return (a._d == null ? 1e9 : a._d) - (b._d == null ? 1e9 : b._d); });
+    // the stream being worked: the shift's, else the map's filter. Its tip today goes first, then its backups, then the rest
+    var stream = ''; try { var sh0 = window.uxShiftState ? window.uxShiftState() : null; stream = (sh0 && sh0.stream) || new Function('return typeof activeFilterStream === "undefined" ? "" : activeFilterStream')() || ''; } catch (e) {}
+    var tf = tips && stream ? tipsFor(stream) : { main: [], backup: [] }, rank = {};
+    tf.main.forEach(function(x){ rank[x.id] = 0; }); tf.backup.forEach(function(x){ if (!(x.id in rank)) rank[x.id] = 1; });
+    var rows = (tips ? TIPS : DEPOTS).map(withPos).map(function(x, i){ x._i = i; x._d = (loc && x.lat != null) ? km(loc, x) : null; x._r = x.id in rank ? rank[x.id] : 2; return x; });
+    rows.sort(function(a, b){ if (!tips && (a.id === mine) !== (b.id === mine)) return a.id === mine ? -1 : 1; if (a._r !== b._r) return a._r - b._r; return (a._d == null ? 1e9 : a._d) - (b._d == null ? 1e9 : b._d); });
     if (!listEl) {
       listEl = document.createElement('div'); listEl.id = 'lbPlaceList';
       listEl.style.cssText = 'position:fixed;inset:0;z-index:2147482000;background:rgba(0,0,0,.55);display:flex;align-items:flex-end;justify-content:center';
@@ -31990,23 +32019,23 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
         var a = b.getAttribute('data-a'), id = b.getAttribute('data-id'), k = listEl._kind;
         var P = (k === 'tips' ? TIPS : DEPOTS).filter(function(x){ return x.id === id; })[0], w = P ? withPos(P) : null;
         if (a === 'x') { listEl.remove(); return; }
-        if (a === 'waze') { if (!wazeTo(w)) alertMsg('Not on the map yet - it is looked up when the phone has signal.'); return; }
+        if (a === 'waze' || a === 'gmaps') { if (!navTo(w, a === 'gmaps' ? 'google' : 'waze')) alertMsg('Not on the map yet - it is looked up when the phone has signal.'); return; }
         if (a === 'map' && w && w.lat != null) { listEl.remove(); try { if (typeof switchMainTab === 'function') switchMainTab('map'); var m = new Function('return typeof leafletMap === "undefined" ? null : leafletMap')(); if (window.lbDisableGpsFollow) window.lbDisableGpsFollow(); if (m) setTimeout(function(){ m.setView([w.lat, w.lng], 17); }, 400); } catch (e) {} return; }
         if (a === 'mine' && pickDepot(id)) { alertMsg('My depot: ' + P.name); openList('depots'); }
       });
     }
     listEl._kind = kind;
     listEl.innerHTML = '<div style="width:100%;max-width:520px;max-height:85vh;overflow:auto;background:#1b1f27;color:#fff;border-radius:16px 16px 0 0;padding:14px 14px calc(14px + env(safe-area-inset-bottom));font:15px/1.35 Roboto,system-ui,sans-serif">' +
-      '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px"><b style="font-size:19px">' + (tips ? 'Tips' : 'Depots') + '</b><button type="button" data-a="x" style="border:0;background:#374151;color:#fff;border-radius:10px;padding:8px 14px;font:inherit">Close</button></div>' +
+      '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px"><b style="font-size:19px">' + (tips ? 'Tips' + (stream && SNAME[stream] ? ' · ' + esc(SNAME[stream]) : '') : 'Depots') + '</b><button type="button" data-a="x" style="border:0;background:#374151;color:#fff;border-radius:10px;padding:8px 14px;font:inherit">Close</button></div>' +
       rows.map(function(x){
         var use = tips ? (x.use || []).map(function(u){ return (SNAME[u[0]] || u[0]) + (u[1].length ? ' ' + u[1].map(function(d){ return DAYN[d]; }).join('/') : '') + (u[2] === 'backup' ? ' (backup)' : ''); }).join(' · ') : '';
-        var me2 = !tips && x.id === mine, btn = 'border:0;border-radius:10px;padding:10px 12px;font:600 14px Roboto,system-ui,sans-serif;';
+        var me2 = (!tips && x.id === mine) || (tips && x._r === 0), btn = 'border:0;border-radius:10px;padding:10px 12px;font:600 14px Roboto,system-ui,sans-serif;';
         return '<div style="padding:12px;border-radius:12px;background:' + (me2 ? '#14351f' : '#262b35') + ';margin-bottom:8px">' +
-          '<div style="display:flex;justify-content:space-between;gap:8px"><b>' + esc(x.name) + (me2 ? ' · my depot' : '') + '</b><span style="color:#cbd5e1;white-space:nowrap">' + (x._d != null ? (x._d < 10 ? x._d.toFixed(1) : Math.round(x._d)) + ' km' : '') + '</span></div>' +
+          '<div style="display:flex;justify-content:space-between;gap:8px"><b>' + esc(x.name) + (me2 ? (tips ? ' · today’s ' + esc(SNAME[stream] || stream) + ' tip' : ' · my depot') : (tips && x._r === 1 ? ' · backup' : '')) + '</b><span style="color:#cbd5e1;white-space:nowrap">' + (x._d != null ? (x._d < 10 ? x._d.toFixed(1) : Math.round(x._d)) + ' km' : '') + '</span></div>' +
           '<div style="color:#cbd5e1;font-size:13px">' + esc(x.addr || '') + '</div>' +
           (use ? '<div style="font-size:13px;margin-top:2px">' + esc(use) + '</div>' : '') +
           ((x.uhf || (x.phone || []).length || x.note) ? '<div style="font-size:13px;margin-top:2px">' + [x.uhf ? 'UHF ' + esc(x.uhf) : '', (x.phone || []).map(function(ph){ return '<a style="color:#93c5fd" href="tel:' + esc(ph.replace(/\s/g, '')) + '">' + esc(ph) + '</a>'; }).join(' · '), x.note ? esc(x.note) : ''].filter(Boolean).join(' · ') + '</div>' : '') +
-          '<div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap"><button type="button" data-a="waze" data-id="' + esc(x.id) + '" style="' + btn + 'background:#2563eb;color:#fff">Waze</button><button type="button" data-a="map" data-id="' + esc(x.id) + '" style="' + btn + 'background:#374151;color:#fff">Show on map</button>' +
+          '<div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap"><button type="button" data-a="waze" data-id="' + esc(x.id) + '" style="' + btn + 'background:#2563eb;color:#fff">Waze</button><button type="button" data-a="gmaps" data-id="' + esc(x.id) + '" style="' + btn + 'background:#16a34a;color:#fff">Google Maps</button><button type="button" data-a="map" data-id="' + esc(x.id) + '" style="' + btn + 'background:#374151;color:#fff">Show on map</button>' +
           (!tips && !me2 ? '<button type="button" data-a="mine" data-id="' + esc(x.id) + '" style="' + btn + 'background:#374151;color:#fff">Make my depot</button>' : '') + '</div></div>';
       }).join('') + (!tips ? '<div style="color:#94a3b8;font-size:12px">Solo Rosebud unless you pick another. "Set depot to here" on the shift screen still works for an exact spot.</div>' : '') + '</div>';
     if (!listEl.parentNode) document.body.appendChild(listEl);
@@ -32020,6 +32049,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     pickDepot: pickDepot,
     openList: openList,
     wazeTo: wazeTo,
+    navTo: navTo,
     tips: function(){ return TIPS.map(withPos); },
     tipsFor: tipsFor,
     // "Garbage: Rye Landfill (backup Cleanaway Dandenong (SEMTS))"
@@ -55821,7 +55851,10 @@ html body.lb-pc.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#
 html body.lb-pc.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h):not(#mn-i) #lbPcBar .pcg-b{align-self:flex-start !important;margin-top:3px !important;height:40px !important}
 html body.lb-pc.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h):not(#mn-i) #lbPcBar .pc-clk,html body.lb-pc.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h):not(#mn-i) #lbPcBar .pc-clk .h,html body.lb-pc.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h):not(#mn-i) #lbPcBar .pc-clk .m,html body.lb-pc.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h):not(#mn-i) #lbPcBar .pc-clk .sx,html body.lb-pc.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h):not(#mn-i) #lbPcBar .pc-clk .sx i,html body.lb-pc.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h):not(#mn-i) #lbPcBar .pc-clk .sx u{font-family:var(--rb-font,var(--mn-font)) !important}
 html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h):not(#mn-i) #lbDrawerBody .lb-res-row.mn-t{height:auto !important;min-height:56px !important;max-height:none !important;overflow:visible !important;align-items:stretch}
-html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h):not(#mn-i) #lbDrawerBody .lb-res-row.mn-t > .lb-res-main{height:auto !important;max-height:none !important;overflow:visible !important}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h):not(#mn-i) #lbDrawerBody .lb-res-row.mn-t > .lb-res-main{height:auto !important;max-height:none !important;overflow:visible !important;display:block !important;-webkit-line-clamp:none !important;line-clamp:none !important;align-self:center !important;padding:8px 10px !important}
+/* (12 Nov, Fox: "two styles fighting": the menu tiles' 2-line clamp cut the suburb to "TYABB 3913..." and pushed the run badges over the row's edge, and the arrow took a third of the row) */
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h):not(#mn-i) #lbDrawerBody .lb-res-row.mn-t > .lb-res-main small{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h):not(#mn-i) #lbDrawerBody .lb-res-row.mn-t > .lb-res-go{flex:0 0 40px !important;width:40px !important;max-width:40px !important;padding:0 !important;-webkit-line-clamp:none !important;align-self:stretch !important}
 html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h):not(#mn-i) #lbDrawerBody .lb-res-row .lb-res-runs{display:flex !important;flex-wrap:wrap !important;gap:4px !important;margin:5px 0 2px !important;height:auto !important;overflow:visible !important}
 html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h):not(#mn-i) #lbDrawerBody .lb-res-row .lb-res-runs .hdr-run-badge{display:inline-flex !important;align-items:center !important;height:22px !important;min-height:22px !important;padding:0 7px !important;gap:4px !important;font:700 12px/1 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif !important;border-radius:6px !important;flex:none !important;overflow:visible !important}
 html body.ux2:not(#mn-a):not(#mn-b):not(#mn-c):not(#mn-d):not(#mn-e):not(#mn-f):not(#mn-g):not(#mn-h):not(#mn-i) #lbDrawerBody .lb-res-row .lb-res-runs .hdr-run-badge .icon-img{width:14px !important;height:14px !important;margin:0 !important}
@@ -57744,7 +57777,10 @@ html body.ux2:not(#lbpa-a):not(#lbpa-b):not(#lbpa-c):not(#lbpa-d) .lbpa input.lb
       (sp.no ? '<div class="lbpa-no' + (sp.no.length > 3 ? ' long' : '') + '">' + esc(sp.no).replace(/(\d)\s*-\s*(\d)/g,'$1\u2013$2') + '</div>' : '') +
       '<div class="lbpa-addr">' + (site.addedInApp ? '<input type="text" id="lbpaAddrIn" class="lbpa-addrin" value="' + esc(addr(site).toUpperCase()) + '" placeholder="Number and street" autocomplete="off" autocapitalize="characters" aria-label="Address">' : '<h2>' + esc(sp.street) + '</h2>') + '<div class="lbpa-sub">' + esc([sub, dt].filter(Boolean).join(' · ')) + '</div></div>' +
       '<div class="lbpa-side"><button type="button" class="lbpa-emos" data-pa-tab="rev" aria-label="Rating, tap for the review">' + emoRow(site) + '</button>' +
-      '<button type="button" class="lbpb-t" data-pa-map="1"><i>' + SVG('<path d="m3 6 6-3 6 3 6-3v15l-6 3-6-3-6 3V6Z"/><path d="M9 3v15M15 6v15"/>') + '</i><span>Map</span></button></div></div>' + nextHtml(site) + '</div>';
+      '<button type="button" class="lbpb-t" data-pa-map="1"><i>' + SVG('<path d="m3 6 6-3 6 3 6-3v15l-6 3-6-3-6 3V6Z"/><path d="M9 3v15M15 6v15"/>') + '</i><span>Map</span></button></div></div>' +
+      // navigate there (Fox, 12 Nov): Waze, or Google Maps with tolls off; on arriving a notification brings the app back
+      (site.lat && Number(site.lat) ? '<div class="lbpa-nav" style="display:flex;gap:8px;margin:8px 6px 4px"><button type="button" data-pa-nav="waze" style="flex:1;height:40px;border:0;border-radius:8px;background:#2563eb;color:#fff;font:700 14px Roboto,system-ui,sans-serif">Waze</button><button type="button" data-pa-nav="google" style="flex:1;height:40px;border:0;border-radius:8px;background:#16a34a;color:#fff;font:700 14px Roboto,system-ui,sans-serif">Google Maps · no tolls</button></div>' : '') +
+      nextHtml(site) + '</div>';
   }
   // bits the Report sheet (HUD script, earlier in the file) draws its head and bin rows with, so it matches this page
   window.lbPropBits = { split: splitAddr, suburb: suburbOf, dist: distTxt, svg: SVG, P: P,
@@ -58037,7 +58073,7 @@ html body.ux2:not(#lbpa-a):not(#lbpa-b):not(#lbpa-c):not(#lbpa-d) .lbpa input.lb
 
   // the clicks and typing on the page
   document.addEventListener('click', function(ev){
-    var t = ev.target.closest ? ev.target.closest('[data-pa-run],[data-pa-runview],[data-pa-runchg],[data-pa-remed],[data-pa-remdel],[data-pa-rate],[data-pa-tab],[data-pa-star],[data-pa-map],[data-pa-gps],[data-pa-fs],[data-pa-fdel],[data-pa-fadd],[data-pa-why],[data-pa-sel],[data-pa-all],[data-pa-setm],[data-pa-house]') : null;
+    var t = ev.target.closest ? ev.target.closest('[data-pa-run],[data-pa-runview],[data-pa-runchg],[data-pa-remed],[data-pa-remdel],[data-pa-rate],[data-pa-tab],[data-pa-star],[data-pa-map],[data-pa-nav],[data-pa-gps],[data-pa-fs],[data-pa-fdel],[data-pa-fadd],[data-pa-why],[data-pa-sel],[data-pa-all],[data-pa-setm],[data-pa-house]') : null;
     if (!t || !t.closest('.lbpb')) return;
     ev.preventDefault(); ev.stopPropagation();
     var id = String(window.__uPropId || ''), site = siteById(id); if (!site) return;
@@ -58068,6 +58104,10 @@ html body.ux2:not(#lbpa-a):not(#lbpa-b):not(#lbpa-c):not(#lbpa-d) .lbpa input.lb
       site.ratingStars = +t.getAttribute('data-pa-star'); saveProp(site, 'rating'); return;
     }
     if (t.hasAttribute('data-pa-tab')) { window.lbPropTab(t.getAttribute('data-pa-tab')); return; }
+    if (t.hasAttribute('data-pa-nav')) {
+      if (window.lbKnownPlaces && window.lbKnownPlaces.navTo) window.lbKnownPlaces.navTo({ name: addr(site), lat: +site.lat, lng: +site.lng }, t.getAttribute('data-pa-nav'));
+      return;
+    }
     if (t.hasAttribute('data-pa-map')) { try { var cm = g('closeModal'); if (cm) cm('propInspectModal'); } catch (e) {} if (typeof window.showPropertyOnMap === 'function') window.showPropertyOnMap(id); return; }
     if (t.hasAttribute('data-pa-gps')) {
       var loc = g('userCurrentLocation'), k = t.getAttribute('data-pa-gps'), i = +t.getAttribute('data-i'), b = site.soloStreams && site.soloStreams[k] && site.soloStreams[k][i];
