@@ -18878,29 +18878,37 @@ window.addEventListener('DOMContentLoaded', async () => {
        usual 5 s), such a bin up to 150 m away now counts when its house is the nearest thing on the run to the truck (no
        other bin dot or house is closer) and it is on the side being worked; the stop is then saved as its kerbside spot
        (confirmProvisionalBinLocation) and from then on it works like any other bin. */
-    let lbNearestD = Infinity;
+    let lbNearestD = Infinity, lbNearestLot = Infinity;
+    const lbLotD = {};   // siteId -> how far the truck is from that property's lot (Vicmap boundary), for bins drawn at the house
     if (lbStopped && lbMayFlip > 0 && !lbLastFixJumped) activeMapCircleMarkers.forEach(o => {
-      if (servicedBinSerials.has(o.serial) || Math.abs(o.lat - userCurrentLocation.lat) > 0.0015) return;
+      if (servicedBinSerials.has(o.serial) || Math.abs(o.lat - userCurrentLocation.lat) > 0.006) return;
       const dd = getDistanceMeters(userCurrentLocation.lat, userCurrentLocation.lng, o.lat, o.lng); if (dd < lbNearestD) lbNearestD = dd;
+      if (o.provisional && !(o.siteId in lbLotD)) { const ld = lbLotDist(o.siteId, userCurrentLocation); lbLotD[o.siteId] = ld; if (ld != null && ld < lbNearestLot) lbNearestLot = ld; }
     });
     if (!lbLastFixJumped) activeMapCircleMarkers.forEach((markerObj, markerKey) => {
       const binId = markerObj.serial || markerKey;
       if (servicedBinSerials.has(binId)) return;
-      if (Math.abs(markerObj.lat - userCurrentLocation.lat) > (markerObj.provisional ? 0.0015 : 0.0004)) return;   // (well north or south: quick no, for a whole day's markers on every fix)
+      if (Math.abs(markerObj.lat - userCurrentLocation.lat) > (markerObj.provisional ? 0.006 : 0.0004)) return;   // (well north or south: quick no, for a whole day's markers on every fix)
 
       const d = getDistanceMeters(userCurrentLocation.lat, userCurrentLocation.lng, markerObj.lat, markerObj.lng);
       // A provisional dot sits at the property's own point, not a confirmed kerbside spot - that
       // can be a fair way from the road on a rural/acreage block (see sourceCoords), so it gets a
       // wider first-flip radius. Once flipped it's replaced with a real kerbside position and goes
       // back to the normal tight radius like every other bin.
-      const lbFar = markerObj.provisional && d > 35 && d <= 150 && lbStopped && lbMayFlip > 0 && d <= lbNearestD + 3;
+      // The property's LOT is what counts when the app has one (Fox, 13 Nov: "much more accurate, and why it was added - even
+      // the houses in the system might be incorrect"): stopped on the road within 25 m of the lot (or in it - a driveway), the
+      // nearest such lot. Only when the house has no lot matched does it fall back to the house: within 150 m and nearest.
+      const lotD = markerObj.provisional ? lbLotD[markerObj.siteId] : undefined;
+      const lbFar = markerObj.provisional && d > 35 && lbStopped && lbMayFlip > 0 &&
+        (lotD != null ? (lotD <= 25 && lotD <= lbNearestLot + 2) : (d <= 150 && d <= lbNearestD + 3));
       if (d > (markerObj.provisional ? 35 : 12) && !lbFar) return;
+      if (lbFar && lotD != null && lotD <= 2) { lbFlipNow.push({ m: markerObj, id: binId, d: lotD }); return; }   // (in the lot: up the driveway, side doesn't matter)
 
       // Which side: judged by the bin's HOUSE, not its dot. A dot put in the middle of the road is always on
       // the right of a truck working the left kerb - going up the street and coming back down - so judged by
       // the dot it was never collected and never missed, and just sat there. The house is always on its own
       // side. (Collection points, whose bins sit away from the house, still go by the dot.)
-      const sideRef = lbBinSideRef(markerObj);
+      const sideRef = (lbFar && lotD != null && lbLotNear[markerObj.siteId]) || lbBinSideRef(markerObj);
       const binBearing = getBearing(userCurrentLocation.lat, userCurrentLocation.lng, sideRef.lat, sideRef.lng);
       const relAngle = (binBearing - (lastValidHeading || 0) + 360) % 360;
 
@@ -18912,7 +18920,7 @@ window.addEventListener('DOMContentLoaded', async () => {
       if (travelMode === 'all' && !(isLeft || isRight)) return;
 
       if (lbStopped) {
-        if (lbMayFlip > 0) lbFlipNow.push({ m: markerObj, id: binId, d });
+        if (lbMayFlip > 0) lbFlipNow.push({ m: markerObj, id: binId, d: (lbFar && lotD != null) ? lotD : d });
       } else if (speedKmh > 6 && !markerObj.provisional && d <= 9 && !missedBinSerials.has(binId)) {
         // Not for a provisional dot - its position is only an approximation, so driving past it
         // too fast to tell isn't good evidence of a genuinely missed bin.
@@ -19105,6 +19113,37 @@ window.addEventListener('DOMContentLoaded', async () => {
   // The point that says which side of the road a bin is on: its house, when the house is within 60 m of the
   // bin's dot (so collection points and far-off pins still go by the dot).
   let lbSideSites = null, lbSideSitesN = -1;
+  // How far a point is from a property's lot (Vicmap boundary, lb-parcels; a hand-drawn one wins): 0 inside it, else metres to
+  // its edge, null when the house has no lot. The nearest point of the edge is kept (lbLotNear) to judge the side by. Rings are
+  // cached per house; "no lot" is asked again after a minute (the lots load a moment after the map).
+  const lbLotRings = new Map(), lbLotNear = {};
+  function lbLotDist(siteId, p) {
+    let c = lbLotRings.get(siteId);
+    if (!c || (!c.r && Date.now() - c.t > 60000)) {
+      let r = null;
+      try { const s = lbSiteById(siteId); r = s && window.lbParcels && window.lbParcels.boundaryFor ? window.lbParcels.boundaryFor(s) : null; } catch (e) { r = null; }
+      c = { r: r && r.length >= 3 ? r : null, t: Date.now() }; lbLotRings.set(siteId, c);
+    }
+    const R = c.r; if (!R) return null;
+    const kx = 111320 * Math.cos(p.lat * Math.PI / 180), ky = 110540, X = q => (Number(q[1]) - p.lng) * kx, Y = q => (Number(q[0]) - p.lat) * ky;
+    let inside = false, best = Infinity, bq = null;
+    for (let i = 0, j = R.length - 1; i < R.length; j = i++) {
+      const xi = X(R[i]), yi = Y(R[i]), xj = X(R[j]), yj = Y(R[j]);
+      if (((yi > 0) !== (yj > 0)) && (0 < (xj - xi) * (0 - yi) / ((yj - yi) || 1e-12) + xi)) inside = !inside;
+      const ex = xj - xi, ey = yj - yi, L2 = ex * ex + ey * ey || 1e-12, t = Math.max(0, Math.min(1, -(xi * ex + yi * ey) / L2));
+      const qx = xi + t * ex, qy = yi + t * ey, dd = Math.hypot(qx, qy);
+      if (dd < best) { best = dd; bq = { lat: p.lat + qy / ky, lng: p.lng + qx / kx }; }
+    }
+    lbLotNear[siteId] = bq;
+    return inside ? 0 : best;
+  }
+  window.lbLotDist = lbLotDist;   // (test hook)
+  let lbSiteMap = null, lbSiteMapN = -1;
+  function lbSiteById(id) {
+    const recs = getRecordsArray();
+    if (!lbSiteMap || lbSiteMapN !== recs.length) { lbSiteMap = new Map(); recs.forEach(s => lbSiteMap.set(String(s.propId || s.siteId || ''), s)); lbSiteMapN = recs.length; }
+    return lbSiteMap.get(String(id)) || null;
+  }
   function lbBinSideRef(m) {
     const recs = getRecordsArray();
     if (!lbSideSites || lbSideSitesN !== recs.length) { lbSideSites = new Map(); recs.forEach(s => lbSideSites.set(String(s.propId || s.siteId || ''), s)); lbSideSitesN = recs.length; }
