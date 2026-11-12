@@ -38717,7 +38717,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       // pick-up "60309" on a shift that started at 60045)
       var d0 = ts.length && bd.length === ts.length && bd[i0] != null ? bd[i0] : (live.dist || 0), d1 = ts.length && bd.length === ts.length && bd[i1] != null ? bd[i1] : (live.dist || 0);
       if (!R.cur.first) R.cur.first = { t: t0, km: k, d: d0 };
-      R.cur.last = { t: t1, km: k, d: d1 }; R.cur.n += n - R.seenBins; R.seenBins = n; ch = true;
+      R.cur.last = { t: t1, km: k, d: d1 }; R.cur.app = (R.cur.app != null ? R.cur.app : R.cur.n) + n - R.seenBins; R.cur.n += n - R.seenBins; R.seenBins = n; ch = true;
     }
     // bins emptied on other runs (lb stops: stolenAt) are on the truck too (Fox, 12 Nov) - into the load, not the run's bins
     var stN = Object.keys((live.log && live.log.stolen) || {}).length;
@@ -38725,7 +38725,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     if (stN > R.seenStolen) {
       var ld = live.dist || 0;
       if (!R.cur.first) R.cur.first = { t: Date.now(), km: odoNow(live), d: ld };
-      R.cur.last = { t: Date.now(), km: odoNow(live), d: ld }; R.cur.n += stN - R.seenStolen; R.cur.stolen = (R.cur.stolen || 0) + stN - R.seenStolen; R.seenStolen = stN; ch = true;
+      R.cur.last = { t: Date.now(), km: odoNow(live), d: ld }; R.cur.app = (R.cur.app != null ? R.cur.app : R.cur.n) + stN - R.seenStolen; R.cur.n += stN - R.seenStolen; R.cur.stolen = (R.cur.stolen || 0) + stN - R.seenStolen; R.seenStolen = stN; ch = true;
     }
     // leaving and getting back to the depot
     var dp = lsGet('lbDepot', null); if (!(dp && isFinite(dp.lat))) dp = (window.lbKnownPlaces && window.lbKnownPlaces.depot()) || live.home || null;
@@ -38797,8 +38797,10 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   function setLoad(n){
     var live = window.uxShiftState ? window.uxShiftState() : null; if (!live || !isFinite(n) || n < 0) return false;
     var R0 = getOrMake(live.id), was = R0.cur.n;
+    if (R0.cur.app == null) R0.cur.app = was;                       // (what the app had counted itself stays as it was)
     R0.cur.n = Math.round(n); R0.cur.adj = (R0.cur.adj || []).concat([{ t: Date.now(), from: was, to: R0.cur.n }]).slice(-20);
     if (!R0.cur.first && R0.cur.n > 0) R0.cur.first = { t: Date.now(), km: odoNow(live), d: live.dist || 0 };
+    if (R0.cur.first && !R0.cur.last) R0.cur.last = R0.cur.first;   // (the load page reads both)
     save(R0); return true;
   }
   function pendingLoad(id){
@@ -38812,7 +38814,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     // not at a tip the phone knows the spot of: suggest today's usual one for the stream
     var stm = sh && (sh.s || sh).stream;
     if (!nt && window.lbKnownPlaces && stm) { var tt = window.lbKnownPlaces.tipsFor(stm); if (tt.main.length) nt = tt.main[0]; }
-    var L = { id: 'l_' + uid(), runNo: '', n: R.cur.n, nApp: R.cur.n, first: R.cur.first, last: R.cur.last, site: nt ? nt.name : '', lat: loc && loc.lat, lng: loc && loc.lng,
+    // nApp: what the app counted by itself; adj: the driver's corrections on the way (Swapping sides); stolen: from other runs
+    var L = { id: 'l_' + uid(), runNo: '', n: R.cur.n, nApp: R.cur.app != null ? R.cur.app : R.cur.n, adj: R.cur.adj || [], stolen: R.cur.stolen || 0, first: R.cur.first, last: R.cur.last, site: nt ? nt.name : '', lat: loc && loc.lat, lng: loc && loc.lng,
       arrT: Date.now(), arrW: '', depW: '', depT: null, docket: '', photos: [] };
     R.loads.push(L); R.cur = { n: 0, first: null, last: null }; save(R);
     try { if (window.uxShiftNoteTip) window.uxShiftNoteTip(L.arrT); } catch (e) {}   // (the bins/hour count starts again after this tip)
@@ -38888,7 +38891,10 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       var tipLine = window.lbKnownPlaces && s.stream ? window.lbKnownPlaces.tipLine(s.stream, L.arrT) : '';
       h = '<div class="rs-auto">The app counted ' + (L.nApp != null ? L.nApp : L.n) + ' bin' + ((L.nApp != null ? L.nApp : L.n) === 1 ? '' : 's') + ' in this load' + (L.first ? ' · first pick-up ' + hhmm(L.first.t) + ', last ' + hhmm(L.last.t) : '') + '</div>' +
         (tipLine ? '<div class="rs-auto">Tip for ' + esc(STREAM_TYPE[s.stream] || s.stream) + ' that day: ' + esc(tipLine) + '</div>' : '') +
+        // (Fox, 12 Nov, for checking the app's counting: the counts on the way, and a tap to confirm the truck's number)
+        ((L.adj && L.adj.length) || L.stolen ? '<div class="rs-auto">' + [(L.adj || []).map(function(a){ return 'changed ' + a.from + ' \u2192 ' + a.to + ' at ' + hhmm(a.t); }).join(', '), L.stolen ? L.stolen + ' from other runs' : ''].filter(Boolean).join(' · ') + '</div>' : '') +
         f('rsLN', 'Bins tipped (the truck’s own counter)', L.n, 'number', 'type the truck’s number if it is different') +
+        '<div class="drv-acts"><button type="button" class="drv-btn' + (L.nOk ? '' : ' drv-go') + '" data-a="nok">' + (L.nOk ? 'Confirmed ' + L.nOk.n + ' at ' + hhmm(L.nOk.t) + ' · confirm again' : 'Confirm ' + (L.n || 0) + ' bins (matches the truck)') + '</button></div>' +
         f('rsLSite', 'Tip site', L.site, 'text', 'e.g. Rye transfer station', ' list="rsTipList"') + '<datalist id="rsTipList">' + sites.map(function(t){ return '<option value="' + esc(t.name) + '">'; }).join('') + '</datalist>' +
         '<div class="rs-grid">' + f('rsLArrT', 'Arrived', hhmm(L.arrT), 'time') + f('rsLArrW', 'Arrival weight (t)', L.arrW, 'number', 'weighbridge in') + '</div>' +
         '<div class="rs-grid">' + f('rsLDepW', 'Departure weight (t)', L.depW, 'number', 'weighbridge out') + f('rsLDepT', 'Left', hhmm(L.depT), 'time') + '</div>' +
@@ -39051,6 +39057,11 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     }
     if (a === 'delfuel') { R.fuel.splice(+b.getAttribute('data-i'), 1); save(R); paint(); return; }
     if (a === 'deladblue') { R.adblue.splice(+b.getAttribute('data-i'), 1); save(R); paint(); return; }
+    if (a === 'nok') {
+      var Lk = R.loads.filter(function(x){ return x.id === loadId; })[0];
+      if (Lk) { Lk.nOk = { t: Date.now(), n: Lk.n || 0, app: Lk.nApp != null ? Lk.nApp : null }; save(R); paint(); }
+      return;
+    }
     if (a === 'stopnote') {
       var x0 = (window.lbStops ? window.lbStops.list(SHc.s.id, 'long') : []).filter(function(x){ return String(x.t0) === b.getAttribute('data-t'); })[0];
       if (x0) { R.comments = (R.comments ? R.comments.replace(/\s+$/, '') + '\n' : '') + 'Stopped ' + hhmm(x0.t0) + ' for ' + Math.round(x0.dur / 60) + ' min' + (x0.street ? ' on ' + x0.street : '') + ': ' + (window.lbStopWhy ? window.lbStopWhy(x0.t0) : ''); save(R); paint(); var ta = $('rsComments'); if (ta) { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); } }
@@ -39176,6 +39187,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     ];
     d.loads.forEach(function(x, i){
       L.push('Load ' + (i + 1) + (x.runNo ? ' (run ' + x.runNo + ')' : '') + ': ' + (x.n || 0) + ' bin' + (x.n === 1 ? '' : 's') + ', first ' + (x.first ? hhmm(x.first.t) + (kmAt(x.first, s) != null ? ' @ ' + kmAt(x.first, s) + ' km' : '') : '—') + ', last ' + (x.last ? hhmm(x.last.t) + (kmAt(x.last, s) != null ? ' @ ' + kmAt(x.last, s) + ' km' : '') : '—') +
+        (x.nApp != null && x.nApp !== x.n ? ' (app ' + x.nApp + ')' : '') + (x.adj && x.adj.length ? ' (changed ' + x.adj.map(function(a){ return a.from + '\u2192' + a.to; }).join(', ') + ')' : '') + (x.stolen ? ' (' + x.stolen + ' from other runs)' : '') + (x.nOk ? ' (confirmed ' + hhmm(x.nOk.t) + ')' : '') +
         (x.notTipped ? ' · not tipped' : ' · ' + (x.site || 'site?') + ' in ' + (hhmm(x.arrT) || '—') + ' ' + (x.arrW || '?') + ' t, out ' + (hhmm(x.depT) || '—') + ' ' + (x.depW || '?') + ' t, docket ' + (x.docket || '—')));
     });
     if (d.comments) L.push('', 'Other work / comments:', d.comments);
