@@ -9,6 +9,7 @@
 //   GET  ?status=<rid>   -> {status:'success', found, emailed, photos, finalEmailed, state, ackAt, ackBy}
 //   POST {type:'photo', rid, name, mime, b64}  -> saved to a Drive folder for that report
 //   POST {type:'final', rid, again, text}      -> one more email, photos attached
+//   (kind "gps-log" is never emailed: stored on the Reports tab + Drive only)
 //   POST {type:'place', key, place}            -> fleet-added place ("Places" tab)
 //   GET  ?places=1       -> {status:'success', places:{key: place}}   (deleted ones stay, flagged)
 //   GET  ?config=1       -> {status:'success', company, opsPhone}
@@ -157,13 +158,17 @@ function handleMsg_(ss, d) {
     sh.appendRow([
       rid, clip_(d.kind), Date.now(), d.urgent ? "URGENT" : "", JSON.stringify(roles), clip_(subject),
       clip_(d.text), clip_(JSON.stringify(d.data || {})), 0, 0, "", 0, 0,
-      String(d.kind) === "dash" ? "waiting" : (d.quiet ? "quiet" : "sent"), "", "", "", ""
+      String(d.kind) === "dash" ? "waiting" : String(d.kind) === "gps-log" ? "logged" : (d.quiet ? "quiet" : "sent"), "", "", "", ""
     ]);
     row = sh.getLastRow();
   }
 
   var emailed = 0, err = "";
-  if (!to.length) {
+  if (String(d.kind) === "gps-log") {
+    // GPS logs are NOT emailed: they sit in the Drive folder + this tab (state "logged") for whoever fixes the GPS problem.
+    // Counted as emailed so the app's delivery check passes.
+    emailed = 1;
+  } else if (!to.length) {
     err = "no recipients configured";
   } else if (d.quiet && String(d.kind) !== "dash") {
     // quiet: the app sends the "final" next with the PDF attached, and that is the only email (the break / end of shift
@@ -277,6 +282,10 @@ function handleFinal_(ss, d) {
   var body = String(d.text || "") +
     (folder ? "\n\n" + n + " photo/file(s)" + (attach ? " attached and" : " (too big to attach)") + " saved in Drive:\n" + folder.getUrl() : "");
   var emailed = 0;
+  if (String(rep.kind) === "gps-log") {                        // stored only, see handleMsg_
+    writeReport_(sh, row, { finalEmailed: 1, finalPhotos: n });
+    return json_({ status: "success", emailed: 1 });
+  }
   if (to.length) {
     var quiet = rep.state === "quiet" && !d.again;            // the first and only email of a quiet report: its own subject
     try { sendMail_(to, (d.again ? "More photos: " : quiet ? "" : "Full report: ") + rep.subject, body, attach ? blobs : []); emailed = to.length; }
