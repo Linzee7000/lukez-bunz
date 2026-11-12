@@ -38728,7 +38728,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
           if (!ls.length) return '';
           return '<div class="rs-auto">Stopped over a minute away from any bin (not at units or a corner). Add a reason if it matters.</div>' + ls.map(function(x){
             var m = Math.floor(x.dur / 60), sec = x.dur % 60;
-            return '<div class="rs-li"><div><b>Stopped ' + hhmm(x.t0) + ' · ' + m + ' min' + (sec ? ' ' + sec + ' s' : '') + '</b><span>' + esc(x.street || 'no house nearby') + '</span></div><button type="button" class="drv-btn" data-a="stopnote" data-t="' + x.t0 + '">Add to comments</button></div>';
+            var why0 = window.lbStopWhy ? window.lbStopWhy(x.t0) : '';
+            return '<div class="rs-li"><div><b>Stopped ' + hhmm(x.t0) + ' · ' + m + ' min' + (sec ? ' ' + sec + ' s' : '') + (why0 ? ' · ' + esc(why0) : '') + '</b><span>' + esc(x.street || 'no house nearby') + '</span></div><button type="button" class="drv-btn" data-a="stopnote" data-t="' + x.t0 + '">Add to comments</button></div>';
           }).join('');
         })() +
         (SHc.live ? '<div class="drv-acts"><button type="button" class="drv-btn' + (bdOpen ? ' drv-go' : ' drv-warnb') + '" data-a="breakdown">' + (bdOpen ? 'Breakdown over' : 'Broken down') + '</button></div>' : '') +
@@ -38850,7 +38851,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     if (a === 'deladblue') { R.adblue.splice(+b.getAttribute('data-i'), 1); save(R); paint(); return; }
     if (a === 'stopnote') {
       var x0 = (window.lbStops ? window.lbStops.list(SHc.s.id, 'long') : []).filter(function(x){ return String(x.t0) === b.getAttribute('data-t'); })[0];
-      if (x0) { R.comments = (R.comments ? R.comments.replace(/\s+$/, '') + '\n' : '') + 'Stopped ' + hhmm(x0.t0) + ' for ' + Math.round(x0.dur / 60) + ' min' + (x0.street ? ' on ' + x0.street : '') + ': '; save(R); paint(); var ta = $('rsComments'); if (ta) { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); } }
+      if (x0) { R.comments = (R.comments ? R.comments.replace(/\s+$/, '') + '\n' : '') + 'Stopped ' + hhmm(x0.t0) + ' for ' + Math.round(x0.dur / 60) + ' min' + (x0.street ? ' on ' + x0.street : '') + ': ' + (window.lbStopWhy ? window.lbStopWhy(x0.t0) : ''); save(R); paint(); var ta = $('rsComments'); if (ta) { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); } }
       return;
     }
     if (a === 'breakdown') {
@@ -39366,6 +39367,15 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
         else note('Couldn’t start the break', 'Is a shift running? Check the break clock in Layers.');
       } else if (a === 'endbrk' && BC && BC.endBreak) {
         BC.endBreak(); try { BC.paint(); } catch (e) {} restBreak = 0; note('Break ended', 'Back to work.');
+      } else if (a === 'jam' || a === 'cs' || a === 'pull' || a === 'swap') {
+        // Fox, 12 Nov: why the truck is stopped - kept with the stop (lbStopReasons), shown on the run sheet's long stops
+        waved[key + '|1'] = waved[key + '|2'] = 1;
+        var WHY = { jam: 'Hopper jam', cs: 'Customer service', pull: 'Pulled over', swap: 'Swapping sides' }[a];
+        whySave(WHY, st);
+        if (a === 'swap') tipAsk(st); else note(WHY + ' logged', 'It goes on the run sheet with this stop.');
+      } else if (a === 'tipgo') {
+        var tp = (st.tips || [])[+b.getAttribute('data-i')];
+        if (tp) waze(tp);
       } else if (a === 'logrev' || a === 'logbins') {
         // Wrongly flagged as a long stop - tag and send the last 15 minutes of GPS fixes so it can
         // be checked later, same CSV as Customize > Send GPS log, with the reason baked in.
@@ -39379,6 +39389,43 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     return el;
   }
   function hide(){ if (el) el.classList.remove('on'); shown = 0; clearTimeout(noteTimer); }
+  // ---- why the truck is stopped (hopper jam, customer service, pulled over, swapping sides) ----
+  function whySave(why, st){
+    var a = lsGet('lbStopReasons', []); if (!Array.isArray(a)) a = [];
+    var sh = window.uxShiftState ? window.uxShiftState() : null, c = (st && st.stop) || (window.lbStops && window.lbStops.current && window.lbStops.current()) || {};
+    a.push({ t0: c.t0 || stopT0 || Date.now(), why: why, ts: Date.now(), shiftId: sh ? sh.id : '', lat: c.lat, lng: c.lng });
+    try { localStorage.setItem('lbStopReasons', JSON.stringify(a.slice(-300))); } catch (e) {}
+    try { if (typeof window.lbGpsLogAdd === 'function') window.lbGpsLogAdd({ k: 'note', note: why }); } catch (e) {}
+  }
+  window.lbStopWhy = function(t0){ var a = lsGet('lbStopReasons', []) || [], hit = ''; a.forEach(function(r){ if (String(r.t0) === String(t0)) hit = r.why; }); return hit; };
+  // Swapping sides is the start or the end of a load: offer the tip. The tips for this stream today first, nearest first.
+  function tipList(){
+    var K = window.lbKnownPlaces; if (!K) return [];
+    var sh = window.uxShiftState ? window.uxShiftState() : null, loc = g('userCurrentLocation');
+    var t = sh && sh.stream && K.tipsFor ? K.tipsFor(sh.stream) : { main: [], backup: [] };
+    var list = t.main.concat(t.backup), seen = {};
+    if (!list.length) list = K.tips();
+    list = list.filter(function(x){ if (!x || x.lat == null || !isFinite(x.lat) || seen[x.id || x.name]) return false; seen[x.id || x.name] = 1; return true; });
+    if (loc && loc.lat != null) list.sort(function(a, b){ return metres(loc, a) - metres(loc, b); });
+    return list.slice(0, 3);
+  }
+  function tipAsk(st){
+    var tips = tipList();
+    if (!tips.length) { note('Swapping sides logged', 'No tip on the map to navigate to.'); return; }
+    var e = build(); shown = 5; e._st = { tips: tips, stop: st && st.stop }; clearTimeout(noteTimer);
+    var loc = g('userCurrentLocation');
+    e.innerHTML = '<div class="lbsp-t">Navigate to the tip?</div><div class="lbsp-s">Swapping sides: the start or the end of a load. Opens Waze from here.</div>' +
+      '<div class="lbsp-b lbsp-b3">' + tips.map(function(x, i){ return '<button type="button"' + (i === 0 ? ' class="go"' : '') + ' data-a="tipgo" data-i="' + i + '">' + esc(x.name) + (loc && loc.lat != null ? ' · ' + (metres(loc, x) / 1000).toFixed(1) + ' km' : '') + '</button>'; }).join('') + '</div>' +
+      '<div class="lbsp-b"><button type="button" data-a="x">No</button></div>';
+    e.setAttribute('data-stage', '5'); e.classList.add('on');
+    noteTimer = setTimeout(function(){ if (shown === 5) hide(); }, 90000);
+  }
+  // Waze, driving from where the truck is now. Tolls: Waze has no way to be told "no tolls" in a link - it uses its own
+  // setting (Waze > Settings > Navigation > Avoid toll roads), set once on the phone and kept.
+  function waze(tp){
+    var url = 'https://waze.com/ul?ll=' + (+tp.lat).toFixed(6) + ',' + (+tp.lng).toFixed(6) + '&navigate=yes';
+    try { window.open(url, '_blank'); } catch (e) { location.href = url; }
+  }
   function note(t, s){
     var e = build(); shown = 9; e._st = null;
     e.innerHTML = '<div class="lbsp-t">' + esc(t) + '</div><div class="lbsp-s">' + esc(s) + '</div>';
@@ -39397,7 +39444,9 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       var sub = where ? '<div class="lbsp-w">' + esc(where) + (st.bin && st.bin.id ? ' · bin ' + esc(st.bin.id) : '') + '</div>' : '';
       html = '<div class="lbsp-t">' + (stage === 1 ? 'What’s the hold-up, ' + name + '?' : 'Still here, ' + name + '?') + '</div>' +
         '<div class="lbsp-s">' + (stage === 1 ? 'Stopped over a minute.' : 'Stopped over three minutes.') + '</div>' + sub +
-        '<div class="lbsp-b lbsp-b4"><button type="button" class="go" data-a="go">Stickering a bin</button><button type="button" data-a="mess">Knocked over a bin</button>' +
+        '<div class="lbsp-b lbsp-b4">' + (st.bin ? '<button type="button" class="go" data-a="go">Stickering a bin</button><button type="button" data-a="mess">Knocked over a bin</button>' : '') +
+        '<button type="button" data-a="jam">Hopper jam</button><button type="button" data-a="cs">Customer service</button>' +
+        '<button type="button" data-a="pull">Pulled over</button><button type="button" data-a="swap">Swapping sides</button>' +
         '<button type="button" data-a="slash">Taking a slash</button><button type="button" data-a="hot">Checking out the hotties</button></div>' +
         '<div class="lbsp-w">None of those - wrongly flagged? Send a GPS log so it can be looked at:</div>' +
         '<div class="lbsp-b lbsp-b3"><button type="button" data-a="logrev">I was reversing</button><button type="button" data-a="logbins">Picking up bins in a row</button></div>' +
@@ -39427,7 +39476,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   }
   function tick(){
     refreshRest();
-    if (shown === 9) return;                                   // let a note finish
+    if (shown === 9 || shown === 5) return;                    // let a note finish; the tip question waits for an answer
     var sh = window.uxShiftState ? window.uxShiftState() : null;
     var cur = window.lbStops && window.lbStops.current ? window.lbStops.current() : null;
     var brk = clockBreak();
@@ -39469,9 +39518,9 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     if (!stage || place) { if (shown) hide(); return; }
     if (waved[key + '|' + stage] || busy) { if (shown === stage) hide(); return; }
     if (shown === stage) return;
+    // (with no bin near, it still asks: pulled over, swapping sides... - just without the bin buttons)
     var bin = binAt({ lat: cur.lat, lng: cur.lng, doneSeen: doneSeen });
-    if (!bin) { if (shown) hide(); return; }
-    show(stage, { bin: bin });
+    show(stage, { bin: bin, stop: { t0: cur.t0, lat: cur.lat, lng: cur.lng } });
   }
   setInterval(function(){ try { tick(); } catch (e) {} }, 1000);
   window.lbStickerPop = { _t: { tick: tick, show: show, hide: hide } };
