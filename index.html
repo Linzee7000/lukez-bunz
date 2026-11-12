@@ -32942,7 +32942,25 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   function hideTrail(){ var m = g('leafletMap'); if (shownTrail && m) m.removeLayer(shownTrail); shownTrail = null; var c = $('uxsTrailChip'); if (c) c.style.display = 'none'; }
 
   /* ---- live counting: km driven and bins done while on shift (not on a break) ---- */
-  var lastLoc = null, lastSize = -1, lastRunKey = '';
+  var lastLoc = null, lastSize = -1, lastRunKey = '', lastLocT = 0, lastCountAt = 0;
+  /* Km driven while this didn't run (Fox, 12 Nov: the app in the background - this runs on a timer, and a phone stops the
+     page's timers in the background). The snail trail keeps recording in the background, so the stretch from the last spot
+     counted to now is measured along the trail instead of being thrown away as "a jump". Not across a break. */
+  function trailKm(fromT, toT, from, to){
+    var P = g('gpsTrailPoints'), T = g('gpsTrailTimes'), B = g('gpsTrailBreaks');
+    if (!P || !T || !P.length) return null;
+    var prev = from, m = 0, n = 0;
+    for (var i = 0; i < P.length; i++) {
+      var t = T[i]; if (!(t > fromT && t <= toT)) continue;
+      var q = { lat: P[i][0], lng: P[i][1] }, d = dist(prev, q);
+      // a gap in the trail (B[i]: GPS lost) still counts as a straight line, unless it is a leap no truck makes
+      if (d < 3000) m += d; prev = q; n++;
+    }
+    if (!n) return null;
+    var d2 = dist(prev, to); if (d2 < 3000) m += d2;
+    var hrs = Math.max(1 / 3600, (toT - fromT) / 3600000);
+    return (m / 1000) / hrs <= 110 ? m : null;                 // faster than a truck goes on average: not believed
+  }
   function runKey(){ var t = $('mapRunTitleText'); return t ? t.textContent : ''; }
   function resetCounters(){ lastLoc = null; lastSize = -1; lastRunKey = runKey(); }
   function count(){
@@ -32986,16 +33004,35 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       }
     }
     if (loc) {
-      if (lastLoc && !brk) { var dd = dist(lastLoc, loc); if (dd >= 4 && dd < 400) { SH.dist = (SH.dist || 0) + dd; ch = true; lastLoc = loc; } else if (dd >= 400) lastLoc = loc; }
-      else lastLoc = loc;
+      var nowL = Date.now();
+      if (lastLoc && !brk) {
+        var dd = dist(lastLoc, loc);
+        if (dd >= 4 && dd < 400) { SH.dist = (SH.dist || 0) + dd; ch = true; lastLoc = loc; lastLocT = nowL; }
+        else if (dd >= 400) {
+          var tk = lastLocT ? trailKm(lastLocT, nowL, lastLoc, loc) : null;
+          if (tk != null) { SH.dist = (SH.dist || 0) + tk; ch = true; }
+          lastLoc = loc; lastLocT = nowL;
+        }
+      }
+      else { lastLoc = loc; lastLocT = nowL; }
     }
     // (bins another truck on the same run flipped are added to the set by lb-runmate-script: they are not this truck's bins)
     var set = g('servicedBinSerials'), size = set && typeof set.size === 'number' ? set.size - (window.lbMateCount ? window.lbMateCount() : 0) : -1, rk = runKey();
+    var prevCountAt = lastCountAt; lastCountAt = Date.now();
     if (size >= 0) {
       if (rk !== lastRunKey || lastSize < 0 || size < lastSize) { lastRunKey = rk; lastSize = size; }
       else if (size > lastSize) {
         var inc = size - lastSize; lastSize = size;
-        if (inc <= 25) { SH.bins = (SH.bins || 0) + inc; var now = Date.now(); SH.binTs = (SH.binTs || []); SH.binD = (SH.binD && SH.binD.length === SH.binTs.length) ? SH.binD : SH.binTs.map(function(){ return null; }); for (var i = 0; i < inc; i++) { SH.binTs.push(now); SH.binD.push(SH.dist || 0); } if (SH.binTs.length > 4000) { SH.binTs = SH.binTs.slice(-4000); SH.binD = SH.binD.slice(-4000); } ch = true; }
+        // More than 25 at once used to be thrown away (a run's saved progress loading). After a while with the app in the
+        // background (the flips go on with the GPS, this didn't run) it is the truck's own bins: counted, each at the time it
+        // was flipped (window.lbMyFlips) where known.
+        var gap = prevCountAt && Date.now() - prevCountAt > 15000, mf = (window.lbMyFlips || []).filter(function(f){ return f && f[1] >= SH.start; });
+        if (inc <= 25 || (gap && mf.length >= inc)) {
+          SH.bins = (SH.bins || 0) + inc; var now = Date.now(); SH.binTs = (SH.binTs || []); SH.binD = (SH.binD && SH.binD.length === SH.binTs.length) ? SH.binD : SH.binTs.map(function(){ return null; });
+          var ft = inc > 1 ? mf.slice(-inc).map(function(f){ return f[1]; }) : [];
+          for (var i = 0; i < inc; i++) { SH.binTs.push(ft.length === inc ? ft[i] : now); SH.binD.push(SH.dist || 0); }
+          if (SH.binTs.length > 4000) { SH.binTs = SH.binTs.slice(-4000); SH.binD = SH.binD.slice(-4000); } ch = true;
+        }
       }
     }
     if (SH.leg && loc) {
@@ -34039,7 +34076,11 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
      the background: that has to be the app.) */
   (function bgSend(){
     if (!window.lbNativeGps || !navigator.geolocation || !navigator.geolocation.watchPosition) { if (!window.__lbBgTry) { window.__lbBgTry = 1; setTimeout(bgSend, 5000); } return; }
-    try { navigator.geolocation.watchPosition(function(){ try { if (SH && Date.now() - liveLast >= 120000) { liveSend(false); liveThumbs(); } } catch (e) { liveBusy = false; } }, function(){}, { enableHighAccuracy: true }); } catch (e) {}
+    try { navigator.geolocation.watchPosition(function(){
+      // the km and bins of the shift are counted on a timer, which a phone stops in the background: count with the fixes too
+      try { if (document.hidden && Date.now() - lastCountAt >= 2000) count(); } catch (e) {}
+      try { if (SH && Date.now() - liveLast >= 120000) { liveSend(false); liveThumbs(); } } catch (e) { liveBusy = false; }
+    }, function(){}, { enableHighAccuracy: true }); } catch (e) {}
   })();
   // back in front after a while away: send straight away rather than at the next 15 s tick
   document.addEventListener('visibilitychange', function(){ try { if (!document.hidden && SH && Date.now() - liveLast >= 120000) { liveSend(false); liveThumbs(); } } catch (e) {} });
