@@ -38855,7 +38855,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   // For the live "Change truck" screen to show the driver what's about to be left behind, before
   // they confirm - read-only, doesn't touch anything.
   // the driver's count of the bins on board (Swapping sides: matched to the truck's own counter) - the load is set to it
-  function setLoad(n, why){
+  function setLoad(n, why, carry){
     var live = window.uxShiftState ? window.uxShiftState() : null; if (!live || !isFinite(n) || n < 0) return false;
     var R0 = getOrMake(live.id), was = R0.cur.n;
     if (R0.cur.app == null) R0.cur.app = was;                       // (what the app had counted itself stays as it was)
@@ -38863,7 +38863,12 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     if (!R0.cur.first && R0.cur.n > 0) R0.cur.first = { t: Date.now(), km: odoNow(live), d: live.dist || 0 };
     if (R0.cur.first && !R0.cur.last) R0.cur.last = R0.cur.first;   // (the load page reads both)
     save(R0);
-    if (R0.cur.n !== was) { try { binCountEmail(live, R0, was, R0.cur.n, why); } catch (e) {} }
+    // a change counted to the run being driven moves its bins to go the other way (+12 on board = 12 fewer to go); a carry
+    // over (bins already on the truck from before) doesn't touch the run (Fox, 13 Nov)
+    if (R0.cur.n !== was && !carry && live.run) {
+      try { var lg = live.log || {}, ba = JSON.parse(JSON.stringify(lg.binAdj || {})), rk = [live.stream, live.run, live.week || ''].join('|'); ba[rk] = (ba[rk] || 0) + (R0.cur.n - was); if (window.uxShiftSetLog) window.uxShiftSetLog({ binAdj: ba }); } catch (e) {}
+    }
+    if (R0.cur.n !== was) { try { binCountEmail(live, R0, was, R0.cur.n, (why || '') + (carry ? ', carry over' : live.run ? ', run ' + live.run : '')); } catch (e) {} }
     return true;
   }
   /* Bins on board changed by hand (Fox, 13 Nov): an email "Bin number changed" with the GPS log and the trail of this load
@@ -39690,11 +39695,12 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       var b = ev.target.closest ? ev.target.closest('button') : null; if (!b) return;
       var a = b.getAttribute('data-a'), st = el._st || {}, stage = shown, BC = window.lbBreakClock;
       // the bins-on-board count: + / - change the number in place, the pop-up stays up
+      if (a === 'cntw') { cntCarry = b.getAttribute('data-w') === 'carry'; el.querySelectorAll('[data-a="cntw"]').forEach(function(x){ x.classList.toggle('go', (x.getAttribute('data-w') === 'carry') === cntCarry); }); return; }
       if (a === 'cnt') { var ci = el.querySelector('#lbspCnt'); if (ci) ci.value = Math.max(0, (parseInt(ci.value, 10) || 0) + (+b.getAttribute('data-d') || 0)); return; }
       if (a === 'cntok') {
         var cv = parseInt((el.querySelector('#lbspCnt') || {}).value, 10);
         hide();
-        if (isFinite(cv) && cv >= 0 && window.lbRunSheet && window.lbRunSheet.setLoad) window.lbRunSheet.setLoad(cv, 'swapping sides');
+        if (isFinite(cv) && cv >= 0 && window.lbRunSheet && window.lbRunSheet.setLoad) window.lbRunSheet.setLoad(cv, 'swapping sides', cntCarry);
         if (loadReady()) tipAsk(st); else note('Bins on board: ' + (isFinite(cv) ? cv : '?'), 'Swapping sides is on the run sheet.');
         return;
       }
@@ -39771,6 +39777,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       return pl.n >= 200 || (pl.first && pl.first.t && Date.now() - pl.first.t >= 3600000);
     } catch (e) { return false; }
   }
+  var cntCarry = false;
   function countAsk(st){
     var sh = window.uxShiftState ? window.uxShiftState() : null, n = 0;
     try { var pl = sh && window.lbRunSheet && window.lbRunSheet.pendingLoad ? window.lbRunSheet.pendingLoad(sh.id) : null; n = pl ? pl.n : 0; } catch (e) {}
@@ -39778,7 +39785,9 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     var pm = function(d){ return '<button type="button" data-a="cnt" data-d="' + d + '">' + (d > 0 ? '+' : '\u2212') + Math.abs(d) + '</button>'; };
     e.innerHTML = '<div class="lbsp-t">Bins on board?</div><div class="lbsp-s">Swapping sides. Make it match the truck’s counter.</div>' +
       '<div class="lbsp-b lbsp-cnt">' + pm(-10) + pm(-1) + '<input id="lbspCnt" type="text" inputmode="numeric" autocomplete="off" value="' + n + '" aria-label="Bins on board">' + pm(1) + pm(10) + '</div>' +
+      '<div class="lbsp-b"><button type="button" class="go" data-a="cntw" data-w="run">' + (sh && sh.run ? 'Run ' + esc(sh.run) : 'This run') + '</button><button type="button" data-a="cntw" data-w="carry">Carry over</button></div>' +
       '<div class="lbsp-b"><button type="button" data-a="x">Skip</button><button type="button" class="go" data-a="cntok">Confirm</button></div>';
+    cntCarry = false;
     e.setAttribute('data-stage', '6'); e.classList.add('on');
     noteTimer = setTimeout(function(){ if (shown === 6) hide(); }, 180000);
   }
@@ -46655,7 +46664,8 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
     });
     return { n: n, stolen: stl, runs: order.map(function(r){ return { run: r, n: by[r] }; }) };
   }
-  function doneCount(){ var s = g('servicedBinSerials'); return (s && s.size != null) ? s.size : 0; }
+  // (+ the driver's corrections to the bins on board that were for this run - lbRunAdj: bins to go moves the other way)
+  function doneCount(){ var s = g('servicedBinSerials'), a = 0; try { a = window.lbRunAdj ? window.lbRunAdj() : 0; } catch (e) {} return Math.max(0, ((s && s.size != null) ? s.size : 0) + a); }
   // Streets with at least one bin still to empty, from the run the street counts were worked out for
   // (lb-street-stats). Only re-counted when a bin is collected or the run changes.
   var sgKey = '', sgVal = null;
@@ -60058,17 +60068,27 @@ html body.lb-pc.lb-layers-open[data-ux-screen="map"] #lbMapKey{display:none}
     ov.innerHTML = '<div class="lbx-sheet"><div class="lbx-h"><b>Bins on board</b><button type="button" class="lbx-btn k" data-x="1">Cancel</button></div>' +
       '<div class="lbx-s">Make it match the truck’s counter. The app has ' + n + '.</div>' +
       '<div class="lbx-cnt">' + pm(-10) + pm(-1) + '<input id="lbObIn" type="text" inputmode="numeric" autocomplete="off" value="' + n + '" aria-label="Bins on board">' + pm(1) + pm(10) + '</div>' +
+      '<div class="lbx-s" style="margin-top:12px">The difference is:</div>' +
+      '<div class="lbx-btns lbx-seg"><button type="button" class="lbx-btn y" data-w="run" style="flex:1">' + (sh.run ? 'Run ' + String(sh.run).replace(/[<>&"]/g, '') : 'This run') + '</button><button type="button" class="lbx-btn k" data-w="carry" style="flex:1">Carry over</button></div>' +
+      '<div class="lbx-s" id="lbObWhy" style="margin-top:6px">Bins left on the run change the other way.</div>' +
       '<div class="lbx-btns"><button type="button" class="lbx-btn y lbx-big" data-ok="1" style="flex:1">Save</button></div></div>';
+    var carry = false;
     ov.addEventListener('click', function(ev){
       if (ev.target === ov) { ov.remove(); ov = null; return; }
       var b = ev.target.closest && ev.target.closest('button'); if (!b) return;
       var inp = ov.querySelector('#lbObIn');
       if (b.getAttribute('data-x')) { ov.remove(); ov = null; return; }
       if (b.getAttribute('data-d')) { inp.value = Math.max(0, (parseInt(inp.value, 10) || 0) + (+b.getAttribute('data-d'))); return; }
+      if (b.getAttribute('data-w')) {
+        carry = b.getAttribute('data-w') === 'carry';
+        ov.querySelectorAll('[data-w]').forEach(function(x){ var on = (x.getAttribute('data-w') === 'carry') === carry; x.classList.toggle('y', on); x.classList.toggle('k', !on); });
+        var wy = ov.querySelector('#lbObWhy'); if (wy) wy.textContent = carry ? 'Bins already on the truck from before: bins left on the run stay as they are.' : 'Bins left on the run change the other way.';
+        return;
+      }
       if (b.getAttribute('data-ok')) {
         var v = parseInt(inp.value, 10); ov.remove(); ov = null;
         if (!isFinite(v) || v < 0 || v === n) return;
-        if (window.lbRunSheet && window.lbRunSheet.setLoad && window.lbRunSheet.setLoad(v, 'changed on the counter')) {
+        if (window.lbRunSheet && window.lbRunSheet.setLoad && window.lbRunSheet.setLoad(v, 'changed on the counter', carry)) {
           try { window.customAlert && window.customAlert('Bins on board: ' + n + ' \u2192 ' + v + '. Sent with the GPS log.'); } catch (e) {}
         }
       }
@@ -60088,6 +60108,8 @@ html body.lb-pc.lb-layers-open[data-ux-screen="map"] #lbMapKey{display:none}
   document.addEventListener('click', function(ev){ if (held && ev.target.closest && ev.target.closest(SEL)) { held = false; ev.stopPropagation(); ev.preventDefault(); } }, true);
   document.addEventListener('contextmenu', function(ev){ if (ev.target.closest && ev.target.closest(SEL)) ev.preventDefault(); }, true);
   window.lbOnBoardEdit = open;   // (test hook)
+  // corrections to the bins on board that were for the run being driven (setLoad in the run sheet keeps them in the shift log)
+  window.lbRunAdj = function(){ var sh = shift(); if (!sh || !sh.run || !sh.log || !sh.log.binAdj) return 0; return +sh.log.binAdj[[sh.stream, sh.run, sh.week || ''].join('|')] || 0; };
 })();
 </script>
 <script id="lb-runmate-script">
