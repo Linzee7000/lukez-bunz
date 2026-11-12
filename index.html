@@ -39344,7 +39344,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   var stop = null;
   function speed(){ var v = +g('currentMapSpeedKmh'); return isFinite(v) ? v : null; }
   function here(){ var l = g('userCurrentLocation'); return l && isFinite(l.lat) && (l.lat || l.lng) ? { lat: +l.lat, lng: +l.lng } : null; }
-  function doneCount(){ var s = g('servicedBinSerials'); return s ? s.size : 0; }
+  // (not the bins another truck did, merged in by lb-runmate-script: a stop where only those came in is not a flip)
+  function doneCount(){ var s = g('servicedBinSerials'); return s ? s.size - (window.lbMateCount ? window.lbMateCount() : 0) : 0; }
 
   function tick(){
     var sh = window.uxShiftState ? window.uxShiftState() : null;
@@ -47200,8 +47201,10 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
     // the left of the speedo: on the truck, and bins to go - from the bins this run collected on the same day last year
     // (data/run-history.json, window.lbLastYearBins), less the bins emptied today; the run's listed bins when there's no history
     if ($('rdLTruck')) {
-      segSet($('rdLTruck').querySelector('.rd-v'), String(T ? T.n : dn));
-      attr($('rdLTruck'), 'aria-label', (T ? 'On truck ' + T.n : 'Collected ' + dn));
+      // (only this truck's bins: dn also has the bins other trucks did on the run - lb-runmate-script)
+      var shL = shift(), myN = T ? T.n : (shL ? (shL.bins || 0) : dn);
+      segSet($('rdLTruck').querySelector('.rd-v'), String(myN));
+      attr($('rdLTruck'), 'aria-label', (T ? 'On truck ' + T.n : 'Collected ' + myN));
       var ly = null; try { ly = window.lbLastYearBins ? window.lbLastYearBins() : null; } catch (e) {}
       var tg = ly != null ? Math.max(0, ly - dn) : (hasRun ? Math.max(0, tot - dn) : null);
       segSet($('rdLTogo').querySelector('.rd-v'), tg != null ? String(tg) : '-');
@@ -59887,6 +59890,8 @@ html body.lb-pc.lb-layers-open[data-ux-screen="map"] #lbMapKey{display:none}
     return n;
   };
   window.lbMateFlips = MATES;
+  // the dash's "done / total" box shows only while another truck is working this run
+  window.lbOtherTrucksOnRun = function(){ return NOW.length > 0; };
   // flips made before the app was last closed
   (function(){ var sv = lsGet(KEY, null); if (sv && Array.isArray(sv.list)) window.lbMyFlips = sv.list.concat(window.lbMyFlips || []); })();
 
@@ -59972,7 +59977,11 @@ html body.lb-pc.lb-layers-open[data-ux-screen="map"] #lbMapKey{display:none}
     mates.concat(thieves.filter(function(t){ return mates.indexOf(t) < 0; })).forEach(function(p, i){
       var col = COLS[i % COLS.length];
       (p.tr || []).forEach(function(sg){ L.polyline(sg, { color: col, weight: 4, opacity: 0.85, interactive: false }).addTo(LAYER); });
-      if (p.at) L.circleMarker(p.at, { radius: 7, color: '#fff', weight: 2, fillColor: col, fillOpacity: 1, interactive: false }).bindTooltip(String(p.truck || p.driver || 'Truck'), { permanent: true, direction: 'top', offset: [0, -6] }).addTo(LAYER);
+      // a truck from another run that took bins off this one carries a counter (Fox, 12 Nov: instead of a message)
+      var tn = p.stolen && !sameRun(sh, p) ? (p.stolen[String(sh.run)] || []).length : 0;
+      var at = p.at || (function(){ var t = p.tr || [], sg = t[t.length - 1]; return sg && sg.length ? sg[sg.length - 1] : null; })();
+      if (at) L.circleMarker(at, { radius: 7, color: '#fff', weight: 2, fillColor: col, fillOpacity: 1, interactive: false })
+        .bindTooltip(String(p.truck || p.driver || 'Truck') + (tn ? ' · ' + tn + ' bin' + (tn === 1 ? '' : 's') + ' taken' : ''), { permanent: true, direction: 'top', offset: [0, -6], className: tn ? 'lbm-thief' : '' }).addTo(LAYER);
     });
   }
   // ---- "T9 stole 3 bins": once a minute at most, all the trucks in one message ----
@@ -59988,7 +59997,7 @@ html body.lb-pc.lb-layers-open[data-ux-screen="map"] #lbMapKey{display:none}
       try { cap.nativePromise('LocalNotifications', 'schedule', { notifications: [{ id: Math.floor(Date.now() / 1000) % 2000000000, title: 'Bins taken from your run', body: msg }] }).catch(function(){}); } catch (e) {}
     }
   }
-  setInterval(function(){ try { tellStolen(); } catch (e) {} }, 60000);
+  // (the counter on the other truck on the map replaced the once-a-minute message - Fox, 12 Nov)
   // ---- the button on the map: "another truck is on this run" - tap it to see where they have been; it goes back to you
   // 20 seconds after the last tap on the screen, or when it is tapped again.
   var NOW = [], viewing = false, lastTap = 0, saved = null, fb = null;
@@ -60034,6 +60043,7 @@ html body.lb-pc.lb-layers-open[data-ux-screen="map"] #lbMapKey{display:none}
   st0.textContent = '#lbMateFab{display:none}html body.ux2 #lbMateFab.on{display:flex}' +
     'html body.ux2 #mapFixedLeftControls #lbMateFab{position:relative !important;left:auto;top:auto;width:48px !important;height:48px !important;flex:none;margin:0;padding:0;align-items:center;justify-content:center;border:var(--rb-bd,3px solid #000);border-radius:6px;box-shadow:var(--rb-sh-md,3px 3px 0 #000);background:#111;color:#a855f7}' +
     'html body.ux2 #lbMateFab svg{width:28px;height:28px}html body.ux2 #lbMateFab.viewing{background:#a855f7;color:#fff}' +
+    '.leaflet-tooltip.lbm-thief{background:#dc2626;color:#fff;border-color:#7f1d1d;font:800 14px/1.1 Roboto,system-ui,sans-serif}.leaflet-tooltip-top.lbm-thief:before{border-top-color:#dc2626}' +
     '#lbMateFab .lbm-n{position:absolute;right:2px;top:0;font:800 12px/1 sans-serif;color:#fff;font-style:normal}#lbMateFab .lbm-n:empty{display:none}';
   document.head.appendChild(st0);
 
