@@ -7678,6 +7678,7 @@ width="40" height="100" style="display:block; filter: drop-shadow(0 0 4px rgba(0
     bin.lat = loc.lat.toFixed(6);
     bin.lng = loc.lng.toFixed(6);
     bin.verified = true;
+    if (bin.dotFixed) delete bin.dotFixed;
     markerObj.lat = loc.lat; markerObj.lng = loc.lng; markerObj.provisional = false;
     logEdit({
       timestamp: new Date().toISOString(),
@@ -18871,17 +18872,29 @@ window.addEventListener('DOMContentLoaded', async () => {
     const lbMayFlip = (lbStopped && lbStopVisit && lbVisitMs >= 5000) ? 1 + Math.floor((lbVisitMs - 5000) / 6000) - lbStopVisit.n : 0;
     const lbFlipNow = [];
     window.lbFlipState = { stopped: lbStopped, byPlace: lbStillByPlace, kmh: speedKmh, heading: lastValidHeading, visitMs: lbVisitMs, visitBins: lbStopVisit ? lbStopVisit.n : 0 };   // (test hook)
+    /* Country bins (Fox, 13 Nov: 106 flipped, 28 counted, a mostly rural run). A bin with no kerbside spot yet is drawn at
+       its HOUSE (provisional), and on an acreage block the house can be 50-150 m from the road, so the truck never got within
+       the 35 m a provisional bin needed and it was never ticked off - so never learnt its kerbside spot either. Stopped (the
+       usual 5 s), such a bin up to 150 m away now counts when its house is the nearest thing on the run to the truck (no
+       other bin dot or house is closer) and it is on the side being worked; the stop is then saved as its kerbside spot
+       (confirmProvisionalBinLocation) and from then on it works like any other bin. */
+    let lbNearestD = Infinity;
+    if (lbStopped && lbMayFlip > 0 && !lbLastFixJumped) activeMapCircleMarkers.forEach(o => {
+      if (servicedBinSerials.has(o.serial) || Math.abs(o.lat - userCurrentLocation.lat) > 0.0015) return;
+      const dd = getDistanceMeters(userCurrentLocation.lat, userCurrentLocation.lng, o.lat, o.lng); if (dd < lbNearestD) lbNearestD = dd;
+    });
     if (!lbLastFixJumped) activeMapCircleMarkers.forEach((markerObj, markerKey) => {
       const binId = markerObj.serial || markerKey;
       if (servicedBinSerials.has(binId)) return;
-      if (Math.abs(markerObj.lat - userCurrentLocation.lat) > 0.0004) return;   // (over 40 m north or south: quick no, for a whole day's markers on every fix)
+      if (Math.abs(markerObj.lat - userCurrentLocation.lat) > (markerObj.provisional ? 0.0015 : 0.0004)) return;   // (well north or south: quick no, for a whole day's markers on every fix)
 
       const d = getDistanceMeters(userCurrentLocation.lat, userCurrentLocation.lng, markerObj.lat, markerObj.lng);
       // A provisional dot sits at the property's own point, not a confirmed kerbside spot - that
       // can be a fair way from the road on a rural/acreage block (see sourceCoords), so it gets a
       // wider first-flip radius. Once flipped it's replaced with a real kerbside position and goes
       // back to the normal tight radius like every other bin.
-      if (d > (markerObj.provisional ? 35 : 12)) return;
+      const lbFar = markerObj.provisional && d > 35 && d <= 150 && lbStopped && lbMayFlip > 0 && d <= lbNearestD + 3;
+      if (d > (markerObj.provisional ? 35 : 12) && !lbFar) return;
 
       // Which side: judged by the bin's HOUSE, not its dot. A dot put in the middle of the road is always on
       // the right of a truck working the left kerb - going up the street and coming back down - so judged by
@@ -19425,7 +19438,7 @@ window.addEventListener('DOMContentLoaded', async () => {
             if (serial && servicedBinSerials.has(serial)) return;
             // No confirmed flip location yet (never serviced before) - shown hollow, at the
             // property's own point, rather than not at all. See sourceCoords().
-            const isProvisional = !!p.provisional;
+            const isProvisional = !!p.provisional || !!bin.dotFixed;
             // A bin already flagged missed (driven past too fast) earlier in
             // this same run stays red when its marker is (re)drawn - e.g.
             // after resuming the run - instead of drawing back in the
