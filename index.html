@@ -33565,7 +33565,7 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
   // What the other truck did on your run (lb-runmate-script keeps it in the shift's log): the run's total, not only yours
   // bins this truck emptied on other runs (lb stops: stolenAt) - their own total, not in the truck's run bins
   function stolenInfo(log){ var st = (log && log.stolen) || {}, ks = Object.keys(st), runs = []; ks.forEach(function(k){ var r = st[k] && st[k].run; if (r && runs.indexOf(r) < 0) runs.push(r); }); return ks.length ? { n: ks.length, runs: runs } : null; }
-  function stolenHtml(log){ var x = stolenInfo(log); return x ? '<div class="drv-hint"><b>' + x.n + ' bin' + (x.n === 1 ? '' : 's') + ' stolen from other runs</b> (run ' + esc(x.runs.join(', ')) + '): not in your run’s bins.</div>' : ''; }
+  function stolenHtml(log){ var x = stolenInfo(log); return x ? '<div class="drv-hint"><b>' + x.n + ' bin' + (x.n === 1 ? '' : 's') + ' stolen from other runs</b> (run ' + esc(x.runs.join(', ')) + '): in the bins on the truck, not in your run’s bins.</div>' : ''; }
   function stolenText(log){ var x = stolenInfo(log); return x ? 'Bins stolen from other runs: ' + x.n + ' (run ' + x.runs.join(', ') + ')' : ''; }
   function mateInfo(log){ var m = (log && log.mate) || {}, n = 0, t = []; Object.keys(m).forEach(function(k){ n += m[k].n || 0; (m[k].t || []).forEach(function(x){ if (t.indexOf(x) < 0) t.push(x); }); }); return n ? { n: n, trucks: t } : null; }
   function mateHtml(log, mine){ var m = mateInfo(log); return m ? '<div class="drv-hint"><b>Run total ' + ((mine || 0) + m.n) + ' bins</b>: yours ' + (mine || 0) + ' + ' + m.n + ' by ' + esc(m.trucks.join(', ')) + ' on your run.</div>' : ''; }
@@ -38714,6 +38714,14 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
       var d0 = ts.length && bd.length === ts.length && bd[i0] != null ? bd[i0] : (live.dist || 0), d1 = ts.length && bd.length === ts.length && bd[i1] != null ? bd[i1] : (live.dist || 0);
       if (!R.cur.first) R.cur.first = { t: t0, km: k, d: d0 };
       R.cur.last = { t: t1, km: k, d: d1 }; R.cur.n += n - R.seenBins; R.seenBins = n; ch = true;
+    }
+    // bins emptied on other runs (lb stops: stolenAt) are on the truck too (Fox, 12 Nov) - into the load, not the run's bins
+    var stN = Object.keys((live.log && live.log.stolen) || {}).length;
+    if (R.seenStolen == null) { R.seenStolen = stN; ch = true; }
+    if (stN > R.seenStolen) {
+      var ld = live.dist || 0;
+      if (!R.cur.first) R.cur.first = { t: Date.now(), km: odoNow(live), d: ld };
+      R.cur.last = { t: Date.now(), km: odoNow(live), d: ld }; R.cur.n += stN - R.seenStolen; R.cur.stolen = (R.cur.stolen || 0) + stN - R.seenStolen; R.seenStolen = stN; ch = true;
     }
     // leaving and getting back to the depot
     var dp = lsGet('lbDepot', null); if (!(dp && isFinite(dp.lat))) dp = (window.lbKnownPlaces && window.lbKnownPlaces.depot()) || live.home || null;
@@ -46504,7 +46512,7 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
     var sh = shift(), R = null;
     try { R = sh && window.lbRunSheet && window.lbRunSheet._t ? window.lbRunSheet._t.get(sh.id) : null; } catch (e) {}
     if (!(R && R.cur && typeof R.cur.n === 'number')) return null;
-    var n = R.cur.n, total = sh.bins || 0, from = Math.max(0, total - n), by = {}, order = [];
+    var n = R.cur.n, stl = R.cur.stolen || 0, total = sh.bins || 0, from = Math.max(0, total - (n - stl)), by = {}, order = [];
     (sh.legs || []).concat(sh.leg ? [sh.leg] : []).forEach(function(l){
       if (!l || !l.run) return;
       var a = Math.max(from, l.bins0 || 0), b = Math.min(total, l.binsEnd == null ? total : l.binsEnd);
@@ -46512,7 +46520,7 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
       if (!(l.run in by)) { by[l.run] = 0; order.push(l.run); }
       by[l.run] += b - a;
     });
-    return { n: n, runs: order.map(function(r){ return { run: r, n: by[r] }; }) };
+    return { n: n, stolen: stl, runs: order.map(function(r){ return { run: r, n: by[r] }; }) };
   }
   function doneCount(){ var s = g('servicedBinSerials'); return (s && s.size != null) ? s.size : 0; }
   // Streets with at least one bin still to empty, from the run the street counts were worked out for
@@ -46608,6 +46616,7 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
     var T = onTruck(), tk = $('rbTruck'), sh0 = shift(), items = [];
     if (T) items.push({ l: 'On truck', v: T.n }); else items.push({ l: sh0 ? 'Flipped' : 'Collected', v: sh0 ? (sh0.bins || 0) : doneCount() });
     if (sh0 && sh0.leg && sh0.leg.run) items.push({ l: 'This run', v: Math.max(0, (sh0.bins || 0) - (sh0.leg.bins0 || 0)) });
+    if (T && T.stolen) items.push({ l: 'Other runs', v: T.stolen });
     if (T && T.runs.length > 1) T.runs.forEach(function(r){ if (!(sh0 && sh0.leg && String(r.run) === String(sh0.leg.run))) items.push({ l: 'From ' + r.run, v: r.n }); });
     var it0 = items[Math.floor(Date.now() / 3000) % items.length], lab = it0.l, val = it0.v;
     txt(tk.querySelector('.rb-k'), lab); txt(tk.querySelector('b'), val);
