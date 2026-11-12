@@ -59918,6 +59918,10 @@ html body.lb-pc.lb-layers-open[data-ux-screen="map"] #lbMapKey{display:none}
     var d = {}; try { d = JSON.parse(localStorage.getItem('lbDriver') || '{}') || {}; } catch (e) {}
     var p = { kind: 'runMate', id: 'rm_' + slug(d.name || sh.driver || sh.truck || sh.id), shift: sh.id, ts: Date.now(), stream: sh.stream, run: String(sh.run), week: sh.week || '', day: sh.day || '',
       truck: sh.truck || '', driver: d.name || sh.driver || '', at: loc ? [+loc.lat.toFixed(5), +loc.lng.toFixed(5)] : null, fl: fl.slice(-1200), tr: myTrail(sh) };
+    // bins this truck emptied on other runs (stolenAt in the stops script), by run, so those drivers' maps tick them off too
+    var stl = (sh.log && sh.log.stolen) || {}, byRun = {}, nst = 0;
+    Object.keys(stl).forEach(function(k){ var r = String((stl[k] && stl[k].run) || ''); if (!r || nst >= 600) return; (byRun[r] = byRun[r] || []).push(k); nst++; });
+    if (nst) p.stolen = byRun;
     if (JSON.stringify(p).length > 42000) { p.fl = p.fl.slice(-600); p.tr = p.tr.slice(-3); }
     window.lbOutbox.postPlace(p);
   }
@@ -59931,10 +59935,23 @@ html body.lb-pc.lb-layers-open[data-ux-screen="map"] #lbMapKey{display:none}
       return p && p.kind === 'runMate' && p.shift !== sh.id && sameRun(sh, p) && Date.now() - (p.ts || 0) < 15 * 60000;
     }).sort(function(a, b){ return String(a.id).localeCompare(String(b.id)); });
     NOW = mates; fab();
+    // Trucks on OTHER runs that emptied bins of this run (same stream, same day and week): their bins come off this map,
+    // their trail is drawn, and the driver is told once a minute ("T9 stole 3 bins").
+    var thieves = Object.keys(places || {}).map(function(k){ return places[k]; }).filter(function(p){
+      if (!p || p.kind !== 'runMate' || p.shift === sh.id || sameRun(sh, p) || !p.stolen || !p.stolen[String(sh.run)]) return false;
+      if (String(p.stream) !== String(sh.stream)) return false;
+      if (p.week && sh.week && String(p.week) !== String(sh.week)) return false;
+      if (p.day && sh.day && String(p.day).toLowerCase() !== String(sh.day).toLowerCase()) return false;
+      return new Date(p.ts).toDateString() === new Date().toDateString();
+    });
     // their bins, done on this map too
     var set; try { set = servicedBinSerials; } catch (e) { return; }
     var fresh = new Set();
     mates.forEach(function(p){ (p.fl || []).forEach(function(s){ if (!set.has(s)) { set.add(s); MATES.add(s); fresh.add(s); try { if (missedBinSerials.has(s)) missedBinSerials.delete(s); } catch (e) {} } }); });
+    thieves.forEach(function(p){
+      var nm = String(p.truck || p.driver || 'Another truck');
+      (p.stolen[String(sh.run)] || []).forEach(function(s){ if (!set.has(s)) { set.add(s); MATES.add(s); fresh.add(s); STOLE[nm] = (STOLE[nm] || 0) + 1; try { if (missedBinSerials.has(s)) missedBinSerials.delete(s); } catch (e) {} } });
+    });
     if (fresh.size) {
       try { activeMapCircleMarkers.forEach(function(o, k){ var id = o.serial || k; if (fresh.has(id) && o.layer && mapMarkersLayer) mapMarkersLayer.removeLayer(o.layer); }); } catch (e) {}
       try { updateFlippedBinCount(); } catch (e) {}
@@ -59944,7 +59961,7 @@ html body.lb-pc.lb-layers-open[data-ux-screen="map"] #lbMapKey{display:none}
     try {
       var lg = sh.log || {}, mt = JSON.parse(JSON.stringify(lg.mate || {})), rk = [sh.stream, sh.run, sh.week || ''].join('|'), cn = window.lbMateCount ? window.lbMateCount() : 0;
       var ex = mt[rk] || { n: 0, t: [] }, tr = ex.t.slice();
-      mates.forEach(function(p){ var nm = String(p.truck || p.driver || 'another truck'); if (tr.indexOf(nm) < 0) tr.push(nm); });
+      mates.concat(thieves).forEach(function(p){ var nm = String(p.truck || p.driver || 'another truck'); if (tr.indexOf(nm) < 0) tr.push(nm); });
       if (cn > ex.n || tr.length !== ex.t.length) { mt[rk] = { n: Math.max(cn, ex.n), t: tr }; if (window.uxShiftSetLog) window.uxShiftSetLog({ mate: mt }); }
     } catch (e) {}
     // their trail
@@ -59952,12 +59969,26 @@ html body.lb-pc.lb-layers-open[data-ux-screen="map"] #lbMapKey{display:none}
     if (!map || typeof L === 'undefined') return;
     if (!LAYER || LAYER._map !== map) { try { if (LAYER) LAYER.remove(); } catch (e) {} LAYER = L.layerGroup().addTo(map); }
     LAYER.clearLayers();
-    mates.forEach(function(p, i){
+    mates.concat(thieves.filter(function(t){ return mates.indexOf(t) < 0; })).forEach(function(p, i){
       var col = COLS[i % COLS.length];
       (p.tr || []).forEach(function(sg){ L.polyline(sg, { color: col, weight: 4, opacity: 0.85, interactive: false }).addTo(LAYER); });
       if (p.at) L.circleMarker(p.at, { radius: 7, color: '#fff', weight: 2, fillColor: col, fillOpacity: 1, interactive: false }).bindTooltip(String(p.truck || p.driver || 'Truck'), { permanent: true, direction: 'top', offset: [0, -6] }).addTo(LAYER);
     });
   }
+  // ---- "T9 stole 3 bins": once a minute at most, all the trucks in one message ----
+  var STOLE = {};
+  function tellStolen(){
+    var ks = Object.keys(STOLE); if (!ks.length) return;
+    var msg = ks.map(function(k){ return k + ' stole ' + STOLE[k] + ' bin' + (STOLE[k] === 1 ? '' : 's'); }).join(' · ') + ' from your run';
+    STOLE = {};
+    try { if (window.customAlert) window.customAlert(msg); } catch (e) {}
+    try { navigator.vibrate && navigator.vibrate([150, 80, 150]); } catch (e) {}
+    var cap = window.Capacitor;
+    if (document.hidden && cap && cap.isNativePlatform && cap.isNativePlatform() && cap.nativePromise) {
+      try { cap.nativePromise('LocalNotifications', 'schedule', { notifications: [{ id: Math.floor(Date.now() / 1000) % 2000000000, title: 'Bins taken from your run', body: msg }] }).catch(function(){}); } catch (e) {}
+    }
+  }
+  setInterval(function(){ try { tellStolen(); } catch (e) {} }, 60000);
   // ---- the button on the map: "another truck is on this run" - tap it to see where they have been; it goes back to you
   // 20 seconds after the last tap on the screen, or when it is tapped again.
   var NOW = [], viewing = false, lastTap = 0, saved = null, fb = null;
