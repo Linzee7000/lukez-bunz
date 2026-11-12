@@ -39614,7 +39614,8 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
         waved[key + '|1'] = waved[key + '|2'] = 1;
         var WHY = { jam: 'Hopper jam', cs: 'Customer service', pull: 'Pulled over', swap: 'Swapping sides' }[a];
         whySave(WHY, st);
-        if (a === 'swap') tipAsk(st); else note(WHY + ' logged', 'It goes on the run sheet with this stop.');
+        // (Fox, 12 Nov: only when the load is ready to tip - 200 bins or more on board, or the load started an hour or more ago)
+        if (a === 'swap' && loadReady()) tipAsk(st); else note(WHY + ' logged', 'It goes on the run sheet with this stop.');
       } else if (a === 'tipgo') {
         var tp = (st.tips || [])[+b.getAttribute('data-i')];
         if (tp) waze(tp);
@@ -39650,6 +39651,13 @@ html body.ux2.ux-lefty #mapFixedLeftControls{right:0 !important;left:auto !impor
     list = list.filter(function(x){ if (!x || x.lat == null || !isFinite(x.lat) || seen[x.id || x.name]) return false; seen[x.id || x.name] = 1; return true; });
     if (loc && loc.lat != null) list.sort(function(a, b){ return metres(loc, a) - metres(loc, b); });
     return list.slice(0, 3);
+  }
+  function loadReady(){
+    try {
+      var sh = window.uxShiftState ? window.uxShiftState() : null; if (!sh || !window.lbRunSheet || !window.lbRunSheet.pendingLoad) return false;
+      var pl = window.lbRunSheet.pendingLoad(sh.id); if (!pl) return false;
+      return pl.n >= 200 || (pl.first && pl.first.t && Date.now() - pl.first.t >= 3600000);
+    } catch (e) { return false; }
   }
   function tipAsk(st){
     var tips = tipList();
@@ -46742,9 +46750,7 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
         '<div class="rd-hero">' +
           // (Fox, 31 Oct 2026: on truck and bins to go on the left, the limit between the speed and the compass)
           '<div class="rd-left"><button type="button" class="rd-lt" id="rdLTruck" aria-label="On truck">' + rdMask('garbagetruck.png') + '<span class="rd-v"></span></button>' +
-            '<div class="rd-lt" id="rdLTogo" aria-label="Bins to go">' + rdMask('bin.png') + '<span class="rd-v"></span></div>' +
-            // stolen bins (Fox, 12 Nov): taken from your run by other trucks (red) and taken by you from other runs, in turn
-            '<div class="rd-lt" id="rdLThief" aria-label="Stolen bins" style="display:none">' + rdMask('data:image/svg+xml,%3Csvg%20xmlns=%27http://www.w3.org/2000/svg%27%20viewBox=%270%200%2024%2024%27%3E%3Cpath%20d=%27M6.5%207c0-2.3%202.4-4%205.5-4s5.5%201.7%205.5%204v.6h-11z%27/%3E%3Cpath%20fill-rule=%27evenodd%27%20d=%27M5.8%208.3h12.4v3.4H5.8zM8.3%209.3h2.6v1.4H8.3zm4.8%200h2.6v1.4h-2.6z%27/%3E%3Cpath%20d=%27M7.2%2012.4h9.6c-.2%202.4-2.2%204-4.8%204s-4.6-1.6-4.8-4z%27/%3E%3Cpath%20d=%27M3.5%2023c.3-3.6%203.6-6%208.5-6%201.6%200%203%20.3%204.2.8L13%2023z%27/%3E%3Cpath%20d=%27M17.6%2012.8c.6-.5%201.5-.5%202%200l.4.4c2.3.6%203.6%202.6%203.6%205%200%202.9-2%204.8-4.8%204.8h-2.6c-2.6%200-4.4-1.9-4.4-4.6%200-2.4%201.6-4.4%203.9-5z%27/%3E%3C/svg%3E') + '<span class="rd-v"></span></div></div>' +
+            '<div class="rd-lt" id="rdLTogo" aria-label="Bins to go">' + rdMask('bin.png') + '<span class="rd-v"></span></div></div>' +
           '<b class="rd-spd" id="rdSpd" aria-live="off"></b>' +
           '<i class="rd-lim" id="rdLim" aria-hidden="true"></i>' +
           '<div class="rd-cmp" id="rdCmp"><span id="rdCard">N</span><span class="rd-cmpd"><span class="rd-deg" id="rdDeg"></span><em>&deg;</em></span></div>' +
@@ -47206,27 +47212,20 @@ try { requestAnimationFrame(function(){ requestAnimationFrame(function(){ var c 
     if ($('rdLTruck')) {
       // (only this truck's bins: dn also has the bins other trucks did on the run - lb-runmate-script)
       var shL = shift(), myN = T ? T.n : (shL ? (shL.bins || 0) : dn);
-      segSet($('rdLTruck').querySelector('.rd-v'), String(myN));
-      attr($('rdLTruck'), 'aria-label', (T ? 'On truck ' + T.n : 'Collected ' + myN));
+      // (Fox, 12 Nov) taking turns every 3 s: on the truck / bins you stole from other runs (a robber's mask), and
+      // bins to go / bins other trucks stole from your run (a red truck, red numbers)
+      var scN = null; try { scN = shL && window.lbStolenCounts ? window.lbStolenCounts() : null; } catch (e) {}
+      var alt = Math.floor(Date.now() / 3000) % 2 === 1, lt = $('rdLTruck'), lg = $('rdLTogo');
+      var showMine = alt && scN && scN.mine > 0, showTaken = alt && scN && scN.taken > 0;
+      lt.setAttribute('data-k', showMine ? 'mine' : ''); lg.setAttribute('data-k', showTaken ? 'taken' : '');
+      segSet(lt.querySelector('.rd-v'), String(showMine ? scN.mine : myN));
+      attr(lt, 'aria-label', showMine ? 'You stole ' + scN.mine + ' bins from other runs' : (T ? 'On truck ' + T.n : 'Collected ' + myN));
       var ly = null; try { ly = window.lbLastYearBins ? window.lbLastYearBins() : null; } catch (e) {}
       var tg = ly != null ? Math.max(0, ly - dn) : (hasRun ? Math.max(0, tot - dn) : null);
-      segSet($('rdLTogo').querySelector('.rd-v'), tg != null ? String(tg) : '-');
+      segSet($('rdLTogo').querySelector('.rd-v'), showTaken ? String(scN.taken) : (tg != null ? String(tg) : '-'));
       // (Fox: not on a shift, no bins to go)
       $('rdLTogo').style.display = shift() ? '' : 'none';
-      attr($('rdLTogo'), 'aria-label', 'Bins to go ' + (tg != null ? tg : '') + (ly != null ? ' (same day last year ' + ly + ')' : ''));
-      var th = $('rdLThief');
-      if (th) {
-        var sc = null; try { sc = window.lbStolenCounts ? window.lbStolenCounts() : null; } catch (e) {}
-        var its = []; if (sc && sc.taken) its.push(['taken', sc.taken]); if (sc && sc.mine) its.push(['mine', sc.mine]);
-        if (!shift() || !its.length) th.style.display = 'none';
-        else {
-          var it = its[Math.floor(Date.now() / 3000) % its.length];
-          th.style.display = ''; th.setAttribute('data-k', it[0]);
-          segSet(th.querySelector('.rd-v'), String(it[1]));
-          attr(th, 'aria-label', it[0] === 'taken' ? it[1] + ' bins stolen from your run' : 'You stole ' + it[1] + ' bins from other runs');
-          th.title = it[0] === 'taken' ? 'Stolen from your run' + (sc.by && sc.by.length ? ' by ' + sc.by.join(', ') : '') : 'You stole from other runs';
-        }
-      }
+      attr($('rdLTogo'), 'aria-label', showTaken ? scN.taken + ' bins stolen from your run' + (scN.by && scN.by.length ? ' by ' + scN.by.join(', ') : '') : 'Bins to go ' + (tg != null ? tg : '') + (ly != null ? ' (same day last year ' + ly + ')' : ''));
     }
     var dv = $('rdDone').querySelectorAll('.rd-v'); segSet(dv[0], String(dn)); segSet(dv[1], String(tot));
     // a cell with nothing to count (no shift, no run yet) is left out, so the row is never a string of dashes
@@ -58927,7 +58926,9 @@ html body.ux2:not(#rp-a):not(#rp-b):not(#rp-c) #lbFuel .lbpb button.lbpb-t.lbfu-
 html[data-ux-skin="rubbish"] body.ux2:not(#dt-a):not(#dt-b):not(#dt-c):not(#dt-d):not(#dt-e):not(#dt-f) #rbDash .rd-spd .rd-sg use:not(.gh){filter:brightness(1.35) saturate(1.2) drop-shadow(0 0 4px currentColor) drop-shadow(0 0 1px #000)}
 html[data-ux-skin="rubbish"] body.ux2:not(#dt-a):not(#dt-b):not(#dt-c):not(#dt-d):not(#dt-e):not(#dt-f) #rbDash .rd-spd .rd-sg .gh{opacity:.2}
 html[data-ux-skin="rubbish"] body.ux2:not(#dt-a):not(#dt-b):not(#dt-c):not(#dt-d):not(#dt-e):not(#dt-f) #rbDash .rd-lt{filter:brightness(1.3) drop-shadow(0 0 3px currentColor) drop-shadow(0 1px 1px #000)}
-html[data-ux-skin="rubbish"] body.ux2:not(#dt-a):not(#dt-b):not(#dt-c):not(#dt-d):not(#dt-e):not(#dt-f) #rbDash #rdLThief[data-k="taken"]{color:#ff4b3e !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#dt-a):not(#dt-b):not(#dt-c):not(#dt-d):not(#dt-e):not(#dt-f) #rbDash #rdLTogo[data-k="taken"]{color:#ff4b3e !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#dt-a):not(#dt-b):not(#dt-c):not(#dt-d):not(#dt-e):not(#dt-f) #rbDash #rdLTogo[data-k="taken"] .rd-ic{--m:url(garbagetruck.png) !important}
+html[data-ux-skin="rubbish"] body.ux2:not(#dt-a):not(#dt-b):not(#dt-c):not(#dt-d):not(#dt-e):not(#dt-f) #rbDash #rdLTruck[data-k="mine"] .rd-ic{--m:url("data:image/svg+xml,%3Csvg%20xmlns=%27http://www.w3.org/2000/svg%27%20viewBox=%270%200%2024%2024%27%3E%3Cpath%20fill-rule=%27evenodd%27%20d=%27M1.5%209.2C3%207.6%206.6%207%2012%207s9%20.6%2010.5%202.2c.4%201.9-.2%204.3-1.6%205.6-1.7%201.5-4.7%201.6-6.6.2L12%2013.6%209.7%2015c-1.9%201.4-4.9%201.3-6.6-.2C1.7%2013.5%201.1%2011.1%201.5%209.2zM5.2%2010.4c.9-.9%203.1-1%204.3.1.3.9-.4%201.9-1.6%202.1-1.3.2-2.6-.5-2.7-2.2zm13.6%200c-.9-.9-3.1-1-4.3.1-.3.9.4%201.9%201.6%202.1%201.3.2%202.6-.5%202.7-2.2z%27/%3E%3C/svg%3E") !important}
 html[data-ux-skin="rubbish"] body.ux2:not(#dt-a):not(#dt-b):not(#dt-c):not(#dt-d):not(#dt-e):not(#dt-f) #rbDash .rd-lt .rd-v{--dw:calc(var(--lb-spd-dw,32px) / 2)}
 html[data-ux-skin="rubbish"] body.ux2:not(#dt-a):not(#dt-b):not(#dt-c):not(#dt-d):not(#dt-e):not(#dt-f) #rbDash .rd-lt .rd-ic{width:calc(var(--lb-spd-dw,32px) * .875) !important;height:calc(var(--lb-spd-dw,32px) * .875) !important}
 html[data-ux-skin="rubbish"] body.ux2:not(#dt-a):not(#dt-b):not(#dt-c):not(#dt-d):not(#dt-e):not(#dt-f) #rbDash .rd-lt .rd-v .rd-sg .gh{opacity:.2}
